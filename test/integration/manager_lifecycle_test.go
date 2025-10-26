@@ -29,19 +29,19 @@ func TestManager_StartStop(t *testing.T) {
 	defer srv.Shutdown()
 	defer conn.Close()
 
-	// Create config
+	// Create config with faster timeouts for tests
 	cfg := parti.Config{
 		WorkerIDPrefix:        "test-worker",
 		WorkerIDMin:           0,
 		WorkerIDMax:           99,
-		WorkerIDTTL:           10 * time.Second,
-		HeartbeatInterval:     1 * time.Second,
-		HeartbeatTTL:          3 * time.Second,
-		ElectionTimeout:       5 * time.Second,
-		StartupTimeout:        25 * time.Second, // Longer for calculator stabilization
-		ShutdownTimeout:       5 * time.Second,
-		ColdStartWindow:       2 * time.Second, // Shorter for tests
-		PlannedScaleWindow:    1 * time.Second, // Shorter for tests
+		WorkerIDTTL:           3 * time.Second,
+		HeartbeatInterval:     300 * time.Millisecond,
+		HeartbeatTTL:          1 * time.Second,
+		ElectionTimeout:       1 * time.Second,
+		StartupTimeout:        5 * time.Second,
+		ShutdownTimeout:       2 * time.Second,
+		ColdStartWindow:       500 * time.Millisecond,
+		PlannedScaleWindow:    300 * time.Millisecond,
 		RestartDetectionRatio: 0.5,
 	}
 
@@ -60,8 +60,8 @@ func TestManager_StartStop(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, mgr)
 
-	// Start manager
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Start manager - use t.Context() which auto-cancels on test end
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
 	err = mgr.Start(ctx)
@@ -73,11 +73,8 @@ func TestManager_StartStop(t *testing.T) {
 
 	t.Logf("Worker started with ID: %s, IsLeader: %v", mgr.WorkerID(), mgr.IsLeader())
 
-	// Let it run briefly
-	time.Sleep(2 * time.Second)
-
-	// Stop manager
-	stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Stop manager - use t.Context() instead of new context
+	stopCtx, stopCancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer stopCancel()
 
 	err = mgr.Stop(stopCtx)
@@ -102,19 +99,19 @@ func TestManager_MultipleWorkers(t *testing.T) {
 	debugLogger := logger.NewTest(t)
 	debugLogger.Info("TEST: Debug logger created successfully")
 
-	// Create config
+	// Create config with faster timeouts
 	cfg := parti.Config{
 		WorkerIDPrefix:        "multi-worker",
 		WorkerIDMin:           0,
 		WorkerIDMax:           99,
-		WorkerIDTTL:           10 * time.Second,
-		HeartbeatInterval:     1 * time.Second,
-		HeartbeatTTL:          3 * time.Second,
-		ElectionTimeout:       5 * time.Second,
-		StartupTimeout:        25 * time.Second, // Longer for calculator stabilization
-		ShutdownTimeout:       5 * time.Second,
-		ColdStartWindow:       2 * time.Second, // Shorter for tests
-		PlannedScaleWindow:    1 * time.Second, // Shorter for tests
+		WorkerIDTTL:           3 * time.Second,
+		HeartbeatInterval:     300 * time.Millisecond,
+		HeartbeatTTL:          1 * time.Second,
+		ElectionTimeout:       1 * time.Second,
+		StartupTimeout:        5 * time.Second,
+		ShutdownTimeout:       2 * time.Second,
+		ColdStartWindow:       500 * time.Millisecond,
+		PlannedScaleWindow:    300 * time.Millisecond,
 		RestartDetectionRatio: 0.5,
 	}
 
@@ -137,8 +134,8 @@ func TestManager_MultipleWorkers(t *testing.T) {
 		workers[i] = mgr
 	}
 
-	// Start all workers concurrently so they all register heartbeats before cold start window expires
-	startCtx, startCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Start all workers concurrently - use t.Context()
+	startCtx, startCancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer startCancel()
 
 	var wg sync.WaitGroup
@@ -160,8 +157,8 @@ func TestManager_MultipleWorkers(t *testing.T) {
 		require.NoError(t, err, "worker %d failed to start", i)
 	}
 
-	// Verify all workers started
-	deadline := time.Now().Add(15 * time.Second)
+	// Verify all workers started with faster timeout
+	deadline := time.Now().Add(8 * time.Second)
 	for i, mgr := range workers {
 		for time.Now().Before(deadline) {
 			state := mgr.State()
@@ -169,7 +166,7 @@ func TestManager_MultipleWorkers(t *testing.T) {
 				break
 			}
 			t.Logf("Worker %d in state %s, waiting...", i, state)
-			time.Sleep(500 * time.Millisecond)
+			time.Sleep(200 * time.Millisecond)
 		}
 		require.Equal(t, parti.StateStable, mgr.State(), "worker %d should be stable", i)
 		require.NotEmpty(t, mgr.WorkerID(), "worker %d should have ID", i)
@@ -184,11 +181,8 @@ func TestManager_MultipleWorkers(t *testing.T) {
 	}
 	require.Equal(t, 1, leaderCount, "should have exactly one leader")
 
-	// Let them run briefly
-	time.Sleep(3 * time.Second)
-
-	// Stop all workers
-	stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Stop all workers - use t.Context()
+	stopCtx, stopCancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer stopCancel()
 
 	for i, mgr := range workers {

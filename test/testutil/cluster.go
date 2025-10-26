@@ -35,14 +35,33 @@ func IntegrationTestConfig() parti.Config {
 		WorkerIDPrefix:        "worker",
 		WorkerIDMin:           0,
 		WorkerIDMax:           10,
-		WorkerIDTTL:           10 * time.Second,
-		HeartbeatInterval:     1 * time.Second,
-		HeartbeatTTL:          3 * time.Second,
-		ElectionTimeout:       5 * time.Second,
-		StartupTimeout:        25 * time.Second,
-		ShutdownTimeout:       5 * time.Second,
-		ColdStartWindow:       2 * time.Second,
-		PlannedScaleWindow:    1 * time.Second,
+		WorkerIDTTL:           5 * time.Second,        // Reduced from 10s
+		HeartbeatInterval:     500 * time.Millisecond, // Reduced from 1s
+		HeartbeatTTL:          2 * time.Second,        // Reduced from 3s
+		ElectionTimeout:       2 * time.Second,        // Reduced from 5s - faster leader election
+		StartupTimeout:        10 * time.Second,       // Reduced from 25s
+		ShutdownTimeout:       3 * time.Second,        // Reduced from 5s
+		ColdStartWindow:       1 * time.Second,        // Reduced from 2s - faster cold start detection
+		PlannedScaleWindow:    500 * time.Millisecond, // Reduced from 1s
+		RestartDetectionRatio: 0.5,
+	}
+}
+
+// FastTestConfig provides aggressive timeouts for faster leader election tests.
+// Use this for tests that focus on leader election and don't need long stabilization.
+func FastTestConfig() parti.Config {
+	return parti.Config{
+		WorkerIDPrefix:        "worker",
+		WorkerIDMin:           0,
+		WorkerIDMax:           10,
+		WorkerIDTTL:           3 * time.Second,
+		HeartbeatInterval:     300 * time.Millisecond, // Very fast heartbeats
+		HeartbeatTTL:          1 * time.Second,
+		ElectionTimeout:       1 * time.Second, // Very fast election - failover in 1-2s
+		StartupTimeout:        5 * time.Second,
+		ShutdownTimeout:       2 * time.Second,
+		ColdStartWindow:       500 * time.Millisecond, // Very fast cold start
+		PlannedScaleWindow:    300 * time.Millisecond,
 		RestartDetectionRatio: 0.5,
 	}
 }
@@ -125,6 +144,25 @@ func NewWorkerCluster(t *testing.T, nc *nats.Conn, numPartitions int) *WorkerClu
 	}
 }
 
+// NewFastWorkerCluster creates a worker cluster with aggressive timeouts for fast leader election tests.
+// Use this for tests that focus on leader election failover and don't need long stabilization windows.
+func NewFastWorkerCluster(t *testing.T, nc *nats.Conn, numPartitions int) *WorkerCluster {
+	cfg := FastTestConfig()
+	partitions := CreateTestPartitions(numPartitions)
+	src := source.NewStatic(partitions)
+	strat := strategy.NewConsistentHash()
+
+	return &WorkerCluster{
+		Workers:       make([]*parti.Manager, 0),
+		StateTrackers: make([]*StateTracker, 0),
+		Config:        cfg,
+		Source:        src,
+		Strategy:      strat,
+		NC:            nc,
+		T:             t,
+	}
+}
+
 // AddWorker adds a worker to the cluster with state tracking.
 //
 // Optional logger can be passed to enable debug logging for troubleshooting:
@@ -187,10 +225,32 @@ func (wc *WorkerCluster) StartWorkers(ctx context.Context) {
 }
 
 // StopWorkers stops all workers gracefully.
+// Skips workers that are already in Shutdown state.
 func (wc *WorkerCluster) StopWorkers() {
-	for _, mgr := range wc.Workers {
+	for i, mgr := range wc.Workers {
+		// Skip if already shutdown
+		if mgr.State() == types.StateShutdown {
+			wc.T.Logf("Worker %d already shutdown, skipping", i)
+			continue
+		}
+
 		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		mgr.Stop(stopCtx)
+
+		// Stop in goroutine with timeout to prevent hanging
+		done := make(chan error, 1)
+		go func() {
+			done <- mgr.Stop(stopCtx)
+		}()
+
+		select {
+		case err := <-done:
+			if err != nil {
+				wc.T.Logf("Worker %d stop error (non-fatal): %v", i, err)
+			}
+		case <-time.After(5 * time.Second):
+			wc.T.Logf("Worker %d stop timeout after 5s (non-fatal)", i)
+		}
+
 		cancel()
 	}
 }
@@ -290,6 +350,8 @@ func (wc *WorkerCluster) GetLeader() *parti.Manager {
 }
 
 // RemoveWorker stops and removes a worker from the cluster (simulates crash).
+// It calls Stop() but doesn't remove from the Workers slice to avoid index issues.
+// Tests should account for stopped workers when counting leaders/stable workers.
 func (wc *WorkerCluster) RemoveWorker(index int) {
 	require.Less(wc.T, index, len(wc.Workers), "invalid worker index")
 
@@ -301,4 +363,16 @@ func (wc *WorkerCluster) RemoveWorker(index int) {
 	require.NoError(wc.T, err, "failed to stop worker %d", index)
 
 	wc.T.Logf("Removed worker %d (%s)", index, mgr.WorkerID())
+}
+
+// GetActiveWorkers returns only the workers that are not in Shutdown state.
+func (wc *WorkerCluster) GetActiveWorkers() []*parti.Manager {
+	active := make([]*parti.Manager, 0, len(wc.Workers))
+	for _, mgr := range wc.Workers {
+		if mgr.State() != types.StateShutdown {
+			active = append(active, mgr)
+		}
+	}
+
+	return active
 }

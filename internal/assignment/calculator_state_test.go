@@ -177,18 +177,18 @@ func TestCalculator_StateTransitions_GetState(t *testing.T) {
 	calc := NewCalculator(kv, "test-assignment", source, strategy, "test-hb", 10*time.Second)
 
 	// Initial state should be Idle
-	require.Equal(t, "Idle", calc.GetState())
+	require.Equal(t, types.CalcStateIdle, calc.GetState())
 
 	// Transition to Scaling
 	ctx := context.Background()
 	calc.enterScalingState("cold_start", 100*time.Millisecond, ctx)
-	require.Equal(t, "Scaling", calc.GetState())
+	require.Equal(t, types.CalcStateScaling, calc.GetState())
 
 	// Wait for automatic transition to Rebalancing
 	time.Sleep(150 * time.Millisecond)
 	// Note: State might be Idle if rebalancing completed quickly
 	state := calc.GetState()
-	require.Contains(t, []string{"Rebalancing", "Idle"}, state)
+	require.Contains(t, []types.CalculatorState{types.CalcStateRebalancing, types.CalcStateIdle}, state)
 }
 
 func TestCalculator_StateTransitions_Scaling(t *testing.T) {
@@ -205,7 +205,7 @@ func TestCalculator_StateTransitions_Scaling(t *testing.T) {
 	// Enter scaling state
 	calc.enterScalingState("cold_start", 50*time.Millisecond, ctx)
 
-	require.Equal(t, "Scaling", calc.GetState())
+	require.Equal(t, types.CalcStateScaling, calc.GetState())
 	require.Equal(t, "cold_start", calc.scalingReason)
 
 	// Wait for window to expire and transition to rebalancing
@@ -213,7 +213,7 @@ func TestCalculator_StateTransitions_Scaling(t *testing.T) {
 
 	// Should have transitioned to Idle after rebalancing
 	require.Eventually(t, func() bool {
-		return calc.GetState() == "Idle"
+		return calc.GetState() == types.CalcStateIdle
 	}, 1*time.Second, 50*time.Millisecond)
 }
 
@@ -233,7 +233,7 @@ func TestCalculator_StateTransitions_Emergency(t *testing.T) {
 
 	// Emergency state should quickly transition through Rebalancing to Idle
 	require.Eventually(t, func() bool {
-		return calc.GetState() == "Idle"
+		return calc.GetState() == types.CalcStateIdle
 	}, 1*time.Second, 50*time.Millisecond)
 
 	// Verify scaling reason was cleared
@@ -253,15 +253,15 @@ func TestCalculator_StateTransitions_ReturnToIdle(t *testing.T) {
 	calc := NewCalculator(kv, "test-assignment", source, strategy, "test-hb", 10*time.Second)
 
 	// Manually set state to Rebalancing
-	calc.calcState.Store(int32(calcStateRebalancing))
+	calc.calcState.Store(int32(types.CalcStateRebalancing))
 	calc.scalingReason = "test_reason"
 
-	require.Equal(t, "Rebalancing", calc.GetState())
+	require.Equal(t, types.CalcStateRebalancing, calc.GetState())
 
 	// Return to idle
 	calc.returnToIdleState()
 
-	require.Equal(t, "Idle", calc.GetState())
+	require.Equal(t, types.CalcStateIdle, calc.GetState())
 	require.Equal(t, "", calc.scalingReason)
 }
 
@@ -272,8 +272,9 @@ func TestCalculator_StateTransitions_PreventsConcurrentRebalance(t *testing.T) {
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(kv, "test-assignment", source, strategy, "test-hb", 10*time.Second)
+	calc := NewCalculator(kv, "test-assignment", source, strategy, "test-hb", 1*time.Second)
 	calc.SetCooldown(100 * time.Millisecond)
+	calc.SetStabilizationWindows(500*time.Millisecond, 300*time.Millisecond) // Fast windows for test
 
 	ctx := context.Background()
 
@@ -307,7 +308,7 @@ func TestCalculator_StateTransitions_PreventsConcurrentRebalance(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should still be in Scaling state (not started new rebalance)
-	require.Equal(t, "Scaling", calc.GetState())
+	require.Equal(t, types.CalcStateScaling, calc.GetState())
 }
 
 func TestCalculator_StateTransitions_CooldownPreventsRebalance(t *testing.T) {
@@ -317,8 +318,9 @@ func TestCalculator_StateTransitions_CooldownPreventsRebalance(t *testing.T) {
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(kv, "test-assignment", source, strategy, "test-hb", 10*time.Second)
+	calc := NewCalculator(kv, "test-assignment", source, strategy, "test-hb", 1*time.Second)
 	calc.SetCooldown(500 * time.Millisecond)
+	calc.SetStabilizationWindows(500*time.Millisecond, 300*time.Millisecond) // Fast windows for test
 
 	ctx := context.Background()
 
@@ -350,20 +352,20 @@ func TestCalculator_StateTransitions_CooldownPreventsRebalance(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should remain in Idle (cooldown prevented rebalance)
-	require.Equal(t, "Idle", calc.GetState())
+	require.Equal(t, types.CalcStateIdle, calc.GetState())
 }
 
 func TestCalculator_StateString(t *testing.T) {
 	tests := []struct {
 		name  string
-		state calculatorState
+		state types.CalculatorState
 		want  string
 	}{
-		{"idle", calcStateIdle, "Idle"},
-		{"scaling", calcStateScaling, "Scaling"},
-		{"rebalancing", calcStateRebalancing, "Rebalancing"},
-		{"emergency", calcStateEmergency, "Emergency"},
-		{"unknown", calculatorState(999), "Unknown"},
+		{"idle", types.CalcStateIdle, "Idle"},
+		{"scaling", types.CalcStateScaling, "Scaling"},
+		{"rebalancing", types.CalcStateRebalancing, "Rebalancing"},
+		{"emergency", types.CalcStateEmergency, "Emergency"},
+		{"unknown", types.CalculatorState(999), "Unknown"},
 	}
 
 	for _, tt := range tests {

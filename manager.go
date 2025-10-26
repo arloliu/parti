@@ -16,6 +16,7 @@ import (
 	"github.com/arloliu/parti/internal/logger"
 	"github.com/arloliu/parti/internal/metrics"
 	"github.com/arloliu/parti/internal/stableid"
+	"github.com/arloliu/parti/types"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -287,6 +288,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 	m.transitionState(m.State(), StateShutdown)
 
 	// Cancel manager context to stop all background goroutines
+	// This will cause monitorAssignmentChanges watcher to close
 	m.cancel()
 	m.mu.Unlock()
 
@@ -295,7 +297,9 @@ func (m *Manager) Stop(ctx context.Context) error {
 
 	// Step 1: Stop calculator if running (leader only)
 	if m.calculator != nil {
+		m.logger.Info("stopping calculator", "worker_id", m.WorkerID())
 		m.stopCalculator()
+		m.logger.Info("calculator stopped", "worker_id", m.WorkerID())
 	}
 
 	// Step 2: Stop heartbeat publisher
@@ -316,7 +320,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 		}
 	}
 
-	// Step 3: Release stable worker ID
+	// Step 4: Release stable worker ID
 	if m.idClaimer != nil {
 		if err := m.idClaimer.Release(ctx); err != nil {
 			m.logError("failed to release worker ID", "error", err)
@@ -326,7 +330,8 @@ func (m *Manager) Stop(ctx context.Context) error {
 		}
 	}
 
-	// Step 4: Wait for all background goroutines with timeout
+	// Step 5: Wait for all background goroutines with timeout
+	m.logger.Debug("waiting for goroutines to exit...", "worker_id", m.WorkerID())
 	done := make(chan struct{})
 	go func() {
 		m.wg.Wait()
@@ -598,9 +603,14 @@ func (m *Manager) participateElection(ctx context.Context, kv jetstream.KeyValue
 }
 
 // monitorLeadership monitors leader changes and renews leadership lease.
+//
+// Leaders periodically renew their lease to maintain leadership.
+// Followers periodically attempt to claim leadership if it becomes vacant.
 func (m *Manager) monitorLeadership() {
 	ticker := time.NewTicker(m.cfg.ElectionTimeout / 3)
 	defer ticker.Stop()
+
+	leaseDuration := int64(m.cfg.ElectionTimeout.Seconds())
 
 	for {
 		select {
@@ -620,29 +630,24 @@ func (m *Manager) monitorLeadership() {
 
 					continue
 				}
-			}
+			} else {
+				// Follower: Try to claim leadership if vacant
+				isLeader, err := m.election.RequestLeadership(m.ctx, m.WorkerID(), leaseDuration)
+				if err != nil {
+					m.logError("failed to request leadership", "error", err)
 
-			// Check current leadership status
-			isLeader, err := m.election.IsLeader(m.ctx)
-			if err != nil {
-				m.logError("failed to check leadership", "error", err)
+					continue
+				}
 
-				continue
-			}
-
-			if wasLeader != isLeader {
-				m.isLeader.Store(isLeader)
-
+				// Check if we became leader
 				if isLeader {
+					m.isLeader.Store(true)
 					m.logger.Info("became leader", "worker_id", m.WorkerID())
+
 					// Start calculator
 					if err := m.startCalculator(m.assignmentKV, m.heartbeatKV); err != nil {
 						m.logError("failed to start calculator", "error", err)
 					}
-				} else {
-					m.logger.Info("lost leadership", "worker_id", m.WorkerID())
-					// Stop calculator
-					m.stopCalculator()
 				}
 			}
 		}
@@ -703,6 +708,9 @@ func (m *Manager) waitForAssignment(ctx context.Context, assignmentKV, _ jetstre
 
 // startCalculator starts the assignment calculator (leader only).
 func (m *Manager) startCalculator(assignmentKV, _ jetstream.KeyValue) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	if m.calculator != nil {
 		return nil // Already started
 	}
@@ -730,6 +738,7 @@ func (m *Manager) startCalculator(assignmentKV, _ jetstream.KeyValue) error {
 
 	// Start calculator in background
 	if err := calc.Start(m.ctx); err != nil {
+		m.calculator = nil // Clear calculator on start failure
 		return fmt.Errorf("failed to start calculator: %w", err)
 	}
 
@@ -746,17 +755,17 @@ func (m *Manager) startCalculator(assignmentKV, _ jetstream.KeyValue) error {
 // monitorCalculatorState monitors the calculator's internal state and syncs it to Manager state.
 //
 // This method runs only on the leader and translates calculator states to Manager states:
-//   - calcStateScaling → StateScaling
-//   - calcStateRebalancing → StateRebalancing
-//   - calcStateEmergency → StateEmergency
-//   - calcStateIdle (after rebalancing) → StateStable
+//   - types.CalcStateScaling → StateScaling
+//   - types.CalcStateRebalancing → StateRebalancing
+//   - types.CalcStateEmergency → StateEmergency
+//   - types.CalcStateIdle (after rebalancing) → StateStable
 func (m *Manager) monitorCalculatorState() {
 	defer m.wg.Done()
 
 	ticker := time.NewTicker(200 * time.Millisecond) // Check calculator state 5x per second
 	defer ticker.Stop()
 
-	var lastCalcState string
+	var lastCalcState types.CalculatorState = types.CalcStateIdle
 
 	for {
 		select {
@@ -781,13 +790,13 @@ func (m *Manager) monitorCalculatorState() {
 
 			// Map calculator state to Manager state
 			switch calcState {
-			case "Scaling":
+			case types.CalcStateScaling:
 				// Calculator entered scaling window
 				if currentState == StateStable {
 					m.transitionState(currentState, StateScaling)
 				}
 
-			case "Rebalancing":
+			case types.CalcStateRebalancing:
 				// Calculator started rebalancing
 				if currentState == StateScaling || currentState == StateEmergency {
 					m.transitionState(currentState, StateRebalancing)
@@ -796,13 +805,13 @@ func (m *Manager) monitorCalculatorState() {
 					m.transitionState(currentState, StateRebalancing)
 				}
 
-			case "Emergency":
+			case types.CalcStateEmergency:
 				// Calculator detected worker crash
 				if currentState == StateStable {
 					m.transitionState(currentState, StateEmergency)
 				}
 
-			case "Idle":
+			case types.CalcStateIdle:
 				// Calculator returned to idle after rebalancing
 				if currentState == StateRebalancing {
 					m.transitionState(currentState, StateStable)
@@ -820,6 +829,9 @@ func (m *Manager) monitorCalculatorState() {
 
 // stopCalculator stops the assignment calculator.
 func (m *Manager) stopCalculator() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	if m.calculator == nil {
 		return
 	}
@@ -911,10 +923,13 @@ func (m *Manager) monitorAssignmentChanges(kv jetstream.KeyValue) {
 	for {
 		select {
 		case <-m.ctx.Done():
+			m.logger.Debug("assignment monitor stopping (context cancelled)", "worker_id", workerID)
 			return
 		case entry := <-watcher.Updates():
 			if entry == nil {
-				continue
+				// Watcher closed (context cancelled or error)
+				m.logger.Debug("assignment monitor stopping (watcher closed)", "worker_id", workerID)
+				return
 			}
 
 			var newAssignment Assignment

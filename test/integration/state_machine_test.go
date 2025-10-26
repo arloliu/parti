@@ -25,22 +25,23 @@ import (
 //
 // Verifies:
 //   - StateScaling is entered
-//   - 30s stabilization window is honored
+//   - Stabilization window is honored
 //   - Transitions: Init → ClaimingID → Election → WaitingAssignment → Scaling → Rebalancing → Stable
 func TestStateMachine_ColdStart(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	// Use t.Context() for automatic cancellation
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
 	// Setup embedded NATS
 	nc, cleanup := testutil.StartEmbeddedNATS(t)
 	defer cleanup()
 
-	// Create a 3-worker cluster with 10 partitions
-	cluster := testutil.NewWorkerCluster(t, nc, 10)
+	// Create a 3-worker cluster with fast configuration
+	cluster := testutil.NewFastWorkerCluster(t, nc, 10)
 	defer cluster.StopWorkers()
 
 	// Add 3 workers with state tracking
@@ -52,11 +53,9 @@ func TestStateMachine_ColdStart(t *testing.T) {
 	startTime := time.Now()
 	cluster.StartWorkers(ctx)
 
-	// Wait for all workers to reach Stable state
-	// Note: Leader goes through Scaling→Rebalancing→Stable
-	// Followers go directly to Stable after WaitingAssignment
+	// Wait for all workers to reach Stable state (faster with 500ms cold start window)
 	t.Log("Waiting for workers to reach Stable state...")
-	cluster.WaitForStableState(15 * time.Second)
+	cluster.WaitForStableState(8 * time.Second)
 
 	elapsed := time.Since(startTime)
 	t.Logf("Cold start took %v", elapsed)
@@ -84,15 +83,16 @@ func TestStateMachine_PlannedScale(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	// Use t.Context() for automatic cancellation
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
 	// Setup embedded NATS
 	nc, cleanup := testutil.StartEmbeddedNATS(t)
 	defer cleanup()
 
-	// Create a cluster with 20 partitions
-	cluster := testutil.NewWorkerCluster(t, nc, 20)
+	// Create a cluster with fast configuration
+	cluster := testutil.NewFastWorkerCluster(t, nc, 20)
 	defer cluster.StopWorkers()
 
 	// Start initial 3 workers
@@ -102,9 +102,9 @@ func TestStateMachine_PlannedScale(t *testing.T) {
 	}
 	cluster.StartWorkers(ctx)
 
-	// Wait for initial stable state
+	// Wait for initial stable state (faster with FastConfig)
 	t.Log("Waiting for initial cluster to stabilize...")
-	cluster.WaitForStableState(15 * time.Second)
+	cluster.WaitForStableState(8 * time.Second)
 	t.Log("Initial cluster stable")
 
 	// Verify initial state
@@ -130,9 +130,9 @@ func TestStateMachine_PlannedScale(t *testing.T) {
 		}
 	}
 
-	// Wait for all 5 workers to stabilize
+	// Wait for all 5 workers to stabilize (faster with 300ms planned scale window)
 	t.Log("Waiting for scaled cluster to stabilize...")
-	cluster.WaitForStableState(15 * time.Second)
+	cluster.WaitForStableState(8 * time.Second)
 	elapsed := time.Since(startScaleTime)
 	t.Logf("Planned scale took %v", elapsed)
 
@@ -173,20 +173,17 @@ func TestStateMachine_Emergency(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	// Use t.Context() for automatic cancellation
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
 	// Setup embedded NATS
 	nc, cleanup := testutil.StartEmbeddedNATS(t)
 	defer cleanup()
 
-	// Create a cluster with 15 partitions
-	cluster := testutil.NewWorkerCluster(t, nc, 15)
+	// Create cluster with fast configuration
+	cluster := testutil.NewFastWorkerCluster(t, nc, 20)
 	defer cluster.StopWorkers()
-
-	// Configure faster heartbeat detection for testing
-	cluster.Config.HeartbeatInterval = 1 * time.Second
-	cluster.Config.HeartbeatTTL = 3 * time.Second
 
 	// Start 3 workers
 	t.Log("Starting 3 workers...")
@@ -195,9 +192,9 @@ func TestStateMachine_Emergency(t *testing.T) {
 	}
 	cluster.StartWorkers(ctx)
 
-	// Wait for cluster to stabilize
+	// Wait for cluster to stabilize (faster with FastConfig)
 	t.Log("Waiting for initial cluster to stabilize...")
-	cluster.WaitForStableState(30 * time.Second)
+	cluster.WaitForStableState(8 * time.Second)
 	t.Log("Initial cluster stable with 3 workers")
 
 	// Find a follower to kill
@@ -237,9 +234,9 @@ func TestStateMachine_Emergency(t *testing.T) {
 	cluster.Workers = append(cluster.Workers[:followerIdx], cluster.Workers[followerIdx+1:]...)
 	cluster.StateTrackers = append(cluster.StateTrackers[:followerIdx], cluster.StateTrackers[followerIdx+1:]...)
 
-	// Wait for cluster to re-stabilize
+	// Wait for cluster to re-stabilize (emergency rebalance is immediate)
 	t.Log("Waiting for remaining workers to stabilize after crash...")
-	cluster.WaitForStableState(20 * time.Second)
+	cluster.WaitForStableState(8 * time.Second)
 
 	// Record post-crash partitions
 	t.Log("Post-crash partition assignments:")
@@ -327,15 +324,16 @@ func TestStateMachine_Restart(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	// Use t.Context() which auto-cancels on test completion
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 
 	// Setup embedded NATS
 	nc, cleanup := testutil.StartEmbeddedNATS(t)
 	defer cleanup()
 
-	// Create first cluster with 20 partitions
-	cluster1 := testutil.NewWorkerCluster(t, nc, 20)
+	// Create first cluster with fast configuration and 20 partitions
+	cluster1 := testutil.NewFastWorkerCluster(t, nc, 20)
 
 	// Start initial 10 workers
 	t.Log("Starting initial 10 workers...")
@@ -344,20 +342,20 @@ func TestStateMachine_Restart(t *testing.T) {
 	}
 	cluster1.StartWorkers(ctx)
 
-	// Wait for cluster to stabilize
+	// Wait for cluster to stabilize (faster with FastConfig)
 	t.Log("Waiting for initial cluster to stabilize...")
-	cluster1.WaitForStableState(45 * time.Second)
+	cluster1.WaitForStableState(15 * time.Second)
 	t.Log("Initial cluster stable with 10 workers")
 
 	// Stop all workers (simulate mass restart)
 	t.Log("Stopping all workers (simulating restart)...")
 	cluster1.StopWorkers()
 
-	// Wait for heartbeats to expire
-	time.Sleep(5 * time.Second)
+	// Wait for heartbeats to expire (faster with FastConfig: 1s TTL)
+	time.Sleep(2 * time.Second)
 
 	// Create new cluster (reusing same NATS connection)
-	cluster2 := testutil.NewWorkerCluster(t, nc, 20)
+	cluster2 := testutil.NewFastWorkerCluster(t, nc, 20)
 	defer cluster2.StopWorkers()
 
 	// Start 10 new workers rapidly (simulating restart)
@@ -369,15 +367,15 @@ func TestStateMachine_Restart(t *testing.T) {
 	}
 	cluster2.StartWorkers(ctx)
 
-	// Wait for all workers to stabilize
+	// Wait for all workers to stabilize (faster with 500ms cold start window)
 	t.Log("Waiting for restarted cluster to stabilize...")
-	cluster2.WaitForStableState(45 * time.Second)
+	cluster2.WaitForStableState(15 * time.Second)
 
 	elapsed := time.Since(startTime)
 	t.Logf("Restart stabilization took %v", elapsed)
 
-	// Verify cold start window was used (should take at least 2s)
-	if elapsed < 2*time.Second {
+	// Verify cold start window was used (should take at least 500ms with FastConfig)
+	if elapsed < 500*time.Millisecond {
 		t.Logf("Warning: restart took less than cold start window (%v)", elapsed)
 	}
 
@@ -398,24 +396,25 @@ func TestStateMachine_StateTransitionValidation(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+	// Use t.Context() for automatic cancellation
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
 
 	// Setup embedded NATS
 	nc, cleanup := testutil.StartEmbeddedNATS(t)
 	defer cleanup()
 
-	// Create a simple cluster with 5 partitions
-	cluster := testutil.NewWorkerCluster(t, nc, 5)
+	// Create a simple cluster with fast configuration
+	cluster := testutil.NewFastWorkerCluster(t, nc, 5)
 	defer cluster.StopWorkers()
 
 	// Add single worker with state tracking
 	cluster.AddWorker(ctx)
 	cluster.StartWorkers(ctx)
 
-	// Wait for stable state
+	// Wait for stable state (faster with FastConfig)
 	t.Log("Waiting for worker to reach Stable state...")
-	cluster.WaitForStableState(30 * time.Second)
+	cluster.WaitForStableState(8 * time.Second)
 
 	// Verify worker reached stable state through valid path
 	if cluster.Workers[0].State() != types.StateStable {

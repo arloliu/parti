@@ -33,7 +33,7 @@ func TestCalculator_ScalingTransition_TimerFires(t *testing.T) {
 	calc.enterScalingState("test_reason", 100*time.Millisecond, ctx)
 
 	// Verify we're in Scaling state
-	require.Equal(t, "Scaling", calc.GetState())
+	require.Equal(t, types.CalcStateScaling, calc.GetState())
 
 	// Wait longer than the window to see if transition happens
 	time.Sleep(200 * time.Millisecond)
@@ -44,7 +44,7 @@ func TestCalculator_ScalingTransition_TimerFires(t *testing.T) {
 
 	// Should have transitioned away from Scaling
 	// (Either to Rebalancing then Idle, or just Idle if rebalance was fast)
-	require.NotEqual(t, "Scaling", finalState, "calculator should have transitioned out of Scaling state")
+	require.NotEqual(t, types.CalcStateScaling, finalState, "calculator should have transitioned out of Scaling state")
 }
 
 // TestCalculator_ScalingTransition_WithRealStart tests scaling transition with full Calculator.Start().
@@ -95,7 +95,7 @@ func TestCalculator_ScalingTransition_WithRealStart(t *testing.T) {
 
 	// Should have entered Scaling state (or already transitioned through it)
 	// With fast watcher detection, we might catch it in Scaling or it might already be done
-	require.Contains(t, []string{"Scaling", "Rebalancing", "Idle"}, scalingState,
+	require.Contains(t, []types.CalculatorState{types.CalcStateScaling, types.CalcStateRebalancing, types.CalcStateIdle}, scalingState,
 		"calculator should have processed worker addition")
 
 	// Wait for full cycle to complete (stabilization window + processing)
@@ -105,7 +105,7 @@ func TestCalculator_ScalingTransition_WithRealStart(t *testing.T) {
 	t.Logf("Final state after window: %s", finalState)
 
 	// Should have completed scaling and returned to Idle
-	require.Equal(t, "Idle", finalState, "calculator should return to Idle after scaling completes")
+	require.Equal(t, types.CalcStateIdle, finalState, "calculator should return to Idle after scaling completes")
 }
 
 // TestCalculator_ScalingTransition_ContextCancellation tests that context cancellation stops the timer.
@@ -126,7 +126,7 @@ func TestCalculator_ScalingTransition_ContextCancellation(t *testing.T) {
 	// Trigger scaling state
 	calc.enterScalingState("test_reason", 2*time.Second, ctx)
 
-	require.Equal(t, "Scaling", calc.GetState())
+	require.Equal(t, types.CalcStateScaling, calc.GetState())
 
 	// Cancel context before window elapses
 	time.Sleep(100 * time.Millisecond)
@@ -138,7 +138,7 @@ func TestCalculator_ScalingTransition_ContextCancellation(t *testing.T) {
 	// Should still be in Scaling (goroutine exited, no transition)
 	state := calc.GetState()
 	t.Logf("State after context cancellation: %s", state)
-	require.Equal(t, "Scaling", state, "should remain in Scaling when context cancelled before window")
+	require.Equal(t, types.CalcStateScaling, state, "should remain in Scaling when context cancelled before window")
 }
 
 // TestCalculator_ScalingTransition_StopBeforeWindow tests that Stop() prevents transition.
@@ -164,7 +164,7 @@ func TestCalculator_ScalingTransition_StopBeforeWindow(t *testing.T) {
 	// Trigger scaling state manually
 	calc.enterScalingState("test_reason", 2*time.Second, ctx)
 
-	require.Equal(t, "Scaling", calc.GetState())
+	require.Equal(t, types.CalcStateScaling, calc.GetState())
 
 	// Stop calculator before window elapses
 	time.Sleep(100 * time.Millisecond)
@@ -237,7 +237,7 @@ func TestCalculator_ScalingTransition_RapidStateChanges(t *testing.T) {
 
 	// Eventually should return to Idle
 	require.Eventually(t, func() bool {
-		return calc.GetState() == "Idle"
+		return calc.GetState() == types.CalcStateIdle
 	}, 2*time.Second, 100*time.Millisecond, "should eventually return to Idle")
 }
 

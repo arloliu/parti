@@ -15,42 +15,6 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
-// calculatorState represents the internal state of the assignment calculator.
-type calculatorState int32
-
-const (
-	// calcStateIdle indicates the calculator is idle (stable operation).
-	calcStateIdle calculatorState = iota
-
-	// calcStateScaling indicates the calculator is in a stabilization window.
-	// Waiting for worker topology to stabilize before rebalancing.
-	calcStateScaling
-
-	// calcStateRebalancing indicates active rebalancing is in progress.
-	// Assignments are being calculated and published.
-	calcStateRebalancing
-
-	// calcStateEmergency indicates emergency rebalancing (worker crash).
-	// No stabilization window - immediate rebalancing required.
-	calcStateEmergency
-)
-
-// String returns the string representation of calculator state.
-func (s calculatorState) String() string {
-	switch s {
-	case calcStateIdle:
-		return "Idle"
-	case calcStateScaling:
-		return "Scaling"
-	case calcStateRebalancing:
-		return "Rebalancing"
-	case calcStateEmergency:
-		return "Emergency"
-	default:
-		return "Unknown"
-	}
-}
-
 // Calculator manages partition assignment calculation and distribution.
 //
 // The calculator runs on the leader worker and is responsible for:
@@ -89,7 +53,7 @@ type Calculator struct {
 	lastRebalance      time.Time
 
 	// Calculator state machine
-	calcState     atomic.Int32    // calculatorState
+	calcState     atomic.Int32    // types.CalculatorState
 	scalingStart  time.Time       // When scaling window started
 	scalingReason string          // Reason: "cold_start", "planned_scale", "emergency", "restart"
 	lastWorkers   map[string]bool // Previous worker set for comparison
@@ -149,7 +113,7 @@ func NewCalculator(
 		doneCh:             make(chan struct{}),
 	}
 	// Initialize calculator state to Idle
-	c.calcState.Store(int32(calcStateIdle))
+	c.calcState.Store(int32(types.CalcStateIdle))
 	return c
 }
 
@@ -311,9 +275,9 @@ func (c *Calculator) IsStarted() bool {
 // GetState returns the current calculator state.
 //
 // Returns:
-//   - string: Current state ("Idle", "Scaling", "Rebalancing", "Emergency")
-func (c *Calculator) GetState() string {
-	return calculatorState(c.calcState.Load()).String()
+//   - types.CalculatorState: Current calculator state (type-safe enum)
+func (c *Calculator) GetState() types.CalculatorState {
+	return types.CalculatorState(c.calcState.Load())
 }
 
 // CurrentVersion returns the current assignment version.
@@ -463,8 +427,8 @@ func (c *Calculator) detectRebalanceType(currentWorkers map[string]bool) (reason
 //   - ctx: Context for cancellation
 func (c *Calculator) enterScalingState(reason string, window time.Duration, ctx context.Context) {
 	// Only enter if currently idle
-	oldState := calculatorState(c.calcState.Swap(int32(calcStateScaling)))
-	if oldState != calcStateIdle {
+	oldState := types.CalculatorState(c.calcState.Swap(int32(types.CalcStateScaling)))
+	if oldState != types.CalcStateIdle {
 		c.logger.Warn("attempted to enter scaling state from non-idle state",
 			"current_state", oldState.String(),
 			"reason", reason)
@@ -507,7 +471,7 @@ func (c *Calculator) enterScalingState(reason string, window time.Duration, ctx 
 // Parameters:
 //   - ctx: Context for rebalance operation
 func (c *Calculator) enterRebalancingState(ctx context.Context) {
-	c.calcState.Store(int32(calcStateRebalancing))
+	c.calcState.Store(int32(types.CalcStateRebalancing))
 
 	c.logger.Info("entering rebalancing state")
 
@@ -540,7 +504,7 @@ func (c *Calculator) enterRebalancingState(ctx context.Context) {
 // Parameters:
 //   - ctx: Context for rebalance operation
 func (c *Calculator) enterEmergencyState(ctx context.Context) {
-	c.calcState.Store(int32(calcStateEmergency))
+	c.calcState.Store(int32(types.CalcStateEmergency))
 
 	c.mu.Lock()
 	c.scalingReason = "emergency"
@@ -571,7 +535,7 @@ func (c *Calculator) enterEmergencyState(ctx context.Context) {
 
 // returnToIdleState transitions the calculator back to idle state after rebalancing completes.
 func (c *Calculator) returnToIdleState() {
-	c.calcState.Store(int32(calcStateIdle))
+	c.calcState.Store(int32(types.CalcStateIdle))
 
 	c.mu.Lock()
 	c.scalingReason = ""
@@ -875,7 +839,7 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 	c.mu.RLock()
 	changed := c.hasWorkersChangedMap(workers)
 	cooldownActive := time.Since(c.lastRebalance) < c.cooldown
-	currentState := calculatorState(c.calcState.Load())
+	currentState := types.CalculatorState(c.calcState.Load())
 	lastWorkerCount := len(c.lastWorkers)
 	c.mu.RUnlock()
 
@@ -891,7 +855,7 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 	}
 
 	// Don't trigger rebalance if already scaling/rebalancing
-	if currentState != calcStateIdle {
+	if currentState != types.CalcStateIdle {
 		c.logger.Info("worker change detected but calculator not idle",
 			"state", currentState.String(),
 		)
