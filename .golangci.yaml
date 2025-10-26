@@ -1,0 +1,251 @@
+version: "2"
+linters:
+  enable:
+    - asasalint
+    - asciicheck
+    - bidichk
+    - bodyclose
+    - copyloopvar
+    - cyclop
+    - decorder
+    - durationcheck
+    - errname
+    - errorlint
+    - exhaustive
+    - fatcontext
+    - gocheckcompilerdirectives
+    - gocritic
+    - gocyclo
+    - gomoddirectives
+    - gomodguard
+    - goprintffuncname
+    - gosec
+    - loggercheck
+    - makezero
+    - misspell
+    - musttag
+    - nakedret
+    - nilnil
+    - nlreturn
+    - noctx
+    - nolintlint
+    - nosprintfhostport
+    - prealloc
+    - predeclared
+    - reassign
+    - revive
+    - rowserrcheck
+    - sqlclosecheck
+    - testableexamples
+    - tparallel
+    - unconvert
+    - unparam
+    - usestdlibvars
+    - wastedassign
+    - whitespace
+  settings:
+    cyclop:
+      max-complexity: 22
+      package-average: 15
+    errcheck:
+      check-type-assertions: true
+    exhaustive:
+      check:
+        - switch
+        - map
+    exhaustruct:
+      exclude:
+        - ^net/http.Client$
+        - ^net/http.Cookie$
+        - ^net/http.Request$
+        - ^net/http.Response$
+        - ^net/http.Server$
+        - ^net/http.Transport$
+        - ^net/url.URL$
+        - ^os/exec.Cmd$
+        - ^reflect.StructField$
+        - ^github.com/spf13/cobra.Command$
+        - ^github.com/spf13/cobra.CompletionOptions$
+        - ^github.com/stretchr/testify/mock.Mock$
+        - ^gopkg.in/yaml.v3.Node$
+    gocritic:
+      settings:
+        captLocal:
+          paramsOnly: true
+        ifElseChain:
+          minThreshold: 3
+        underef:
+          skipRecvDeref: false
+    gocyclo:
+      min-complexity: 30
+    gomodguard:
+      blocked:
+        modules:
+          - github.com/golang/protobuf:
+              recommendations:
+                - google.golang.org/protobuf
+              reason: see https://developers.google.com/protocol-buffers/docs/reference/go/faq#modules
+          - github.com/satori/go.uuid:
+              recommendations:
+                - github.com/google/uuid
+              reason: satori's package is not maintained
+          - github.com/gofrs/uuid:
+              recommendations:
+                - github.com/google/uuid
+              reason: gofrs' package is not go module
+    govet:
+      disable:
+        - fieldalignment
+        - shadow
+      enable-all: true
+    nakedret:
+      max-func-lines: 40
+    nlreturn:
+      block-size: 3
+    nolintlint:
+      require-explanation: false
+      require-specific: true
+    revive:
+      enable-all-rules: true
+      rules:
+        - name: add-constant
+          disabled: true
+        - name: cyclomatic
+          disabled: true
+        - name: cognitive-complexity
+          disabled: true
+        - name: context-as-argument
+          severity: warning
+          disabled: false
+          exclude:
+            - '**/*_test.go'
+        - name: comment-spacings
+          arguments:
+            - nolint
+          severity: warning
+          disabled: false
+          exclude:
+            - ""
+        - name: exported
+          arguments:
+            - disableStutteringCheck
+            - checkPrivateReceivers
+            - checkPublicInterface
+            - sayRepetitiveInsteadOfStutters
+          severity: warning
+          disabled: false
+          exclude:
+            - ""
+        - name: flag-parameter
+          disabled: true
+        - name: function-length
+          arguments:
+            - 100
+            - 0
+          severity: warning
+          disabled: false
+          exclude:
+            - '**/*_test.go'
+        - name: import-shadowing
+          severity: warning
+          disabled: false
+          exclude:
+            - '**/*_test.go'
+        - name: line-length-limit
+          disabled: true
+        - name: max-public-structs
+          severity: warning
+          disabled: true
+        - name: unused-parameter
+          disabled: true
+        - name: unused-receiver
+          disabled: true
+        - name: unchecked-type-assertion
+          arguments:
+            - acceptIgnoredAssertionResult: true
+          severity: warning
+          disabled: true
+          exclude:
+            - '**/*_test.go'
+        - name: unhandled-error
+          arguments:
+            - fmt.Errorf
+            - fmt.Printf
+            - fmt.Println
+            - strings.Builder.*
+            - bytes.Buffer.*
+          severity: warning
+          disabled: false
+          exclude:
+            - ""
+        - name: receiver-naming
+          disabled: false
+          exclude:
+            - '**/*_test.go'
+        - name: unexported-return
+          disabled: true
+        - name: var-declaration
+          disabled: true
+        - name: var-naming
+          arguments:
+            - []
+            - []
+            - - skipPackageNameChecks: true
+          severity: warning
+          disabled: false
+    rowserrcheck:
+      packages:
+        - github.com/jmoiron/sqlx
+    staticcheck:
+      checks:
+        - all
+        - "-ST1003"
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - godot
+        source: (noinspection|TODO)
+      - linters:
+          - gocritic
+        source: //noinspection
+      - linters:
+          - bodyclose
+          - dupl
+          - goconst
+          - gosec
+          - noctx
+          - wrapcheck
+        path: _test\.go
+    paths:
+      - vendor
+      - evaluations
+      - examples
+      - docs
+      - testdata
+      - tools
+      - third_party$
+      - builtin$
+      - examples$
+issues:
+  max-same-issues: 50
+formatters:
+  enable:
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - vendor
+      - evaluations
+      - examples
+      - docs
+      - testdata
+      - tools
+      - third_party$
+      - builtin$
+      - examples$

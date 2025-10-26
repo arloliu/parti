@@ -1,0 +1,14 @@
+/tmp/
+
+.vscode/settings.json
+.vscode
+*.code-workspace
+.coverage
+.benchmarks/
+
+/*.out
+/*.log
+/*.cov
+/*.html
+/*.pprof
+

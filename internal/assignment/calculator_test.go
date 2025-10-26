@@ -1,0 +1,404 @@
+package assignment
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"testing"
+	"time"
+
+	partitest "github.com/arloliu/parti/testing"
+	"github.com/arloliu/parti/types"
+	"github.com/stretchr/testify/require"
+)
+
+// mockSource implements PartitionSource for testing
+type mockSource struct {
+	partitions []types.Partition
+	err        error
+}
+
+func (m *mockSource) ListPartitions(ctx context.Context) ([]types.Partition, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+
+	return m.partitions, nil
+}
+
+// mockStrategy implements AssignmentStrategy for testing
+type mockStrategy struct {
+	assignments map[string][]types.Partition
+	err         error
+}
+
+func (m *mockStrategy) Assign(workers []string, partitions []types.Partition) (map[string][]types.Partition, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	if m.assignments != nil {
+		return m.assignments, nil
+	}
+
+	// Simple round-robin assignment
+	result := make(map[string][]types.Partition)
+	for i, part := range partitions {
+		workerIdx := i % len(workers)
+		worker := workers[workerIdx]
+		result[worker] = append(result[worker], part)
+	}
+
+	return result, nil
+}
+
+func TestCalculator_SetMethods(t *testing.T) {
+	t.Run("sets cooldown successfully", func(t *testing.T) {
+		_, nc := partitest.StartEmbeddedNATS(t)
+		kv := partitest.CreateJetStreamKV(t, nc, "test-calc-cooldown")
+
+		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
+		strategy := &mockStrategy{}
+
+		calc := NewCalculator(kv, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc.SetCooldown(5 * time.Second)
+
+		require.Equal(t, 5*time.Second, calc.cooldown)
+	})
+
+	t.Run("sets min threshold successfully", func(t *testing.T) {
+		_, nc := partitest.StartEmbeddedNATS(t)
+		kv := partitest.CreateJetStreamKV(t, nc, "test-calc-threshold")
+
+		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
+		strategy := &mockStrategy{}
+
+		calc := NewCalculator(kv, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc.SetMinThreshold(0.3)
+
+		require.Equal(t, 0.3, calc.minThreshold)
+	})
+
+	t.Run("sets restart detection ratio successfully", func(t *testing.T) {
+		_, nc := partitest.StartEmbeddedNATS(t)
+		kv := partitest.CreateJetStreamKV(t, nc, "test-calc-ratio")
+
+		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
+		strategy := &mockStrategy{}
+
+		calc := NewCalculator(kv, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc.SetRestartDetectionRatio(0.7)
+
+		require.Equal(t, 0.7, calc.restartRatio)
+	})
+
+	t.Run("sets stabilization windows successfully", func(t *testing.T) {
+		_, nc := partitest.StartEmbeddedNATS(t)
+		kv := partitest.CreateJetStreamKV(t, nc, "test-calc-windows")
+
+		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
+		strategy := &mockStrategy{}
+
+		calc := NewCalculator(kv, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc.SetStabilizationWindows(20*time.Second, 5*time.Second)
+
+		require.Equal(t, 20*time.Second, calc.coldStartWindow)
+		require.Equal(t, 5*time.Second, calc.plannedScaleWin)
+	})
+}
+
+func TestCalculator_Start(t *testing.T) {
+	t.Run("starts successfully with initial assignment", func(t *testing.T) {
+		ctx := t.Context()
+
+		_, nc := partitest.StartEmbeddedNATS(t)
+		kv := partitest.CreateJetStreamKV(t, nc, "test-calc-start")
+
+		// Create a heartbeat for worker-1
+		_, err := kv.Put(ctx, "worker-hb.worker-1", []byte(time.Now().Format(time.RFC3339Nano)))
+		require.NoError(t, err)
+
+		source := &mockSource{
+			partitions: []types.Partition{
+				{Keys: []string{"p1"}},
+				{Keys: []string{"p2"}},
+			},
+		}
+		strategy := &mockStrategy{}
+
+		calc := NewCalculator(kv, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		// Use very short stabilization windows for testing
+		calc.SetStabilizationWindows(50*time.Millisecond, 50*time.Millisecond)
+
+		err = calc.Start(ctx)
+		require.NoError(t, err)
+		defer func() { _ = calc.Stop() }()
+
+		require.True(t, calc.IsStarted())
+		require.Greater(t, calc.CurrentVersion(), int64(0))
+
+		// Verify assignment was published
+		entry, err := kv.Get(ctx, "assignment.worker-1")
+		require.NoError(t, err)
+
+		var assignment types.Assignment
+		err = json.Unmarshal(entry.Value(), &assignment)
+		require.NoError(t, err)
+		require.Equal(t, calc.CurrentVersion(), assignment.Version)
+		require.Len(t, assignment.Partitions, 2)
+	})
+
+	t.Run("returns error if already started", func(t *testing.T) {
+		ctx := t.Context()
+
+		_, nc := partitest.StartEmbeddedNATS(t)
+		kv := partitest.CreateJetStreamKV(t, nc, "test-calc-started")
+
+		// Create a heartbeat
+		_, err := kv.Put(ctx, "worker-hb.worker-1", []byte(time.Now().Format(time.RFC3339Nano)))
+		require.NoError(t, err)
+
+		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
+		strategy := &mockStrategy{}
+
+		calc := NewCalculator(kv, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc.SetStabilizationWindows(50*time.Millisecond, 50*time.Millisecond)
+
+		err = calc.Start(ctx)
+		require.NoError(t, err)
+		defer func() { _ = calc.Stop() }()
+
+		err = calc.Start(ctx)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "already started")
+	})
+}
+
+func TestCalculator_Stop(t *testing.T) {
+	t.Run("stops successfully", func(t *testing.T) {
+		ctx := t.Context()
+
+		_, nc := partitest.StartEmbeddedNATS(t)
+		kv := partitest.CreateJetStreamKV(t, nc, "test-calc-stop")
+
+		// Create a heartbeat
+		_, err := kv.Put(ctx, "worker-hb.worker-1", []byte(time.Now().Format(time.RFC3339Nano)))
+		require.NoError(t, err)
+
+		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
+		strategy := &mockStrategy{}
+
+		calc := NewCalculator(kv, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc.SetStabilizationWindows(50*time.Millisecond, 50*time.Millisecond)
+
+		err = calc.Start(ctx)
+		require.NoError(t, err)
+
+		err = calc.Stop()
+		require.NoError(t, err)
+		require.False(t, calc.IsStarted())
+	})
+
+	t.Run("returns error if not started", func(t *testing.T) {
+		_, nc := partitest.StartEmbeddedNATS(t)
+		kv := partitest.CreateJetStreamKV(t, nc, "test-calc-not-started")
+
+		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
+		strategy := &mockStrategy{}
+
+		calc := NewCalculator(kv, "assignment", source, strategy, "worker-hb", 6*time.Second)
+
+		err := calc.Stop()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "not started")
+	})
+}
+
+func TestCalculator_WorkerMonitoring(t *testing.T) {
+	t.Run("detects new worker and triggers rebalance", func(t *testing.T) {
+		ctx := t.Context()
+
+		_, nc := partitest.StartEmbeddedNATS(t)
+		kv := partitest.CreateJetStreamKV(t, nc, "test-calc-monitoring")
+
+		// Create initial heartbeat for worker-1
+		_, err := kv.Put(ctx, "worker-hb.worker-1", []byte(time.Now().Format(time.RFC3339Nano)))
+		require.NoError(t, err)
+
+		source := &mockSource{
+			partitions: []types.Partition{
+				{Keys: []string{"p1"}},
+				{Keys: []string{"p2"}},
+			},
+		}
+		strategy := &mockStrategy{}
+
+		calc := NewCalculator(kv, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc.SetStabilizationWindows(50*time.Millisecond, 50*time.Millisecond)
+		calc.SetCooldown(100 * time.Millisecond) // Short cooldown for testing
+
+		err = calc.Start(ctx)
+		require.NoError(t, err)
+		defer func() { _ = calc.Stop() }()
+
+		initialVersion := calc.CurrentVersion()
+
+		// Add worker-2 heartbeat
+		time.Sleep(150 * time.Millisecond) // Wait for cooldown
+		_, err = kv.Put(ctx, "worker-hb.worker-2", []byte(time.Now().Format(time.RFC3339Nano)))
+		require.NoError(t, err)
+
+		// Wait for monitoring cycle to detect change
+		time.Sleep(3500 * time.Millisecond) // hbTTL/2 + processing time
+
+		// Version should increase due to rebalance
+		require.Greater(t, calc.CurrentVersion(), initialVersion)
+
+		// Verify both workers got assignments
+		entry1, err := kv.Get(ctx, "assignment.worker-1")
+		require.NoError(t, err)
+		require.NotNil(t, entry1)
+
+		entry2, err := kv.Get(ctx, "assignment.worker-2")
+		require.NoError(t, err)
+		require.NotNil(t, entry2)
+	})
+}
+
+func TestCalculator_CooldownPreventsRebalancing(t *testing.T) {
+	t.Run("respects cooldown period", func(t *testing.T) {
+		ctx := t.Context()
+
+		_, nc := partitest.StartEmbeddedNATS(t)
+		kv := partitest.CreateJetStreamKV(t, nc, "test-calc-cooldown-prevent")
+
+		// Create initial heartbeat
+		_, err := kv.Put(ctx, "worker-hb.worker-1", []byte(time.Now().Format(time.RFC3339Nano)))
+		require.NoError(t, err)
+
+		source := &mockSource{
+			partitions: []types.Partition{{Keys: []string{"p1"}}},
+		}
+		strategy := &mockStrategy{}
+
+		calc := NewCalculator(kv, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc.SetStabilizationWindows(50*time.Millisecond, 50*time.Millisecond)
+		calc.SetCooldown(5 * time.Second) // Long cooldown
+
+		err = calc.Start(ctx)
+		require.NoError(t, err)
+		defer func() { _ = calc.Stop() }()
+
+		initialVersion := calc.CurrentVersion()
+
+		// Add worker-2 immediately (should be blocked by cooldown)
+		_, err = kv.Put(ctx, "worker-hb.worker-2", []byte(time.Now().Format(time.RFC3339Nano)))
+		require.NoError(t, err)
+
+		// Wait for monitoring cycle
+		time.Sleep(3500 * time.Millisecond)
+
+		// Version should NOT change due to cooldown
+		require.Equal(t, initialVersion, calc.CurrentVersion())
+	})
+}
+
+func TestCalculator_StabilizationWindow(t *testing.T) {
+	t.Run("selects cold start window for many workers", func(t *testing.T) {
+		ctx := t.Context()
+
+		_, nc := partitest.StartEmbeddedNATS(t)
+		kv := partitest.CreateJetStreamKV(t, nc, "test-calc-coldstart")
+
+		// Create heartbeats for many workers
+		for i := 1; i <= 5; i++ {
+			key := fmt.Sprintf("worker-hb.worker-%d", i)
+			_, err := kv.Put(ctx, key, []byte(time.Now().Format(time.RFC3339Nano)))
+			require.NoError(t, err)
+		}
+
+		source := &mockSource{
+			partitions: []types.Partition{
+				{Keys: []string{"p1"}},
+				{Keys: []string{"p2"}},
+			},
+		}
+		strategy := &mockStrategy{}
+
+		calc := NewCalculator(kv, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc.SetRestartDetectionRatio(0.5) // 5 workers / 2 expected = 2.5 ratio > 0.5
+
+		window := calc.selectStabilizationWindow(ctx)
+		require.Equal(t, calc.coldStartWindow, window)
+	})
+
+	t.Run("selects planned scale window for few workers", func(t *testing.T) {
+		ctx := t.Context()
+
+		_, nc := partitest.StartEmbeddedNATS(t)
+		kv := partitest.CreateJetStreamKV(t, nc, "test-calc-scale")
+
+		// Create heartbeat for one worker
+		_, err := kv.Put(ctx, "worker-hb.worker-1", []byte(time.Now().Format(time.RFC3339Nano)))
+		require.NoError(t, err)
+
+		// Create many partitions so expected workers is high
+		var partitions []types.Partition
+		for i := 0; i < 50; i++ {
+			partitions = append(partitions, types.Partition{Keys: []string{fmt.Sprintf("p%d", i)}})
+		}
+
+		source := &mockSource{partitions: partitions}
+		strategy := &mockStrategy{}
+
+		calc := NewCalculator(kv, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc.SetRestartDetectionRatio(0.5) // 1 worker / 5 expected = 0.2 ratio < 0.5
+
+		window := calc.selectStabilizationWindow(ctx)
+		require.Equal(t, calc.plannedScaleWin, window)
+	})
+}
+
+func TestCalculator_GetActiveWorkers(t *testing.T) {
+	t.Run("retrieves active workers from heartbeats", func(t *testing.T) {
+		ctx := t.Context()
+
+		_, nc := partitest.StartEmbeddedNATS(t)
+		kv := partitest.CreateJetStreamKV(t, nc, "test-calc-workers")
+
+		// Create heartbeats for multiple workers
+		_, err := kv.Put(ctx, "worker-hb.worker-1", []byte(time.Now().Format(time.RFC3339Nano)))
+		require.NoError(t, err)
+		_, err = kv.Put(ctx, "worker-hb.worker-2", []byte(time.Now().Format(time.RFC3339Nano)))
+		require.NoError(t, err)
+		_, err = kv.Put(ctx, "worker-hb.worker-3", []byte(time.Now().Format(time.RFC3339Nano)))
+		require.NoError(t, err)
+
+		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
+		strategy := &mockStrategy{}
+
+		calc := NewCalculator(kv, "assignment", source, strategy, "worker-hb", 6*time.Second)
+
+		workers, err := calc.getActiveWorkers(ctx)
+		require.NoError(t, err)
+		require.Len(t, workers, 3)
+		require.Contains(t, workers, "worker-1")
+		require.Contains(t, workers, "worker-2")
+		require.Contains(t, workers, "worker-3")
+	})
+
+	t.Run("returns empty list when no workers", func(t *testing.T) {
+		ctx := t.Context()
+
+		_, nc := partitest.StartEmbeddedNATS(t)
+		kv := partitest.CreateJetStreamKV(t, nc, "test-calc-no-workers")
+
+		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
+		strategy := &mockStrategy{}
+
+		calc := NewCalculator(kv, "assignment", source, strategy, "worker-hb", 6*time.Second)
+
+		workers, err := calc.getActiveWorkers(ctx)
+		require.NoError(t, err)
+		require.Empty(t, workers)
+	})
+}
