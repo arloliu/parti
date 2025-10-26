@@ -2,7 +2,7 @@
 
 ## Overview
 
-This chapter provides detailed documentation for each major component in the tFDC defender cluster system.
+This chapter provides detailed documentation for each major component in the defender cluster system.
 
 ## Components
 
@@ -106,7 +106,7 @@ Kubernetes deployment manifests and scaling strategies.
     ┌────────────────────▼──────────────────────────┐
     │         Cassandra (3+ nodes)                  │
     │  ┌──────────────────────────────────────┐     │
-    │  │  Keyspace: fdc_system                │     │
+    │  │  Keyspace: defense_system            │     │
     │  │  - t_charts (raw data)               │     │
     │  │  - u_charts (calculated stats)       │     │
     │  │  - defense_events (alarms)           │     │

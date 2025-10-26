@@ -31,7 +31,7 @@ func StartEmbeddedNATS(t *testing.T) (*nats.Conn, func()) {
 
 // IntegrationTestConfig provides default configuration for integration tests.
 func IntegrationTestConfig() parti.Config {
-	return parti.Config{
+	cfg := parti.Config{
 		WorkerIDPrefix:        "worker",
 		WorkerIDMin:           0,
 		WorkerIDMax:           10,
@@ -45,25 +45,31 @@ func IntegrationTestConfig() parti.Config {
 		PlannedScaleWindow:    500 * time.Millisecond, // Reduced from 1s
 		RestartDetectionRatio: 0.5,
 	}
+	parti.ApplyDefaults(&cfg) // Apply default KV bucket names
+
+	return cfg
 }
 
 // FastTestConfig provides aggressive timeouts for faster leader election tests.
 // Use this for tests that focus on leader election and don't need long stabilization.
 func FastTestConfig() parti.Config {
-	return parti.Config{
+	cfg := parti.Config{
 		WorkerIDPrefix:        "worker",
 		WorkerIDMin:           0,
-		WorkerIDMax:           10,
-		WorkerIDTTL:           3 * time.Second,
+		WorkerIDMax:           20,                     // Support up to 20 workers
+		WorkerIDTTL:           30 * time.Second,       // Long TTL to prevent expiration during concurrent startup
 		HeartbeatInterval:     300 * time.Millisecond, // Very fast heartbeats
-		HeartbeatTTL:          1 * time.Second,
-		ElectionTimeout:       1 * time.Second, // Very fast election - failover in 1-2s
+		HeartbeatTTL:          3 * time.Second,        // Balance: long enough for assignments, short enough for dead worker detection
+		ElectionTimeout:       1 * time.Second,        // Very fast election - failover in 1-2s
 		StartupTimeout:        5 * time.Second,
 		ShutdownTimeout:       2 * time.Second,
 		ColdStartWindow:       500 * time.Millisecond, // Very fast cold start
 		PlannedScaleWindow:    300 * time.Millisecond,
 		RestartDetectionRatio: 0.5,
 	}
+	parti.ApplyDefaults(&cfg) // Apply default KV bucket names
+
+	return cfg
 }
 
 // CreateTestPartitions creates n partitions for testing.
@@ -131,14 +137,14 @@ func NewWorkerCluster(t *testing.T, nc *nats.Conn, numPartitions int) *WorkerClu
 	cfg := IntegrationTestConfig()
 	partitions := CreateTestPartitions(numPartitions)
 	src := source.NewStatic(partitions)
-	strat := strategy.NewConsistentHash()
+	assignmentStrategy := strategy.NewConsistentHash()
 
 	return &WorkerCluster{
 		Workers:       make([]*parti.Manager, 0),
 		StateTrackers: make([]*StateTracker, 0),
 		Config:        cfg,
 		Source:        src,
-		Strategy:      strat,
+		Strategy:      assignmentStrategy,
 		NC:            nc,
 		T:             t,
 	}
@@ -150,14 +156,14 @@ func NewFastWorkerCluster(t *testing.T, nc *nats.Conn, numPartitions int) *Worke
 	cfg := FastTestConfig()
 	partitions := CreateTestPartitions(numPartitions)
 	src := source.NewStatic(partitions)
-	strat := strategy.NewConsistentHash()
+	assignmentStrategy := strategy.NewConsistentHash()
 
 	return &WorkerCluster{
 		Workers:       make([]*parti.Manager, 0),
 		StateTrackers: make([]*StateTracker, 0),
 		Config:        cfg,
 		Source:        src,
-		Strategy:      strat,
+		Strategy:      assignmentStrategy,
 		NC:            nc,
 		T:             t,
 	}
@@ -279,6 +285,10 @@ func (wc *WorkerCluster) VerifyExactlyOneLeader() *parti.Manager {
 	leaderCount := 0
 	var leader *parti.Manager
 	for i, mgr := range wc.Workers {
+		// Skip shutdown workers
+		if mgr.State() == types.StateShutdown {
+			continue
+		}
 		if mgr.IsLeader() {
 			leaderCount++
 			leader = mgr

@@ -156,7 +156,7 @@ NATS_KV_STABLE_IDS: "stable-ids"
 
 # Cassandra Configuration
 CASSANDRA_HOSTS: "cassandra-1,cassandra-2,cassandra-3"
-CASSANDRA_KEYSPACE: "fdc_system"
+CASSANDRA_KEYSPACE: "defense_system"
 CASSANDRA_CONSISTENCY: "QUORUM"
 
 # Election Agent Configuration

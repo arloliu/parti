@@ -813,7 +813,7 @@ T+105s: State = CRASH → Calculate immediately (28 defenders)
 
 **Why immediate for crashes?**
 - Chambers are orphaned (no defender processing them)
-- Business impact: tFDC out-of-spec for orhpan chambers
+- Business impact: defender out-of-spec for orhpan chambers
 - Can't wait 10-30s when data is not being processed
 
 **Why 10s for planned scale?**

@@ -135,12 +135,14 @@ func (p *Publisher) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop stops the heartbeat publisher.
+// Stop stops the heartbeat publisher and deletes the heartbeat entry from KV.
 //
-// Blocks until the publisher goroutine exits.
+// Blocks until the publisher goroutine exits and cleanup completes.
+// The heartbeat entry is deleted to immediately signal worker shutdown
+// instead of waiting for TTL expiration.
 //
 // Returns:
-//   - error: ErrNotStarted if not running
+//   - error: ErrNotStarted if not running, or cleanup error if delete fails
 func (p *Publisher) Stop() error {
 	p.mu.Lock()
 
@@ -158,6 +160,17 @@ func (p *Publisher) Stop() error {
 
 	// Wait for goroutine to finish
 	<-p.doneCh
+
+	// Delete heartbeat entry from KV (cleanup)
+	// Use background context with timeout since worker is shutting down
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	key := p.keyForWorker(p.workerID)
+	if err := p.kv.Delete(ctx, key); err != nil {
+		// Don't fail on cleanup errors, but return them for logging
+		return fmt.Errorf("stopped but failed to delete heartbeat: %w", err)
+	}
 
 	return nil
 }

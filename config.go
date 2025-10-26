@@ -16,6 +16,26 @@ type AssignmentConfig struct {
 	RebalanceCooldown time.Duration `yaml:"rebalanceCooldown"`
 }
 
+// KVBucketConfig configures NATS JetStream KV bucket names and TTLs.
+type KVBucketConfig struct {
+	// StableIDBucket is the bucket name for stable worker ID claims.
+	StableIDBucket string `yaml:"stableIdBucket"`
+
+	// ElectionBucket is the bucket name for leader election.
+	ElectionBucket string `yaml:"electionBucket"`
+
+	// HeartbeatBucket is the bucket name for worker heartbeats.
+	HeartbeatBucket string `yaml:"heartbeatBucket"`
+
+	// AssignmentBucket is the bucket name for partition assignments.
+	AssignmentBucket string `yaml:"assignmentBucket"`
+
+	// AssignmentTTL is how long assignments remain in KV (0 = no expiration).
+	// Assignments should persist across leader changes for version continuity.
+	// Recommended: 0 (no TTL) or very long (e.g., 1 hour).
+	AssignmentTTL time.Duration `yaml:"assignmentTtl"`
+}
+
 // Config is the configuration for the Manager.
 //
 // All duration fields accept standard Go duration strings like "30s", "5m", "1h".
@@ -83,6 +103,9 @@ type Config struct {
 
 	// Assignment controls partition assignment and rebalancing behavior.
 	Assignment AssignmentConfig `yaml:"assignment"`
+
+	// KVBuckets controls NATS JetStream KV bucket configuration.
+	KVBuckets KVBucketConfig `yaml:"kvBuckets"`
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -107,6 +130,13 @@ func DefaultConfig() Config {
 		Assignment: AssignmentConfig{
 			MinRebalanceThreshold: 0.15,
 			RebalanceCooldown:     10 * time.Second,
+		},
+		KVBuckets: KVBucketConfig{
+			StableIDBucket:   "parti-stableid",
+			ElectionBucket:   "parti-election",
+			HeartbeatBucket:  "parti-heartbeat",
+			AssignmentBucket: "parti-assignment",
+			AssignmentTTL:    0, // No TTL - assignments persist for version continuity
 		},
 	}
 }
@@ -160,4 +190,17 @@ func ApplyDefaults(cfg *Config) {
 	if cfg.Assignment.RebalanceCooldown == 0 {
 		cfg.Assignment.RebalanceCooldown = defaults.Assignment.RebalanceCooldown
 	}
+	if cfg.KVBuckets.StableIDBucket == "" {
+		cfg.KVBuckets.StableIDBucket = defaults.KVBuckets.StableIDBucket
+	}
+	if cfg.KVBuckets.ElectionBucket == "" {
+		cfg.KVBuckets.ElectionBucket = defaults.KVBuckets.ElectionBucket
+	}
+	if cfg.KVBuckets.HeartbeatBucket == "" {
+		cfg.KVBuckets.HeartbeatBucket = defaults.KVBuckets.HeartbeatBucket
+	}
+	if cfg.KVBuckets.AssignmentBucket == "" {
+		cfg.KVBuckets.AssignmentBucket = defaults.KVBuckets.AssignmentBucket
+	}
+	// Note: AssignmentTTL of 0 is valid (no expiration), so we don't apply default
 }

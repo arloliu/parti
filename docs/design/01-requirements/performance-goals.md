@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document defines detailed performance goals, SLA targets, and timing requirements for the tFDC.
+This document defines detailed performance goals, SLA targets, and timing requirements for the distributed worker.
 
 ## Process Time SLA
 

@@ -30,7 +30,7 @@ func TestCalculator_ScalingTransition_TimerFires(t *testing.T) {
 	ctx := context.Background()
 
 	// Manually trigger scaling state (bypassing Start/monitorWorkers)
-	calc.enterScalingState("test_reason", 100*time.Millisecond, ctx)
+	calc.enterScalingState(ctx, "test_reason", 100*time.Millisecond)
 
 	// Verify we're in Scaling state
 	require.Equal(t, types.CalcStateScaling, calc.GetState())
@@ -74,7 +74,7 @@ func TestCalculator_ScalingTransition_WithRealStart(t *testing.T) {
 	// Start calculator
 	err = calc.Start(ctx)
 	require.NoError(t, err)
-	defer calc.Stop()
+	defer func() { _ = calc.Stop() }()
 
 	// Wait for initial assignment
 	time.Sleep(200 * time.Millisecond)
@@ -124,7 +124,7 @@ func TestCalculator_ScalingTransition_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Trigger scaling state
-	calc.enterScalingState("test_reason", 2*time.Second, ctx)
+	calc.enterScalingState(ctx, "test_reason", 2*time.Second)
 
 	require.Equal(t, types.CalcStateScaling, calc.GetState())
 
@@ -162,7 +162,7 @@ func TestCalculator_ScalingTransition_StopBeforeWindow(t *testing.T) {
 	require.NoError(t, err)
 
 	// Trigger scaling state manually
-	calc.enterScalingState("test_reason", 2*time.Second, ctx)
+	calc.enterScalingState(ctx, "test_reason", 2*time.Second)
 
 	require.Equal(t, types.CalcStateScaling, calc.GetState())
 
@@ -204,7 +204,7 @@ func TestCalculator_ScalingTransition_RapidStateChanges(t *testing.T) {
 	// Start calculator
 	err = calc.Start(ctx)
 	require.NoError(t, err)
-	defer calc.Stop()
+	defer func() { _ = calc.Stop() }()
 
 	time.Sleep(200 * time.Millisecond)
 	t.Logf("Initial state: %s", calc.GetState())

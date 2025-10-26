@@ -21,7 +21,7 @@
 
 ### Manual Scaling
 ```bash
-kubectl scale deployment defender --replicas=45 -n fdc-system
+kubectl scale deployment defender --replicas=45 -n defense-system
 ```
 
 ### Horizontal Pod Autoscaler (HPA)
@@ -30,7 +30,7 @@ apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: defender-hpa
-  namespace: fdc-system
+  namespace: defense-system
 spec:
   scaleTargetRef:
     apiVersion: apps/v1

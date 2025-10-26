@@ -2,7 +2,7 @@
 
 ## Overview
 
-This chapter describes key operational scenarios that demonstrate how the tFDC defender cluster behaves in real-world situations. Each scenario includes detailed timelines, sequence diagrams, failure modes, and observability guidelines.
+This chapter describes key operational scenarios that demonstrate how the defender cluster behaves in real-world situations. Each scenario includes detailed timelines, sequence diagrams, failure modes, and observability guidelines.
 
 ## Scenarios
 

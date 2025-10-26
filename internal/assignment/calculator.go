@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -26,10 +27,11 @@ import (
 //
 // The calculator does NOT run on follower workers.
 type Calculator struct {
-	kv       jetstream.KeyValue
-	prefix   string
-	source   types.PartitionSource
-	strategy types.AssignmentStrategy
+	assignmentKV jetstream.KeyValue // KV bucket for assignments
+	heartbeatKV  jetstream.KeyValue // KV bucket for heartbeats
+	prefix       string
+	source       types.PartitionSource
+	strategy     types.AssignmentStrategy
 
 	// Configuration
 	hbPrefix        string
@@ -59,10 +61,8 @@ type Calculator struct {
 	lastWorkers   map[string]bool // Previous worker set for comparison
 
 	// Hybrid monitoring: watcher (primary) + polling (fallback)
-	watcher          jetstream.KeyWatcher
-	watcherHealthy   atomic.Bool
-	lastWatcherEvent atomic.Int64 // Unix timestamp of last watcher event
-	watcherMu        sync.Mutex   // Protects watcher lifecycle
+	watcher   jetstream.KeyWatcher
+	watcherMu sync.Mutex // Protects watcher lifecycle
 
 	// Lifecycle
 	stopCh chan struct{}
@@ -75,7 +75,8 @@ type Calculator struct {
 // It should only be started on the leader worker.
 //
 // Parameters:
-//   - kv: NATS KV bucket for storing assignments
+//   - assignmentKV: NATS KV bucket for storing assignments
+//   - heartbeatKV: NATS KV bucket for reading worker heartbeats
 //   - prefix: Key prefix for assignment storage (e.g., "assignment")
 //   - source: Partition source for discovering available partitions
 //   - strategy: Assignment strategy for distributing partitions
@@ -85,7 +86,8 @@ type Calculator struct {
 // Returns:
 //   - *Calculator: New calculator instance ready to start
 func NewCalculator(
-	kv jetstream.KeyValue,
+	assignmentKV jetstream.KeyValue,
+	heartbeatKV jetstream.KeyValue,
 	prefix string,
 	source types.PartitionSource,
 	strategy types.AssignmentStrategy,
@@ -93,7 +95,8 @@ func NewCalculator(
 	hbTTL time.Duration,
 ) *Calculator {
 	c := &Calculator{
-		kv:                 kv,
+		assignmentKV:       assignmentKV,
+		heartbeatKV:        heartbeatKV,
 		prefix:             prefix,
 		source:             source,
 		strategy:           strategy,
@@ -114,6 +117,7 @@ func NewCalculator(
 	}
 	// Initialize calculator state to Idle
 	c.calcState.Store(int32(types.CalcStateIdle))
+
 	return c
 }
 
@@ -193,6 +197,57 @@ func (c *Calculator) SetLogger(l types.Logger) {
 	}
 }
 
+// discoverHighestVersion scans existing assignments in KV to find the highest version.
+// This ensures version monotonicity across leader changes.
+func (c *Calculator) discoverHighestVersion(ctx context.Context) error {
+	keys, err := c.assignmentKV.Keys(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list KV keys: %w", err)
+	}
+
+	c.logger.Debug("discovering highest version", "total_keys", len(keys), "prefix", c.prefix)
+
+	highestVersion := int64(0)
+	checkedCount := 0
+	for _, key := range keys {
+		// Skip non-assignment keys (heartbeats, etc.)
+		if !strings.HasPrefix(key, c.prefix+".") {
+			c.logger.Debug("skipping non-assignment key", "key", key, "prefix", c.prefix)
+			continue
+		}
+
+		checkedCount++
+		entry, err := c.assignmentKV.Get(ctx, key)
+		if err != nil {
+			c.logger.Debug("failed to read assignment key", "key", key, "error", err)
+			continue // Skip entries we can't read
+		}
+
+		var asgn types.Assignment
+		if err := json.Unmarshal(entry.Value(), &asgn); err != nil {
+			c.logger.Debug("failed to unmarshal assignment", "key", key, "error", err)
+			continue // Skip malformed entries
+		}
+
+		c.logger.Debug("found assignment", "key", key, "version", asgn.Version)
+		if asgn.Version > highestVersion {
+			highestVersion = asgn.Version
+		}
+	}
+
+	c.mu.Lock()
+	c.currentVersion = highestVersion
+	c.mu.Unlock()
+
+	if highestVersion > 0 {
+		c.logger.Info("discovered existing assignments", "highest_version", highestVersion, "checked_keys", checkedCount)
+	} else {
+		c.logger.Debug("no existing assignments found", "checked_keys", checkedCount)
+	}
+
+	return nil
+}
+
 // Start begins monitoring workers and calculating assignments.
 //
 // This method should only be called on the leader worker. It:
@@ -215,6 +270,11 @@ func (c *Calculator) Start(ctx context.Context) error {
 	}
 	c.started = true
 	c.mu.Unlock()
+
+	// Discover highest version from existing assignments to ensure monotonicity across leader changes
+	if err := c.discoverHighestVersion(ctx); err != nil {
+		c.logger.Warn("failed to discover existing versions, starting from 0", "error", err)
+	}
 
 	c.logger.Info("performing initial assignment")
 
@@ -422,10 +482,10 @@ func (c *Calculator) detectRebalanceType(currentWorkers map[string]bool) (reason
 // enterScalingState transitions the calculator into scaling state with stabilization window.
 //
 // Parameters:
+//   - ctx: Context for cancellation
 //   - reason: Reason for scaling ("cold_start", "planned_scale", "restart")
 //   - window: Stabilization window duration to wait before rebalancing
-//   - ctx: Context for cancellation
-func (c *Calculator) enterScalingState(reason string, window time.Duration, ctx context.Context) {
+func (c *Calculator) enterScalingState(ctx context.Context, reason string, window time.Duration) {
 	// Only enter if currently idle
 	oldState := types.CalculatorState(c.calcState.Swap(int32(types.CalcStateScaling)))
 	if oldState != types.CalcStateIdle {
@@ -434,6 +494,7 @@ func (c *Calculator) enterScalingState(reason string, window time.Duration, ctx 
 			"reason", reason)
 		// Restore old state
 		c.calcState.Store(int32(oldState))
+
 		return
 	}
 
@@ -611,25 +672,23 @@ func (c *Calculator) watchHeartbeats(ctx context.Context) {
 	c.watcherMu.Lock()
 
 	// Create watcher for all heartbeat keys
-	watcher, err := c.kv.WatchAll(ctx)
+	watcher, err := c.heartbeatKV.WatchAll(ctx)
 	if err != nil {
 		c.logger.Error("failed to create heartbeat watcher, falling back to polling", "error", err)
-		c.watcherHealthy.Store(false)
 		c.watcherMu.Unlock()
+
 		return
 	}
 
 	c.watcher = watcher
-	c.watcherHealthy.Store(true)
 	c.watcherMu.Unlock()
 
 	defer func() {
 		c.watcherMu.Lock()
 		if c.watcher != nil {
-			c.watcher.Stop()
+			_ = c.watcher.Stop() // Best effort - ignore error during cleanup
 			c.watcher = nil
 		}
-		c.watcherHealthy.Store(false)
 		c.watcherMu.Unlock()
 	}()
 
@@ -655,15 +714,12 @@ func (c *Calculator) watchHeartbeats(ctx context.Context) {
 		case entry := <-watcher.Updates():
 			if entry == nil {
 				c.logger.Warn("watcher channel closed, falling back to polling")
-				c.watcherHealthy.Store(false)
 				if debounceTimer != nil {
 					debounceTimer.Stop()
 				}
+
 				return
 			}
-
-			// Update last event timestamp
-			c.lastWatcherEvent.Store(time.Now().Unix())
 
 			// Extract worker ID from key (format: "prefix.workerID")
 			workerID := c.extractWorkerID(entry.Key())
@@ -689,6 +745,10 @@ func (c *Calculator) watchHeartbeats(ctx context.Context) {
 					topologyChanged = true
 					c.logger.Info("watcher detected worker leave", "worker_id", workerID)
 				}
+
+			default:
+				// Ignore other operations (Purge, etc.)
+				continue
 			}
 
 			if !topologyChanged {
@@ -718,6 +778,7 @@ func (c *Calculator) watchHeartbeats(ctx context.Context) {
 			if debounceTimer != nil {
 				debounceTimer.Stop()
 			}
+
 			return
 		}
 	}
@@ -888,7 +949,7 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 		c.enterEmergencyState(ctx)
 	} else {
 		// Cold start, planned scale, or restart: use stabilization window
-		c.enterScalingState(reason, window, ctx)
+		c.enterScalingState(ctx, reason, window)
 	}
 
 	return nil
@@ -927,15 +988,18 @@ func (c *Calculator) hasWorkersChangedMap(workers map[string]bool) bool {
 // getActiveWorkers retrieves the list of workers with active heartbeats.
 func (c *Calculator) getActiveWorkers(ctx context.Context) ([]string, error) {
 	// List all keys with heartbeat prefix
-	keys, err := c.kv.Keys(ctx)
+	keys, err := c.heartbeatKV.Keys(ctx)
 	if err != nil {
 		// Handle "no keys found" as empty list
 		if err.Error() == "nats: no keys found" {
+			c.logger.Debug("no heartbeat keys found")
 			return []string{}, nil
 		}
 
 		return nil, fmt.Errorf("failed to list heartbeat keys: %w", err)
 	}
+
+	c.logger.Debug("scanning heartbeat keys", "total_keys", len(keys), "hb_prefix", c.hbPrefix)
 
 	var workers []string
 	for _, key := range keys {
@@ -943,8 +1007,13 @@ func (c *Calculator) getActiveWorkers(ctx context.Context) ([]string, error) {
 		if len(key) > len(c.hbPrefix)+1 && key[:len(c.hbPrefix)] == c.hbPrefix {
 			workerID := key[len(c.hbPrefix)+1:]
 			workers = append(workers, workerID)
+			c.logger.Debug("found active worker heartbeat", "key", key, "worker_id", workerID)
+		} else {
+			c.logger.Debug("skipping non-heartbeat key", "key", key, "hb_prefix", c.hbPrefix)
 		}
 	}
+
+	c.logger.Debug("active workers discovered", "count", len(workers), "workers", workers)
 
 	return workers, nil
 }
@@ -960,10 +1029,14 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 		return err
 	}
 
+	c.logger.Debug("rebalance started", "lifecycle", lifecycle, "worker_count", len(workers), "workers", workers)
+
 	partitions, err := c.source.ListPartitions(ctx)
 	if err != nil {
 		return err
 	}
+
+	c.logger.Debug("partitions retrieved", "partition_count", len(partitions))
 
 	if len(workers) == 0 {
 		c.logger.Info("no active workers for assignment")
@@ -976,8 +1049,12 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 		return fmt.Errorf("assignment calculation failed: %w", err)
 	}
 
+	c.logger.Debug("assignments calculated", "worker_count", len(assignments))
+
 	// Increment version
 	c.currentVersion++
+
+	c.logger.Debug("publishing assignments to KV", "version", c.currentVersion, "worker_count", len(assignments))
 
 	// Publish assignments to KV
 	for workerID, parts := range assignments {
@@ -993,10 +1070,13 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 		}
 
 		key := fmt.Sprintf("%s.%s", c.prefix, workerID)
-		if _, err := c.kv.Put(ctx, key, data); err != nil {
+		c.logger.Debug("publishing assignment", "key", key, "worker_id", workerID, "partitions", len(parts), "version", c.currentVersion)
+		if _, err := c.assignmentKV.Put(ctx, key, data); err != nil {
 			return fmt.Errorf("failed to publish assignment: %w", err)
 		}
 	}
+
+	c.logger.Debug("all assignments published successfully", "version", c.currentVersion, "workers", len(assignments))
 
 	// Update tracking state
 	c.currentWorkers = make(map[string]bool)

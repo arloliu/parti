@@ -178,8 +178,9 @@ func (c *Claimer) renew(ctx context.Context) error {
 	key := c.keyForID(c.workerID)
 	value := time.Now().Format(time.RFC3339)
 
-	// Update the existing key with timeout from context
-	_, err := c.kv.Update(ctx, key, []byte(value), 0) // revision 0 = latest
+	// Use Put() instead of Update() to overwrite regardless of revision
+	// This allows renewal to work even if the key was created/updated by another process
+	_, err := c.kv.Put(ctx, key, []byte(value))
 	if err != nil {
 		return fmt.Errorf("failed to renew ID %s: %w", c.workerID, err)
 	}

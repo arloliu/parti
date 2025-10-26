@@ -6,7 +6,6 @@ import "context"
 //
 // Implementations can query various backends:
 //   - Cassandra: token ranges from system tables
-//   - Kafka: topic partitions from broker metadata
 //   - Static: fixed list for testing
 //   - Custom: any dynamic partition discovery logic
 //

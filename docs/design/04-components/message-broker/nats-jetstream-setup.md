@@ -307,7 +307,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: nats
-  namespace: fdc-system
+  namespace: defense-system
 spec:
   selector:
     app: nats
@@ -330,7 +330,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: nats
-  namespace: fdc-system
+  namespace: defense-system
 spec:
   serviceName: nats
   replicas: 3
@@ -415,13 +415,13 @@ jetstream {
 
 # Clustering
 cluster {
-  name: fdc-nats-cluster
+  name: defense-nats-cluster
   listen: 0.0.0.0:6222
 
   routes: [
-    nats://nats-0.nats.fdc-system.svc:6222
-    nats://nats-1.nats.fdc-system.svc:6222
-    nats://nats-2.nats.fdc-system.svc:6222
+    nats://nats-0.nats.defense-system.svc:6222
+    nats://nats-1.nats.defense-system.svc:6222
+    nats://nats-2.nats.defense-system.svc:6222
   ]
 }
 

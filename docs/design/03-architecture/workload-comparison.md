@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document provides a detailed comparison of three approaches for deploying the tFDC defender cluster in Kubernetes, analyzing their trade-offs for our specific use case of distributed stateless processing with stable identities.
+This document provides a detailed comparison of three approaches for deploying the defender cluster in Kubernetes, analyzing their trade-offs for our specific use case of distributed stateless processing with stable identities.
 
 ## The Three Approaches
 

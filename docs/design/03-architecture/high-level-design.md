@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document presents the high-level architecture of a **scalable, distributed, and stateless tFDC System** designed for collecting and fault detection with high-freqency and massive data volume.
+This document presents the high-level architecture of a **scalable, distributed, and stateless worker System** designed for collecting and fault detection with high-freqency and massive data volume.
 
 ### Design Focus
 

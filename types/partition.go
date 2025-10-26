@@ -6,7 +6,6 @@ package types
 // multiple keys and has an associated weight for load balancing.
 type Partition struct {
 	// Keys uniquely identify this partition.
-	// For Cassandra: ["keyspace", "table", "token_range"]
 	// For Kafka: ["topic", "partition_id"]
 	Keys []string `json:"keys"`
 

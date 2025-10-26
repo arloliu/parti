@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document outlines the technical constraints and existing infrastructure that shape the design of the tFDC System.
+This document outlines the technical constraints and existing infrastructure that shape the design of the distributed worker system.
 
 ## Existing Infrastructure & Libraries
 

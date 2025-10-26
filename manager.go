@@ -13,6 +13,7 @@ import (
 	"github.com/arloliu/parti/internal/election"
 	"github.com/arloliu/parti/internal/heartbeat"
 	"github.com/arloliu/parti/internal/hooks"
+	"github.com/arloliu/parti/internal/kvutil"
 	"github.com/arloliu/parti/internal/logger"
 	"github.com/arloliu/parti/internal/metrics"
 	"github.com/arloliu/parti/internal/stableid"
@@ -125,6 +126,9 @@ func NewManager(cfg *Config, conn *nats.Conn, source PartitionSource, strategy A
 		return nil, ErrAssignmentStrategyRequired
 	}
 
+	// Apply defaults to fill in any missing configuration
+	ApplyDefaults(cfg)
+
 	// Apply options
 	options := &managerOptions{}
 	for _, opt := range opts {
@@ -203,23 +207,26 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 
 	// Create KV buckets for coordination
-	stableIDKV, err := m.ensureKVBucket(startupCtx, js, "parti-stableid", m.cfg.WorkerIDTTL)
+	stableIDKV, err := m.ensureKVBucket(startupCtx, js, m.cfg.KVBuckets.StableIDBucket, m.cfg.WorkerIDTTL)
 	if err != nil {
 		return fmt.Errorf("failed to create stable ID KV: %w", err)
 	}
 
-	electionKV, err := m.ensureKVBucket(startupCtx, js, "parti-election", m.cfg.ElectionTimeout)
+	electionKV, err := m.ensureKVBucket(startupCtx, js, m.cfg.KVBuckets.ElectionBucket, m.cfg.ElectionTimeout)
 	if err != nil {
 		return fmt.Errorf("failed to create election KV: %w", err)
 	}
 
-	heartbeatKV, err := m.ensureKVBucket(startupCtx, js, "parti-heartbeat", m.cfg.HeartbeatTTL)
+	heartbeatKV, err := m.ensureKVBucket(startupCtx, js, m.cfg.KVBuckets.HeartbeatBucket, m.cfg.HeartbeatTTL)
 	if err != nil {
 		return fmt.Errorf("failed to create heartbeat KV: %w", err)
 	}
 
-	// Use heartbeat KV for both heartbeats and assignments (calculator expects them in same bucket)
-	assignmentKV := heartbeatKV
+	// Create separate assignment bucket (no TTL - assignments persist for version continuity)
+	assignmentKV, err := m.ensureKVBucket(startupCtx, js, m.cfg.KVBuckets.AssignmentBucket, m.cfg.KVBuckets.AssignmentTTL)
+	if err != nil {
+		return fmt.Errorf("failed to create assignment KV: %w", err)
+	}
 
 	// Store KV buckets for later use
 	m.assignmentKV = assignmentKV
@@ -521,6 +528,9 @@ func (m *Manager) logError(msg string, keysAndValues ...any) {
 }
 
 // ensureKVBucket creates or opens a KV bucket with the specified TTL.
+//
+// Uses retry logic to handle race conditions when multiple workers
+// try to create the same bucket concurrently.
 func (m *Manager) ensureKVBucket(ctx context.Context, js jetstream.JetStream, bucket string, ttl time.Duration) (jetstream.KeyValue, error) {
 	cfg := jetstream.KeyValueConfig{
 		Bucket:  bucket,
@@ -531,14 +541,11 @@ func (m *Manager) ensureKVBucket(ctx context.Context, js jetstream.JetStream, bu
 		cfg.TTL = ttl
 	}
 
-	kv, err := js.CreateKeyValue(ctx, cfg)
+	// Use retry logic to handle concurrent creation
+	const maxRetries = 5
+	kv, err := kvutil.EnsureKVBucketWithRetry(ctx, js, cfg, maxRetries)
 	if err != nil {
-		// If bucket exists, try to get it
-		if errors.Is(err, jetstream.ErrBucketExists) {
-			return js.KeyValue(ctx, bucket)
-		}
-
-		return nil, fmt.Errorf("failed to create KV bucket %s: %w", bucket, err)
+		return nil, fmt.Errorf("failed to create/open KV bucket %s: %w", bucket, err)
 	}
 
 	return kv, nil
@@ -707,7 +714,7 @@ func (m *Manager) waitForAssignment(ctx context.Context, assignmentKV, _ jetstre
 }
 
 // startCalculator starts the assignment calculator (leader only).
-func (m *Manager) startCalculator(assignmentKV, _ jetstream.KeyValue) error {
+func (m *Manager) startCalculator(assignmentKV, heartbeatKV jetstream.KeyValue) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -716,11 +723,12 @@ func (m *Manager) startCalculator(assignmentKV, _ jetstream.KeyValue) error {
 	}
 
 	calc := assignment.NewCalculator(
-		assignmentKV, // Heartbeat KV bucket (contains both heartbeats and assignments)
-		"assignment",
+		assignmentKV, // Assignment KV bucket (no TTL)
+		heartbeatKV,  // Heartbeat KV bucket (with TTL)
+		"assignment", // Prefix for assignment keys
 		m.source,
 		m.strategy,
-		"heartbeat", // Prefix for heartbeat keys in the same bucket
+		"heartbeat", // Prefix for heartbeat keys
 		m.cfg.HeartbeatTTL,
 	)
 
@@ -908,12 +916,16 @@ func (m *Manager) monitorAssignmentChanges(kv jetstream.KeyValue) {
 
 	workerID := m.WorkerID()
 	key := fmt.Sprintf("assignment.%s", workerID) // Match calculator's key format
+
+	// Watch for updates to this worker's assignment key
+	// The watcher will deliver initial value, then a nil entry marker, then future updates
 	watcher, err := kv.Watch(m.ctx, key)
 	if err != nil {
 		m.logError("failed to watch assignments", "error", err)
 
 		return
 	}
+
 	defer func() {
 		if err := watcher.Stop(); err != nil {
 			m.logError("failed to stop watcher", "error", err)
@@ -927,9 +939,9 @@ func (m *Manager) monitorAssignmentChanges(kv jetstream.KeyValue) {
 			return
 		case entry := <-watcher.Updates():
 			if entry == nil {
-				// Watcher closed (context cancelled or error)
-				m.logger.Debug("assignment monitor stopping (watcher closed)", "worker_id", workerID)
-				return
+				// Nil entry indicates end of initial values replay
+				// This is normal - continue watching for future updates
+				continue
 			}
 
 			var newAssignment Assignment

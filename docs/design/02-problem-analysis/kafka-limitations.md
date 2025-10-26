@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document explains why Apache Kafka is not suitable for the distributed FDC System, focusing on the pain points of Kafka's consumer group rebalancing mechanism when dealing with topology changes.
+This document explains why Apache Kafka is not suitable for the distributed system, focusing on the pain points of Kafka's consumer group rebalancing mechanism when dealing with topology changes.
 
 *The critical pain points are rolling update and code start stability.*
 
@@ -12,7 +12,7 @@ This document explains why Apache Kafka is not suitable for the distributed FDC 
 - **Message Throughput**: 1.25-10 messages/sec (LOW throughput, high latency sensitivity)
 - **Total Chambers**: 1,500-6,000 chambers (each needs independent processing)
 - **Topology Changes**: Frequent (scaling, rolling updates, failures)
-- **Latency SLA**: < 5 seconds per tFDC defense process
+- **Latency SLA**: < 5 seconds per worker defense process
 
 ## Kafka-Based Partition Design
 

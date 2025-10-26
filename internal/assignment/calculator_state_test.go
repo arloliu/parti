@@ -181,7 +181,7 @@ func TestCalculator_StateTransitions_GetState(t *testing.T) {
 
 	// Transition to Scaling
 	ctx := context.Background()
-	calc.enterScalingState("cold_start", 100*time.Millisecond, ctx)
+	calc.enterScalingState(ctx, "cold_start", 100*time.Millisecond)
 	require.Equal(t, types.CalcStateScaling, calc.GetState())
 
 	// Wait for automatic transition to Rebalancing
@@ -203,7 +203,7 @@ func TestCalculator_StateTransitions_Scaling(t *testing.T) {
 	ctx := context.Background()
 
 	// Enter scaling state
-	calc.enterScalingState("cold_start", 50*time.Millisecond, ctx)
+	calc.enterScalingState(ctx, "cold_start", 50*time.Millisecond)
 
 	require.Equal(t, types.CalcStateScaling, calc.GetState())
 	require.Equal(t, "cold_start", calc.scalingReason)
@@ -281,7 +281,7 @@ func TestCalculator_StateTransitions_PreventsConcurrentRebalance(t *testing.T) {
 	// Start calculator to set up KV buckets
 	err := calc.Start(ctx)
 	require.NoError(t, err)
-	defer calc.Stop()
+	defer func() { _ = calc.Stop() }()
 
 	// Publish some heartbeats
 	hbKV := partitest.CreateJetStreamKV(t, nc, "test-hb")
@@ -293,7 +293,7 @@ func TestCalculator_StateTransitions_PreventsConcurrentRebalance(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Manually enter scaling state
-	calc.enterScalingState("test", 200*time.Millisecond, ctx)
+	calc.enterScalingState(ctx, "test", 200*time.Millisecond)
 
 	// Set up for checkForChanges
 	calc.mu.Lock()
@@ -327,7 +327,7 @@ func TestCalculator_StateTransitions_CooldownPreventsRebalance(t *testing.T) {
 	// Start calculator
 	err := calc.Start(ctx)
 	require.NoError(t, err)
-	defer calc.Stop()
+	defer func() { _ = calc.Stop() }()
 
 	// Publish heartbeats
 	hbKV := partitest.CreateJetStreamKV(t, nc, "test-hb")
