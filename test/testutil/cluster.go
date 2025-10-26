@@ -25,6 +25,7 @@ func StartEmbeddedNATS(t *testing.T) (*nats.Conn, func()) {
 		srv.Shutdown()
 		srv.WaitForShutdown()
 	}
+
 	return nc, cleanup
 }
 
@@ -55,6 +56,7 @@ func CreateTestPartitions(n int) []types.Partition {
 			Weight: 100,
 		}
 	}
+
 	return partitions
 }
 
@@ -90,6 +92,7 @@ func (st *StateTracker) HasState(state types.State) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -109,21 +112,35 @@ func NewWorkerCluster(t *testing.T, nc *nats.Conn, numPartitions int) *WorkerClu
 	cfg := IntegrationTestConfig()
 	partitions := CreateTestPartitions(numPartitions)
 	src := source.NewStatic(partitions)
-	strategy := strategy.NewConsistentHash()
+	strat := strategy.NewConsistentHash()
 
 	return &WorkerCluster{
 		Workers:       make([]*parti.Manager, 0),
 		StateTrackers: make([]*StateTracker, 0),
 		Config:        cfg,
 		Source:        src,
-		Strategy:      strategy,
+		Strategy:      strat,
 		NC:            nc,
 		T:             t,
 	}
 }
 
 // AddWorker adds a worker to the cluster with state tracking.
-func (wc *WorkerCluster) AddWorker(ctx context.Context) *parti.Manager {
+//
+// Optional logger can be passed to enable debug logging for troubleshooting:
+//
+//	debugLogger := logger.NewTest(t)
+//	cluster.AddWorker(ctx, debugLogger)
+//
+// Without a logger, the worker will use the default NopLogger (no output).
+//
+// Parameters:
+//   - ctx: Context for the worker lifecycle
+//   - opts: Optional logger for debug output
+//
+// Returns:
+//   - *parti.Manager: The created worker manager
+func (wc *WorkerCluster) AddWorker(ctx context.Context, opts ...types.Logger) *parti.Manager {
 	workerIdx := len(wc.Workers)
 	tracker := CreateStateTracker(wc.T, workerIdx)
 	wc.StateTrackers = append(wc.StateTrackers, tracker)
@@ -132,10 +149,22 @@ func (wc *WorkerCluster) AddWorker(ctx context.Context) *parti.Manager {
 		OnStateChanged: tracker.Hook(),
 	}
 
-	mgr, err := parti.NewManager(&wc.Config, wc.NC, wc.Source, wc.Strategy, parti.WithHooks(hooks))
+	// Build manager options
+	managerOpts := []parti.Option{parti.WithHooks(hooks)}
+
+	// Add logger if provided
+	if len(opts) > 0 && opts[0] != nil {
+		managerOpts = append(managerOpts, parti.WithLogger(opts[0]))
+	}
+
+	mgr, err := parti.NewManager(
+		&wc.Config, wc.NC, wc.Source, wc.Strategy,
+		managerOpts...,
+	)
 	require.NoError(wc.T, err, "failed to create worker %d", workerIdx)
 
 	wc.Workers = append(wc.Workers, mgr)
+
 	return mgr
 }
 
@@ -145,6 +174,7 @@ func (wc *WorkerCluster) AddWorkerWithoutTracking(ctx context.Context) *parti.Ma
 	require.NoError(wc.T, err, "failed to create worker")
 
 	wc.Workers = append(wc.Workers, mgr)
+
 	return mgr
 }
 
@@ -179,6 +209,7 @@ func (wc *WorkerCluster) WaitForStableState(timeout time.Duration) {
 			}
 		}
 		wc.T.Logf("Stable workers: %d/%d", stableCount, len(wc.Workers))
+
 		return stableCount == len(wc.Workers)
 	}, timeout, 500*time.Millisecond, "workers did not reach Stable state")
 }
@@ -195,6 +226,7 @@ func (wc *WorkerCluster) VerifyExactlyOneLeader() *parti.Manager {
 		}
 	}
 	require.Equal(wc.T, 1, leaderCount, "expected exactly one leader")
+
 	return leader
 }
 
@@ -253,6 +285,7 @@ func (wc *WorkerCluster) GetLeader() *parti.Manager {
 			return mgr
 		}
 	}
+
 	return nil
 }
 

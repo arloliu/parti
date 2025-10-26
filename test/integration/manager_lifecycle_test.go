@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/arloliu/parti"
+	"github.com/arloliu/parti/internal/logger"
 	"github.com/arloliu/parti/source"
 	"github.com/arloliu/parti/strategy"
 	partitest "github.com/arloliu/parti/testing"
@@ -97,6 +98,10 @@ func TestManager_MultipleWorkers(t *testing.T) {
 	defer srv.Shutdown()
 	defer conn.Close()
 
+	// Create debug logger for troubleshooting
+	debugLogger := logger.NewTest(t)
+	debugLogger.Info("TEST: Debug logger created successfully")
+
 	// Create config
 	cfg := parti.Config{
 		WorkerIDPrefix:        "multi-worker",
@@ -127,7 +132,7 @@ func TestManager_MultipleWorkers(t *testing.T) {
 	// Create 3 workers
 	workers := make([]*parti.Manager, 3)
 	for i := range workers {
-		mgr, err := parti.NewManager(&cfg, conn, src, strategy)
+		mgr, err := parti.NewManager(&cfg, conn, src, strategy, parti.WithLogger(debugLogger))
 		require.NoError(t, err)
 		workers[i] = mgr
 	}
@@ -156,7 +161,16 @@ func TestManager_MultipleWorkers(t *testing.T) {
 	}
 
 	// Verify all workers started
+	deadline := time.Now().Add(15 * time.Second)
 	for i, mgr := range workers {
+		for time.Now().Before(deadline) {
+			state := mgr.State()
+			if state == parti.StateStable {
+				break
+			}
+			t.Logf("Worker %d in state %s, waiting...", i, state)
+			time.Sleep(500 * time.Millisecond)
+		}
 		require.Equal(t, parti.StateStable, mgr.State(), "worker %d should be stable", i)
 		require.NotEmpty(t, mgr.WorkerID(), "worker %d should have ID", i)
 	}

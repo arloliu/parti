@@ -12,6 +12,15 @@ import (
 	"github.com/arloliu/parti/types"
 )
 
+// To enable debug logging for troubleshooting, import and use:
+//   "github.com/arloliu/parti/internal/logger"
+//
+// Then when adding workers:
+//   debugLogger := logger.NewTest(t)
+//   cluster.AddWorker(ctx, debugLogger)
+//
+// This will show detailed calculator state transitions and assignment logs.
+
 // TestStateMachine_ColdStart tests the cold start scenario (0 → 3 workers).
 //
 // Verifies:

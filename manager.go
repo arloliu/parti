@@ -597,7 +597,7 @@ func (m *Manager) participateElection(ctx context.Context, kv jetstream.KeyValue
 	return nil
 }
 
-// monitorLeadership monitors leader changes.
+// monitorLeadership monitors leader changes and renews leadership lease.
 func (m *Manager) monitorLeadership() {
 	ticker := time.NewTicker(m.cfg.ElectionTimeout / 3)
 	defer ticker.Stop()
@@ -608,6 +608,21 @@ func (m *Manager) monitorLeadership() {
 			return
 		case <-ticker.C:
 			wasLeader := m.IsLeader()
+
+			// If we're the leader, renew the lease
+			if wasLeader {
+				if err := m.election.RenewLeadership(m.ctx); err != nil {
+					m.logError("failed to renew leadership", "error", err)
+					// Leadership lost
+					m.isLeader.Store(false)
+					m.logger.Info("lost leadership", "worker_id", m.WorkerID())
+					m.stopCalculator()
+
+					continue
+				}
+			}
+
+			// Check current leadership status
 			isLeader, err := m.election.IsLeader(m.ctx)
 			if err != nil {
 				m.logError("failed to check leadership", "error", err)
@@ -790,6 +805,9 @@ func (m *Manager) monitorCalculatorState() {
 			case "Idle":
 				// Calculator returned to idle after rebalancing
 				if currentState == StateRebalancing {
+					m.transitionState(currentState, StateStable)
+				} else if currentState == StateScaling {
+					// Fast rebalancing completed before we saw Rebalancing state
 					m.transitionState(currentState, StateStable)
 				} else if currentState == StateEmergency {
 					// Emergency rebalancing complete
