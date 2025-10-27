@@ -207,6 +207,11 @@ Example:
 
 ### Testing Guidelines
 
+**Ground Rules**
+- DON'T USE emojis in test log messages!
+- DON'T USE emojis in test log messages!
+- DON'T USE emojis in test log messages!
+
 **Test Organization** (Hybrid Approach):
 - **Unit tests**: Co-located with implementation (`*_test.go`)
 - **Integration tests**: Dedicated directory (`test/integration/`)

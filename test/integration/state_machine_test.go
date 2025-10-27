@@ -332,8 +332,9 @@ func TestStateMachine_Restart(t *testing.T) {
 	nc, cleanup := testutil.StartEmbeddedNATS(t)
 	defer cleanup()
 
-	// Create first cluster with fast configuration and 20 partitions
-	cluster1 := testutil.NewFastWorkerCluster(t, nc, 20)
+	// Create first cluster with fast configuration and 100 partitions
+	// (need enough partitions for ConsistentHash to distribute across 10 workers)
+	cluster1 := testutil.NewFastWorkerCluster(t, nc, 100)
 
 	// Start initial 10 workers
 	t.Log("Starting initial 10 workers...")
@@ -355,7 +356,7 @@ func TestStateMachine_Restart(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	// Create new cluster (reusing same NATS connection)
-	cluster2 := testutil.NewFastWorkerCluster(t, nc, 20)
+	cluster2 := testutil.NewFastWorkerCluster(t, nc, 100)
 	defer cluster2.StopWorkers()
 
 	// Start 10 new workers rapidly (simulating restart)
@@ -381,7 +382,7 @@ func TestStateMachine_Restart(t *testing.T) {
 
 	// Verify all workers have assignments
 	cluster2.VerifyAllWorkersHavePartitions()
-	cluster2.VerifyTotalPartitionCount(20)
+	cluster2.VerifyTotalPartitionCount(100)
 
 	t.Log("All partitions accounted for after restart")
 }

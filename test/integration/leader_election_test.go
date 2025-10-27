@@ -33,8 +33,7 @@ func TestLeaderElection_BasicFailover(t *testing.T) {
 	// Create cluster with fast configuration for quick leader election
 	cluster := testutil.NewFastWorkerCluster(t, nc, 10)
 
-	// Enable debug logging to see shutdown behavior
-	debugLogger := logging.NewTest(t)
+	debugLogger := logging.NewNop()
 
 	// Add and start 3 workers
 	for i := 0; i < 3; i++ {
@@ -261,7 +260,7 @@ func TestLeaderElection_AssignmentPreservation(t *testing.T) {
 
 	// Create cluster with fast configuration
 	cluster := testutil.NewFastWorkerCluster(t, nc, 20)
-	debugLogger := logging.NewTest(t)
+	debugLogger := logging.NewNop()
 
 	// Start 3 workers
 	for i := 0; i < 3; i++ {
@@ -435,7 +434,7 @@ func TestLeaderElection_AssignmentVersioning(t *testing.T) {
 
 	// Create cluster with fast configuration
 	cluster := testutil.NewFastWorkerCluster(t, nc, 20)
-	debugLogger := logging.NewTest(t)
+	debugLogger := logging.NewNop()
 
 	// Start 3 workers
 	for i := 0; i < 3; i++ {
@@ -562,7 +561,7 @@ func TestLeaderElection_NoOrphansOnFailover(t *testing.T) {
 
 	// Create cluster with fast configuration
 	cluster := testutil.NewFastWorkerCluster(t, nc, 20)
-	debugLogger := logging.NewTest(t)
+	debugLogger := logging.NewNop()
 
 	// Start 4 workers simultaneously for realistic concurrent startup
 	for i := 0; i < 4; i++ {

@@ -5,7 +5,7 @@ import "context"
 // PartitionSource discovers and provides the list of available partitions.
 //
 // Implementations can query various backends:
-//   - Cassandra: token ranges from system tables
+//   - Cassandra: the signal sources from system tables
 //   - Static: fixed list for testing
 //   - Custom: any dynamic partition discovery logic
 //

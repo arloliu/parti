@@ -14,6 +14,7 @@ import (
 	"github.com/arloliu/parti/internal/logging"
 	"github.com/arloliu/parti/source"
 	"github.com/arloliu/parti/strategy"
+	"github.com/arloliu/parti/test/testutil"
 	partitest "github.com/arloliu/parti/testing"
 	"github.com/arloliu/parti/types"
 	"github.com/stretchr/testify/require"
@@ -41,8 +42,7 @@ func TestAssignmentCorrectness_AllPartitionsAssigned(t *testing.T) {
 	defer srv.Shutdown()
 	defer conn.Close()
 
-	// Create debug logger
-	debugLogger := logging.NewTest(t)
+	debugLogger := logging.NewNop()
 
 	// Create partitions with unique IDs
 	partitions := make([]types.Partition, numPartitions)
@@ -87,12 +87,12 @@ func TestAssignmentCorrectness_AllPartitionsAssigned(t *testing.T) {
 		wg.Add(1)
 		go func(idx int, m *parti.Manager) {
 			defer wg.Done()
-			t.Logf("⏱️  Starting manager %d at T+%v", idx, time.Since(startTime))
+			t.Logf("Starting manager %d at T+%v", idx, time.Since(startTime))
 			if err := m.Start(ctx); err != nil {
 				startErrors[idx] = err
-				t.Logf("❌ Manager %d failed to start: %v", idx, err)
+				t.Logf("Manager %d failed to start: %v", idx, err)
 			} else {
-				t.Logf("✅ Manager %d started successfully", idx)
+				t.Logf("Manager %d started successfully", idx)
 			}
 		}(i, mgr)
 	}
@@ -104,8 +104,13 @@ func TestAssignmentCorrectness_AllPartitionsAssigned(t *testing.T) {
 		require.NoError(t, err, "manager %d failed to start", i)
 	}
 
-	// Wait for stable state (cold start + buffer)
-	time.Sleep(4 * time.Second)
+	// Wait for all managers to reach stable state
+	mgrWaiters := make([]testutil.ManagerWaiter, numWorkers)
+	for i, mgr := range managers {
+		mgrWaiters[i] = mgr
+	}
+	err := testutil.WaitAllManagersState(ctx, mgrWaiters, parti.StateStable, 15*time.Second)
+	require.NoError(t, err, "not all managers reached stable state")
 
 	// Collect assignments from all workers
 	assignmentMap := make(map[string][]string) // partition key -> worker IDs
@@ -140,7 +145,7 @@ func TestAssignmentCorrectness_AllPartitionsAssigned(t *testing.T) {
 			orphans = append(orphans, partKey)
 		} else if len(workers) > 1 {
 			duplicates = append(duplicates, partKey)
-			t.Logf("⚠️  Partition %s assigned to multiple workers: %v", partKey, workers)
+			t.Logf("Partition %s assigned to multiple workers: %v", partKey, workers)
 		}
 	}
 
@@ -160,8 +165,8 @@ func TestAssignmentCorrectness_AllPartitionsAssigned(t *testing.T) {
 			"Worker %d has too many partitions (%d > %d)", i, count, expectedMax)
 	}
 
-	t.Log("✅ All partitions assigned exactly once")
-	t.Logf("✅ Distribution: total=%d, workers=%d, avg=%.1f per worker",
+	t.Log("All partitions assigned exactly once")
+	t.Logf("Distribution: total=%d, workers=%d, avg=%.1f per worker",
 		totalAssigned, numWorkers, float64(totalAssigned)/float64(numWorkers))
 
 	// Cleanup
@@ -229,14 +234,19 @@ func TestAssignmentCorrectness_StableAssignments(t *testing.T) {
 		managers[i] = mgr
 	}
 
-	// Start all managers
+	// Start all managers concurrently
+	mgrWaiters := make([]testutil.ManagerWaiter, numWorkers)
 	for i, mgr := range managers {
-		err := mgr.Start(ctx)
-		require.NoError(t, err, "manager %d failed to start", i)
+		mgrWaiters[i] = mgr
+		go func(m *parti.Manager, idx int) {
+			err := m.Start(ctx)
+			require.NoError(t, err, "manager %d failed to start", idx)
+		}(mgr, i)
 	}
 
-	// Wait for stable state
-	time.Sleep(4 * time.Second)
+	// Wait for all managers to reach stable state
+	err := testutil.WaitAllManagersState(ctx, mgrWaiters, parti.StateStable, 15*time.Second)
+	require.NoError(t, err, "not all managers reached stable state")
 
 	// Record initial assignments
 	initialAssignments := make(map[int][]types.Partition) // worker index -> partitions
@@ -268,7 +278,7 @@ func TestAssignmentCorrectness_StableAssignments(t *testing.T) {
 				// Compare assignments
 				if !partitionSetsEqual(initial, current) {
 					changeCount++
-					t.Logf("⚠️  Worker %d assignment changed at observation %d: %d -> %d partitions",
+					t.Logf("Worker %d assignment changed at observation %d: %d -> %d partitions",
 						i, observations, len(initial), len(current))
 					initialAssignments[i] = current // Update for next comparison
 				}
@@ -280,7 +290,7 @@ done:
 	require.Equal(t, 0, changeCount,
 		"Assignments changed %d times during %s with no topology changes", changeCount, observePeriod)
 
-	t.Logf("✅ Assignments remained stable for %s (%d observations)", observePeriod, observations)
+	t.Logf("Assignments remained stable for %s (%d observations)", observePeriod, observations)
 
 	// Cleanup
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)

@@ -233,6 +233,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.heartbeatKV = heartbeatKV
 
 	// Step 1: Claim stable worker ID
+	m.logger.Debug("Claiming stable worker ID...")
 	m.transitionState(m.State(), StateClaimingID)
 	if err := m.claimWorkerID(startupCtx, stableIDKV); err != nil {
 		return fmt.Errorf("failed to claim worker ID: %w", err)
@@ -401,6 +402,84 @@ func (m *Manager) CurrentAssignment() Assignment {
 //   - State: Current state
 func (m *Manager) State() State {
 	return State(m.state.Load())
+}
+
+// WaitState waits for the manager to reach the expected state within the timeout period.
+//
+// This method is useful for testing and synchronization scenarios where you need to
+// wait for the manager to reach a specific state before proceeding.
+//
+// The method returns a read-only channel that will receive exactly one value:
+//   - nil if the expected state is reached within the timeout
+//   - context.DeadlineExceeded if the timeout expires before reaching the state
+//
+// The channel is closed after sending the result, allowing safe use in select statements.
+//
+// Parameters:
+//   - expectedState: The state to wait for
+//   - timeout: Maximum duration to wait for the state
+//
+// Returns:
+//   - <-chan error: A channel that receives the result (nil on success, error on timeout)
+//
+// Example:
+//
+//	// Wait for manager to reach Stable state
+//	errCh := manager.WaitState(StateStable, 10*time.Second)
+//	if err := <-errCh; err != nil {
+//	    log.Printf("Failed to reach Stable state: %v", err)
+//	}
+//
+//	// Using with select for multiple operations
+//	select {
+//	case err := <-manager.WaitState(StateStable, 5*time.Second):
+//	    if err != nil {
+//	        return fmt.Errorf("timeout waiting for stable state: %w", err)
+//	    }
+//	case <-ctx.Done():
+//	    return ctx.Err()
+//	}
+//
+//	// Waiting for multiple managers
+//	for i, mgr := range managers {
+//	    if err := <-mgr.WaitState(StateStable, 10*time.Second); err != nil {
+//	        return fmt.Errorf("manager %d failed: %w", i, err)
+//	    }
+//	}
+func (m *Manager) WaitState(expectedState State, timeout time.Duration) <-chan error {
+	ch := make(chan error, 1) // Buffered to prevent goroutine leak
+
+	go func() {
+		defer close(ch)
+
+		// Check if already in expected state
+		if m.State() == expectedState {
+			ch <- nil
+			return
+		}
+
+		// Poll for state changes
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+
+		timeoutTimer := time.NewTimer(timeout)
+		defer timeoutTimer.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				if m.State() == expectedState {
+					ch <- nil
+					return
+				}
+			case <-timeoutTimer.C:
+				ch <- context.DeadlineExceeded
+				return
+			}
+		}
+	}()
+
+	return ch
 }
 
 // RefreshPartitions triggers partition discovery refresh.
@@ -698,17 +777,17 @@ func (m *Manager) waitForAssignment(ctx context.Context, assignmentKV, _ jetstre
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			asgn, err := m.fetchAssignment(ctx, assignmentKV)
+			curAssignment, err := m.fetchAssignment(ctx, assignmentKV)
 			if err != nil {
 				return fmt.Errorf("failed to fetch assignment: %w", err)
 			}
 
-			if asgn != nil {
-				m.assignment.Store(*asgn)
+			if curAssignment != nil {
+				m.assignment.Store(*curAssignment)
 				m.logger.Info("received initial assignment",
 					"worker_id", m.WorkerID(),
-					"partitions", len(asgn.Partitions),
-					"version", asgn.Version,
+					"partitions", len(curAssignment.Partitions),
+					"version", curAssignment.Version,
 				)
 
 				return nil

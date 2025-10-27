@@ -13,6 +13,7 @@ import (
 	"github.com/arloliu/parti/internal/logging"
 	"github.com/arloliu/parti/source"
 	"github.com/arloliu/parti/strategy"
+	"github.com/arloliu/parti/test/testutil"
 	partitest "github.com/arloliu/parti/testing"
 	"github.com/arloliu/parti/types"
 	"github.com/stretchr/testify/require"
@@ -95,9 +96,7 @@ func TestManager_MultipleWorkers(t *testing.T) {
 	defer srv.Shutdown()
 	defer conn.Close()
 
-	// Create debug logger for troubleshooting
-	debugLogger := logging.NewTest(t)
-	debugLogger.Info("TEST: Debug logger created successfully")
+	debugLogger := logging.NewNop()
 
 	// Create config with faster timeouts
 	cfg := parti.Config{
@@ -157,18 +156,16 @@ func TestManager_MultipleWorkers(t *testing.T) {
 		require.NoError(t, err, "worker %d failed to start", i)
 	}
 
-	// Verify all workers started with faster timeout
-	deadline := time.Now().Add(8 * time.Second)
+	// Wait for all workers to reach stable state
+	mgrWaiters := make([]testutil.ManagerWaiter, len(workers))
 	for i, mgr := range workers {
-		for time.Now().Before(deadline) {
-			state := mgr.State()
-			if state == parti.StateStable {
-				break
-			}
-			t.Logf("Worker %d in state %s, waiting...", i, state)
-			time.Sleep(200 * time.Millisecond)
-		}
-		require.Equal(t, parti.StateStable, mgr.State(), "worker %d should be stable", i)
+		mgrWaiters[i] = mgr
+	}
+	err := testutil.WaitAllManagersState(t.Context(), mgrWaiters, parti.StateStable, 10*time.Second)
+	require.NoError(t, err, "not all workers reached stable state")
+
+	// Verify all workers have IDs
+	for i, mgr := range workers {
 		require.NotEmpty(t, mgr.WorkerID(), "worker %d should have ID", i)
 	}
 
