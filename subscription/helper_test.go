@@ -13,7 +13,7 @@ import (
 
 func TestHelper_UpdateSubscriptions(t *testing.T) {
 	t.Run("adds subscriptions for new partitions", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		_, nc := partitest.StartEmbeddedNATS(t)
 
 		helper := NewHelper(nc, Config{
@@ -56,7 +56,7 @@ func TestHelper_UpdateSubscriptions(t *testing.T) {
 	})
 
 	t.Run("removes subscriptions for removed partitions", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		_, nc := partitest.StartEmbeddedNATS(t)
 
 		helper := NewHelper(nc, Config{
@@ -92,7 +92,7 @@ func TestHelper_UpdateSubscriptions(t *testing.T) {
 	})
 
 	t.Run("handles empty partition keys", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		_, nc := partitest.StartEmbeddedNATS(t)
 
 		helper := NewHelper(nc, Config{
@@ -129,7 +129,7 @@ func TestHelper_UpdateSubscriptions(t *testing.T) {
 		defer helper.Close()
 
 		// Create context that will be cancelled
-		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 		defer cancel()
 
 		// Close NATS connection to force subscription failures
@@ -149,7 +149,7 @@ func TestHelper_UpdateSubscriptions(t *testing.T) {
 
 func TestHelper_Close(t *testing.T) {
 	t.Run("closes all subscriptions", func(t *testing.T) {
-		ctx := context.Background()
+		ctx := t.Context()
 		_, nc := partitest.StartEmbeddedNATS(t)
 
 		helper := NewHelper(nc, Config{

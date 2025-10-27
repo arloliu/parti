@@ -2,6 +2,7 @@ package subscription
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -83,6 +84,8 @@ func (h *Helper) UpdateSubscriptions(
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	var unsubErrors []error
+
 	// Unsubscribe from removed partitions
 	for _, partition := range removed {
 		// Use first key as partition identifier (typically the unique ID)
@@ -93,9 +96,7 @@ func (h *Helper) UpdateSubscriptions(
 
 		if sub, exists := h.subscriptions[partID]; exists {
 			if err := sub.Unsubscribe(); err != nil {
-				// Log error but continue with other partitions
-				// In production, you might want to inject a logger here
-				_ = err
+				unsubErrors = append(unsubErrors, fmt.Errorf("failed to unsubscribe from partition %s: %w", partID, err))
 			}
 			delete(h.subscriptions, partID)
 		}
@@ -156,6 +157,11 @@ func (h *Helper) UpdateSubscriptions(
 		h.subscriptions[partID] = sub
 	}
 
+	// Return aggregated unsubscribe errors if any occurred
+	if len(unsubErrors) > 0 {
+		return errors.Join(unsubErrors...)
+	}
+
 	return nil
 }
 
@@ -171,18 +177,23 @@ func (h *Helper) Close() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	var firstErr error
+	var closeErrors []error
 
 	for partID, sub := range h.subscriptions {
-		if err := sub.Unsubscribe(); err != nil && firstErr == nil {
-			firstErr = fmt.Errorf("failed to unsubscribe from partition %s: %w", partID, err)
+		if err := sub.Unsubscribe(); err != nil {
+			closeErrors = append(closeErrors, fmt.Errorf("failed to unsubscribe from partition %s: %w", partID, err))
 		}
 	}
 
 	// Clear all subscriptions
 	h.subscriptions = make(map[string]*nats.Subscription)
 
-	return firstErr
+	// Return aggregated close errors if any occurred
+	if len(closeErrors) > 0 {
+		return errors.Join(closeErrors...)
+	}
+
+	return nil
 }
 
 // ActivePartitions returns the list of currently subscribed partition IDs.

@@ -2,12 +2,14 @@ package source
 
 import (
 	"context"
+	"sync"
 
 	"github.com/arloliu/parti/types"
 )
 
 // Static implements a partition source with a fixed list of partitions.
 type Static struct {
+	mu         sync.RWMutex
 	partitions []types.Partition
 }
 
@@ -44,8 +46,32 @@ func NewStatic(partitions []types.Partition) *Static {
 //   - []types.Partition: The fixed list of partitions
 //   - error: Always nil (never fails)
 func (s *Static) ListPartitions(_ /* ctx */ context.Context) ([]types.Partition, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	result := make([]types.Partition, len(s.partitions))
 	copy(result, s.partitions)
 
 	return result, nil
+}
+
+// Update updates the partition list.
+//
+// This allows the static source to simulate dynamic partition changes,
+// which is useful for testing partition refresh scenarios.
+//
+// Parameters:
+//   - partitions: New list of partitions
+//
+// Example:
+//
+//	src := source.NewStatic(initialPartitions)
+//	// Later: add more partitions
+//	src.Update(expandedPartitions)
+func (s *Static) Update(partitions []types.Partition) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.partitions = make([]types.Partition, len(partitions))
+	copy(s.partitions, partitions)
 }

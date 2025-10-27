@@ -163,13 +163,13 @@ func (c *ConsistentHash) Assign(workers []string, partitions []parti.Partition) 
 **Each type, struct, or logical component should have at most 3 Go source files:**
 
 1. **Implementation file** - Contains the main logic, types, and methods
-   - Example: `numeric_raw.go`, `ts_delta.go`, `blob.go`
+   - Example: `manager.go`, `claimer.go`, `partition.go`
 
 2. **Test file** (`*_test.go`) - Contains unit tests for the implementation
-   - Example: `numeric_raw_test.go`, `ts_delta_test.go`, `blob_test.go`
+   - Example: `manager_test.go`, `claimer_test.go`, `partition_test.go`
 
 3. **Benchmark file** (`*_bench_test.go`) - Contains performance benchmarks (optional)
-   - Example: `numeric_bench_test.go`, `ts_delta_bench_test.go`, `blob_bench_test.go`
+   - Example: `manager_bench_test.go`, `claimer_bench_test.go`, `partition_bench_test.go`
 
 **Key Principles:**
 - ✅ Each component follows this 3-file pattern
@@ -223,6 +223,7 @@ Example:
 - **Avoid over-engineering:** Don't use table-driven structure for single test cases - write simple, direct tests instead
 - Place tests in `_test.go` files in the same package
 - Use the standard `testing` package
+- Use `t.Context()` for context management in tests
 - Use `b.Loop()` (introduced in Go 1.24) for benchmarks
 - Use `testify` for assertions and mocking
 - Mock external dependencies for isolated tests
@@ -236,6 +237,7 @@ Example:
 
 **Integration Test Guidelines:**
 - Place in `test/integration/` directory
+- Use `t.Context()` for context management in tests
 - Use build tags: `//go:build integration`
 - Package name: `integration_test`
 - Always include `testing.Short()` guard
