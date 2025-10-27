@@ -177,10 +177,10 @@ test:
 
 ### Enable Debug Output
 ```go
-import "github.com/arloliu/parti/internal/logger"
+import "github.com/arloliu/parti/internal/logging"
 
 // In your test
-cfg.Logger = logger.NewStdLogger(logger.LevelDebug)
+cfg.Logger = logging.NewTest(t)
 ```
 
 ### Run with Verbose Output

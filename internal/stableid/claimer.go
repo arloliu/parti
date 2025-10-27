@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/arloliu/parti/internal/logging"
+	"github.com/arloliu/parti/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -30,6 +32,8 @@ type Claimer struct {
 	workerID string        // Claimed worker ID
 	stopCh   chan struct{} // Signal to stop renewal goroutine
 	doneCh   chan struct{} // Signal that renewal has stopped
+
+	logger types.Logger
 }
 
 // NewClaimer creates a new stable ID claimer.
@@ -40,15 +44,20 @@ type Claimer struct {
 //   - minID: Minimum ID number (inclusive)
 //   - maxID: Maximum ID number (inclusive)
 //   - ttl: TTL for ID claims
+//   - logger: Logger for debug output
 //
 // Returns:
 //   - *Claimer: New claimer instance
 //
 // Example:
 //
-//	claimer := stableid.NewClaimer(kvBucket, "worker", 0, 99, 30*time.Second)
+//	claimer := stableid.NewClaimer(kvBucket, "worker", 0, 99, 30*time.Second, logger)
 //	workerID, err := claimer.Claim(ctx)
-func NewClaimer(kv jetstream.KeyValue, prefix string, minID, maxID int, ttl time.Duration) *Claimer {
+func NewClaimer(kv jetstream.KeyValue, prefix string, minID, maxID int, ttl time.Duration, logger types.Logger) *Claimer {
+	if logger == nil {
+		logger = logging.NewNop()
+	}
+
 	return &Claimer{
 		kv:     kv,
 		prefix: prefix,
@@ -57,6 +66,7 @@ func NewClaimer(kv jetstream.KeyValue, prefix string, minID, maxID int, ttl time
 		ttl:    ttl,
 		stopCh: make(chan struct{}),
 		doneCh: make(chan struct{}),
+		logger: logger,
 	}
 }
 
@@ -80,10 +90,13 @@ func NewClaimer(kv jetstream.KeyValue, prefix string, minID, maxID int, ttl time
 //	}
 //	log.Printf("Claimed worker ID: %s", workerID)
 func (c *Claimer) Claim(ctx context.Context) (string, error) {
+	c.logger.Debug("stable ID claim starting", "prefix", c.prefix, "min", c.minID, "max", c.maxID, "ttl", c.ttl)
+
 	// Try each ID sequentially
 	for id := c.minID; id <= c.maxID; id++ {
 		select {
 		case <-ctx.Done():
+			c.logger.Debug("stable ID claim cancelled", "tried_ids", id-c.minID)
 			return "", ctx.Err()
 		default:
 		}
@@ -91,25 +104,35 @@ func (c *Claimer) Claim(ctx context.Context) (string, error) {
 		workerID := fmt.Sprintf("%s-%d", c.prefix, id)
 		key := c.keyForID(workerID)
 
+		c.logger.Debug("attempting to claim stable ID", "worker_id", workerID, "key", key, "attempt", id-c.minID+1)
+
 		// Try to create the key (atomic operation)
 		// Value contains timestamp for monitoring
 		value := time.Now().Format(time.RFC3339)
 
-		_, err := c.kv.Create(ctx, key, []byte(value))
+		revision, err := c.kv.Create(ctx, key, []byte(value))
+		c.logger.Debug("kv.Create result", "worker_id", workerID, "key", key, "revision", revision, "error", err)
+
 		if err == nil {
 			// Successfully claimed this ID
 			c.workerID = workerID
+			c.logger.Info("stable ID claimed successfully", "worker_id", workerID, "key", key, "revision", revision, "attempts", id-c.minID+1)
+
 			return workerID, nil
 		}
 
 		// Check if it's just already claimed (expected) vs other errors
 		if !errors.Is(err, jetstream.ErrKeyExists) {
 			// Unexpected error (connection issue, etc.)
+			c.logger.Error("stable ID claim failed with unexpected error", "worker_id", workerID, "error", err)
 			return "", fmt.Errorf("failed to claim ID %s: %w", workerID, err)
 		}
 
 		// ID already claimed, try next one
+		c.logger.Debug("stable ID already claimed, trying next", "worker_id", workerID, "next_id", id+1)
 	}
+
+	c.logger.Error("no available stable IDs in pool", "prefix", c.prefix, "min", c.minID, "max", c.maxID, "pool_size", c.maxID-c.minID+1)
 
 	return "", ErrNoAvailableID
 }

@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/arloliu/parti"
-	"github.com/arloliu/parti/internal/logger"
+	"github.com/arloliu/parti/internal/logging"
 	"github.com/arloliu/parti/source"
 	"github.com/arloliu/parti/strategy"
 	partitest "github.com/arloliu/parti/testing"
@@ -96,7 +96,7 @@ func TestManager_MultipleWorkers(t *testing.T) {
 	defer conn.Close()
 
 	// Create debug logger for troubleshooting
-	debugLogger := logger.NewTest(t)
+	debugLogger := logging.NewTest(t)
 	debugLogger.Info("TEST: Debug logger created successfully")
 
 	// Create config with faster timeouts

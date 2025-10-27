@@ -15,7 +15,7 @@
 //
 // To enable detailed logging for troubleshooting, pass a logger when adding workers:
 //
-//	import "github.com/arloliu/parti/internal/logger"
+//	import "github.com/arloliu/parti/internal/logging"
 //
 //	debugLogger := logger.NewTest(t)
 //	cluster.AddWorker(ctx, debugLogger)  // With debug logs

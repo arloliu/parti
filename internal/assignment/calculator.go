@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/arloliu/parti/internal/logger"
+	"github.com/arloliu/parti/internal/logging"
 	"github.com/arloliu/parti/internal/metrics"
 	"github.com/arloliu/parti/types"
 	"github.com/nats-io/nats.go/jetstream"
@@ -108,7 +108,7 @@ func NewCalculator(
 		coldStartWindow:    30 * time.Second,
 		plannedScaleWin:    10 * time.Second,
 		metrics:            metrics.NewNop(),
-		logger:             logger.NewNop(),
+		logger:             logging.NewNop(),
 		currentWorkers:     make(map[string]bool),
 		currentAssignments: make(map[string][]types.Partition),
 		lastWorkers:        make(map[string]bool),
@@ -191,7 +191,7 @@ func (c *Calculator) SetLogger(l types.Logger) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if l == nil {
-		c.logger = logger.NewNop()
+		c.logger = logging.NewNop()
 	} else {
 		c.logger = l
 	}

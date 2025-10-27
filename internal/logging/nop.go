@@ -1,5 +1,5 @@
-// Package logger provides logging utilities for the Parti library.
-package logger
+// Package logging provides logging utilities for the Parti library.
+package logging
 
 import "github.com/arloliu/parti/types"
 

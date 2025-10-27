@@ -441,7 +441,7 @@ go test -count=1 ./...
 ### With Logging
 
 ```go
-import "github.com/arloliu/parti/internal/logger"
+import "github.com/arloliu/parti/internal/logging"
 
 cfg.Logger = logger.NewStdLogger(logger.LevelDebug)
 ```

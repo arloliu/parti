@@ -14,7 +14,7 @@ import (
 	"github.com/arloliu/parti/internal/heartbeat"
 	"github.com/arloliu/parti/internal/hooks"
 	"github.com/arloliu/parti/internal/kvutil"
-	"github.com/arloliu/parti/internal/logger"
+	"github.com/arloliu/parti/internal/logging"
 	"github.com/arloliu/parti/internal/metrics"
 	"github.com/arloliu/parti/internal/stableid"
 	"github.com/arloliu/parti/types"
@@ -143,7 +143,7 @@ func NewManager(cfg *Config, conn *nats.Conn, source PartitionSource, strategy A
 
 	loggerInstance := options.logger
 	if loggerInstance == nil {
-		loggerInstance = logger.NewNop()
+		loggerInstance = logging.NewNop()
 	}
 
 	hooksInstance := options.hooks
@@ -559,6 +559,7 @@ func (m *Manager) claimWorkerID(ctx context.Context, kv jetstream.KeyValue) erro
 		m.cfg.WorkerIDMin,
 		m.cfg.WorkerIDMax,
 		m.cfg.WorkerIDTTL,
+		m.logger,
 	)
 	m.idClaimer = claimer
 
@@ -570,8 +571,11 @@ func (m *Manager) claimWorkerID(ctx context.Context, kv jetstream.KeyValue) erro
 	m.workerID.Store(workerID)
 	m.logger.Info("claimed stable worker ID", "worker_id", workerID)
 
-	// Start renewal goroutine
-	if err := claimer.StartRenewal(ctx); err != nil {
+	// Start renewal goroutine with manager's lifecycle context (not startup context)
+	// CRITICAL: Must use m.ctx (manager lifecycle) not ctx (startup context)
+	// The startup context gets cancelled after Start() returns, which would
+	// stop renewal and allow the stable ID to expire and be reclaimed by other workers.
+	if err := claimer.StartRenewal(m.ctx); err != nil {
 		return fmt.Errorf("failed to start renewal: %w", err)
 	}
 

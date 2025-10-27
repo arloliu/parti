@@ -13,10 +13,10 @@ import (
 )
 
 // To enable debug logging for troubleshooting, import and use:
-//   "github.com/arloliu/parti/internal/logger"
+//   "github.com/arloliu/parti/internal/logging"
 //
 // Then when adding workers:
-//   debugLogger := logger.NewTest(t)
+//   debugLogger := logging.NewTest(t)
 //   cluster.AddWorker(ctx, debugLogger)
 //
 // This will show detailed calculator state transitions and assignment logs.

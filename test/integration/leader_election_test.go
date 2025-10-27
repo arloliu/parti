@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/arloliu/parti"
-	"github.com/arloliu/parti/internal/logger"
+	"github.com/arloliu/parti/internal/logging"
 	"github.com/arloliu/parti/test/testutil"
 	"github.com/arloliu/parti/types"
 	"github.com/stretchr/testify/require"
@@ -34,7 +34,7 @@ func TestLeaderElection_BasicFailover(t *testing.T) {
 	cluster := testutil.NewFastWorkerCluster(t, nc, 10)
 
 	// Enable debug logging to see shutdown behavior
-	debugLogger := logger.NewTest(t)
+	debugLogger := logging.NewTest(t)
 
 	// Add and start 3 workers
 	for i := 0; i < 3; i++ {
@@ -261,7 +261,7 @@ func TestLeaderElection_AssignmentPreservation(t *testing.T) {
 
 	// Create cluster with fast configuration
 	cluster := testutil.NewFastWorkerCluster(t, nc, 20)
-	debugLogger := logger.NewTest(t)
+	debugLogger := logging.NewTest(t)
 
 	// Start 3 workers
 	for i := 0; i < 3; i++ {
@@ -435,7 +435,7 @@ func TestLeaderElection_AssignmentVersioning(t *testing.T) {
 
 	// Create cluster with fast configuration
 	cluster := testutil.NewFastWorkerCluster(t, nc, 20)
-	debugLogger := logger.NewTest(t)
+	debugLogger := logging.NewTest(t)
 
 	// Start 3 workers
 	for i := 0; i < 3; i++ {
@@ -562,7 +562,7 @@ func TestLeaderElection_NoOrphansOnFailover(t *testing.T) {
 
 	// Create cluster with fast configuration
 	cluster := testutil.NewFastWorkerCluster(t, nc, 20)
-	debugLogger := logger.NewTest(t)
+	debugLogger := logging.NewTest(t)
 
 	// Start 4 workers simultaneously for realistic concurrent startup
 	for i := 0; i < 4; i++ {
