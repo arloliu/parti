@@ -1,7 +1,6 @@
 package assignment
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -18,50 +17,54 @@ func TestCalculatorCooldown(t *testing.T) {
 	_, nc := partitest.StartEmbeddedNATS(t)
 
 	t.Run("default cooldown is 10 seconds", func(t *testing.T) {
-		ctx := context.Background()
-		
+		assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-cooldown-default-assignment")
+		heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-cooldown-default-heartbeat")
+
 		// Create test partitions
 		partitions := make([]types.Partition, 5)
 		for i := 0; i < 5; i++ {
 			partitions[i] = types.Partition{Keys: []string{string(rune('A' + i))}}
 		}
-		
+
 		partitionSource := source.NewStatic(partitions)
 		assignmentStrategy := strategy.NewRoundRobin()
 
 		calc := NewCalculator(
-			nc,
+			assignmentKV,
+			heartbeatKV,
 			"test-assignment",
-			"test-heartbeat",
-			"worker",
 			partitionSource,
 			assignmentStrategy,
+			"worker",
+			5*time.Second,
 		)
 
 		// Default cooldown should be 10s
 		require.Equal(t, 10*time.Second, calc.cooldown)
 
-		t.Logf("✅ Default cooldown is 10 seconds")
+		t.Log("✅ Default cooldown is 10 seconds")
 	})
 
 	t.Run("can set custom cooldown", func(t *testing.T) {
-		ctx := context.Background()
-		
+		assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-cooldown-custom-assignment")
+		heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-cooldown-custom-heartbeat")
+
 		partitions := make([]types.Partition, 5)
 		for i := 0; i < 5; i++ {
 			partitions[i] = types.Partition{Keys: []string{string(rune('A' + i))}}
 		}
-		
+
 		partitionSource := source.NewStatic(partitions)
 		assignmentStrategy := strategy.NewRoundRobin()
 
 		calc := NewCalculator(
-			nc,
+			assignmentKV,
+			heartbeatKV,
 			"test-assignment",
-			"test-heartbeat",
-			"worker",
 			partitionSource,
 			assignmentStrategy,
+			"worker",
+			5*time.Second,
 		)
 
 		// Set custom cooldown
@@ -76,7 +79,7 @@ func TestCalculatorCooldown(t *testing.T) {
 	t.Run("cooldown blocks rapid rebalances", func(t *testing.T) {
 		// This test verifies that the cooldown actually prevents
 		// rapid successive rebalances
-		
+
 		t.Skip("Integration test needed - requires actual rebalance scenarios")
 	})
 }

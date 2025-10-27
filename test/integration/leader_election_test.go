@@ -684,6 +684,268 @@ func TestLeaderElection_NoOrphansOnFailover(t *testing.T) {
 	t.Logf("✅ Completed 3 rapid leader transitions: no orphaned partitions detected")
 }
 
+// TestLeaderElection_RapidChurn tests system stability under rapid leader changes.
+// This is a lightweight test - 3 rounds in 15 seconds instead of 12 rounds in 60s.
+func TestLeaderElection_RapidChurn(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	t.Parallel() // Can run in parallel with other tests
+
+	// Start NATS
+	nc, cleanup := testutil.StartEmbeddedNATS(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	// Create cluster with fast configuration
+	cluster := testutil.NewFastWorkerCluster(t, nc, 20)
+
+	// Start 4 workers (need extras since we'll kill 3)
+	for i := 0; i < 4; i++ {
+		mgr := cluster.AddWorker(ctx)
+		err := mgr.Start(ctx)
+		require.NoError(t, err, "worker %d failed to start", i)
+	}
+	defer cluster.StopWorkers()
+
+	// Wait for initial stability
+	cluster.WaitForStableState(8 * time.Second)
+	initialLeader := cluster.VerifyExactlyOneLeader()
+	t.Logf("Initial leader: %s", initialLeader.WorkerID())
+
+	// Rapid churn: Kill leader 3 times with 5-second intervals
+	for round := 1; round <= 3; round++ {
+		t.Logf("=== Churn Round %d ===", round)
+
+		// Find and kill current leader
+		currentLeader := cluster.VerifyExactlyOneLeader()
+		leaderID := currentLeader.WorkerID()
+		t.Logf("Killing leader %s (round %d)", leaderID, round)
+
+		err := currentLeader.Stop(ctx)
+		require.NoError(t, err, "failed to stop leader in round %d", round)
+
+		// Wait for new leader election (2-3 seconds with fast config)
+		time.Sleep(3 * time.Second)
+
+		// Verify new leader elected (only check alive workers)
+		leaderCount := 0
+		var newLeaderID string
+		for _, mgr := range cluster.Workers {
+			if mgr.State() == types.StateShutdown {
+				continue
+			}
+			if mgr.IsLeader() {
+				leaderCount++
+				newLeaderID = mgr.WorkerID()
+			}
+		}
+		require.Equal(t, 1, leaderCount, "expected exactly one leader after round %d", round)
+		require.NotEqual(t, leaderID, newLeaderID, "new leader should be different in round %d", round)
+		t.Logf("New leader elected: %s", newLeaderID)
+
+		// Verify partitions still assigned (quick check)
+		aliveWorkers := 0
+		totalPartitions := 0
+		for _, mgr := range cluster.Workers {
+			if mgr.State() == types.StateShutdown {
+				continue
+			}
+			aliveWorkers++
+			assignment := mgr.CurrentAssignment()
+			totalPartitions += len(assignment.Partitions)
+		}
+		require.Equal(t, 20, totalPartitions,
+			"after round %d: expected 20 partitions, got %d (alive workers: %d)",
+			round, totalPartitions, aliveWorkers)
+
+		// Brief pause before next round
+		time.Sleep(2 * time.Second)
+	}
+
+	t.Logf("✅ System remained stable through 3 rapid leader transitions")
+}
+
+// TestLeaderElection_ShutdownDuringRebalancing tests leader shutdown during active rebalancing.
+// This is a focused test - we trigger rebalancing and kill leader immediately.
+func TestLeaderElection_ShutdownDuringRebalancing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	t.Parallel() // Can run in parallel
+
+	// Start NATS
+	nc, cleanup := testutil.StartEmbeddedNATS(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 25*time.Second)
+	defer cancel()
+
+	// Create cluster
+	cluster := testutil.NewFastWorkerCluster(t, nc, 20)
+
+	// Start 2 workers and wait for stability
+	for i := 0; i < 2; i++ {
+		mgr := cluster.AddWorker(ctx)
+		err := mgr.Start(ctx)
+		require.NoError(t, err)
+	}
+	defer cluster.StopWorkers()
+
+	cluster.WaitForStableState(8 * time.Second)
+	leader := cluster.VerifyExactlyOneLeader()
+	leaderID := leader.WorkerID()
+	t.Logf("Initial leader: %s", leaderID)
+
+	// Start a new worker to trigger planned scale (rebalancing with 1s cooldown)
+	newWorker := cluster.AddWorker(ctx)
+	err := newWorker.Start(ctx)
+	require.NoError(t, err)
+
+	// Wait for new worker to reach Stable state
+	require.Eventually(t, func() bool {
+		return newWorker.State() == types.StateStable
+	}, 8*time.Second, 200*time.Millisecond, "new worker should reach Stable state")
+
+	t.Logf("New worker %s reached Stable state", newWorker.WorkerID())
+
+	// Wait briefly for leader to detect the new worker and enter Scaling state
+	time.Sleep(500 * time.Millisecond)
+
+	// Verify leader is in Scaling or Rebalancing state
+	leaderState := leader.State()
+	t.Logf("Leader state before shutdown: %s", leaderState)
+	require.Contains(t, []types.State{types.StateScaling, types.StateRebalancing, types.StateStable},
+		leaderState, "leader should be in scaling/rebalancing/stable state")
+
+	// Kill leader immediately (during or just after rebalancing)
+	t.Logf("Killing leader %s during rebalancing", leaderID)
+	err = leader.Stop(ctx)
+	require.NoError(t, err)
+
+	// Wait for new leader election and rebalancing
+	time.Sleep(4 * time.Second)
+
+	// Verify new leader elected
+	newLeader := cluster.VerifyExactlyOneLeader()
+	require.NotEqual(t, leaderID, newLeader.WorkerID(), "new leader should be different")
+	t.Logf("New leader elected: %s", newLeader.WorkerID())
+
+	// Wait for system to stabilize after leadership change
+	time.Sleep(3 * time.Second)
+
+	// Verify remaining 2 workers have partitions (worker-0 killed, workers 1-2 remain)
+	aliveWorkers := 0
+	totalPartitions := 0
+	for _, mgr := range cluster.Workers {
+		if mgr.State() == types.StateShutdown {
+			continue
+		}
+		aliveWorkers++
+		assignment := mgr.CurrentAssignment()
+		partCount := len(assignment.Partitions)
+		totalPartitions += partCount
+		require.Greater(t, partCount, 0, "worker %s should have partitions", mgr.WorkerID())
+		t.Logf("Worker %s: %d partitions", mgr.WorkerID(), partCount)
+	}
+
+	require.Equal(t, 2, aliveWorkers, "should have 2 alive workers (worker-0 killed)")
+	require.Equal(t, 20, totalPartitions, "all 20 partitions should be assigned")
+
+	t.Logf("✅ System recovered successfully from leader shutdown during rebalancing")
+}
+
+// TestLeaderElection_ShutdownDuringEmergency tests leader shutdown during emergency rebalancing.
+// This is a focused stress test - we kill one worker (triggers emergency), then immediately kill leader.
+func TestLeaderElection_ShutdownDuringEmergency(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	t.Parallel() // Can run in parallel
+
+	// Start NATS
+	nc, cleanup := testutil.StartEmbeddedNATS(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 25*time.Second)
+	defer cancel()
+
+	// Create cluster
+	cluster := testutil.NewFastWorkerCluster(t, nc, 20)
+
+	// Start 4 workers
+	for i := 0; i < 4; i++ {
+		mgr := cluster.AddWorker(ctx)
+		err := mgr.Start(ctx)
+		require.NoError(t, err)
+	}
+	defer cluster.StopWorkers()
+
+	cluster.WaitForStableState(8 * time.Second)
+	leader := cluster.VerifyExactlyOneLeader()
+	leaderID := leader.WorkerID()
+	t.Logf("Initial leader: %s", leaderID)
+
+	// Find a follower to kill (trigger emergency)
+	var victimWorker *parti.Manager
+	for _, mgr := range cluster.Workers {
+		if mgr.WorkerID() != leaderID {
+			victimWorker = mgr
+			break
+		}
+	}
+	require.NotNil(t, victimWorker, "should find a follower")
+
+	// Kill the follower to trigger emergency rebalancing
+	t.Logf("Killing follower %s to trigger emergency", victimWorker.WorkerID())
+	err := victimWorker.Stop(ctx)
+	require.NoError(t, err)
+
+	// Wait just long enough for leader to detect (heartbeat TTL is 3s, poll is faster)
+	time.Sleep(500 * time.Millisecond)
+
+	// Now kill the leader during emergency rebalancing
+	t.Logf("Killing leader %s during emergency rebalancing", leaderID)
+	err = leader.Stop(ctx)
+	require.NoError(t, err)
+
+	// Wait for new leader election
+	time.Sleep(4 * time.Second)
+
+	// Verify new leader elected
+	newLeader := cluster.VerifyExactlyOneLeader()
+	require.NotEqual(t, leaderID, newLeader.WorkerID(), "new leader should be different")
+	t.Logf("New leader elected: %s", newLeader.WorkerID())
+
+	// Wait for system to stabilize
+	time.Sleep(3 * time.Second)
+
+	// Verify remaining 2 workers have all partitions
+	aliveWorkers := 0
+	totalPartitions := 0
+	for _, mgr := range cluster.Workers {
+		if mgr.State() == types.StateShutdown {
+			continue
+		}
+		aliveWorkers++
+		assignment := mgr.CurrentAssignment()
+		partCount := len(assignment.Partitions)
+		totalPartitions += partCount
+		require.Greater(t, partCount, 0, "worker %s should have partitions", mgr.WorkerID())
+		t.Logf("Worker %s: %d partitions", mgr.WorkerID(), partCount)
+	}
+
+	require.Equal(t, 2, aliveWorkers, "should have 2 alive workers")
+	require.Equal(t, 20, totalPartitions, "all 20 partitions should be assigned")
+
+	t.Logf("✅ System recovered from cascading failures (follower + leader during emergency)")
+}
+
 // Helper function to get keys from a map
 func getKeys(m map[int64]bool) []int64 {
 	keys := make([]int64, 0, len(m))

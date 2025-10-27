@@ -2,6 +2,7 @@ package kvutil
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -28,12 +29,12 @@ func TestConcurrentKVBucketCreation(t *testing.T) {
 		numWorkers := 5
 
 		var wg sync.WaitGroup
-		errors := make(chan error, numWorkers)
+		errChan := make(chan error, numWorkers)
 		kvs := make([]jetstream.KeyValue, numWorkers)
 
 		// Start 5 goroutines all trying to create the same bucket
 		for i := 0; i < numWorkers; i++ {
-			wg.Add(1)
+			wg.Add(1) //nolint:revive // Standard pattern for concurrent operations
 			go func(idx int) {
 				defer wg.Done()
 
@@ -47,13 +48,13 @@ func TestConcurrentKVBucketCreation(t *testing.T) {
 				kv, err := js.CreateKeyValue(ctx, cfg)
 				if err != nil {
 					// If bucket exists, try to get it
-					if err == jetstream.ErrBucketExists {
+					if errors.Is(err, jetstream.ErrBucketExists) {
 						kv, err = js.KeyValue(ctx, bucketName)
 					}
 				}
 
 				if err != nil {
-					errors <- err
+					errChan <- err
 					return
 				}
 
@@ -62,11 +63,11 @@ func TestConcurrentKVBucketCreation(t *testing.T) {
 		}
 
 		wg.Wait()
-		close(errors)
+		close(errChan)
 
 		// Check if any errors occurred
 		var errList []error
-		for err := range errors {
+		for err := range errChan {
 			errList = append(errList, err)
 		}
 
@@ -88,14 +89,14 @@ func TestConcurrentKVBucketCreation(t *testing.T) {
 		successCount := make(chan int, numWorkers)
 
 		for i := 0; i < numWorkers; i++ {
-			wg.Add(1)
+			wg.Add(1) //nolint:revive // Standard pattern for concurrent operations
 			go func(idx int) {
 				defer wg.Done()
 
 				// Retry logic
 				var err error
 				maxRetries := 5
-				
+
 				for attempt := 0; attempt < maxRetries; attempt++ {
 					cfg := jetstream.KeyValueConfig{
 						Bucket:  bucketName,
@@ -111,7 +112,7 @@ func TestConcurrentKVBucketCreation(t *testing.T) {
 					}
 
 					// If bucket exists, get it
-					if err == jetstream.ErrBucketExists {
+					if errors.Is(err, jetstream.ErrBucketExists) {
 						kv, err = js.KeyValue(ctx, bucketName)
 						if err == nil {
 							_ = kv
@@ -164,7 +165,7 @@ func TestKVBucketCreationTimeout(t *testing.T) {
 		}
 
 		_, err := js.CreateKeyValue(ctx, cfg)
-		
+
 		// Should fail with context error
 		require.Error(t, err)
 		t.Logf("Got expected error: %v", err)
@@ -183,7 +184,7 @@ func TestKVBucketCreationTimeout(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, kv)
 
-		t.Logf("✅ Successfully created bucket with sufficient timeout")
+		t.Log("✅ Successfully created bucket with sufficient timeout")
 	})
 }
 
@@ -206,19 +207,19 @@ func TestEnsureKVBucketWithRetry(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, kv)
 
-		t.Logf("✅ Bucket created successfully on first try")
+		t.Log("✅ Bucket created successfully on first try")
 	})
 
 	t.Run("bucket exists - should open it", func(t *testing.T) {
 		bucketName := "test-retry-bucket-2"
-		
+
 		// Create bucket first
 		cfg := jetstream.KeyValueConfig{
 			Bucket:  bucketName,
 			History: 1,
 			TTL:     5 * time.Second,
 		}
-		
+
 		kv1, err := js.CreateKeyValue(ctx, cfg)
 		require.NoError(t, err)
 		require.NotNil(t, kv1)
@@ -228,7 +229,7 @@ func TestEnsureKVBucketWithRetry(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, kv2)
 
-		t.Logf("✅ Successfully opened existing bucket")
+		t.Log("✅ Successfully opened existing bucket")
 	})
 
 	t.Run("concurrent creates with retry - 10 workers", func(t *testing.T) {
@@ -246,7 +247,7 @@ func TestEnsureKVBucketWithRetry(t *testing.T) {
 		}
 
 		for i := 0; i < numWorkers; i++ {
-			wg.Add(1)
+			wg.Add(1) //nolint:revive // Standard pattern for concurrent operations
 			go func(idx int) {
 				defer wg.Done()
 

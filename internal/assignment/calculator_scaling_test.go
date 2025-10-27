@@ -16,7 +16,8 @@ import (
 // This is a focused unit test to verify the timer mechanism works in isolation.
 func TestCalculator_ScalingTransition_TimerFires(t *testing.T) {
 	_, nc := partitest.StartEmbeddedNATS(t)
-	kv := partitest.CreateJetStreamKV(t, nc, "test-scaling")
+	assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-scaling-assignment")
+	heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-scaling-heartbeat")
 
 	src := &mockSource{partitions: []types.Partition{
 		{Keys: []string{"p1"}, Weight: 100},
@@ -24,7 +25,7 @@ func TestCalculator_ScalingTransition_TimerFires(t *testing.T) {
 	}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(kv, "test", src, strategy, "heartbeat", 5*time.Second)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test", src, strategy, "heartbeat", 5*time.Second)
 	calc.SetStabilizationWindows(100*time.Millisecond, 50*time.Millisecond) // Very short windows for testing
 
 	ctx := context.Background()
@@ -52,7 +53,8 @@ func TestCalculator_ScalingTransition_TimerFires(t *testing.T) {
 // This tests the integration between monitorWorkers and the state machine.
 func TestCalculator_ScalingTransition_WithRealStart(t *testing.T) {
 	_, nc := partitest.StartEmbeddedNATS(t)
-	kv := partitest.CreateJetStreamKV(t, nc, "test-scaling-real")
+	assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-scaling-real-assignment")
+	heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-scaling-real-heartbeat")
 
 	src := &mockSource{partitions: []types.Partition{
 		{Keys: []string{"p1"}, Weight: 100},
@@ -60,7 +62,7 @@ func TestCalculator_ScalingTransition_WithRealStart(t *testing.T) {
 	}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(kv, "test", src, strategy, "heartbeat", 1*time.Second)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test", src, strategy, "heartbeat", 1*time.Second)
 	calc.SetStabilizationWindows(500*time.Millisecond, 250*time.Millisecond) // Short windows for testing
 	calc.SetCooldown(0)                                                      // No cooldown for this test
 
@@ -68,7 +70,7 @@ func TestCalculator_ScalingTransition_WithRealStart(t *testing.T) {
 	defer cancel()
 
 	// Create initial heartbeat (simulate 1 worker)
-	err := publishHeartbeat(ctx, kv, "heartbeat.worker-1", 2*time.Second)
+	err := publishHeartbeat(ctx, heartbeatKV, "heartbeat.worker-1", 2*time.Second)
 	require.NoError(t, err)
 
 	// Start calculator
@@ -83,7 +85,7 @@ func TestCalculator_ScalingTransition_WithRealStart(t *testing.T) {
 	t.Logf("Initial state: %s", initialState)
 
 	// Add a second worker (should trigger scaling)
-	err = publishHeartbeat(ctx, kv, "heartbeat.worker-2", 2*time.Second)
+	err = publishHeartbeat(ctx, heartbeatKV, "heartbeat.worker-2", 2*time.Second)
 	require.NoError(t, err)
 
 	// With hybrid approach (watcher + polling), detection is much faster (<100ms)
@@ -111,14 +113,15 @@ func TestCalculator_ScalingTransition_WithRealStart(t *testing.T) {
 // TestCalculator_ScalingTransition_ContextCancellation tests that context cancellation stops the timer.
 func TestCalculator_ScalingTransition_ContextCancellation(t *testing.T) {
 	_, nc := partitest.StartEmbeddedNATS(t)
-	kv := partitest.CreateJetStreamKV(t, nc, "test-scaling-cancel")
+	assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-scaling-cancel-assignment")
+	heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-scaling-cancel-heartbeat")
 
 	src := &mockSource{partitions: []types.Partition{
 		{Keys: []string{"p1"}, Weight: 100},
 	}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(kv, "test", src, strategy, "heartbeat", 5*time.Second)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test", src, strategy, "heartbeat", 5*time.Second)
 	calc.SetStabilizationWindows(2*time.Second, 1*time.Second) // Long window
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -144,14 +147,15 @@ func TestCalculator_ScalingTransition_ContextCancellation(t *testing.T) {
 // TestCalculator_ScalingTransition_StopBeforeWindow tests that Stop() prevents transition.
 func TestCalculator_ScalingTransition_StopBeforeWindow(t *testing.T) {
 	_, nc := partitest.StartEmbeddedNATS(t)
-	kv := partitest.CreateJetStreamKV(t, nc, "test-scaling-stop")
+	assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-scaling-stop-assignment")
+	heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-scaling-stop-heartbeat")
 
 	src := &mockSource{partitions: []types.Partition{
 		{Keys: []string{"p1"}, Weight: 100},
 	}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(kv, "test", src, strategy, "heartbeat", 5*time.Second)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test", src, strategy, "heartbeat", 5*time.Second)
 	calc.SetStabilizationWindows(2*time.Second, 1*time.Second) // Long window
 	calc.SetCooldown(0)
 
@@ -182,7 +186,8 @@ func TestCalculator_ScalingTransition_StopBeforeWindow(t *testing.T) {
 // TestCalculator_ScalingTransition_RapidStateChanges tests multiple rapid worker changes.
 func TestCalculator_ScalingTransition_RapidStateChanges(t *testing.T) {
 	_, nc := partitest.StartEmbeddedNATS(t)
-	kv := partitest.CreateJetStreamKV(t, nc, "test-scaling-rapid")
+	assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-scaling-rapid-assignment")
+	heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-scaling-rapid-heartbeat")
 
 	src := &mockSource{partitions: []types.Partition{
 		{Keys: []string{"p1"}, Weight: 100},
@@ -190,7 +195,7 @@ func TestCalculator_ScalingTransition_RapidStateChanges(t *testing.T) {
 	}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(kv, "test", src, strategy, "heartbeat", 500*time.Millisecond)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test", src, strategy, "heartbeat", 500*time.Millisecond)
 	calc.SetStabilizationWindows(300*time.Millisecond, 150*time.Millisecond)
 	calc.SetCooldown(0)
 
@@ -198,7 +203,7 @@ func TestCalculator_ScalingTransition_RapidStateChanges(t *testing.T) {
 	defer cancel()
 
 	// Create initial worker
-	err := publishHeartbeat(ctx, kv, "heartbeat.worker-1", 1*time.Second)
+	err := publishHeartbeat(ctx, heartbeatKV, "heartbeat.worker-1", 1*time.Second)
 	require.NoError(t, err)
 
 	// Start calculator
@@ -210,7 +215,7 @@ func TestCalculator_ScalingTransition_RapidStateChanges(t *testing.T) {
 	t.Logf("Initial state: %s", calc.GetState())
 
 	// Add worker 2
-	err = publishHeartbeat(ctx, kv, "heartbeat.worker-2", 1*time.Second)
+	err = publishHeartbeat(ctx, heartbeatKV, "heartbeat.worker-2", 1*time.Second)
 	require.NoError(t, err)
 
 	time.Sleep(100 * time.Millisecond)
@@ -218,7 +223,7 @@ func TestCalculator_ScalingTransition_RapidStateChanges(t *testing.T) {
 	t.Logf("After adding worker-2: %s", state1)
 
 	// Add worker 3 quickly
-	err = publishHeartbeat(ctx, kv, "heartbeat.worker-3", 1*time.Second)
+	err = publishHeartbeat(ctx, heartbeatKV, "heartbeat.worker-3", 1*time.Second)
 	require.NoError(t, err)
 
 	time.Sleep(100 * time.Millisecond)
@@ -242,7 +247,7 @@ func TestCalculator_ScalingTransition_RapidStateChanges(t *testing.T) {
 }
 
 // publishHeartbeat is a helper to publish a worker heartbeat to the KV store.
-func publishHeartbeat(ctx context.Context, kv jetstream.KeyValue, key string, ttl time.Duration) error {
+func publishHeartbeat(ctx context.Context, kv jetstream.KeyValue, key string, _ time.Duration) error {
 	data := []byte(time.Now().Format(time.RFC3339))
 	_, err := kv.Put(ctx, key, data)
 	return err

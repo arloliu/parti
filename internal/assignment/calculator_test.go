@@ -54,12 +54,13 @@ func (m *mockStrategy) Assign(workers []string, partitions []types.Partition) (m
 func TestCalculator_SetMethods(t *testing.T) {
 	t.Run("sets cooldown successfully", func(t *testing.T) {
 		_, nc := partitest.StartEmbeddedNATS(t)
-		kv := partitest.CreateJetStreamKV(t, nc, "test-calc-cooldown")
+		assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-cooldown-assignment")
+		heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-cooldown-heartbeat")
 
 		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
 		strategy := &mockStrategy{}
 
-		calc := NewCalculator(kv, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second)
 		calc.SetCooldown(5 * time.Second)
 
 		require.Equal(t, 5*time.Second, calc.cooldown)
@@ -67,12 +68,13 @@ func TestCalculator_SetMethods(t *testing.T) {
 
 	t.Run("sets min threshold successfully", func(t *testing.T) {
 		_, nc := partitest.StartEmbeddedNATS(t)
-		kv := partitest.CreateJetStreamKV(t, nc, "test-calc-threshold")
+		assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-threshold-assignment")
+		heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-threshold-heartbeat")
 
 		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
 		strategy := &mockStrategy{}
 
-		calc := NewCalculator(kv, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second)
 		calc.SetMinThreshold(0.3)
 
 		require.Equal(t, 0.3, calc.minThreshold)
@@ -80,12 +82,13 @@ func TestCalculator_SetMethods(t *testing.T) {
 
 	t.Run("sets restart detection ratio successfully", func(t *testing.T) {
 		_, nc := partitest.StartEmbeddedNATS(t)
-		kv := partitest.CreateJetStreamKV(t, nc, "test-calc-ratio")
+		assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-ratio-assignment")
+		heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-ratio-heartbeat")
 
 		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
 		strategy := &mockStrategy{}
 
-		calc := NewCalculator(kv, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second)
 		calc.SetRestartDetectionRatio(0.7)
 
 		require.Equal(t, 0.7, calc.restartRatio)
@@ -93,12 +96,13 @@ func TestCalculator_SetMethods(t *testing.T) {
 
 	t.Run("sets stabilization windows successfully", func(t *testing.T) {
 		_, nc := partitest.StartEmbeddedNATS(t)
-		kv := partitest.CreateJetStreamKV(t, nc, "test-calc-windows")
+		assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-windows-assignment")
+		heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-windows-heartbeat")
 
 		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
 		strategy := &mockStrategy{}
 
-		calc := NewCalculator(kv, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second)
 		calc.SetStabilizationWindows(20*time.Second, 5*time.Second)
 
 		require.Equal(t, 20*time.Second, calc.coldStartWindow)
@@ -111,10 +115,11 @@ func TestCalculator_Start(t *testing.T) {
 		ctx := t.Context()
 
 		_, nc := partitest.StartEmbeddedNATS(t)
-		kv := partitest.CreateJetStreamKV(t, nc, "test-calc-start")
+		assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-start-assignment")
+		heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-start-heartbeat")
 
 		// Create a heartbeat for worker-1
-		_, err := kv.Put(ctx, "worker-hb.worker-1", []byte(time.Now().Format(time.RFC3339Nano)))
+		_, err := heartbeatKV.Put(ctx, "worker-hb.worker-1", []byte(time.Now().Format(time.RFC3339Nano)))
 		require.NoError(t, err)
 
 		source := &mockSource{
@@ -125,7 +130,7 @@ func TestCalculator_Start(t *testing.T) {
 		}
 		strategy := &mockStrategy{}
 
-		calc := NewCalculator(kv, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second)
 		// Use very short stabilization windows for testing
 		calc.SetStabilizationWindows(50*time.Millisecond, 50*time.Millisecond)
 
@@ -137,7 +142,7 @@ func TestCalculator_Start(t *testing.T) {
 		require.Greater(t, calc.CurrentVersion(), int64(0))
 
 		// Verify assignment was published
-		entry, err := kv.Get(ctx, "assignment.worker-1")
+		entry, err := assignmentKV.Get(ctx, "assignment.worker-1")
 		require.NoError(t, err)
 
 		var assignment types.Assignment
@@ -151,16 +156,17 @@ func TestCalculator_Start(t *testing.T) {
 		ctx := t.Context()
 
 		_, nc := partitest.StartEmbeddedNATS(t)
-		kv := partitest.CreateJetStreamKV(t, nc, "test-calc-started")
+		assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-started-assignment")
+		heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-started-heartbeat")
 
 		// Create a heartbeat
-		_, err := kv.Put(ctx, "worker-hb.worker-1", []byte(time.Now().Format(time.RFC3339Nano)))
+		_, err := heartbeatKV.Put(ctx, "worker-hb.worker-1", []byte(time.Now().Format(time.RFC3339Nano)))
 		require.NoError(t, err)
 
 		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
 		strategy := &mockStrategy{}
 
-		calc := NewCalculator(kv, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second)
 		calc.SetStabilizationWindows(50*time.Millisecond, 50*time.Millisecond)
 
 		err = calc.Start(ctx)
@@ -178,16 +184,17 @@ func TestCalculator_Stop(t *testing.T) {
 		ctx := t.Context()
 
 		_, nc := partitest.StartEmbeddedNATS(t)
-		kv := partitest.CreateJetStreamKV(t, nc, "test-calc-stop")
+		assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-stop-assignment")
+		heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-stop-heartbeat")
 
 		// Create a heartbeat
-		_, err := kv.Put(ctx, "worker-hb.worker-1", []byte(time.Now().Format(time.RFC3339Nano)))
+		_, err := heartbeatKV.Put(ctx, "worker-hb.worker-1", []byte(time.Now().Format(time.RFC3339Nano)))
 		require.NoError(t, err)
 
 		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
 		strategy := &mockStrategy{}
 
-		calc := NewCalculator(kv, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second)
 		calc.SetStabilizationWindows(50*time.Millisecond, 50*time.Millisecond)
 
 		err = calc.Start(ctx)
@@ -200,12 +207,13 @@ func TestCalculator_Stop(t *testing.T) {
 
 	t.Run("returns error if not started", func(t *testing.T) {
 		_, nc := partitest.StartEmbeddedNATS(t)
-		kv := partitest.CreateJetStreamKV(t, nc, "test-calc-not-started")
+		assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-not-started-assignment")
+		heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-not-started-heartbeat")
 
 		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
 		strategy := &mockStrategy{}
 
-		calc := NewCalculator(kv, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second)
 
 		err := calc.Stop()
 		require.Error(t, err)
@@ -218,10 +226,11 @@ func TestCalculator_WorkerMonitoring(t *testing.T) {
 		ctx := t.Context()
 
 		_, nc := partitest.StartEmbeddedNATS(t)
-		kv := partitest.CreateJetStreamKV(t, nc, "test-calc-monitoring")
+		assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-monitoring-assignment")
+		heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-monitoring-heartbeat")
 
 		// Create initial heartbeat for worker-1
-		_, err := kv.Put(ctx, "worker-hb.worker-1", []byte(time.Now().Format(time.RFC3339Nano)))
+		_, err := heartbeatKV.Put(ctx, "worker-hb.worker-1", []byte(time.Now().Format(time.RFC3339Nano)))
 		require.NoError(t, err)
 
 		source := &mockSource{
@@ -232,7 +241,7 @@ func TestCalculator_WorkerMonitoring(t *testing.T) {
 		}
 		strategy := &mockStrategy{}
 
-		calc := NewCalculator(kv, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second)
 		calc.SetStabilizationWindows(50*time.Millisecond, 50*time.Millisecond)
 		calc.SetCooldown(100 * time.Millisecond) // Short cooldown for testing
 
@@ -244,7 +253,7 @@ func TestCalculator_WorkerMonitoring(t *testing.T) {
 
 		// Add worker-2 heartbeat
 		time.Sleep(150 * time.Millisecond) // Wait for cooldown
-		_, err = kv.Put(ctx, "worker-hb.worker-2", []byte(time.Now().Format(time.RFC3339Nano)))
+		_, err = heartbeatKV.Put(ctx, "worker-hb.worker-2", []byte(time.Now().Format(time.RFC3339Nano)))
 		require.NoError(t, err)
 
 		// Wait for monitoring cycle to detect change
@@ -254,11 +263,11 @@ func TestCalculator_WorkerMonitoring(t *testing.T) {
 		require.Greater(t, calc.CurrentVersion(), initialVersion)
 
 		// Verify both workers got assignments
-		entry1, err := kv.Get(ctx, "assignment.worker-1")
+		entry1, err := assignmentKV.Get(ctx, "assignment.worker-1")
 		require.NoError(t, err)
 		require.NotNil(t, entry1)
 
-		entry2, err := kv.Get(ctx, "assignment.worker-2")
+		entry2, err := assignmentKV.Get(ctx, "assignment.worker-2")
 		require.NoError(t, err)
 		require.NotNil(t, entry2)
 	})
@@ -269,10 +278,11 @@ func TestCalculator_CooldownPreventsRebalancing(t *testing.T) {
 		ctx := t.Context()
 
 		_, nc := partitest.StartEmbeddedNATS(t)
-		kv := partitest.CreateJetStreamKV(t, nc, "test-calc-cooldown-prevent")
+		assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-cooldown-prevent-assignment")
+		heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-cooldown-prevent-heartbeat")
 
 		// Create initial heartbeat
-		_, err := kv.Put(ctx, "worker-hb.worker-1", []byte(time.Now().Format(time.RFC3339Nano)))
+		_, err := heartbeatKV.Put(ctx, "worker-hb.worker-1", []byte(time.Now().Format(time.RFC3339Nano)))
 		require.NoError(t, err)
 
 		source := &mockSource{
@@ -280,7 +290,7 @@ func TestCalculator_CooldownPreventsRebalancing(t *testing.T) {
 		}
 		strategy := &mockStrategy{}
 
-		calc := NewCalculator(kv, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second)
 		calc.SetStabilizationWindows(50*time.Millisecond, 50*time.Millisecond)
 		calc.SetCooldown(5 * time.Second) // Long cooldown
 
@@ -291,7 +301,7 @@ func TestCalculator_CooldownPreventsRebalancing(t *testing.T) {
 		initialVersion := calc.CurrentVersion()
 
 		// Add worker-2 immediately (should be blocked by cooldown)
-		_, err = kv.Put(ctx, "worker-hb.worker-2", []byte(time.Now().Format(time.RFC3339Nano)))
+		_, err = heartbeatKV.Put(ctx, "worker-hb.worker-2", []byte(time.Now().Format(time.RFC3339Nano)))
 		require.NoError(t, err)
 
 		// Wait for monitoring cycle
@@ -307,12 +317,13 @@ func TestCalculator_StabilizationWindow(t *testing.T) {
 		ctx := t.Context()
 
 		_, nc := partitest.StartEmbeddedNATS(t)
-		kv := partitest.CreateJetStreamKV(t, nc, "test-calc-coldstart")
+		assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-coldstart-assignment")
+		heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-coldstart-heartbeat")
 
 		// Create heartbeats for many workers
 		for i := 1; i <= 5; i++ {
 			key := fmt.Sprintf("worker-hb.worker-%d", i)
-			_, err := kv.Put(ctx, key, []byte(time.Now().Format(time.RFC3339Nano)))
+			_, err := heartbeatKV.Put(ctx, key, []byte(time.Now().Format(time.RFC3339Nano)))
 			require.NoError(t, err)
 		}
 
@@ -324,7 +335,7 @@ func TestCalculator_StabilizationWindow(t *testing.T) {
 		}
 		strategy := &mockStrategy{}
 
-		calc := NewCalculator(kv, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second)
 		calc.SetRestartDetectionRatio(0.5) // 5 workers / 2 expected = 2.5 ratio > 0.5
 
 		window := calc.selectStabilizationWindow(ctx)
@@ -335,10 +346,11 @@ func TestCalculator_StabilizationWindow(t *testing.T) {
 		ctx := t.Context()
 
 		_, nc := partitest.StartEmbeddedNATS(t)
-		kv := partitest.CreateJetStreamKV(t, nc, "test-calc-scale")
+		assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-scale-assignment")
+		heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-scale-heartbeat")
 
 		// Create heartbeat for one worker
-		_, err := kv.Put(ctx, "worker-hb.worker-1", []byte(time.Now().Format(time.RFC3339Nano)))
+		_, err := heartbeatKV.Put(ctx, "worker-hb.worker-1", []byte(time.Now().Format(time.RFC3339Nano)))
 		require.NoError(t, err)
 
 		// Create many partitions so expected workers is high
@@ -350,7 +362,7 @@ func TestCalculator_StabilizationWindow(t *testing.T) {
 		source := &mockSource{partitions: partitions}
 		strategy := &mockStrategy{}
 
-		calc := NewCalculator(kv, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second)
 		calc.SetRestartDetectionRatio(0.5) // 1 worker / 5 expected = 0.2 ratio < 0.5
 
 		window := calc.selectStabilizationWindow(ctx)
@@ -363,20 +375,21 @@ func TestCalculator_GetActiveWorkers(t *testing.T) {
 		ctx := t.Context()
 
 		_, nc := partitest.StartEmbeddedNATS(t)
-		kv := partitest.CreateJetStreamKV(t, nc, "test-calc-workers")
+		assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-workers-assignment")
+		heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-workers-heartbeat")
 
 		// Create heartbeats for multiple workers
-		_, err := kv.Put(ctx, "worker-hb.worker-1", []byte(time.Now().Format(time.RFC3339Nano)))
+		_, err := heartbeatKV.Put(ctx, "worker-hb.worker-1", []byte(time.Now().Format(time.RFC3339Nano)))
 		require.NoError(t, err)
-		_, err = kv.Put(ctx, "worker-hb.worker-2", []byte(time.Now().Format(time.RFC3339Nano)))
+		_, err = heartbeatKV.Put(ctx, "worker-hb.worker-2", []byte(time.Now().Format(time.RFC3339Nano)))
 		require.NoError(t, err)
-		_, err = kv.Put(ctx, "worker-hb.worker-3", []byte(time.Now().Format(time.RFC3339Nano)))
+		_, err = heartbeatKV.Put(ctx, "worker-hb.worker-3", []byte(time.Now().Format(time.RFC3339Nano)))
 		require.NoError(t, err)
 
 		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
 		strategy := &mockStrategy{}
 
-		calc := NewCalculator(kv, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second)
 
 		workers, err := calc.getActiveWorkers(ctx)
 		require.NoError(t, err)
@@ -390,12 +403,13 @@ func TestCalculator_GetActiveWorkers(t *testing.T) {
 		ctx := t.Context()
 
 		_, nc := partitest.StartEmbeddedNATS(t)
-		kv := partitest.CreateJetStreamKV(t, nc, "test-calc-no-workers")
+		assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-no-workers-assignment")
+		heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-no-workers-heartbeat")
 
 		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
 		strategy := &mockStrategy{}
 
-		calc := NewCalculator(kv, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second)
 
 		workers, err := calc.getActiveWorkers(ctx)
 		require.NoError(t, err)

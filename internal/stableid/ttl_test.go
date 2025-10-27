@@ -48,7 +48,7 @@ func TestNATSKV_PutResetsTTL(t *testing.T) {
 		require.NoError(t, err, "Put() should have reset TTL, entry should still exist")
 		require.Equal(t, "updated-1", string(entry.Value()))
 
-		t.Logf("✅ Put() successfully reset TTL")
+		t.Log("✅ Put() successfully reset TTL")
 	})
 
 	t.Run("Update resets TTL", func(t *testing.T) {
@@ -71,7 +71,7 @@ func TestNATSKV_PutResetsTTL(t *testing.T) {
 		require.NoError(t, err, "Update() should have reset TTL, entry should still exist")
 		require.Equal(t, "updated-2", string(entry.Value()))
 
-		t.Logf("✅ Update() successfully reset TTL")
+		t.Log("✅ Update() successfully reset TTL")
 	})
 
 	t.Run("Without Put/Update - entry expires", func(t *testing.T) {
@@ -87,7 +87,7 @@ func TestNATSKV_PutResetsTTL(t *testing.T) {
 		require.Error(t, err, "Entry should have expired after TTL")
 		require.ErrorIs(t, err, jetstream.ErrKeyNotFound)
 
-		t.Logf("✅ Entry correctly expired after TTL without renewal")
+		t.Log("✅ Entry correctly expired after TTL without renewal")
 	})
 }
 
@@ -120,7 +120,7 @@ func TestNATSKV_PutVsUpdateRevision(t *testing.T) {
 		require.NoError(t, err)
 		require.Greater(t, rev3, rev2, "Put should increment revision again")
 
-		t.Logf("✅ Put() always succeeds regardless of current revision")
+		t.Log("✅ Put() always succeeds regardless of current revision")
 	})
 
 	t.Run("Update requires correct revision", func(t *testing.T) {
@@ -142,6 +142,6 @@ func TestNATSKV_PutVsUpdateRevision(t *testing.T) {
 		require.NoError(t, err)
 		require.Greater(t, rev3, rev2)
 
-		t.Logf("✅ Update() requires correct revision")
+		t.Log("✅ Update() requires correct revision")
 	})
 }

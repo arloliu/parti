@@ -93,5 +93,5 @@ func (l *SlogLogger) Error(msg string, keysAndValues ...any) {
 //   - keysAndValues: Optional key-value pairs for structured logging
 func (l *SlogLogger) Fatal(msg string, keysAndValues ...any) {
 	l.logger.Error(msg, keysAndValues...)
-	os.Exit(1)
+	os.Exit(1) //nolint:revive // Fatal should exit the program
 }

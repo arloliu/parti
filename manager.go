@@ -773,7 +773,7 @@ func (m *Manager) monitorCalculatorState() {
 	ticker := time.NewTicker(200 * time.Millisecond) // Check calculator state 5x per second
 	defer ticker.Stop()
 
-	var lastCalcState types.CalculatorState = types.CalcStateIdle
+	lastCalcState := types.CalcStateIdle
 
 	for {
 		select {
@@ -806,10 +806,8 @@ func (m *Manager) monitorCalculatorState() {
 
 			case types.CalcStateRebalancing:
 				// Calculator started rebalancing
-				if currentState == StateScaling || currentState == StateEmergency {
-					m.transitionState(currentState, StateRebalancing)
-				} else if currentState == StateStable {
-					// Direct rebalance (e.g., manual trigger)
+				if currentState == StateScaling || currentState == StateEmergency || currentState == StateStable {
+					// From Scaling, Emergency, or direct from Stable (manual trigger)
 					m.transitionState(currentState, StateRebalancing)
 				}
 
@@ -821,15 +819,13 @@ func (m *Manager) monitorCalculatorState() {
 
 			case types.CalcStateIdle:
 				// Calculator returned to idle after rebalancing
-				if currentState == StateRebalancing {
-					m.transitionState(currentState, StateStable)
-				} else if currentState == StateScaling {
-					// Fast rebalancing completed before we saw Rebalancing state
-					m.transitionState(currentState, StateStable)
-				} else if currentState == StateEmergency {
-					// Emergency rebalancing complete
+				if currentState == StateRebalancing || currentState == StateScaling || currentState == StateEmergency {
+					// From any leader state back to Stable
 					m.transitionState(currentState, StateStable)
 				}
+
+			default:
+				// Unknown calculator state - no action needed
 			}
 		}
 	}
@@ -852,8 +848,8 @@ func (m *Manager) stopCalculator() {
 	case StateScaling, StateRebalancing, StateEmergency:
 		// Lost leadership while in leader-only state
 		// Transition to Stable if we have an assignment, otherwise WaitingAssignment
-		assignment := m.CurrentAssignment()
-		if len(assignment.Partitions) > 0 {
+		currentAssignment := m.CurrentAssignment()
+		if len(currentAssignment.Partitions) > 0 {
 			m.transitionState(currentState, StateStable)
 			m.logger.Info("transitioned to Stable after losing leadership",
 				"worker_id", m.WorkerID(),
@@ -866,6 +862,9 @@ func (m *Manager) stopCalculator() {
 				"from_state", currentState.String(),
 			)
 		}
+
+	default:
+		// No state transition needed for non-leader states
 	}
 
 	if err := m.calculator.Stop(); err != nil {

@@ -54,10 +54,11 @@ func TestManager_LeadershipLoss_StateTransition(t *testing.T) {
 	// Track state transitions
 	stateTransitions := make([]string, 0)
 	hooks := &Hooks{
-		OnStateChanged: func(ctx context.Context, from, to types.State) error {
+		OnStateChanged: func(_ context.Context, from, to types.State) error {
 			transition := from.String() + " → " + to.String()
 			stateTransitions = append(stateTransitions, transition)
 			t.Logf("State transition: %s", transition)
+
 			return nil
 		},
 	}
@@ -71,7 +72,7 @@ func TestManager_LeadershipLoss_StateTransition(t *testing.T) {
 	defer func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		mgr1.Stop(stopCtx)
+		_ = mgr1.Stop(stopCtx)
 	}()
 
 	// Wait for worker to become leader and reach Stable

@@ -493,7 +493,7 @@ func (c *Calculator) enterScalingState(ctx context.Context, reason string, windo
 			"current_state", oldState.String(),
 			"reason", reason)
 		// Restore old state
-		c.calcState.Store(int32(oldState))
+		c.calcState.Store(int32(oldState)) //nolint:gosec // State values are small constants
 
 		return
 	}
@@ -663,128 +663,6 @@ func (c *Calculator) monitorWorkers(ctx context.Context) {
 	}
 }
 
-// watchHeartbeats monitors heartbeat changes via NATS KV watcher (primary detection).
-//
-// This runs in a separate goroutine and provides fast (<100ms) detection of worker changes.
-// If the watcher fails, pollForChanges() serves as fallback.
-// Only triggers rebalancing when the worker set changes, not on heartbeat refreshes.
-func (c *Calculator) watchHeartbeats(ctx context.Context) {
-	c.watcherMu.Lock()
-
-	// Create watcher for all heartbeat keys
-	watcher, err := c.heartbeatKV.WatchAll(ctx)
-	if err != nil {
-		c.logger.Error("failed to create heartbeat watcher, falling back to polling", "error", err)
-		c.watcherMu.Unlock()
-
-		return
-	}
-
-	c.watcher = watcher
-	c.watcherMu.Unlock()
-
-	defer func() {
-		c.watcherMu.Lock()
-		if c.watcher != nil {
-			_ = c.watcher.Stop() // Best effort - ignore error during cleanup
-			c.watcher = nil
-		}
-		c.watcherMu.Unlock()
-	}()
-
-	c.logger.Info("heartbeat watcher started")
-
-	// Track known workers to detect topology changes
-	knownWorkers := make(map[string]bool)
-
-	// Initialize with current workers
-	workers, err := c.getActiveWorkers(ctx)
-	if err == nil {
-		for _, w := range workers {
-			knownWorkers[w] = true
-		}
-	}
-
-	// Debounce timer to batch rapid changes
-	var debounceTimer *time.Timer
-	pendingCheck := false
-
-	for {
-		select {
-		case entry := <-watcher.Updates():
-			if entry == nil {
-				c.logger.Warn("watcher channel closed, falling back to polling")
-				if debounceTimer != nil {
-					debounceTimer.Stop()
-				}
-
-				return
-			}
-
-			// Extract worker ID from key (format: "prefix.workerID")
-			workerID := c.extractWorkerID(entry.Key())
-			if workerID == "" {
-				continue
-			}
-
-			// Check if this is a topology change
-			topologyChanged := false
-			switch entry.Operation() {
-			case jetstream.KeyValuePut:
-				// New worker joined (not just heartbeat refresh)
-				if !knownWorkers[workerID] {
-					knownWorkers[workerID] = true
-					topologyChanged = true
-					c.logger.Info("watcher detected worker join", "worker_id", workerID)
-				}
-
-			case jetstream.KeyValueDelete:
-				// Worker crashed (TTL expired) or gracefully removed
-				if knownWorkers[workerID] {
-					delete(knownWorkers, workerID)
-					topologyChanged = true
-					c.logger.Info("watcher detected worker leave", "worker_id", workerID)
-				}
-
-			default:
-				// Ignore other operations (Purge, etc.)
-				continue
-			}
-
-			if !topologyChanged {
-				continue
-			}
-
-			// Debounce: wait 200ms after last topology change before checking
-			// This batches rapid worker joins during cold start
-			if debounceTimer != nil {
-				debounceTimer.Stop()
-			}
-			pendingCheck = true
-			debounceTimer = time.AfterFunc(200*time.Millisecond, func() {
-				if !pendingCheck {
-					return
-				}
-				pendingCheck = false
-
-				// Check for changes with current worker set
-				if err := c.checkForChanges(ctx); err != nil {
-					c.logger.Error("failed to check for worker changes", "error", err)
-				}
-			})
-
-		case <-ctx.Done():
-			c.logger.Info("watcher stopped (context cancelled)")
-			if debounceTimer != nil {
-				debounceTimer.Stop()
-			}
-
-			return
-		}
-	}
-}
-
-// pollForChanges checks for worker changes via polling.
 func (c *Calculator) pollForChanges(ctx context.Context) error {
 	workers, err := c.getActiveWorkers(ctx)
 	if err != nil {
@@ -811,70 +689,6 @@ func (c *Calculator) pollForChanges(ctx context.Context) error {
 	return c.checkForChanges(ctx, currentWorkers)
 }
 
-// handleWorkerEvent processes a single worker event from the watcher.
-func (c *Calculator) handleWorkerEvent(ctx context.Context, workerID string, joined bool) {
-	c.mu.Lock()
-	lastWorkers := make(map[string]bool)
-	for k, v := range c.lastWorkers {
-		lastWorkers[k] = v
-	}
-	c.mu.Unlock()
-
-	if joined {
-		// Worker joined
-		if !lastWorkers[workerID] {
-			c.logger.Info("watcher detected worker join", "worker", workerID)
-			lastWorkers[workerID] = true
-
-			// Reconstruct current workers map
-			currentWorkers := make(map[string]bool)
-			for k := range lastWorkers {
-				currentWorkers[k] = true
-			}
-
-			// Trigger rebalancing check
-			if err := c.checkForChanges(ctx, currentWorkers); err != nil {
-				c.logger.Error("failed to process worker join", "error", err, "worker", workerID)
-			}
-		}
-	} else {
-		// Worker left (crashed or graceful shutdown)
-		if lastWorkers[workerID] {
-			c.logger.Info("watcher detected worker leave", "worker", workerID)
-			delete(lastWorkers, workerID)
-
-			// Reconstruct current workers map
-			currentWorkers := make(map[string]bool)
-			for k := range lastWorkers {
-				currentWorkers[k] = true
-			}
-
-			// Trigger rebalancing check
-			if err := c.checkForChanges(ctx, currentWorkers); err != nil {
-				c.logger.Error("failed to process worker leave", "error", err, "worker", workerID)
-			}
-		}
-	}
-}
-
-// extractWorkerID extracts the worker ID from a heartbeat key.
-//
-// Key format: "prefix.workerID"
-// Returns empty string if key format is invalid.
-func (c *Calculator) extractWorkerID(key string) string {
-	if len(key) <= len(c.hbPrefix)+1 {
-		return ""
-	}
-
-	if key[:len(c.hbPrefix)] != c.hbPrefix {
-		return ""
-	}
-
-	return key[len(c.hbPrefix)+1:]
-}
-
-// checkForChanges detects worker changes and triggers rebalancing if needed.
-//
 // Parameters:
 //   - ctx: Context for cancellation
 //   - currentWorkers: Optional map of current workers (if nil, fetches from KV)
@@ -953,21 +767,6 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 	}
 
 	return nil
-}
-
-// hasWorkersChanged checks if the worker set has changed.
-func (c *Calculator) hasWorkersChanged(workers []string) bool {
-	if len(workers) != len(c.currentWorkers) {
-		return true
-	}
-
-	for _, w := range workers {
-		if !c.currentWorkers[w] {
-			return true
-		}
-	}
-
-	return false
 }
 
 // hasWorkersChangedMap checks if the worker set has changed using map comparison.

@@ -46,8 +46,8 @@ func TestHelper_UpdateSubscriptions(t *testing.T) {
 		require.Contains(t, active, "partition-1")
 
 		// Publish messages to test subscriptions
-		nc.Publish("test-stream.partition-0", []byte("msg1"))
-		nc.Publish("test-stream.partition-1", []byte("msg2"))
+		_ = nc.Publish("test-stream.partition-0", []byte("msg1"))
+		_ = nc.Publish("test-stream.partition-1", []byte("msg2"))
 		nc.Flush()
 
 		// Give time for messages to be received

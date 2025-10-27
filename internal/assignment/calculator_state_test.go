@@ -12,12 +12,13 @@ import (
 
 func TestCalculator_detectRebalanceType_ColdStart(t *testing.T) {
 	_, nc := partitest.StartEmbeddedNATS(t)
-	kv := partitest.CreateJetStreamKV(t, nc, "test-calc-coldstart")
+	assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-coldstart-assignment")
+	heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-coldstart-heartbeat")
 
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(kv, "test-assignment", source, strategy, "test-hb", 10*time.Second)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second)
 
 	// Cold start: 0 → 3 workers
 	currentWorkers := map[string]bool{
@@ -35,12 +36,13 @@ func TestCalculator_detectRebalanceType_ColdStart(t *testing.T) {
 
 func TestCalculator_detectRebalanceType_PlannedScale(t *testing.T) {
 	_, nc := partitest.StartEmbeddedNATS(t)
-	kv := partitest.CreateJetStreamKV(t, nc, "test-calc-plannedscale")
+	assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-plannedscale-assignment")
+	heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-plannedscale-heartbeat")
 
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(kv, "test-assignment", source, strategy, "test-hb", 10*time.Second)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second)
 
 	// Set up previous workers
 	calc.lastWorkers = map[string]bool{
@@ -66,12 +68,13 @@ func TestCalculator_detectRebalanceType_PlannedScale(t *testing.T) {
 
 func TestCalculator_detectRebalanceType_Emergency(t *testing.T) {
 	_, nc := partitest.StartEmbeddedNATS(t)
-	kv := partitest.CreateJetStreamKV(t, nc, "test-calc-emergency")
+	assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-emergency-assignment")
+	heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-emergency-heartbeat")
 
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(kv, "test-assignment", source, strategy, "test-hb", 10*time.Second)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second)
 
 	// Set up previous workers
 	calc.lastWorkers = map[string]bool{
@@ -94,12 +97,13 @@ func TestCalculator_detectRebalanceType_Emergency(t *testing.T) {
 
 func TestCalculator_detectRebalanceType_Restart(t *testing.T) {
 	_, nc := partitest.StartEmbeddedNATS(t)
-	kv := partitest.CreateJetStreamKV(t, nc, "test-calc-restart")
+	assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-restart-assignment")
+	heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-restart-heartbeat")
 
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(kv, "test-assignment", source, strategy, "test-hb", 10*time.Second)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second)
 	calc.SetRestartDetectionRatio(0.5) // 50% threshold
 
 	// Set up previous workers (10 workers)
@@ -139,12 +143,13 @@ func TestCalculator_detectRebalanceType_Restart(t *testing.T) {
 
 func TestCalculator_detectRebalanceType_MultipleWorkersCrashed(t *testing.T) {
 	_, nc := partitest.StartEmbeddedNATS(t)
-	kv := partitest.CreateJetStreamKV(t, nc, "test-calc-multicrash")
+	assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-multicrash-assignment")
+	heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-multicrash-heartbeat")
 
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(kv, "test-assignment", source, strategy, "test-hb", 10*time.Second)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second)
 
 	// Set up previous workers
 	calc.lastWorkers = map[string]bool{
@@ -169,12 +174,13 @@ func TestCalculator_detectRebalanceType_MultipleWorkersCrashed(t *testing.T) {
 
 func TestCalculator_StateTransitions_GetState(t *testing.T) {
 	_, nc := partitest.StartEmbeddedNATS(t)
-	kv := partitest.CreateJetStreamKV(t, nc, "test-calc-getstate")
+	assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-getstate-assignment")
+	heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-getstate-heartbeat")
 
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(kv, "test-assignment", source, strategy, "test-hb", 10*time.Second)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second)
 
 	// Initial state should be Idle
 	require.Equal(t, types.CalcStateIdle, calc.GetState())
@@ -193,12 +199,13 @@ func TestCalculator_StateTransitions_GetState(t *testing.T) {
 
 func TestCalculator_StateTransitions_Scaling(t *testing.T) {
 	_, nc := partitest.StartEmbeddedNATS(t)
-	kv := partitest.CreateJetStreamKV(t, nc, "test-calc-scaling")
+	assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-scaling-assignment")
+	heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-scaling-heartbeat")
 
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(kv, "test-assignment", source, strategy, "test-hb", 10*time.Second)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second)
 
 	ctx := context.Background()
 
@@ -219,12 +226,13 @@ func TestCalculator_StateTransitions_Scaling(t *testing.T) {
 
 func TestCalculator_StateTransitions_Emergency(t *testing.T) {
 	_, nc := partitest.StartEmbeddedNATS(t)
-	kv := partitest.CreateJetStreamKV(t, nc, "test-calc-emergency-state")
+	assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-emergency-state-assignment")
+	heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-emergency-state-heartbeat")
 
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(kv, "test-assignment", source, strategy, "test-hb", 10*time.Second)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second)
 
 	ctx := context.Background()
 
@@ -245,12 +253,13 @@ func TestCalculator_StateTransitions_Emergency(t *testing.T) {
 
 func TestCalculator_StateTransitions_ReturnToIdle(t *testing.T) {
 	_, nc := partitest.StartEmbeddedNATS(t)
-	kv := partitest.CreateJetStreamKV(t, nc, "test-calc-returnidle")
+	assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-returnidle-assignment")
+	heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-returnidle-heartbeat")
 
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(kv, "test-assignment", source, strategy, "test-hb", 10*time.Second)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second)
 
 	// Manually set state to Rebalancing
 	calc.calcState.Store(int32(types.CalcStateRebalancing))
@@ -267,12 +276,13 @@ func TestCalculator_StateTransitions_ReturnToIdle(t *testing.T) {
 
 func TestCalculator_StateTransitions_PreventsConcurrentRebalance(t *testing.T) {
 	_, nc := partitest.StartEmbeddedNATS(t)
-	kv := partitest.CreateJetStreamKV(t, nc, "test-calc-preventconcurrent")
+	assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-preventconcurrent-assignment")
+	heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-preventconcurrent-heartbeat")
 
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(kv, "test-assignment", source, strategy, "test-hb", 1*time.Second)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 1*time.Second)
 	calc.SetCooldown(100 * time.Millisecond)
 	calc.SetStabilizationWindows(500*time.Millisecond, 300*time.Millisecond) // Fast windows for test
 
@@ -313,12 +323,13 @@ func TestCalculator_StateTransitions_PreventsConcurrentRebalance(t *testing.T) {
 
 func TestCalculator_StateTransitions_CooldownPreventsRebalance(t *testing.T) {
 	_, nc := partitest.StartEmbeddedNATS(t)
-	kv := partitest.CreateJetStreamKV(t, nc, "test-calc-cooldown-state")
+	assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-cooldown-state-assignment")
+	heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-cooldown-state-heartbeat")
 
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(kv, "test-assignment", source, strategy, "test-hb", 1*time.Second)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 1*time.Second)
 	calc.SetCooldown(500 * time.Millisecond)
 	calc.SetStabilizationWindows(500*time.Millisecond, 300*time.Millisecond) // Fast windows for test
 
