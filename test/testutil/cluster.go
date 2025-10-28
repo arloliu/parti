@@ -48,7 +48,7 @@ func IntegrationTestConfig() parti.Config {
 			RebalanceCooldown: 2 * time.Second, // Reduced from default 10s - faster rebalancing in tests
 		},
 	}
-	parti.ApplyDefaults(&cfg) // Apply default KV bucket names
+	parti.SetDefaults(&cfg) // Apply default KV bucket names
 
 	return cfg
 }
@@ -70,10 +70,10 @@ func FastTestConfig() parti.Config {
 		PlannedScaleWindow:    300 * time.Millisecond,
 		RestartDetectionRatio: 0.5,
 		Assignment: parti.AssignmentConfig{
-			RebalanceCooldown: 1 * time.Second, // Very short cooldown for fast tests - critical for concurrent startup
+			RebalanceCooldown: 400 * time.Millisecond, // Must be <= ColdStartWindow (500ms)
 		},
 	}
-	parti.ApplyDefaults(&cfg) // Apply default KV bucket names
+	parti.SetDefaults(&cfg) // Apply default KV bucket names
 
 	return cfg
 }

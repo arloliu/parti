@@ -62,7 +62,7 @@ func TestConsistentHash_PartitionAffinity(t *testing.T) {
 	t.Logf("Phase 1: Starting %d initial workers...", initialWorkers)
 	initialManagers := make([]*parti.Manager, initialWorkers)
 	for i := range initialManagers {
-		mgr, err := parti.NewManager(cfg, conn, source.NewStatic(partitions), strategy.NewConsistentHash())
+		mgr, err := parti.NewManager(&cfg, conn, source.NewStatic(partitions), strategy.NewConsistentHash())
 		require.NoError(t, err)
 		initialManagers[i] = mgr
 	}
@@ -95,7 +95,7 @@ func TestConsistentHash_PartitionAffinity(t *testing.T) {
 
 	// Phase 2: Add one more worker and observe rebalancing
 	t.Logf("Phase 2: Adding 1 worker (scale %d→%d)...", initialWorkers, finalWorkers)
-	newMgr, err := parti.NewManager(cfg, conn, source.NewStatic(partitions), strategy.NewConsistentHash())
+	newMgr, err := parti.NewManager(&cfg, conn, source.NewStatic(partitions), strategy.NewConsistentHash())
 	require.NoError(t, err)
 
 	go func() {
@@ -218,7 +218,7 @@ func TestRoundRobin_EvenDistribution(t *testing.T) {
 	managers := make([]*parti.Manager, numWorkers)
 	mgrWaiters := make([]testutil.ManagerWaiter, numWorkers)
 	for i := range managers {
-		mgr, err := parti.NewManager(cfg, conn, source.NewStatic(partitions), strategy.NewRoundRobin(), parti.WithLogger(logger))
+		mgr, err := parti.NewManager(&cfg, conn, source.NewStatic(partitions), strategy.NewRoundRobin(), parti.WithLogger(logger))
 		require.NoError(t, err)
 		managers[i] = mgr
 		mgrWaiters[i] = mgr
@@ -356,6 +356,10 @@ func TestWeightedPartitions_LoadBalancing(t *testing.T) {
 		ColdStartWindow:       3 * time.Second,
 		PlannedScaleWindow:    2 * time.Second,
 		RestartDetectionRatio: 0.5,
+		Assignment: parti.AssignmentConfig{
+			MinRebalanceThreshold: 0.15,
+			RebalanceCooldown:     2 * time.Second, // Must be <= ColdStartWindow (3s)
+		},
 	}
 
 	// Create managers with ConsistentHash (supports weights)

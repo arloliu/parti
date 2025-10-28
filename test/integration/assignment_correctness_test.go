@@ -63,7 +63,7 @@ func TestAssignmentCorrectness_AllPartitionsAssigned(t *testing.T) {
 	// Create managers with SHARED NATS connection and debug logger
 	managers := make([]*parti.Manager, numWorkers)
 	for i := range managers {
-		mgr, err := parti.NewManager(cfg, conn, source.NewStatic(partitions), strategy.NewConsistentHash(), parti.WithLogger(debugLogger))
+		mgr, err := parti.NewManager(&cfg, conn, source.NewStatic(partitions), strategy.NewConsistentHash(), parti.WithLogger(debugLogger))
 		require.NoError(t, err)
 		managers[i] = mgr
 	}
@@ -210,7 +210,7 @@ func TestAssignmentCorrectness_StableAssignments(t *testing.T) {
 	// Create managers
 	managers := make([]*parti.Manager, numWorkers)
 	for i := range managers {
-		mgr, err := parti.NewManager(cfg, conn, source.NewStatic(partitions), strategy.NewConsistentHash())
+		mgr, err := parti.NewManager(&cfg, conn, source.NewStatic(partitions), strategy.NewConsistentHash())
 		require.NoError(t, err)
 		managers[i] = mgr
 	}

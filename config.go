@@ -142,11 +142,11 @@ func DefaultConfig() Config {
 	}
 }
 
-// ApplyDefaults applies default values to zero-valued fields in the config.
+// SetDefaults fills in missing configuration values with production defaults.
 //
 // Parameters:
 //   - cfg: Config to apply defaults to (modified in place)
-func ApplyDefaults(cfg *Config) {
+func SetDefaults(cfg *Config) {
 	defaults := DefaultConfig()
 
 	if cfg.WorkerIDPrefix == "" {

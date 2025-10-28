@@ -126,8 +126,8 @@ func NewManager(cfg *Config, conn *nats.Conn, source PartitionSource, strategy A
 		return nil, ErrAssignmentStrategyRequired
 	}
 
-	// Apply defaults to fill in any missing configuration
-	ApplyDefaults(cfg)
+	// Fill in missing configuration values with defaults
+	SetDefaults(cfg)
 
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {

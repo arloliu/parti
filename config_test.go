@@ -28,10 +28,10 @@ func TestDefaultConfig(t *testing.T) {
 	require.Equal(t, 10*time.Second, cfg.Assignment.RebalanceCooldown)
 }
 
-func TestApplyDefaults(t *testing.T) {
+func TestSetDefaults(t *testing.T) {
 	t.Run("applies defaults to empty config", func(t *testing.T) {
 		cfg := Config{}
-		ApplyDefaults(&cfg)
+		SetDefaults(&cfg)
 
 		require.Equal(t, "worker", cfg.WorkerIDPrefix)
 		require.Equal(t, 99, cfg.WorkerIDMax)
@@ -60,7 +60,7 @@ func TestApplyDefaults(t *testing.T) {
 				RebalanceCooldown:     15 * time.Second,
 			},
 		}
-		ApplyDefaults(&cfg)
+		SetDefaults(&cfg)
 
 		// All custom values should be preserved
 		require.Equal(t, "custom", cfg.WorkerIDPrefix)
@@ -86,7 +86,7 @@ func TestApplyDefaults(t *testing.T) {
 			WorkerIDTTL:    45 * time.Second,
 			// Leave other fields empty
 		}
-		ApplyDefaults(&cfg)
+		SetDefaults(&cfg)
 
 		// Custom values preserved
 		require.Equal(t, "myworker", cfg.WorkerIDPrefix)
@@ -140,7 +140,7 @@ assignment:
 	require.Equal(t, 12*time.Second, cfg.Assignment.RebalanceCooldown)
 }
 
-// TestConfig_DefaultsWithPartialYAML demonstrates using ApplyDefaults with partial config
+// TestConfig_DefaultsWithPartialYAML demonstrates using SetDefaults with partial config
 func TestConfig_DefaultsWithPartialYAML(t *testing.T) {
 	// Only specify a few fields, rest will use defaults
 	yamlConfig := `
@@ -153,7 +153,7 @@ heartbeatInterval: 5s
 	require.NoError(t, err)
 
 	// Apply defaults for unset fields
-	ApplyDefaults(&cfg)
+	SetDefaults(&cfg)
 
 	// Custom values preserved
 	require.Equal(t, "custom", cfg.WorkerIDPrefix)

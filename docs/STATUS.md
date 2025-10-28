@@ -187,7 +187,9 @@
 - ✅ All fields documented
 - ✅ YAML support
 - ✅ DefaultConfig()
-- ✅ ApplyDefaults()
+- ✅ TestConfig()
+- ✅ SetDefaults()
+- ✅ Validation helpers
 - ❌ Configuration impact not tested
 - ❌ Tuning guidelines not validated
 
