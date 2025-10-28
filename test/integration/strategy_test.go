@@ -211,7 +211,7 @@ func TestRoundRobin_EvenDistribution(t *testing.T) {
 	cfg.WorkerIDTTL = 10 * time.Second
 	cfg.ColdStartWindow = 3 * time.Second
 	cfg.PlannedScaleWindow = 2 * time.Second
-	cfg.Assignment.RebalanceCooldown = 1 * time.Second
+	cfg.Assignment.MinRebalanceInterval = 1 * time.Second
 
 	// Create managers with RoundRobin strategy
 	logger := logging.NewNop()
@@ -358,7 +358,7 @@ func TestWeightedPartitions_LoadBalancing(t *testing.T) {
 		RestartDetectionRatio: 0.5,
 		Assignment: parti.AssignmentConfig{
 			MinRebalanceThreshold: 0.15,
-			RebalanceCooldown:     2 * time.Second, // Must be <= ColdStartWindow (3s)
+			MinRebalanceInterval:     2 * time.Second, // Must be <= ColdStartWindow (3s)
 		},
 	}
 

@@ -125,7 +125,7 @@ func TestSubscriptionHelper_UpdateOnRebalance(t *testing.T) {
 		RestartDetectionRatio: 0.5,
 		Assignment: parti.AssignmentConfig{
 			MinRebalanceThreshold: 0.15,
-			RebalanceCooldown:     2 * time.Second,
+			MinRebalanceInterval:     2 * time.Second,
 		},
 	}
 

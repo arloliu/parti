@@ -63,7 +63,7 @@ func TestRefreshPartitions_Addition(t *testing.T) {
 		RestartDetectionRatio: 0.5,
 		Assignment: parti.AssignmentConfig{
 			MinRebalanceThreshold: 0.15,
-			RebalanceCooldown:     2 * time.Second,
+			MinRebalanceInterval:     2 * time.Second,
 		},
 	}
 
@@ -227,7 +227,7 @@ func TestRefreshPartitions_Removal(t *testing.T) {
 		RestartDetectionRatio: 0.5,
 		Assignment: parti.AssignmentConfig{
 			MinRebalanceThreshold: 0.15,
-			RebalanceCooldown:     2 * time.Second,
+			MinRebalanceInterval:     2 * time.Second,
 		},
 	}
 
@@ -400,7 +400,7 @@ func TestRefreshPartitions_WeightChange(t *testing.T) {
 		RestartDetectionRatio: 0.5,
 		Assignment: parti.AssignmentConfig{
 			MinRebalanceThreshold: 0.15,
-			RebalanceCooldown:     2 * time.Second,
+			MinRebalanceInterval:     2 * time.Second,
 		},
 	}
 
@@ -574,12 +574,12 @@ func TestRefreshPartitions_Cooldown(t *testing.T) {
 		ElectionTimeout:       1 * time.Second,
 		StartupTimeout:        5 * time.Second,
 		ShutdownTimeout:       2 * time.Second,
-		ColdStartWindow:       4 * time.Second, // Must be >= RebalanceCooldown
+		ColdStartWindow:       4 * time.Second, // Must be >= MinRebalanceInterval
 		PlannedScaleWindow:    2 * time.Second,
 		RestartDetectionRatio: 0.5,
 		Assignment: parti.AssignmentConfig{
 			MinRebalanceThreshold: 0.15,
-			RebalanceCooldown:     3 * time.Second, // Longer cooldown for this test
+			MinRebalanceInterval:     3 * time.Second, // Longer cooldown for this test
 		},
 	}
 

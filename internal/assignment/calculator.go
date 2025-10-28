@@ -846,6 +846,25 @@ func (c *Calculator) pollForChanges(ctx context.Context) error {
 // Parameters:
 //   - ctx: Context for cancellation
 //   - currentWorkers: Optional map of current workers (if nil, fetches from KV)
+//
+// checkForChanges evaluates worker topology changes and triggers rebalancing if needed.
+//
+// Implements three-tier timing model:
+//  1. Detection Speed (Tier 1) - Watcher/polling notices changes quickly
+//  2. Rate Limiting (Tier 3) - Check MinRebalanceInterval FIRST to prevent thrashing
+//  3. Stabilization (Tier 2) - Apply window AFTER rate limit passes
+//
+// Tier ordering is critical:
+//   - Rate limit (Tier 3) takes precedence over stabilization (Tier 2)
+//   - If rate limit is active, defer rebalance regardless of stabilization window
+//   - Only after rate limit expires do we enter stabilization windows
+//
+// Parameters:
+//   - ctx: Context for cancellation
+//   - currentWorkers: Optional set of active worker IDs (if empty, fetched from KV)
+//
+// Returns:
+//   - error: Processing error, nil on success
 func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[string]bool) error {
 	var workers map[string]bool
 
@@ -892,15 +911,24 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 		return nil
 	}
 
+	// TIER 3: Rate limiting - Enforce MinRebalanceInterval FIRST
+	// This prevents thrashing during rapid successive changes
 	if cooldownActive {
-		c.logger.Info("rebalance needed but cooldown active", "cooldown", c.cooldown)
+		timeSinceLastRebalance := time.Since(c.lastRebalance)
+		remaining := c.cooldown - timeSinceLastRebalance
+		c.logger.Info("worker change detected but rate limit active",
+			"min_rebalance_interval", c.cooldown,
+			"time_since_last", timeSinceLastRebalance,
+			"remaining", remaining,
+			"next_allowed", c.lastRebalance.Add(c.cooldown),
+		)
 
-		return nil
+		return nil // Defer - will be checked again by next poll/watcher event
 	}
 
 	c.logger.Info("worker change detected", "workers", len(workers))
 
-	// Detect rebalance type and trigger appropriate state transition
+	// TIER 2: Determine rebalance type and stabilization window
 	reason, window := c.detectRebalanceType(workers)
 
 	// Handle grace period for worker disappearance
@@ -923,7 +951,7 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 		// Emergency: immediate rebalance with no window
 		c.enterEmergencyState(ctx)
 	} else {
-		// Cold start or planned scale: use stabilization window
+		// Cold start or planned scale: use stabilization window (Tier 2)
 		c.enterScalingState(ctx, reason, window)
 	}
 

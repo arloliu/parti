@@ -43,7 +43,7 @@ func TestManager_LeadershipLoss_StateTransition(t *testing.T) {
 		PlannedScaleWindow:    500 * time.Millisecond,
 		RestartDetectionRatio: 0.5,
 		Assignment: AssignmentConfig{
-			RebalanceCooldown: 100 * time.Millisecond, // Short cooldown for testing fast detection
+			MinRebalanceInterval: 100 * time.Millisecond, // Short cooldown for testing fast detection
 		},
 	}
 

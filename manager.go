@@ -848,7 +848,7 @@ func (m *Manager) startCalculator(assignmentKV, heartbeatKV jetstream.KeyValue) 
 	)
 
 	// Configure calculator with settings from config
-	calc.SetCooldown(m.cfg.Assignment.RebalanceCooldown)
+	calc.SetCooldown(m.cfg.Assignment.MinRebalanceInterval)
 	calc.SetMinThreshold(m.cfg.Assignment.MinRebalanceThreshold)
 	calc.SetRestartDetectionRatio(m.cfg.RestartDetectionRatio)
 	calc.SetStabilizationWindows(m.cfg.ColdStartWindow, m.cfg.PlannedScaleWindow)

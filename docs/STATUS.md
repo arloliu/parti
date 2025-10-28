@@ -1,6 +1,6 @@
 # Parti Implementation Status
 
-**Last Updated**: October 28, 2025 (Phase 2 Refactoring Complete! 🎉)
+**Last Updated**: October 28, 2025 (Phase 3 Refactoring Complete! 🎉)
 
 ## Quick Summary
 
@@ -8,11 +8,40 @@
 🟢 **State Machine**: Fully implemented and tested ✨
 🟢 **Assignment Correctness**: All Phase 3 tests passing ✨
 🟢 **Dynamic Partition Discovery**: All Phase 4 tests passing ✨
-🟢 **Emergency Detection**: Hysteresis implemented - flapping prevented ✨ NEW
+🟢 **Emergency Detection**: Hysteresis implemented - flapping prevented ✨
+🟢 **Timing Model**: Three-tier system documented and validated ✨ NEW
 🟢 **Testing**: Integration tests optimized, 5-10x faster ✨
 🟡 **Production Ready**: Very close - reliability testing next (1-2 weeks)
 
 ## Recent Accomplishments (October 28, 2025)
+
+🎉 **Phase 3 Refactoring COMPLETE - Timing Consolidation & Semantic Clarity**
+- ✅ Renamed RebalanceCooldown → MinRebalanceInterval for semantic clarity
+- ✅ Three-tier timing model documented in config.go
+- ✅ Enhanced validation: MinRebalanceInterval ≤ PlannedScaleWindow/ColdStartWindow
+- ✅ Updated checkForChanges() with clear tier ordering documentation
+- ✅ All 100+ references updated across codebase
+- ✅ All unit tests passing with new naming
+
+✨ **Three-Tier Timing Model**
+- ✅ **Tier 1 (Detection)**: How fast we notice changes (watcher + polling)
+  - WatcherDebounce: 100ms (hardcoded)
+  - PollingInterval: HeartbeatTTL/2 (calculated fallback)
+- ✅ **Tier 2 (Stabilization)**: How long we wait before acting
+  - ColdStartWindow: 30s (full fleet startup)
+  - PlannedScaleWindow: 10s (gradual scaling)
+  - EmergencyWindow: 0s (immediate action)
+  - EmergencyGracePeriod: 1.5s (hysteresis)
+- ✅ **Tier 3 (Rate Limiting)**: How often we can rebalance
+  - MinRebalanceInterval: 10s (prevents thrashing)
+  - Checked FIRST before stabilization windows
+
+✨ **Semantic Improvements**
+- ✅ **MinRebalanceInterval** replaces "cooldown" terminology
+- ✅ Clear distinction: Rate limiting (Tier 3) vs Stabilization (Tier 2)
+- ✅ Tier ordering enforced: Rate limit → Stabilization → Execution
+- ✅ Comprehensive flow examples in config.go documentation
+- ✅ Validation ensures proper coordination between tiers
 
 🎉 **Phase 2 Refactoring COMPLETE - Emergency Detection with Hysteresis**
 - ✅ EmergencyDetector with hysteresis tracking implemented
