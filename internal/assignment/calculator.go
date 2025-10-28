@@ -680,15 +680,18 @@ func (c *Calculator) startWatcher(ctx context.Context) error {
 		return nil // Already started
 	}
 
-	// Watch all heartbeat keys with prefix
+	// Watch all heartbeat keys with prefix pattern
 	pattern := fmt.Sprintf("%s.*", c.hbPrefix)
-	watcher, err := c.heartbeatKV.WatchAll(ctx)
+	watcher, err := c.heartbeatKV.Watch(ctx, pattern)
 	if err != nil {
 		return fmt.Errorf("failed to start watcher: %w", err)
 	}
 
 	c.watcher = watcher
-	c.logger.Info("watcher started for fast worker detection", "pattern", pattern)
+	c.logger.Info("watcher started for fast worker detection",
+		"pattern", pattern,
+		"hbPrefix", c.hbPrefix,
+	)
 
 	// Start goroutine to process watcher events
 	go c.processWatcherEvents(ctx)
@@ -712,11 +715,15 @@ func (c *Calculator) stopWatcher() {
 
 // processWatcherEvents processes events from the NATS KV watcher.
 func (c *Calculator) processWatcherEvents(ctx context.Context) {
+	c.logger.Debug("watcher event processor goroutine started")
+	defer c.logger.Debug("watcher event processor goroutine stopped")
+
 	c.watcherMu.Lock()
 	watcher := c.watcher
 	c.watcherMu.Unlock()
 
 	if watcher == nil {
+		c.logger.Warn("watcher is nil, cannot process events")
 		return
 	}
 
@@ -734,10 +741,13 @@ func (c *Calculator) processWatcherEvents(ctx context.Context) {
 		case entry := <-watcher.Updates():
 			if entry == nil {
 				// Watcher stopped or initial replay done
+				c.logger.Debug("watcher: nil entry (replay done or stopped)")
 				continue
 			}
 
 			// Heartbeat key changed (worker added or updated)
+			c.logger.Debug("watcher: received entry", "key", entry.Key(), "operation", entry.Operation())
+
 			// Schedule a debounced check
 			if !pendingCheck {
 				pendingCheck = true

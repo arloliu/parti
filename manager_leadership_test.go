@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arloliu/parti/internal/logging"
 	"github.com/arloliu/parti/source"
 	"github.com/arloliu/parti/strategy"
 	partitest "github.com/arloliu/parti/testing"
@@ -25,6 +26,9 @@ func TestManager_LeadershipLoss_StateTransition(t *testing.T) {
 	// Setup embedded NATS
 	_, nc := partitest.StartEmbeddedNATS(t)
 
+	// Create test logger for debugging
+	logger := logging.NewTest(t)
+
 	cfg := Config{
 		WorkerIDPrefix:        "worker",
 		WorkerIDMin:           0,
@@ -38,6 +42,9 @@ func TestManager_LeadershipLoss_StateTransition(t *testing.T) {
 		ColdStartWindow:       1 * time.Second,
 		PlannedScaleWindow:    500 * time.Millisecond,
 		RestartDetectionRatio: 0.5,
+		Assignment: AssignmentConfig{
+			RebalanceCooldown: 100 * time.Millisecond, // Short cooldown for testing fast detection
+		},
 	}
 
 	// Create partition source
@@ -64,7 +71,7 @@ func TestManager_LeadershipLoss_StateTransition(t *testing.T) {
 	}
 
 	// Create first worker
-	mgr1, err := NewManager(&cfg, nc, src, strategy, WithHooks(hooks))
+	mgr1, err := NewManager(&cfg, nc, src, strategy, WithHooks(hooks), WithLogger(logger))
 	require.NoError(t, err)
 
 	err = mgr1.Start(ctx)
@@ -83,18 +90,23 @@ func TestManager_LeadershipLoss_StateTransition(t *testing.T) {
 	t.Log("Worker 1 is leader and stable")
 
 	// Create second worker (will trigger scaling in leader)
-	mgr2, err := NewManager(&cfg, nc, src, strategy)
+	mgr2, err := NewManager(&cfg, nc, src, strategy, WithLogger(logger))
 	require.NoError(t, err)
 
-	// Start in background, may or may not succeed (that's okay for this test)
+	// Track mgr2 start result
+	mgr2Started := make(chan error, 1)
 	go func() {
 		startCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_ = mgr2.Start(startCtx) // Ignore error, focus is on mgr1's state transition
+		mgr2Started <- mgr2.Start(startCtx)
 	}()
 
-	// Give it a moment to connect
-	time.Sleep(500 * time.Millisecond)
+	// Wait for mgr2 to reach a stable state (either WaitingAssignment or Stable)
+	require.Eventually(t, func() bool {
+		state := mgr2.State()
+		t.Logf("Worker 2 state: %s", state.String())
+		return state == StateWaitingAssignment || state == StateStable
+	}, 3*time.Second, 100*time.Millisecond, "worker 2 did not start successfully")
 
 	// Wait for leader to detect new worker and enter Scaling state
 	require.Eventually(t, func() bool {
@@ -137,5 +149,5 @@ func TestManager_LeadershipLoss_StateTransition(t *testing.T) {
 	}
 
 	require.True(t, foundValidExit, "did not find valid exit from Scaling state")
-	t.Log("✅ Successfully transitioned out of Scaling state")
+	t.Log("Successfully transitioned out of Scaling state")
 }

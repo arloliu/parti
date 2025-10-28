@@ -96,10 +96,10 @@ func TestWatcher_FastDetection(t *testing.T) {
 		detectionLatency.Milliseconds())
 
 	if detectionLatency < 3*time.Second {
-		t.Logf("✅ Detection+rebalancing in %dms indicates watcher is working well",
+		t.Logf("Detection+rebalancing in %dms indicates watcher is working well",
 			detectionLatency.Milliseconds())
 	} else {
-		t.Logf("ℹ️  Detection+rebalancing in %dms (within tolerance, may include stabilization delays)",
+		t.Logf("Detection+rebalancing in %dms (within tolerance, may include stabilization delays)",
 			detectionLatency.Milliseconds())
 	}
 
@@ -184,9 +184,9 @@ func TestWatcher_NoDoubleTriggering(t *testing.T) {
 		"version should increment by 1-2 (no duplicate triggers), got delta=%d", versionDelta)
 
 	if versionDelta == 1 {
-		t.Log("✅ Version incremented by 1 - no duplicate triggering detected")
+		t.Log("Version incremented by 1 - no duplicate triggering detected")
 	} else {
-		t.Logf("⚠️  Version incremented by %d - possible duplicate trigger but within tolerance", versionDelta)
+		t.Logf("Version incremented by %d - possible duplicate trigger but within tolerance", versionDelta)
 	}
 
 	t.Log("Test passed - no excessive rebalancing detected")
