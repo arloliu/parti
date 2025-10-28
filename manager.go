@@ -597,6 +597,10 @@ func (m *Manager) transitionState(from, to State) {
 
 // isValidTransition validates that a state transition is allowed.
 //
+// Valid transitions after Phase 1 refactoring:
+//   - Removed Scaling→Stable direct transition (was workaround for polling lag)
+//   - All transitions now properly sequenced through calculator state changes
+//
 // Returns:
 //   - bool: true if transition is valid, false otherwise
 func (m *Manager) isValidTransition(from, to State) bool {
@@ -607,10 +611,10 @@ func (m *Manager) isValidTransition(from, to State) bool {
 		StateElection:          {StateWaitingAssignment, StateShutdown},
 		StateWaitingAssignment: {StateStable, StateShutdown},
 		StateStable:            {StateScaling, StateRebalancing, StateEmergency, StateShutdown},
-		StateScaling:           {StateRebalancing, StateStable, StateWaitingAssignment, StateShutdown}, // Added Stable and WaitingAssignment for leadership loss
-		StateRebalancing:       {StateStable, StateWaitingAssignment, StateShutdown},                   // Added WaitingAssignment for leadership loss
-		StateEmergency:         {StateStable, StateWaitingAssignment, StateShutdown},                   // Added WaitingAssignment for leadership loss
-		StateShutdown:          {},                                                                     // Terminal state - no transitions allowed
+		StateScaling:           {StateRebalancing, StateWaitingAssignment, StateShutdown}, // Removed Stable (no longer needed)
+		StateRebalancing:       {StateStable, StateWaitingAssignment, StateShutdown},      // Added WaitingAssignment for leadership loss
+		StateEmergency:         {StateStable, StateWaitingAssignment, StateShutdown},      // Added WaitingAssignment for leadership loss
+		StateShutdown:          {},                                                        // Terminal state - no transitions allowed
 	}
 
 	allowedStates, exists := validTransitions[from]
@@ -872,6 +876,10 @@ func (m *Manager) startCalculator(assignmentKV, heartbeatKV jetstream.KeyValue) 
 
 // monitorCalculatorState monitors the calculator's internal state and syncs it to Manager state.
 //
+// This goroutine listens to the Calculator's state change channel and updates
+// the Manager's state machine accordingly. Replaces the previous polling-based
+// approach (200ms ticker) with event-driven synchronization for zero-lag updates.
+//
 // This method runs only on the leader and translates calculator states to Manager states:
 //   - types.CalcStateScaling → StateScaling
 //   - types.CalcStateRebalancing → StateRebalancing
@@ -880,70 +888,74 @@ func (m *Manager) startCalculator(assignmentKV, heartbeatKV jetstream.KeyValue) 
 func (m *Manager) monitorCalculatorState() {
 	defer m.wg.Done()
 
-	ticker := time.NewTicker(200 * time.Millisecond) // Check calculator state 5x per second
-	defer ticker.Stop()
-
-	lastCalcState := types.CalcStateIdle
+	m.logger.Info("starting calculator state monitor")
 
 	for {
 		select {
 		case <-m.ctx.Done():
+			m.logger.Info("calculator state monitor stopped")
 			return
-		case <-ticker.C:
-			// Safely read calculator with mutex protection
-			m.mu.RLock()
-			calc := m.calculator
-			m.mu.RUnlock()
 
-			if calc == nil {
-				// Calculator stopped (lost leadership)
-				return
-			}
-
-			// Get current calculator state
-			calcState := calc.GetState()
-
-			// Only transition if state changed
-			if calcState == lastCalcState {
-				continue
-			}
-
-			lastCalcState = calcState
-			currentState := m.State()
-
-			// Map calculator state to Manager state
-			switch calcState {
-			case types.CalcStateScaling:
-				// Calculator entered scaling window
-				if currentState == StateStable {
-					m.transitionState(currentState, StateScaling)
-				}
-
-			case types.CalcStateRebalancing:
-				// Calculator started rebalancing
-				if currentState == StateScaling || currentState == StateEmergency || currentState == StateStable {
-					// From Scaling, Emergency, or direct from Stable (manual trigger)
-					m.transitionState(currentState, StateRebalancing)
-				}
-
-			case types.CalcStateEmergency:
-				// Calculator detected worker crash
-				if currentState == StateStable {
-					m.transitionState(currentState, StateEmergency)
-				}
-
-			case types.CalcStateIdle:
-				// Calculator returned to idle after rebalancing
-				if currentState == StateRebalancing || currentState == StateScaling || currentState == StateEmergency {
-					// From any leader state back to Stable
-					m.transitionState(currentState, StateStable)
-				}
-
-			default:
-				// Unknown calculator state - no action needed
+		case calcState := <-m.calculator.StateChanges():
+			// Synchronize Manager state based on Calculator state
+			if err := m.syncStateFromCalculator(calcState); err != nil {
+				m.logError("failed to sync state from calculator",
+					"calc_state", calcState,
+					"error", err,
+				)
 			}
 		}
 	}
+}
+
+// syncStateFromCalculator updates Manager state based on Calculator state.
+//
+// State mapping:
+//   - CalcStateIdle       → StateStable (if Manager is in active state)
+//   - CalcStateScaling    → StateScaling
+//   - CalcStateRebalancing → StateRebalancing
+//   - CalcStateEmergency  → StateEmergency
+//
+// Parameters:
+//   - calcState: Current calculator state to synchronize with
+//
+// Returns:
+//   - error: State transition error if invalid transition attempted
+func (m *Manager) syncStateFromCalculator(calcState types.CalculatorState) error {
+	currentState := m.State()
+
+	// Skip if Manager is in initialization or shutdown states
+	if currentState == StateInit || currentState == StateClaimingID ||
+		currentState == StateElection || currentState == StateWaitingAssignment ||
+		currentState == StateShutdown {
+		return nil
+	}
+
+	var targetState State
+
+	switch calcState {
+	case types.CalcStateIdle:
+		targetState = StateStable
+
+	case types.CalcStateScaling:
+		targetState = StateScaling
+
+	case types.CalcStateRebalancing:
+		targetState = StateRebalancing
+
+	case types.CalcStateEmergency:
+		targetState = StateEmergency
+
+	default:
+		return fmt.Errorf("unknown calculator state: %v", calcState)
+	}
+
+	// Only transition if state actually changed
+	if currentState != targetState {
+		m.transitionState(currentState, targetState)
+	}
+
+	return nil
 }
 
 // stopCalculator stops the assignment calculator.

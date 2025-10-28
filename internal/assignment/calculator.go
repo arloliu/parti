@@ -60,6 +60,9 @@ type Calculator struct {
 	scalingReason string          // Reason: "cold_start", "planned_scale", "emergency", "restart"
 	lastWorkers   map[string]bool // Previous worker set for comparison
 
+	// State change notification
+	stateChangeChan chan types.CalculatorState // Buffered channel for non-blocking state emission
+
 	// Hybrid monitoring: watcher (primary) + polling (fallback)
 	watcher   jetstream.KeyWatcher
 	watcherMu sync.Mutex // Protects watcher lifecycle
@@ -112,6 +115,7 @@ func NewCalculator(
 		currentWorkers:     make(map[string]bool),
 		currentAssignments: make(map[string][]types.Partition),
 		lastWorkers:        make(map[string]bool),
+		stateChangeChan:    make(chan types.CalculatorState, 1), // Buffered for non-blocking
 		stopCh:             make(chan struct{}),
 		doneCh:             make(chan struct{}),
 	}
@@ -194,6 +198,39 @@ func (c *Calculator) SetLogger(l types.Logger) {
 		c.logger = logging.NewNop()
 	} else {
 		c.logger = l
+	}
+}
+
+// StateChanges returns a read-only channel for monitoring calculator state transitions.
+//
+// The Manager should listen to this channel to synchronize its state machine
+// with the calculator's state without polling. Channel is buffered (size 1)
+// to prevent blocking the calculator.
+//
+// Returns:
+//   - <-chan types.CalculatorState: Read-only state change notification channel
+func (c *Calculator) StateChanges() <-chan types.CalculatorState {
+	return c.stateChangeChan
+}
+
+// emitStateChange notifies listeners of calculator state change.
+//
+// Non-blocking: uses select with default to prevent calculator stalls.
+// If the channel is full (Manager hasn't read previous state), the emission
+// is skipped. This is acceptable as the Manager will get the latest state
+// on its next read.
+//
+// Parameters:
+//   - state: New calculator state to emit
+func (c *Calculator) emitStateChange(state types.CalculatorState) {
+	select {
+	case c.stateChangeChan <- state:
+		// State change sent successfully
+		c.logger.Debug("emitted state change", "state", state)
+	default:
+		// Channel full (Manager hasn't read previous state yet)
+		// This is OK - Manager will get the latest state on next read
+		c.logger.Debug("skipped state emission (channel full)", "state", state)
 	}
 }
 
@@ -508,6 +545,9 @@ func (c *Calculator) enterScalingState(ctx context.Context, reason string, windo
 		"window", window,
 	)
 
+	// Notify Manager of state change
+	c.emitStateChange(types.CalcStateScaling)
+
 	// Start timer for scaling window
 	go func() {
 		c.logger.Info("scaling timer goroutine started", "window", window)
@@ -535,6 +575,9 @@ func (c *Calculator) enterRebalancingState(ctx context.Context) {
 	c.calcState.Store(int32(types.CalcStateRebalancing))
 
 	c.logger.Info("entering rebalancing state")
+
+	// Notify Manager of state change
+	c.emitStateChange(types.CalcStateRebalancing)
 
 	// Perform rebalance
 	if err := c.rebalance(ctx, c.scalingReason); err != nil {
@@ -573,6 +616,9 @@ func (c *Calculator) enterEmergencyState(ctx context.Context) {
 
 	c.logger.Warn("entering emergency state - immediate rebalance")
 
+	// Notify Manager of state change
+	c.emitStateChange(types.CalcStateEmergency)
+
 	// Perform immediate rebalance
 	if err := c.rebalance(ctx, "emergency"); err != nil {
 		c.logger.Error("emergency rebalancing failed", "error", err)
@@ -603,6 +649,9 @@ func (c *Calculator) returnToIdleState() {
 	c.mu.Unlock()
 
 	c.logger.Info("returned to idle state")
+
+	// Notify Manager of state change
+	c.emitStateChange(types.CalcStateIdle)
 }
 
 // selectStabilizationWindow chooses between cold start and planned scale window.
