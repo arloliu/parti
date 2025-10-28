@@ -78,6 +78,15 @@ type Config struct {
 	// Recommended: 10 seconds.
 	PlannedScaleWindow time.Duration `yaml:"plannedScaleWindow"`
 
+	// EmergencyGracePeriod is the minimum time a worker must be missing before
+	// triggering emergency rebalance. Prevents false positives from transient
+	// network issues or brief connectivity loss.
+	//
+	// Default: 0 (auto-calculated as 1.5 * HeartbeatInterval)
+	// Recommended: 1.5-2.0 * HeartbeatInterval
+	// Constraint: Must be <= HeartbeatTTL
+	EmergencyGracePeriod time.Duration `yaml:"emergencyGracePeriod"`
+
 	// RestartDetectionRatio determines when a restart is classified as cold start vs planned.
 	// If (failed workers / total workers) > ratio, it's treated as a cold start.
 	// For example, 0.5 means if >50% of workers fail simultaneously, use ColdStartWindow.
@@ -169,6 +178,10 @@ func SetDefaults(cfg *Config) {
 	}
 	if cfg.PlannedScaleWindow == 0 {
 		cfg.PlannedScaleWindow = defaults.PlannedScaleWindow
+	}
+	if cfg.EmergencyGracePeriod == 0 {
+		// Default: 1.5x HeartbeatInterval (allows one missed heartbeat)
+		cfg.EmergencyGracePeriod = time.Duration(float64(cfg.HeartbeatInterval) * 1.5)
 	}
 	if cfg.RestartDetectionRatio == 0 {
 		cfg.RestartDetectionRatio = defaults.RestartDetectionRatio
@@ -297,6 +310,14 @@ func (cfg *Config) Validate() error {
 		return fmt.Errorf(
 			"RebalanceCooldown (%v) should not exceed ColdStartWindow (%v)",
 			cfg.Assignment.RebalanceCooldown, cfg.ColdStartWindow,
+		)
+	}
+
+	// Rule 7: EmergencyGracePeriod sanity
+	if cfg.EmergencyGracePeriod > cfg.HeartbeatTTL {
+		return fmt.Errorf(
+			"EmergencyGracePeriod (%v) must be <= HeartbeatTTL (%v)",
+			cfg.EmergencyGracePeriod, cfg.HeartbeatTTL,
 		)
 	}
 

@@ -364,6 +364,7 @@ func setupCalculatorForWatcherTest(t *testing.T) (*Calculator, jetstream.KeyValu
 		strategy,
 		"heartbeat",
 		5*time.Second,
+		2*time.Second, // Emergency grace period
 	)
 	calc.SetLogger(logging.NewTest(t))
 

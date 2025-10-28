@@ -37,6 +37,7 @@ func TestCalculatorCooldown(t *testing.T) {
 			assignmentStrategy,
 			"worker",
 			5*time.Second,
+			2*time.Second, // Emergency grace period
 		)
 
 		// Default cooldown should be 10s
@@ -65,6 +66,7 @@ func TestCalculatorCooldown(t *testing.T) {
 			assignmentStrategy,
 			"worker",
 			5*time.Second,
+			2*time.Second, // Emergency grace period
 		)
 
 		// Set custom cooldown

@@ -842,8 +842,9 @@ func (m *Manager) startCalculator(assignmentKV, heartbeatKV jetstream.KeyValue) 
 		"assignment", // Prefix for assignment keys
 		m.source,
 		m.strategy,
-		"heartbeat", // Prefix for heartbeat keys
-		m.cfg.HeartbeatTTL,
+		"heartbeat",                // Prefix for heartbeat keys
+		m.cfg.HeartbeatTTL,         // Heartbeat TTL for worker liveness detection
+		m.cfg.EmergencyGracePeriod, // Emergency grace period for hysteresis
 	)
 
 	// Configure calculator with settings from config

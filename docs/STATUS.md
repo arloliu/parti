@@ -1,17 +1,44 @@
 # Parti Implementation Status
 
-**Last Updated**: October 27, 2025 (Phase 4 Complete! 🎉)
+**Last Updated**: October 28, 2025 (Phase 2 Refactoring Complete! 🎉)
 
 ## Quick Summary
 
 🟢 **Foundation**: Core components work
 🟢 **State Machine**: Fully implemented and tested ✨
 🟢 **Assignment Correctness**: All Phase 3 tests passing ✨
-🟢 **Dynamic Partition Discovery**: All Phase 4 tests passing ✨ NEW
+🟢 **Dynamic Partition Discovery**: All Phase 4 tests passing ✨
+🟢 **Emergency Detection**: Hysteresis implemented - flapping prevented ✨ NEW
 🟢 **Testing**: Integration tests optimized, 5-10x faster ✨
 🟡 **Production Ready**: Very close - reliability testing next (1-2 weeks)
 
-## Recent Accomplishments (October 27, 2025)
+## Recent Accomplishments (October 28, 2025)
+
+🎉 **Phase 2 Refactoring COMPLETE - Emergency Detection with Hysteresis**
+- ✅ EmergencyDetector with hysteresis tracking implemented
+- ✅ Grace period prevents flapping from transient network issues
+- ✅ Configurable EmergencyGracePeriod (default: 1.5 × HeartbeatInterval)
+- ✅ Restart detection removed - simplified to 3 rebalance cases
+- ✅ Config validation added: EmergencyGracePeriod ≤ HeartbeatTTL
+- ✅ All unit tests passing (7 emergency detector tests, 9.6s runtime)
+- ✅ Integration tests created (3 tests verifying hysteresis behavior)
+- ✅ 54 test call sites updated for new Calculator signature
+
+✨ **Emergency Detection Changes**
+- ✅ **Hysteresis Tracking**: Workers must be missing for grace period before emergency
+- ✅ **Transient Recovery**: Workers that reappear within grace period don't trigger emergency
+- ✅ **Confirmed Failures**: Only sustained disappearances (>grace period) trigger rebalance
+- ✅ **Reset After Rebalance**: Emergency tracking cleared after successful assignment
+- ✅ **Simplified Logic**: Removed ambiguous restart detection (>50% missing)
+- ✅ **3 Rebalance Types**: Emergency (with hysteresis), Cold Start (0→N), Planned Scale (N→M)
+
+✨ **Configuration Enhancements**
+- ✅ **EmergencyGracePeriod** field added to Config
+- ✅ Default calculation: 1.5 × HeartbeatInterval (customizable)
+- ✅ Validation Rule 7: EmergencyGracePeriod must be ≤ HeartbeatTTL
+- ✅ Integration with Calculator: grace period passed to NewCalculator()
+
+## Previous Accomplishments (October 27, 2025)
 
 🎉 **Phase 4 COMPLETE - Dynamic Partition Discovery**
 - ✅ All 12 Phase 4 tests passing in 11.69s (excellent parallelization)

@@ -60,6 +60,9 @@ type Calculator struct {
 	scalingReason string          // Reason: "cold_start", "planned_scale", "emergency", "restart"
 	lastWorkers   map[string]bool // Previous worker set for comparison
 
+	// Emergency detection
+	emergencyDetector *EmergencyDetector // Hysteresis-based emergency detection
+
 	// State change notification
 	stateChangeChan chan types.CalculatorState // Buffered channel for non-blocking state emission
 
@@ -85,6 +88,7 @@ type Calculator struct {
 //   - strategy: Assignment strategy for distributing partitions
 //   - hbPrefix: Heartbeat key prefix for monitoring workers
 //   - hbTTL: Heartbeat TTL duration for detecting dead workers
+//   - emergencyGracePeriod: Minimum time workers must be missing before emergency (hysteresis)
 //
 // Returns:
 //   - *Calculator: New calculator instance ready to start
@@ -96,6 +100,7 @@ func NewCalculator(
 	strategy types.AssignmentStrategy,
 	hbPrefix string,
 	hbTTL time.Duration,
+	emergencyGracePeriod time.Duration,
 ) *Calculator {
 	c := &Calculator{
 		assignmentKV:       assignmentKV,
@@ -121,6 +126,9 @@ func NewCalculator(
 	}
 	// Initialize calculator state to Idle
 	c.calcState.Store(int32(types.CalcStateIdle))
+
+	// Initialize emergency detector with configured grace period
+	c.emergencyDetector = NewEmergencyDetector(emergencyGracePeriod)
 
 	return c
 }
@@ -439,78 +447,67 @@ func (c *Calculator) initialAssignment(ctx context.Context) error {
 
 // detectRebalanceType determines the type of rebalance needed based on worker topology changes.
 //
+// Simplified logic (Phase 2):
+//   - Worker(s) disappeared → Emergency (with hysteresis check via EmergencyDetector)
+//   - Cold start (0 workers) → Cold Start (30s window)
+//   - Worker(s) added → Planned Scale (10s window)
+//
+// Removed restart detection (missingRatio > 0.5) as it's ambiguous:
+// If >50% capacity disappears, it's always an emergency regardless of cause.
+//
 // This method analyzes worker count changes to classify the rebalance scenario:
+//   - Emergency: Workers disappeared beyond grace period → No window, immediate rebalance
 //   - Cold start: Starting from 0 workers → Use 30s stabilization window
-//   - Restart: >50% workers disappeared and rejoined → Use 30s window (like cold start)
-//   - Emergency: One or more workers disappeared (crash) → No window, immediate rebalance
 //   - Planned scale: Gradual worker additions → Use 10s stabilization window
 //
 // Parameters:
 //   - currentWorkers: Current set of active workers
 //
 // Returns:
-//   - reason: Rebalance type ("cold_start", "restart", "emergency", "planned_scale")
-//   - window: Stabilization window duration
+//   - reason: Rebalance type ("emergency", "cold_start", "planned_scale", or "" if in grace period)
+//   - window: Stabilization window duration (0 for emergency or during grace period)
 func (c *Calculator) detectRebalanceType(currentWorkers map[string]bool) (reason string, window time.Duration) {
 	prevCount := len(c.lastWorkers)
 	currCount := len(currentWorkers)
 
-	// Emergency: Worker(s) disappeared (crash scenario)
+	// Case 1: Worker(s) disappeared - Check for emergency with hysteresis
 	if currCount < prevCount {
-		// Find which workers disappeared
-		disappeared := make([]string, 0)
-		for workerID := range c.lastWorkers {
-			if !currentWorkers[workerID] {
-				disappeared = append(disappeared, workerID)
-			}
+		emergency, disappearedWorkers := c.emergencyDetector.CheckEmergency(c.lastWorkers, currentWorkers)
+
+		if emergency {
+			c.logger.Warn("emergency: workers disappeared beyond grace period",
+				"disappeared", disappearedWorkers,
+				"prev_count", prevCount,
+				"curr_count", currCount,
+			)
+
+			return "emergency", 0 // No stabilization - immediate action
 		}
-		c.logger.Warn("workers disappeared - emergency rebalance",
-			"disappeared", disappeared,
+
+		// Still in grace period - no action yet
+		c.logger.Info("workers disappeared but within grace period",
 			"prev_count", prevCount,
 			"curr_count", currCount,
 		)
 
-		return "emergency", 0 // No stabilization window
+		return "", 0 // Wait for grace period to expire
 	}
 
-	// Cold start: Starting from 0 workers
-	if prevCount == 0 && currCount >= 1 {
+	// Case 2: Cold start - First workers joining
+	if prevCount == 0 {
 		c.logger.Info("cold start detected",
-			"workers", currCount,
+			"worker_count", currCount,
+			"window", c.coldStartWindow,
 		)
 
 		return "cold_start", c.coldStartWindow
 	}
 
-	// Restart detection: Many workers disappeared then rejoined quickly
-	// This happens when the entire system restarts (e.g., deployment)
-	if prevCount > 0 {
-		// Calculate how many workers from previous set are missing
-		missingCount := 0
-		for workerID := range c.lastWorkers {
-			if !currentWorkers[workerID] {
-				missingCount++
-			}
-		}
-
-		// If more than restartRatio of workers changed, treat as restart
-		missingRatio := float64(missingCount) / float64(prevCount)
-		if missingRatio > c.restartRatio {
-			c.logger.Info("restart detected",
-				"prev_count", prevCount,
-				"curr_count", currCount,
-				"missing", missingCount,
-				"missing_ratio", missingRatio,
-			)
-
-			return "restart", c.coldStartWindow // Use cold start window
-		}
-	}
-
-	// Planned scale: Gradual worker additions
+	// Case 3: Planned scale - Worker(s) added
 	c.logger.Info("planned scale detected",
 		"prev_count", prevCount,
 		"curr_count", currCount,
+		"window", c.plannedScaleWin,
 	)
 
 	return "planned_scale", c.plannedScaleWin
@@ -635,6 +632,9 @@ func (c *Calculator) enterEmergencyState(ctx context.Context) {
 		c.lastWorkers[w] = true
 	}
 	c.mu.Unlock()
+
+	// Reset emergency detector after successful emergency rebalance
+	c.emergencyDetector.Reset()
 
 	// Successfully rebalanced, return to idle
 	c.returnToIdleState()
@@ -903,6 +903,13 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 	// Detect rebalance type and trigger appropriate state transition
 	reason, window := c.detectRebalanceType(workers)
 
+	// Handle grace period for worker disappearance
+	if reason == "" {
+		c.logger.Info("worker change in grace period - waiting for confirmation")
+		// Don't update lastWorkers - keep tracking the disappeared workers
+		return nil
+	}
+
 	// Update lastWorkers for next comparison
 	c.mu.Lock()
 	c.lastWorkers = make(map[string]bool)
@@ -916,7 +923,7 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 		// Emergency: immediate rebalance with no window
 		c.enterEmergencyState(ctx)
 	} else {
-		// Cold start, planned scale, or restart: use stabilization window
+		// Cold start or planned scale: use stabilization window
 		c.enterScalingState(ctx, reason, window)
 	}
 

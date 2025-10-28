@@ -25,7 +25,7 @@ func TestCalculator_ScalingTransition_TimerFires(t *testing.T) {
 	}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test", src, strategy, "heartbeat", 5*time.Second)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test", src, strategy, "heartbeat", 5*time.Second, 1*time.Second)
 	calc.SetStabilizationWindows(100*time.Millisecond, 50*time.Millisecond) // Very short windows for testing
 
 	ctx := context.Background()
@@ -62,7 +62,7 @@ func TestCalculator_ScalingTransition_WithRealStart(t *testing.T) {
 	}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test", src, strategy, "heartbeat", 1*time.Second)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test", src, strategy, "heartbeat", 1*time.Second, 500*time.Millisecond)
 	calc.SetStabilizationWindows(500*time.Millisecond, 250*time.Millisecond) // Short windows for testing
 	calc.SetCooldown(0)                                                      // No cooldown for this test
 
@@ -121,7 +121,7 @@ func TestCalculator_ScalingTransition_ContextCancellation(t *testing.T) {
 	}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test", src, strategy, "heartbeat", 5*time.Second)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test", src, strategy, "heartbeat", 5*time.Second, 1*time.Second)
 	calc.SetStabilizationWindows(2*time.Second, 1*time.Second) // Long window
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -155,7 +155,7 @@ func TestCalculator_ScalingTransition_StopBeforeWindow(t *testing.T) {
 	}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test", src, strategy, "heartbeat", 5*time.Second)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test", src, strategy, "heartbeat", 5*time.Second, 1*time.Second)
 	calc.SetStabilizationWindows(2*time.Second, 1*time.Second) // Long window
 	calc.SetCooldown(0)
 
@@ -195,7 +195,7 @@ func TestCalculator_ScalingTransition_RapidStateChanges(t *testing.T) {
 	}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test", src, strategy, "heartbeat", 500*time.Millisecond)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test", src, strategy, "heartbeat", 500*time.Millisecond, 300*time.Millisecond)
 	calc.SetStabilizationWindows(300*time.Millisecond, 150*time.Millisecond)
 	calc.SetCooldown(0)
 

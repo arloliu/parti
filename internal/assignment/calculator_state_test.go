@@ -18,7 +18,7 @@ func TestCalculator_detectRebalanceType_ColdStart(t *testing.T) {
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second, 5*time.Second)
 
 	// Cold start: 0 → 3 workers
 	currentWorkers := map[string]bool{
@@ -42,7 +42,7 @@ func TestCalculator_detectRebalanceType_PlannedScale(t *testing.T) {
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second, 5*time.Second)
 
 	// Set up previous workers
 	calc.lastWorkers = map[string]bool{
@@ -74,7 +74,7 @@ func TestCalculator_detectRebalanceType_Emergency(t *testing.T) {
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second, 5*time.Second)
 
 	// Set up previous workers
 	calc.lastWorkers = map[string]bool{
@@ -89,8 +89,17 @@ func TestCalculator_detectRebalanceType_Emergency(t *testing.T) {
 		"worker-1": true,
 	}
 
+	// First check - should return empty (grace period)
 	reason, window := calc.detectRebalanceType(currentWorkers)
+	require.Equal(t, "", reason, "Should be in grace period initially")
+	require.Equal(t, time.Duration(0), window)
 
+	// Wait for grace period to expire (grace period = 0.75 * 10s = 7.5s)
+	// For testing, we can directly simulate by waiting longer or using the emergency detector
+	time.Sleep(8 * time.Second)
+
+	// Second check - should now be emergency
+	reason, window = calc.detectRebalanceType(currentWorkers)
 	require.Equal(t, "emergency", reason)
 	require.Equal(t, time.Duration(0), window)
 }
@@ -103,8 +112,8 @@ func TestCalculator_detectRebalanceType_Restart(t *testing.T) {
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second)
-	calc.SetRestartDetectionRatio(0.5) // 50% threshold
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second, 5*time.Second)
+	calc.SetRestartDetectionRatio(0.5) // 50% threshold (not used anymore - removed restart detection)
 
 	// Set up previous workers (10 workers)
 	calc.lastWorkers = map[string]bool{
@@ -120,7 +129,9 @@ func TestCalculator_detectRebalanceType_Restart(t *testing.T) {
 		"worker-9": true,
 	}
 
-	// Restart: 10 → 10 workers, but 6 workers changed (60% > 50% threshold)
+	// Phase 2: Restart detection removed - now treated as planned scale
+	// 10 → 10 workers, but 6 workers changed (60% > 50% threshold)
+	// Since worker count stayed same (10 → 10), this is now "planned_scale" not "restart"
 	currentWorkers := map[string]bool{
 		"worker-0":  true,
 		"worker-1":  true,
@@ -136,9 +147,10 @@ func TestCalculator_detectRebalanceType_Restart(t *testing.T) {
 
 	reason, window := calc.detectRebalanceType(currentWorkers)
 
-	require.Equal(t, "restart", reason)
-	require.Equal(t, calc.coldStartWindow, window)
-	require.Equal(t, 30*time.Second, window)
+	// Phase 2: This is now treated as planned scale since count stayed same
+	require.Equal(t, "planned_scale", reason)
+	require.Equal(t, calc.plannedScaleWin, window)
+	require.Equal(t, 10*time.Second, window)
 }
 
 func TestCalculator_detectRebalanceType_MultipleWorkersCrashed(t *testing.T) {
@@ -149,7 +161,7 @@ func TestCalculator_detectRebalanceType_MultipleWorkersCrashed(t *testing.T) {
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second, 5*time.Second)
 
 	// Set up previous workers
 	calc.lastWorkers = map[string]bool{
@@ -166,8 +178,16 @@ func TestCalculator_detectRebalanceType_MultipleWorkersCrashed(t *testing.T) {
 		"worker-1": true,
 	}
 
+	// First check - should return empty (grace period)
 	reason, window := calc.detectRebalanceType(currentWorkers)
+	require.Equal(t, "", reason, "Should be in grace period initially")
+	require.Equal(t, time.Duration(0), window)
 
+	// Wait for grace period to expire (grace period = 0.75 * 10s = 7.5s)
+	time.Sleep(8 * time.Second)
+
+	// Second check - should now be emergency
+	reason, window = calc.detectRebalanceType(currentWorkers)
 	require.Equal(t, "emergency", reason)
 	require.Equal(t, time.Duration(0), window)
 }
@@ -180,7 +200,7 @@ func TestCalculator_StateTransitions_GetState(t *testing.T) {
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second, 5*time.Second)
 
 	// Initial state should be Idle
 	require.Equal(t, types.CalcStateIdle, calc.GetState())
@@ -205,7 +225,7 @@ func TestCalculator_StateTransitions_Scaling(t *testing.T) {
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second, 5*time.Second)
 
 	ctx := context.Background()
 
@@ -232,7 +252,7 @@ func TestCalculator_StateTransitions_Emergency(t *testing.T) {
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second, 5*time.Second)
 
 	ctx := context.Background()
 
@@ -259,7 +279,7 @@ func TestCalculator_StateTransitions_ReturnToIdle(t *testing.T) {
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second, 5*time.Second)
 
 	// Manually set state to Rebalancing
 	calc.calcState.Store(int32(types.CalcStateRebalancing))
@@ -282,7 +302,7 @@ func TestCalculator_StateTransitions_PreventsConcurrentRebalance(t *testing.T) {
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 1*time.Second)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 1*time.Second, 500*time.Millisecond)
 	calc.SetCooldown(100 * time.Millisecond)
 	calc.SetStabilizationWindows(500*time.Millisecond, 300*time.Millisecond) // Fast windows for test
 
@@ -329,7 +349,7 @@ func TestCalculator_StateTransitions_CooldownPreventsRebalance(t *testing.T) {
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 1*time.Second)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 1*time.Second, 500*time.Millisecond)
 	calc.SetCooldown(500 * time.Millisecond)
 	calc.SetStabilizationWindows(500*time.Millisecond, 300*time.Millisecond) // Fast windows for test
 

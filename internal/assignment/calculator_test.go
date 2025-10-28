@@ -60,7 +60,7 @@ func TestCalculator_SetMethods(t *testing.T) {
 		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
 		strategy := &mockStrategy{}
 
-		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second, 3*time.Second)
 		calc.SetCooldown(5 * time.Second)
 
 		require.Equal(t, 5*time.Second, calc.cooldown)
@@ -74,7 +74,7 @@ func TestCalculator_SetMethods(t *testing.T) {
 		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
 		strategy := &mockStrategy{}
 
-		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second, 3*time.Second)
 		calc.SetMinThreshold(0.3)
 
 		require.Equal(t, 0.3, calc.minThreshold)
@@ -88,7 +88,7 @@ func TestCalculator_SetMethods(t *testing.T) {
 		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
 		strategy := &mockStrategy{}
 
-		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second, 3*time.Second)
 		calc.SetRestartDetectionRatio(0.7)
 
 		require.Equal(t, 0.7, calc.restartRatio)
@@ -102,7 +102,7 @@ func TestCalculator_SetMethods(t *testing.T) {
 		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
 		strategy := &mockStrategy{}
 
-		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second, 3*time.Second)
 		calc.SetStabilizationWindows(20*time.Second, 5*time.Second)
 
 		require.Equal(t, 20*time.Second, calc.coldStartWindow)
@@ -130,7 +130,7 @@ func TestCalculator_Start(t *testing.T) {
 		}
 		strategy := &mockStrategy{}
 
-		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second, 3*time.Second)
 		// Use very short stabilization windows for testing
 		calc.SetStabilizationWindows(50*time.Millisecond, 50*time.Millisecond)
 
@@ -166,7 +166,7 @@ func TestCalculator_Start(t *testing.T) {
 		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
 		strategy := &mockStrategy{}
 
-		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second, 3*time.Second)
 		calc.SetStabilizationWindows(50*time.Millisecond, 50*time.Millisecond)
 
 		err = calc.Start(ctx)
@@ -194,7 +194,7 @@ func TestCalculator_Stop(t *testing.T) {
 		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
 		strategy := &mockStrategy{}
 
-		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second, 3*time.Second)
 		calc.SetStabilizationWindows(50*time.Millisecond, 50*time.Millisecond)
 
 		err = calc.Start(ctx)
@@ -213,7 +213,7 @@ func TestCalculator_Stop(t *testing.T) {
 		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
 		strategy := &mockStrategy{}
 
-		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second, 3*time.Second)
 
 		err := calc.Stop()
 		require.Error(t, err)
@@ -241,7 +241,7 @@ func TestCalculator_WorkerMonitoring(t *testing.T) {
 		}
 		strategy := &mockStrategy{}
 
-		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second, 3*time.Second)
 		calc.SetStabilizationWindows(50*time.Millisecond, 50*time.Millisecond)
 		calc.SetCooldown(100 * time.Millisecond) // Short cooldown for testing
 
@@ -290,7 +290,7 @@ func TestCalculator_CooldownPreventsRebalancing(t *testing.T) {
 		}
 		strategy := &mockStrategy{}
 
-		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second, 3*time.Second)
 		calc.SetStabilizationWindows(50*time.Millisecond, 50*time.Millisecond)
 		calc.SetCooldown(5 * time.Second) // Long cooldown
 
@@ -335,7 +335,7 @@ func TestCalculator_StabilizationWindow(t *testing.T) {
 		}
 		strategy := &mockStrategy{}
 
-		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second, 3*time.Second)
 		calc.SetRestartDetectionRatio(0.5) // 5 workers / 2 expected = 2.5 ratio > 0.5
 
 		window := calc.selectStabilizationWindow(ctx)
@@ -362,7 +362,7 @@ func TestCalculator_StabilizationWindow(t *testing.T) {
 		source := &mockSource{partitions: partitions}
 		strategy := &mockStrategy{}
 
-		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second, 3*time.Second)
 		calc.SetRestartDetectionRatio(0.5) // 1 worker / 5 expected = 0.2 ratio < 0.5
 
 		window := calc.selectStabilizationWindow(ctx)
@@ -389,7 +389,7 @@ func TestCalculator_GetActiveWorkers(t *testing.T) {
 		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
 		strategy := &mockStrategy{}
 
-		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second, 3*time.Second)
 
 		workers, err := calc.getActiveWorkers(ctx)
 		require.NoError(t, err)
@@ -409,7 +409,7 @@ func TestCalculator_GetActiveWorkers(t *testing.T) {
 		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
 		strategy := &mockStrategy{}
 
-		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second)
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second, 3*time.Second)
 
 		workers, err := calc.getActiveWorkers(ctx)
 		require.NoError(t, err)
