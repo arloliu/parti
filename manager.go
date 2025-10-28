@@ -129,6 +129,11 @@ func NewManager(cfg *Config, conn *nats.Conn, source PartitionSource, strategy A
 	// Apply defaults to fill in any missing configuration
 	ApplyDefaults(cfg)
 
+	// Validate configuration
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid configuration: %w", err)
+	}
+
 	// Apply options
 	options := &managerOptions{}
 	for _, opt := range opts {
@@ -145,6 +150,9 @@ func NewManager(cfg *Config, conn *nats.Conn, source PartitionSource, strategy A
 	if loggerInstance == nil {
 		loggerInstance = logging.NewNop()
 	}
+
+	// Validate with warnings after logger is available
+	cfg.ValidateWithWarnings(loggerInstance)
 
 	hooksInstance := options.hooks
 	if hooksInstance == nil {

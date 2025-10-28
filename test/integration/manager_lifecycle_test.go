@@ -30,21 +30,9 @@ func TestManager_StartStop(t *testing.T) {
 	defer srv.Shutdown()
 	defer conn.Close()
 
-	// Create config with faster timeouts for tests
-	cfg := parti.Config{
-		WorkerIDPrefix:        "test-worker",
-		WorkerIDMin:           0,
-		WorkerIDMax:           99,
-		WorkerIDTTL:           3 * time.Second,
-		HeartbeatInterval:     300 * time.Millisecond,
-		HeartbeatTTL:          1 * time.Second,
-		ElectionTimeout:       1 * time.Second,
-		StartupTimeout:        5 * time.Second,
-		ShutdownTimeout:       2 * time.Second,
-		ColdStartWindow:       500 * time.Millisecond,
-		PlannedScaleWindow:    300 * time.Millisecond,
-		RestartDetectionRatio: 0.5,
-	}
+	// Create config with test-optimized timings
+	cfg := parti.TestConfig()
+	cfg.WorkerIDPrefix = "test-worker"
 
 	// Create partition source
 	partitions := []types.Partition{
@@ -98,21 +86,9 @@ func TestManager_MultipleWorkers(t *testing.T) {
 
 	debugLogger := logging.NewNop()
 
-	// Create config with faster timeouts
-	cfg := parti.Config{
-		WorkerIDPrefix:        "multi-worker",
-		WorkerIDMin:           0,
-		WorkerIDMax:           99,
-		WorkerIDTTL:           3 * time.Second,
-		HeartbeatInterval:     300 * time.Millisecond,
-		HeartbeatTTL:          1 * time.Second,
-		ElectionTimeout:       1 * time.Second,
-		StartupTimeout:        5 * time.Second,
-		ShutdownTimeout:       2 * time.Second,
-		ColdStartWindow:       500 * time.Millisecond,
-		PlannedScaleWindow:    300 * time.Millisecond,
-		RestartDetectionRatio: 0.5,
-	}
+	// Create config with test-optimized timings
+	cfg := parti.TestConfig()
+	cfg.WorkerIDPrefix = "test-worker"
 
 	// Create partition source
 	partitions := []types.Partition{

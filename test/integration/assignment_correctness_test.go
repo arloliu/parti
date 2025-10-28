@@ -53,21 +53,12 @@ func TestAssignmentCorrectness_AllPartitionsAssigned(t *testing.T) {
 		}
 	}
 
-	// Create config with fast timeouts for tests
-	cfg := &parti.Config{
-		WorkerIDPrefix:        "test-worker",
-		WorkerIDMin:           0,
-		WorkerIDMax:           99,
-		WorkerIDTTL:           10 * time.Second, // Longer TTL to prevent expiration during test
-		HeartbeatInterval:     300 * time.Millisecond,
-		HeartbeatTTL:          1 * time.Second,
-		ElectionTimeout:       1 * time.Second,
-		StartupTimeout:        5 * time.Second,
-		ShutdownTimeout:       2 * time.Second,
-		ColdStartWindow:       2 * time.Second,
-		PlannedScaleWindow:    1 * time.Second,
-		RestartDetectionRatio: 0.5,
-	}
+	// Create config with test-optimized timings
+	cfg := parti.TestConfig()
+	cfg.WorkerIDPrefix = "test-worker"
+	cfg.WorkerIDTTL = 10 * time.Second // Longer TTL to prevent expiration during test
+	cfg.ColdStartWindow = 2 * time.Second
+	cfg.PlannedScaleWindow = 1 * time.Second
 
 	// Create managers with SHARED NATS connection and debug logger
 	managers := make([]*parti.Manager, numWorkers)
@@ -210,21 +201,11 @@ func TestAssignmentCorrectness_StableAssignments(t *testing.T) {
 		}
 	}
 
-	// Create config
-	cfg := &parti.Config{
-		WorkerIDPrefix:        "test-worker",
-		WorkerIDMin:           0,
-		WorkerIDMax:           99,
-		WorkerIDTTL:           3 * time.Second,
-		HeartbeatInterval:     300 * time.Millisecond,
-		HeartbeatTTL:          1 * time.Second,
-		ElectionTimeout:       1 * time.Second,
-		StartupTimeout:        5 * time.Second,
-		ShutdownTimeout:       2 * time.Second,
-		ColdStartWindow:       2 * time.Second,
-		PlannedScaleWindow:    1 * time.Second,
-		RestartDetectionRatio: 0.5,
-	}
+	// Create config with test-optimized timings
+	cfg := parti.TestConfig()
+	cfg.WorkerIDPrefix = "test-worker"
+	cfg.ColdStartWindow = 2 * time.Second
+	cfg.PlannedScaleWindow = 1 * time.Second
 
 	// Create managers
 	managers := make([]*parti.Manager, numWorkers)

@@ -51,21 +51,12 @@ func TestConsistentHash_PartitionAffinity(t *testing.T) {
 		}
 	}
 
-	// Create config
-	cfg := &parti.Config{
-		WorkerIDPrefix:        "affinity-worker",
-		WorkerIDMin:           0,
-		WorkerIDMax:           99,
-		WorkerIDTTL:           10 * time.Second,
-		HeartbeatInterval:     300 * time.Millisecond,
-		HeartbeatTTL:          1 * time.Second,
-		ElectionTimeout:       1 * time.Second,
-		StartupTimeout:        10 * time.Second,
-		ShutdownTimeout:       3 * time.Second,
-		ColdStartWindow:       3 * time.Second,
-		PlannedScaleWindow:    2 * time.Second,
-		RestartDetectionRatio: 0.5,
-	}
+	// Create config with test-optimized timings
+	cfg := parti.TestConfig()
+	cfg.WorkerIDPrefix = "affinity-worker"
+	cfg.WorkerIDTTL = 10 * time.Second
+	cfg.ColdStartWindow = 3 * time.Second
+	cfg.PlannedScaleWindow = 2 * time.Second
 
 	// Phase 1: Start initial workers and record assignments
 	t.Logf("Phase 1: Starting %d initial workers...", initialWorkers)
@@ -214,24 +205,13 @@ func TestRoundRobin_EvenDistribution(t *testing.T) {
 		}
 	}
 
-	// Create config
-	cfg := &parti.Config{
-		WorkerIDPrefix:        "rr-worker",
-		WorkerIDMin:           0,
-		WorkerIDMax:           99,
-		WorkerIDTTL:           10 * time.Second,
-		HeartbeatInterval:     300 * time.Millisecond,
-		HeartbeatTTL:          1 * time.Second,
-		ElectionTimeout:       1 * time.Second,
-		StartupTimeout:        10 * time.Second,
-		ShutdownTimeout:       3 * time.Second,
-		ColdStartWindow:       3 * time.Second,
-		PlannedScaleWindow:    2 * time.Second,
-		RestartDetectionRatio: 0.5,
-		Assignment: parti.AssignmentConfig{
-			RebalanceCooldown: 1 * time.Second,
-		},
-	}
+	// Create config with test-optimized timings
+	cfg := parti.TestConfig()
+	cfg.WorkerIDPrefix = "rr-worker"
+	cfg.WorkerIDTTL = 10 * time.Second
+	cfg.ColdStartWindow = 3 * time.Second
+	cfg.PlannedScaleWindow = 2 * time.Second
+	cfg.Assignment.RebalanceCooldown = 1 * time.Second
 
 	// Create managers with RoundRobin strategy
 	logger := logging.NewNop()

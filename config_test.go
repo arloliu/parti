@@ -166,3 +166,178 @@ heartbeatInterval: 5s
 	require.Equal(t, 0.15, cfg.Assignment.MinRebalanceThreshold)
 	require.Equal(t, 10*time.Second, cfg.Assignment.RebalanceCooldown)
 }
+
+func TestConfigValidate(t *testing.T) {
+	t.Run("valid default config passes validation", func(t *testing.T) {
+		cfg := DefaultConfig()
+		err := cfg.Validate()
+		require.NoError(t, err)
+	})
+
+	t.Run("valid test config passes validation", func(t *testing.T) {
+		cfg := TestConfig()
+		err := cfg.Validate()
+		require.NoError(t, err)
+	})
+
+	t.Run("HeartbeatTTL too short fails validation", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.HeartbeatTTL = 1 * time.Second
+		cfg.HeartbeatInterval = 2 * time.Second
+
+		err := cfg.Validate()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "HeartbeatTTL")
+		require.Contains(t, err.Error(), "2*HeartbeatInterval")
+	})
+
+	t.Run("WorkerIDTTL less than 3x HeartbeatInterval fails", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.HeartbeatInterval = 5 * time.Second
+		cfg.WorkerIDTTL = 10 * time.Second // Less than 3x (15s)
+		cfg.HeartbeatTTL = 15 * time.Second
+
+		err := cfg.Validate()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "WorkerIDTTL")
+		require.Contains(t, err.Error(), "3*HeartbeatInterval")
+	})
+
+	t.Run("WorkerIDTTL less than HeartbeatTTL fails", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.HeartbeatInterval = 2 * time.Second
+		cfg.HeartbeatTTL = 10 * time.Second
+		cfg.WorkerIDTTL = 8 * time.Second // Less than HeartbeatTTL
+
+		err := cfg.Validate()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "WorkerIDTTL")
+		require.Contains(t, err.Error(), "HeartbeatTTL")
+	})
+
+	t.Run("zero RebalanceCooldown fails validation", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.Assignment.RebalanceCooldown = 0
+
+		err := cfg.Validate()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "RebalanceCooldown")
+		require.Contains(t, err.Error(), "> 0")
+	})
+
+	t.Run("negative RebalanceCooldown fails validation", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.Assignment.RebalanceCooldown = -5 * time.Second
+
+		err := cfg.Validate()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "RebalanceCooldown")
+	})
+
+	t.Run("ColdStartWindow less than PlannedScaleWindow fails", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.ColdStartWindow = 5 * time.Second
+		cfg.PlannedScaleWindow = 10 * time.Second
+
+		err := cfg.Validate()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "ColdStartWindow")
+		require.Contains(t, err.Error(), "PlannedScaleWindow")
+	})
+
+	t.Run("RebalanceCooldown exceeds ColdStartWindow fails", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.Assignment.RebalanceCooldown = 40 * time.Second
+		cfg.ColdStartWindow = 30 * time.Second
+
+		err := cfg.Validate()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "RebalanceCooldown")
+		require.Contains(t, err.Error(), "ColdStartWindow")
+	})
+
+	t.Run("valid custom config with tight timings", func(t *testing.T) {
+		cfg := Config{
+			WorkerIDPrefix:        "worker",
+			WorkerIDMin:           0,
+			WorkerIDMax:           99,
+			HeartbeatInterval:     1 * time.Second,
+			HeartbeatTTL:          2 * time.Second, // 2x interval (minimum)
+			WorkerIDTTL:           3 * time.Second, // 3x interval (minimum)
+			ColdStartWindow:       10 * time.Second,
+			PlannedScaleWindow:    10 * time.Second, // Equal is valid
+			OperationTimeout:      10 * time.Second,
+			ElectionTimeout:       5 * time.Second,
+			StartupTimeout:        30 * time.Second,
+			ShutdownTimeout:       10 * time.Second,
+			RestartDetectionRatio: 0.5,
+			Assignment: AssignmentConfig{
+				MinRebalanceThreshold: 0.15,
+				RebalanceCooldown:     5 * time.Second,
+			},
+			KVBuckets: KVBucketConfig{
+				StableIDBucket:   "parti-stableid",
+				ElectionBucket:   "parti-election",
+				HeartbeatBucket:  "parti-heartbeat",
+				AssignmentBucket: "parti-assignment",
+				AssignmentTTL:    0,
+			},
+		}
+
+		err := cfg.Validate()
+		require.NoError(t, err)
+	})
+
+	t.Run("valid custom config with conservative timings", func(t *testing.T) {
+		cfg := Config{
+			WorkerIDPrefix:        "worker",
+			WorkerIDMin:           0,
+			WorkerIDMax:           99,
+			HeartbeatInterval:     5 * time.Second,
+			HeartbeatTTL:          15 * time.Second, // 3x interval
+			WorkerIDTTL:           60 * time.Second, // 12x interval (very safe)
+			ColdStartWindow:       60 * time.Second,
+			PlannedScaleWindow:    20 * time.Second,
+			OperationTimeout:      10 * time.Second,
+			ElectionTimeout:       5 * time.Second,
+			StartupTimeout:        30 * time.Second,
+			ShutdownTimeout:       10 * time.Second,
+			RestartDetectionRatio: 0.5,
+			Assignment: AssignmentConfig{
+				MinRebalanceThreshold: 0.15,
+				RebalanceCooldown:     15 * time.Second,
+			},
+			KVBuckets: KVBucketConfig{
+				StableIDBucket:   "parti-stableid",
+				ElectionBucket:   "parti-election",
+				HeartbeatBucket:  "parti-heartbeat",
+				AssignmentBucket: "parti-assignment",
+				AssignmentTTL:    0,
+			},
+		}
+
+		err := cfg.Validate()
+		require.NoError(t, err)
+	})
+}
+
+func TestTestConfig(t *testing.T) {
+	cfg := TestConfig()
+
+	// Verify fast timings
+	require.Equal(t, 100*time.Millisecond, cfg.Assignment.RebalanceCooldown)
+	require.Equal(t, 1*time.Second, cfg.ColdStartWindow)
+	require.Equal(t, 500*time.Millisecond, cfg.PlannedScaleWindow)
+	require.Equal(t, 500*time.Millisecond, cfg.HeartbeatInterval)
+	require.Equal(t, 1500*time.Millisecond, cfg.HeartbeatTTL)
+	require.Equal(t, 5*time.Second, cfg.WorkerIDTTL)
+
+	// Verify it passes validation
+	err := cfg.Validate()
+	require.NoError(t, err)
+
+	// Verify other defaults are preserved
+	require.Equal(t, "worker", cfg.WorkerIDPrefix)
+	require.Equal(t, 0, cfg.WorkerIDMin)
+	require.Equal(t, 99, cfg.WorkerIDMax)
+}

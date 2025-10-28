@@ -1,6 +1,7 @@
 package parti
 
 import (
+	"fmt"
 	"time"
 )
 
@@ -203,4 +204,156 @@ func ApplyDefaults(cfg *Config) {
 		cfg.KVBuckets.AssignmentBucket = defaults.KVBuckets.AssignmentBucket
 	}
 	// Note: AssignmentTTL of 0 is valid (no expiration), so we don't apply default
+}
+
+// TTL Configuration Guide
+// =======================
+//
+// This library uses three different TTLs with specific purposes and constraints:
+//
+// 1. WorkerIDTTL (Default: 30s)
+//    Purpose: Stable worker identity lease duration in NATS KV
+//    Renewal: Automatically renewed every WorkerIDTTL/3 (~10s)
+//    Expiry Impact: Worker loses ID claim and must re-acquire (causes disruption)
+//    Recommendation: Set to 3-5x HeartbeatInterval
+//
+// 2. HeartbeatTTL (Default: 6s)
+//    Purpose: Worker liveness detection window
+//    Renewal: Heartbeat published every HeartbeatInterval (2s)
+//    Expiry Impact: Worker considered dead → Emergency rebalance triggered
+//    Recommendation: Set to 3x HeartbeatInterval
+//
+// 3. AssignmentTTL (Default: 0 = infinite)
+//    Purpose: Assignment persistence across leader changes
+//    Renewal: Never (assignments persist indefinitely)
+//    Expiry Impact: Lost assignment history → Version counter reset
+//    Recommendation: 0 (infinite) or very long (1h+) for production
+//
+// Constraint Hierarchy:
+//   WorkerIDTTL >= HeartbeatTTL >= 2 * HeartbeatInterval
+//
+// Example Valid Configurations:
+//
+//   // Production (default)
+//   WorkerIDTTL: 30s, HeartbeatInterval: 2s, HeartbeatTTL: 6s
+//
+//   // Fast (testing)
+//   WorkerIDTTL: 5s, HeartbeatInterval: 500ms, HeartbeatTTL: 1.5s
+//
+//   // Conservative (unstable network)
+//   WorkerIDTTL: 60s, HeartbeatInterval: 5s, HeartbeatTTL: 15s
+
+// Validate checks configuration constraints and returns error for invalid values.
+//
+// Hard Validation Rules:
+//   - HeartbeatTTL >= 2 * HeartbeatInterval (allow 1 missed heartbeat)
+//   - WorkerIDTTL >= 3 * HeartbeatInterval (stable ID renewal)
+//   - WorkerIDTTL >= HeartbeatTTL (ID must outlive heartbeat)
+//   - RebalanceCooldown > 0 (prevent thrashing)
+//   - ColdStartWindow >= PlannedScaleWindow (cold start is slower)
+//
+// Returns:
+//   - error: Validation error with clear explanation, nil if valid
+func (cfg *Config) Validate() error {
+	// Rule 1: HeartbeatTTL sanity
+	if cfg.HeartbeatTTL < 2*cfg.HeartbeatInterval {
+		return fmt.Errorf(
+			"HeartbeatTTL (%v) must be >= 2*HeartbeatInterval (%v) to allow one missed heartbeat",
+			cfg.HeartbeatTTL, cfg.HeartbeatInterval,
+		)
+	}
+
+	// Rule 2: WorkerIDTTL vs HeartbeatInterval
+	if cfg.WorkerIDTTL < 3*cfg.HeartbeatInterval {
+		return fmt.Errorf(
+			"WorkerIDTTL (%v) must be >= 3*HeartbeatInterval (%v) for stable ID renewal",
+			cfg.WorkerIDTTL, cfg.HeartbeatInterval,
+		)
+	}
+
+	// Rule 3: WorkerIDTTL vs HeartbeatTTL hierarchy
+	if cfg.WorkerIDTTL < cfg.HeartbeatTTL {
+		return fmt.Errorf(
+			"WorkerIDTTL (%v) must be >= HeartbeatTTL (%v) to prevent ID expiry before heartbeat",
+			cfg.WorkerIDTTL, cfg.HeartbeatTTL,
+		)
+	}
+
+	// Rule 4: RebalanceCooldown sanity
+	if cfg.Assignment.RebalanceCooldown <= 0 {
+		return fmt.Errorf("RebalanceCooldown must be > 0, got %v", cfg.Assignment.RebalanceCooldown)
+	}
+
+	// Rule 5: Stabilization windows
+	if cfg.ColdStartWindow < cfg.PlannedScaleWindow {
+		return fmt.Errorf(
+			"ColdStartWindow (%v) should be >= PlannedScaleWindow (%v)",
+			cfg.ColdStartWindow, cfg.PlannedScaleWindow,
+		)
+	}
+
+	// Rule 6: RebalanceCooldown vs windows (recommended)
+	if cfg.Assignment.RebalanceCooldown > cfg.ColdStartWindow {
+		return fmt.Errorf(
+			"RebalanceCooldown (%v) should not exceed ColdStartWindow (%v)",
+			cfg.Assignment.RebalanceCooldown, cfg.ColdStartWindow,
+		)
+	}
+
+	return nil
+}
+
+// ValidateWithWarnings checks configuration and logs warnings for non-recommended values.
+//
+// This is called after Validate() in NewManager() to provide operator guidance.
+//
+// Parameters:
+//   - logger: Logger instance for warning output
+func (cfg *Config) ValidateWithWarnings(logger Logger) {
+	// Warn if WorkerIDTTL is less than recommended 2x HeartbeatTTL
+	if cfg.WorkerIDTTL < 2*cfg.HeartbeatTTL {
+		logger.Warn(
+			"WorkerIDTTL is below recommended minimum",
+			"workerIDTTL", cfg.WorkerIDTTL,
+			"heartbeatTTL", cfg.HeartbeatTTL,
+			"recommended", 2*cfg.HeartbeatTTL,
+		)
+	}
+
+	// Warn if RebalanceCooldown is very short
+	if cfg.Assignment.RebalanceCooldown < 5*time.Second {
+		logger.Warn(
+			"RebalanceCooldown is very short, may cause frequent rebalancing",
+			"cooldown", cfg.Assignment.RebalanceCooldown,
+			"recommended", "10s or higher",
+		)
+	}
+}
+
+// TestConfig returns a configuration optimized for fast test execution.
+//
+// Test timings are 10-100x faster than production defaults to enable
+// rapid iteration without sacrificing test coverage. Use DefaultConfig()
+// for production deployments.
+//
+// Returns:
+//   - Config: Configuration with fast timings for tests
+//
+// Example:
+//
+//	cfg := parti.TestConfig()
+//	cfg.WorkerIDPrefix = "test-worker"
+//	manager, err := parti.NewManager(nc, cfg)
+func TestConfig() Config {
+	cfg := DefaultConfig()
+
+	// Fast timings for test execution (10-100x faster)
+	cfg.Assignment.RebalanceCooldown = 100 * time.Millisecond // 100x faster
+	cfg.ColdStartWindow = 1 * time.Second                     // 30x faster
+	cfg.PlannedScaleWindow = 500 * time.Millisecond           // 20x faster
+	cfg.HeartbeatInterval = 500 * time.Millisecond            // 4x faster
+	cfg.HeartbeatTTL = 1500 * time.Millisecond                // 4x faster
+	cfg.WorkerIDTTL = 5 * time.Second                         // 6x faster
+
+	return cfg
 }
