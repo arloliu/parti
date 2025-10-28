@@ -447,15 +447,7 @@ func (c *Calculator) initialAssignment(ctx context.Context) error {
 
 // detectRebalanceType determines the type of rebalance needed based on worker topology changes.
 //
-// Simplified logic (Phase 2):
-//   - Worker(s) disappeared → Emergency (with hysteresis check via EmergencyDetector)
-//   - Cold start (0 workers) → Cold Start (30s window)
-//   - Worker(s) added → Planned Scale (10s window)
-//
-// Removed restart detection (missingRatio > 0.5) as it's ambiguous:
-// If >50% capacity disappears, it's always an emergency regardless of cause.
-//
-// This method analyzes worker count changes to classify the rebalance scenario:
+// This method classifies the rebalance scenario:
 //   - Emergency: Workers disappeared beyond grace period → No window, immediate rebalance
 //   - Cold start: Starting from 0 workers → Use 30s stabilization window
 //   - Planned scale: Gradual worker additions → Use 10s stabilization window

@@ -597,10 +597,6 @@ func (m *Manager) transitionState(from, to State) {
 
 // isValidTransition validates that a state transition is allowed.
 //
-// Valid transitions after Phase 1 refactoring:
-//   - Removed Scaling→Stable direct transition (was workaround for polling lag)
-//   - All transitions now properly sequenced through calculator state changes
-//
 // Returns:
 //   - bool: true if transition is valid, false otherwise
 func (m *Manager) isValidTransition(from, to State) bool {
@@ -611,10 +607,10 @@ func (m *Manager) isValidTransition(from, to State) bool {
 		StateElection:          {StateWaitingAssignment, StateShutdown},
 		StateWaitingAssignment: {StateStable, StateShutdown},
 		StateStable:            {StateScaling, StateRebalancing, StateEmergency, StateShutdown},
-		StateScaling:           {StateRebalancing, StateWaitingAssignment, StateShutdown}, // Removed Stable (no longer needed)
-		StateRebalancing:       {StateStable, StateWaitingAssignment, StateShutdown},      // Added WaitingAssignment for leadership loss
-		StateEmergency:         {StateStable, StateWaitingAssignment, StateShutdown},      // Added WaitingAssignment for leadership loss
-		StateShutdown:          {},                                                        // Terminal state - no transitions allowed
+		StateScaling:           {StateRebalancing, StateWaitingAssignment, StateShutdown},
+		StateRebalancing:       {StateStable, StateWaitingAssignment, StateShutdown},
+		StateEmergency:         {StateStable, StateWaitingAssignment, StateShutdown},
+		StateShutdown:          {}, // Terminal state - no transitions allowed
 	}
 
 	allowedStates, exists := validTransitions[from]

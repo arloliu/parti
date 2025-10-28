@@ -129,9 +129,8 @@ func TestCalculator_detectRebalanceType_Restart(t *testing.T) {
 		"worker-9": true,
 	}
 
-	// Phase 2: Restart detection removed - now treated as planned scale
-	// 10 → 10 workers, but 6 workers changed (60% > 50% threshold)
-	// Since worker count stayed same (10 → 10), this is now "planned_scale" not "restart"
+	// Worker set changed: 10 → 10 workers but 6 workers different (60% turnover)
+	// Since worker count stayed same, treated as planned_scale
 	currentWorkers := map[string]bool{
 		"worker-0":  true,
 		"worker-1":  true,
@@ -147,7 +146,6 @@ func TestCalculator_detectRebalanceType_Restart(t *testing.T) {
 
 	reason, window := calc.detectRebalanceType(currentWorkers)
 
-	// Phase 2: This is now treated as planned scale since count stayed same
 	require.Equal(t, "planned_scale", reason)
 	require.Equal(t, calc.plannedScaleWin, window)
 	require.Equal(t, 10*time.Second, window)
