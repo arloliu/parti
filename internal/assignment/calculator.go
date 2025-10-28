@@ -639,26 +639,121 @@ func (c *Calculator) selectStabilizationWindow(ctx context.Context) time.Duratio
 //   - Polls NATS KV heartbeats every HeartbeatTTL/2 (1.5s typical)
 //   - Simple, reliable, and proven in tests
 //
-// TODO: Add watcher for faster detection (<100ms) while keeping polling as fallback
+// Hybrid monitoring: watcher (primary, <100ms) + polling (fallback, ~1.5s)
 func (c *Calculator) monitorWorkers(ctx context.Context) {
 	defer close(c.doneCh)
 
-	// Polling ticker for worker changes
+	// Start watcher for fast detection
+	if err := c.startWatcher(ctx); err != nil {
+		c.logger.Warn("failed to start watcher, falling back to polling only", "error", err)
+	}
+
+	// Polling ticker for worker changes (fallback)
 	ticker := time.NewTicker(c.hbTTL / 2) // Check twice per TTL
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ticker.C:
-			// Check for worker changes via polling
+			// Check for worker changes via polling (fallback)
 			if err := c.pollForChanges(ctx); err != nil {
 				c.logger.Error("polling error", "error", err)
 			}
 
 		case <-c.stopCh:
+			c.stopWatcher()
 			return
+
+		case <-ctx.Done():
+			c.stopWatcher()
+			return
+		}
+	}
+}
+
+// startWatcher starts the NATS KV watcher for fast worker change detection.
+func (c *Calculator) startWatcher(ctx context.Context) error {
+	c.watcherMu.Lock()
+	defer c.watcherMu.Unlock()
+
+	if c.watcher != nil {
+		return nil // Already started
+	}
+
+	// Watch all heartbeat keys with prefix
+	pattern := fmt.Sprintf("%s.*", c.hbPrefix)
+	watcher, err := c.heartbeatKV.WatchAll(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to start watcher: %w", err)
+	}
+
+	c.watcher = watcher
+	c.logger.Info("watcher started for fast worker detection", "pattern", pattern)
+
+	// Start goroutine to process watcher events
+	go c.processWatcherEvents(ctx)
+
+	return nil
+}
+
+// stopWatcher stops the NATS KV watcher.
+func (c *Calculator) stopWatcher() {
+	c.watcherMu.Lock()
+	defer c.watcherMu.Unlock()
+
+	if c.watcher != nil {
+		if err := c.watcher.Stop(); err != nil {
+			c.logger.Warn("failed to stop watcher", "error", err)
+		}
+		c.watcher = nil
+		c.logger.Debug("watcher stopped")
+	}
+}
+
+// processWatcherEvents processes events from the NATS KV watcher.
+func (c *Calculator) processWatcherEvents(ctx context.Context) {
+	c.watcherMu.Lock()
+	watcher := c.watcher
+	c.watcherMu.Unlock()
+
+	if watcher == nil {
+		return
+	}
+
+	// Debounce rapid events
+	debounceTimer := time.NewTimer(100 * time.Millisecond)
+	debounceTimer.Stop() // Stop initially
+	var pendingCheck bool
+
+	for {
+		select {
 		case <-ctx.Done():
 			return
+		case <-c.stopCh:
+			return
+		case entry := <-watcher.Updates():
+			if entry == nil {
+				// Watcher stopped or initial replay done
+				continue
+			}
+
+			// Heartbeat key changed (worker added or updated)
+			// Schedule a debounced check
+			if !pendingCheck {
+				pendingCheck = true
+				debounceTimer.Reset(100 * time.Millisecond)
+			}
+
+		case <-debounceTimer.C:
+			if pendingCheck {
+				pendingCheck = false
+				c.logger.Debug("watcher detected change, triggering check")
+
+				// Check for worker changes
+				if err := c.pollForChanges(ctx); err != nil {
+					c.logger.Error("watcher-triggered check failed", "error", err)
+				}
+			}
 		}
 	}
 }

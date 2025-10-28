@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/arloliu/parti/internal/logging"
@@ -32,6 +33,7 @@ type Claimer struct {
 	workerID string        // Claimed worker ID
 	stopCh   chan struct{} // Signal to stop renewal goroutine
 	doneCh   chan struct{} // Signal that renewal has stopped
+	stopOnce sync.Once     // Ensures stopCh is closed only once
 
 	logger types.Logger
 }
@@ -214,6 +216,7 @@ func (c *Claimer) renew(ctx context.Context) error {
 // Release releases the claimed worker ID and stops renewal.
 //
 // Should be called during graceful shutdown to free the ID for reuse.
+// Safe to call multiple times concurrently - subsequent calls will return ErrNotClaimed.
 //
 // Parameters:
 //   - ctx: Context for timeout
@@ -231,8 +234,10 @@ func (c *Claimer) Release(ctx context.Context) error {
 		return ErrNotClaimed
 	}
 
-	// Stop renewal goroutine
-	close(c.stopCh)
+	// Stop renewal goroutine (safe for concurrent calls)
+	c.stopOnce.Do(func() {
+		close(c.stopCh)
+	})
 
 	// Wait for renewal to stop with timeout
 	select {

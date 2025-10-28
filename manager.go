@@ -272,12 +272,14 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	// Start background workers
 	m.wg.Add(1)
-	go m.monitorAssignmentChanges(assignmentKV)
+	go m.monitorAssignmentChanges(m.ctx, assignmentKV)
 
 	return nil
 }
 
 // Stop gracefully shuts down the manager.
+//
+// Safe to call multiple times - subsequent calls will return ErrNotStarted.
 //
 // Parameters:
 //   - ctx: Context for shutdown timeout
@@ -286,18 +288,31 @@ func (m *Manager) Start(ctx context.Context) error {
 //   - error: Shutdown error or timeout
 func (m *Manager) Stop(ctx context.Context) error {
 	m.mu.Lock()
+
+	// Check if already stopped or never started
 	if m.ctx == nil {
 		m.mu.Unlock()
 
 		return ErrNotStarted
 	}
 
+	// Check if already in shutdown state (concurrent Stop() call)
+	currentState := m.State()
+	if currentState == StateShutdown {
+		m.mu.Unlock()
+
+		return ErrNotStarted
+	}
+
 	// Transition to shutdown state
-	m.transitionState(m.State(), StateShutdown)
+	m.transitionState(currentState, StateShutdown)
 
 	// Cancel manager context to stop all background goroutines
 	// This will cause monitorAssignmentChanges watcher to close
 	m.cancel()
+
+	// Note: Keep m.ctx (even though cancelled) instead of setting to nil
+	// so background goroutines can still use it in their select statements
 	m.mu.Unlock()
 
 	// Shutdown sequence (reverse of startup)
@@ -310,9 +325,9 @@ func (m *Manager) Stop(ctx context.Context) error {
 		m.logger.Info("calculator stopped", "worker_id", m.WorkerID())
 	}
 
-	// Step 2: Stop heartbeat publisher
+	// Step 2: Stop heartbeat publisher (ignore ErrNotStarted)
 	if m.heartbeat != nil {
-		if err := m.heartbeat.Stop(); err != nil {
+		if err := m.heartbeat.Stop(); err != nil && !errors.Is(err, heartbeat.ErrNotStarted) {
 			m.logError("failed to stop heartbeat", "error", err)
 			shutdownErr = fmt.Errorf("heartbeat stop failed: %w", err)
 		}
@@ -328,9 +343,9 @@ func (m *Manager) Stop(ctx context.Context) error {
 		}
 	}
 
-	// Step 4: Release stable worker ID
+	// Step 4: Release stable worker ID (ignore ErrNotClaimed)
 	if m.idClaimer != nil {
-		if err := m.idClaimer.Release(ctx); err != nil {
+		if err := m.idClaimer.Release(ctx); err != nil && !errors.Is(err, stableid.ErrNotClaimed) {
 			m.logError("failed to release worker ID", "error", err)
 			if shutdownErr == nil {
 				shutdownErr = fmt.Errorf("worker ID release failed: %w", err)
@@ -520,14 +535,18 @@ func (m *Manager) RefreshPartitions(ctx context.Context) error {
 	}
 
 	// Check if calculator is available
-	if m.calculator == nil {
+	m.mu.RLock()
+	calc := m.calculator
+	m.mu.RUnlock()
+
+	if calc == nil {
 		return errors.New("calculator not initialized")
 	}
 
 	m.logger.Info("refreshing partitions and triggering rebalance")
 
 	// Trigger rebalance which will call source.ListPartitions() to get fresh partition list
-	if err := m.calculator.TriggerRebalance(ctx); err != nil {
+	if err := calc.TriggerRebalance(ctx); err != nil {
 		return fmt.Errorf("failed to trigger rebalance: %w", err)
 	}
 
@@ -863,13 +882,18 @@ func (m *Manager) monitorCalculatorState() {
 		case <-m.ctx.Done():
 			return
 		case <-ticker.C:
-			if m.calculator == nil {
+			// Safely read calculator with mutex protection
+			m.mu.RLock()
+			calc := m.calculator
+			m.mu.RUnlock()
+
+			if calc == nil {
 				// Calculator stopped (lost leadership)
 				return
 			}
 
 			// Get current calculator state
-			calcState := m.calculator.GetState()
+			calcState := calc.GetState()
 
 			// Only transition if state changed
 			if calcState == lastCalcState {
@@ -960,7 +984,11 @@ func (m *Manager) stopCalculator() {
 
 // calculateAndPublish calculates and publishes assignments.
 func (m *Manager) calculateAndPublish(_ context.Context) error {
-	if m.calculator == nil {
+	m.mu.RLock()
+	calc := m.calculator
+	m.mu.RUnlock()
+
+	if calc == nil {
 		return errors.New("calculator not started")
 	}
 
@@ -993,7 +1021,7 @@ func (m *Manager) fetchAssignment(ctx context.Context, kv jetstream.KeyValue) (*
 }
 
 // monitorAssignmentChanges monitors for assignment changes.
-func (m *Manager) monitorAssignmentChanges(kv jetstream.KeyValue) {
+func (m *Manager) monitorAssignmentChanges(ctx context.Context, kv jetstream.KeyValue) {
 	defer m.wg.Done()
 
 	workerID := m.WorkerID()
@@ -1001,7 +1029,7 @@ func (m *Manager) monitorAssignmentChanges(kv jetstream.KeyValue) {
 
 	// Watch for updates to this worker's assignment key
 	// The watcher will deliver initial value, then a nil entry marker, then future updates
-	watcher, err := kv.Watch(m.ctx, key)
+	watcher, err := kv.Watch(ctx, key)
 	if err != nil {
 		m.logError("failed to watch assignments", "error", err)
 
@@ -1016,7 +1044,7 @@ func (m *Manager) monitorAssignmentChanges(kv jetstream.KeyValue) {
 
 	for {
 		select {
-		case <-m.ctx.Done():
+		case <-ctx.Done():
 			m.logger.Debug("assignment monitor stopping (context cancelled)", "worker_id", workerID)
 			return
 		case entry := <-watcher.Updates():
