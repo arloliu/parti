@@ -1,4 +1,3 @@
-
 package integration_test
 
 import (
@@ -80,7 +79,7 @@ func TestWatcher_FastDetection(t *testing.T) {
 	detectionLatency := time.Since(detectionStart)
 	totalLatency := time.Since(startTime)
 
-	t.Logf("Worker-4 started at T+0ms")
+	t.Log("Worker-4 started at T+0ms")
 	t.Logf("Worker-4 received assignments at T+%dms", detectionLatency.Milliseconds())
 	t.Logf("Total time from worker start: %dms", totalLatency.Milliseconds())
 

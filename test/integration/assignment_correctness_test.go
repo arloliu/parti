@@ -72,9 +72,9 @@ func TestAssignmentCorrectness_AllPartitionsAssigned(t *testing.T) {
 	startErrors := make([]error, numWorkers)
 
 	for i, mgr := range managers {
-		wg.Add(1)
-		go func(idx int, m *parti.Manager) {
-			defer wg.Done()
+		idx := i
+		m := mgr
+		wg.Go(func() {
 			t.Logf("Starting manager %d at T+%v", idx, time.Since(startTime))
 			if err := m.Start(ctx); err != nil {
 				startErrors[idx] = err
@@ -82,7 +82,7 @@ func TestAssignmentCorrectness_AllPartitionsAssigned(t *testing.T) {
 			} else {
 				t.Logf("Manager %d started successfully", idx)
 			}
-		}(i, mgr)
+		})
 	}
 
 	wg.Wait()
@@ -289,6 +289,7 @@ func partitionKey(p types.Partition) string {
 	for i := 1; i < len(p.Keys); i++ {
 		result += ":" + p.Keys[i]
 	}
+
 	return result
 }
 

@@ -122,7 +122,7 @@ func TestSubscriptionHelper_UpdateOnRebalance(t *testing.T) {
 		RestartDetectionRatio: 0.5,
 		Assignment: parti.AssignmentConfig{
 			MinRebalanceThreshold: 0.15,
-			MinRebalanceInterval:     2 * time.Second,
+			MinRebalanceInterval:  2 * time.Second,
 		},
 	}
 
@@ -134,15 +134,21 @@ func TestSubscriptionHelper_UpdateOnRebalance(t *testing.T) {
 		manager, err := parti.NewManager(cfg, conn, partitionSource, strategy.NewRoundRobin(), parti.WithLogger(debugLogger))
 		require.NoError(t, err, "Failed to create manager %d", i)
 		managers[i] = manager
-
-		defer func(m *parti.Manager, idx int) {
-			stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer stopCancel()
-			if err := m.Stop(stopCtx); err != nil {
-				t.Logf("Failed to stop manager %d: %v", idx, err)
-			}
-		}(manager, i)
 	}
+
+	// Cleanup function for all managers
+	cleanupManagers := func() {
+		for i, manager := range managers {
+			if manager != nil {
+				stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer stopCancel() //nolint:revive
+				if err := manager.Stop(stopCtx); err != nil {
+					t.Logf("Failed to stop manager %d: %v", i, err)
+				}
+			}
+		}
+	}
+	defer cleanupManagers()
 
 	// Start managers
 	t.Log("Starting 2 managers with 30 partitions...")

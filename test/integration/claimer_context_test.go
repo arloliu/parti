@@ -52,7 +52,7 @@ func TestClaimerContextLifecycle_StartupContextCancellation(t *testing.T) {
 	// Wait for "startup" to complete, then cancel startup context
 	time.Sleep(500 * time.Millisecond)
 	cancelStartup() // This simulates startup context being cancelled after Manager.Start() returns
-	t.Logf("Startup context cancelled at T+500ms")
+	t.Log("Startup context cancelled at T+500ms")
 
 	// Wait for TTL to expire (3 seconds) - if renewal stopped, ID will expire
 	t.Logf("Waiting %v for stable ID to expire (if renewal stopped)...", ttl)
@@ -112,7 +112,7 @@ func TestClaimerContextLifecycle_ManagerContextCorrect(t *testing.T) {
 	// Wait for "startup" to complete, then cancel startup context
 	time.Sleep(500 * time.Millisecond)
 	cancelStartup() // Startup context cancelled, but renewal should continue
-	t.Logf("Startup context cancelled at T+500ms (renewal should continue)")
+	t.Log("Startup context cancelled at T+500ms (renewal should continue)")
 
 	// Wait longer than TTL to verify renewal is working
 	t.Logf("Waiting %v (longer than TTL) to verify renewal keeps ID alive...", ttl+time.Second)
@@ -126,7 +126,7 @@ func TestClaimerContextLifecycle_ManagerContextCorrect(t *testing.T) {
 	require.Equal(t, stableid.ErrNoAvailableID, err)
 	require.Equal(t, "", workerID2)
 
-	t.Logf("FIX VERIFIED: Worker 2 cannot claim worker-0 because renewal kept it alive!")
+	t.Log("FIX VERIFIED: Worker 2 cannot claim worker-0 because renewal kept it alive!")
 
 	// Cleanup
 	require.NoError(t, claimer1.Release(managerCtx))
@@ -215,10 +215,9 @@ func TestClaimerContextLifecycle_MultipleWorkers(t *testing.T) {
 	for i := 0; i < numWorkers; i++ {
 		// Each worker has its own startup and manager context
 		startupCtx, cancelStartup := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancelStartup()
 
 		managerCtx, cancel := context.WithCancel(context.Background())
-		managerContexts[i] = managerCtx
+		managerContexts[i] = managerCtx //nolint:fatcontext
 		cancelFuncs[i] = cancel
 
 		// Create claimer
@@ -228,6 +227,7 @@ func TestClaimerContextLifecycle_MultipleWorkers(t *testing.T) {
 		// Claim ID with startup context
 		workerID, err := claimer.Claim(startupCtx)
 		require.NoError(t, err)
+		cancelStartup()
 		workerIDs[i] = workerID
 
 		// BUG: Using startup context for renewal (will fail)

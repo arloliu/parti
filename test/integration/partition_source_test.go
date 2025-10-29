@@ -2,6 +2,7 @@ package integration_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -169,10 +170,8 @@ func TestPartitionSource_ConcurrentAccess(t *testing.T) {
 
 	// Start readers
 	for i := 0; i < numReaders; i++ {
-		wg.Add(1)
-		go func(readerID int) {
-			defer wg.Done()
-
+		readerID := i
+		wg.Go(func() {
 			for j := 0; j < iterations; j++ {
 				partitions, err := src.ListPartitions(ctx)
 				if err != nil {
@@ -194,15 +193,12 @@ func TestPartitionSource_ConcurrentAccess(t *testing.T) {
 					}
 				}
 			}
-		}(i)
+		})
 	}
 
 	// Start writers
 	for i := 0; i < numWriters; i++ {
-		wg.Add(1)
-		go func(writerID int) {
-			defer wg.Done()
-
+		wg.Go(func() {
 			for j := 0; j < iterations; j++ {
 				// Alternate between different partition counts
 				partCount := 50 + (j % 50) // 50-99 partitions
@@ -219,7 +215,7 @@ func TestPartitionSource_ConcurrentAccess(t *testing.T) {
 				// Brief sleep to allow readers to see the update
 				time.Sleep(time.Millisecond)
 			}
-		}(i)
+		})
 	}
 
 	// Wait for all goroutines to finish
@@ -227,7 +223,7 @@ func TestPartitionSource_ConcurrentAccess(t *testing.T) {
 	close(errChan)
 
 	// Check for errors
-	var errors []error
+	errors := make([]error, 0, numReaders+numWriters)
 	for err := range errChan {
 		errors = append(errors, err)
 	}
@@ -335,7 +331,7 @@ type errorPartitionSource struct {
 
 func (e *errorPartitionSource) ListPartitions(ctx context.Context) ([]types.Partition, error) {
 	if e.shouldFail {
-		return nil, fmt.Errorf("simulated partition discovery failure")
+		return nil, errors.New("simulated partition discovery failure")
 	}
 
 	return []types.Partition{

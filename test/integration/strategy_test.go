@@ -101,7 +101,10 @@ func TestConsistentHash_PartitionAffinity(t *testing.T) {
 	}()
 
 	// Wait for new manager to reach stable state and rebalancing to complete
-	allManagers := append(initialManagers, newMgr)
+	allManagers := make([]*parti.Manager, len(initialManagers)+1)
+	copy(allManagers, initialManagers)
+	allManagers[len(initialManagers)] = newMgr
+
 	allWaiters := make([]testutil.ManagerWaiter, len(allManagers))
 	for i, mgr := range allManagers {
 		allWaiters[i] = mgr

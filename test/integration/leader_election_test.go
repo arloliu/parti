@@ -63,7 +63,7 @@ func TestLeaderElection_BasicFailover(t *testing.T) {
 	cluster.RemoveWorker(leaderIndex)
 
 	// Wait for new leader election (ElectionTimeout is 1s with FastConfig, should happen within 5s)
-	t.Logf("Waiting for new leader election...")
+	t.Log("Waiting for new leader election...")
 
 	var newLeader *parti.Manager
 	require.Eventually(t, func() bool {
@@ -121,7 +121,7 @@ func TestLeaderElection_ColdStart(t *testing.T) {
 	cluster := testutil.NewFastWorkerCluster(t, nc, 10)
 
 	// Start 5 workers simultaneously (cold start)
-	t.Logf("Starting 5 workers simultaneously...")
+	t.Log("Starting 5 workers simultaneously...")
 	for i := 0; i < 5; i++ {
 		mgr := cluster.AddWorker(ctx)
 		err := mgr.Start(ctx)
@@ -228,7 +228,7 @@ func TestLeaderElection_LeaderRenewal(t *testing.T) {
 	t.Logf("Initial leader: %s", initialLeaderID)
 
 	// Wait for 6x ElectionTimeout (ElectionTimeout is 1s, so wait 6s for multiple renewals)
-	t.Logf("Waiting 6s for leader to renew lease...")
+	t.Log("Waiting 6s for leader to renew lease...")
 	time.Sleep(6 * time.Second)
 
 	// Verify same leader is still the leader (lease renewed)
@@ -242,6 +242,8 @@ func TestLeaderElection_LeaderRenewal(t *testing.T) {
 }
 
 // TestLeaderElection_AssignmentPreservation tests that assignments are preserved during leader transition.
+//
+//nolint:cyclop
 func TestLeaderElection_AssignmentPreservation(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -361,7 +363,7 @@ func TestLeaderElection_AssignmentPreservation(t *testing.T) {
 		return allUpdated
 	}, 15*time.Second, 500*time.Millisecond, "workers did not receive new assignments after leader failover")
 
-	t.Logf("All workers received new assignments from new leader")
+	t.Log("All workers received new assignments from new leader")
 
 	// Capture assignments after leader transition
 	assignmentsAfter := make(map[string]map[string]bool)
@@ -677,7 +679,7 @@ func TestLeaderElection_NoOrphansOnFailover(t *testing.T) {
 		t.Logf("Round %d: All 20 partitions assigned, no orphans, no duplicates", round)
 	}
 
-	t.Logf("Completed 3 rapid leader transitions: no orphaned partitions detected")
+	t.Log("Completed 3 rapid leader transitions: no orphaned partitions detected")
 }
 
 // TestLeaderElection_RapidChurn tests system stability under rapid leader changes.
@@ -762,7 +764,7 @@ func TestLeaderElection_RapidChurn(t *testing.T) {
 		time.Sleep(2 * time.Second)
 	}
 
-	t.Logf("System remained stable through 3 rapid leader transitions")
+	t.Log("System remained stable through 3 rapid leader transitions")
 }
 
 // TestLeaderElection_ShutdownDuringRebalancing tests leader shutdown during active rebalancing.
@@ -852,7 +854,7 @@ func TestLeaderElection_ShutdownDuringRebalancing(t *testing.T) {
 	require.Equal(t, 2, aliveWorkers, "should have 2 alive workers (worker-0 killed)")
 	require.Equal(t, 20, totalPartitions, "all 20 partitions should be assigned")
 
-	t.Logf("System recovered successfully from leader shutdown during rebalancing")
+	t.Log("System recovered successfully from leader shutdown during rebalancing")
 }
 
 // TestLeaderElection_ShutdownDuringEmergency tests leader shutdown during emergency rebalancing.
@@ -939,7 +941,7 @@ func TestLeaderElection_ShutdownDuringEmergency(t *testing.T) {
 	require.Equal(t, 2, aliveWorkers, "should have 2 alive workers")
 	require.Equal(t, 20, totalPartitions, "all 20 partitions should be assigned")
 
-	t.Logf("System recovered from cascading failures (follower + leader during emergency)")
+	t.Log("System recovered from cascading failures (follower + leader during emergency)")
 }
 
 // Helper function to get keys from a map

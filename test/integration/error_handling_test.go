@@ -1,8 +1,8 @@
-
 package integration_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -53,11 +53,12 @@ func TestErrorHandling_ConcurrentStart(t *testing.T) {
 
 	for range numGoroutines {
 		err := <-errorsCh
-		if err == nil {
+		switch {
+		case err == nil:
 			successCount++
-		} else if err == parti.ErrAlreadyStarted {
+		case errors.Is(err, parti.ErrAlreadyStarted):
 			alreadyStartedCount++
-		} else {
+		default:
 			t.Errorf("Unexpected error from Start(): %v", err)
 		}
 	}
@@ -128,11 +129,12 @@ func TestErrorHandling_ConcurrentStop(t *testing.T) {
 
 	for range numGoroutines {
 		err := <-errorsCh
-		if err == nil {
+		switch {
+		case err == nil:
 			successCount++
-		} else if err == parti.ErrNotStarted {
+		case errors.Is(err, parti.ErrNotStarted):
 			notStartedCount++
-		} else {
+		default:
 			t.Errorf("Unexpected error from Stop(): %v", err)
 		}
 	}

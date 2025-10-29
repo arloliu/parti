@@ -72,15 +72,21 @@ func TestRefreshPartitions_Addition(t *testing.T) {
 		manager, err := parti.NewManager(cfg, conn, partitionSource, strategy.NewRoundRobin(), parti.WithLogger(debugLogger))
 		require.NoError(t, err, "Failed to create manager %d", i)
 		managers[i] = manager
-
-		defer func(m *parti.Manager, idx int) {
-			stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer stopCancel()
-			if err := m.Stop(stopCtx); err != nil {
-				t.Logf("Failed to stop manager %d: %v", idx, err)
-			}
-		}(manager, i)
 	}
+
+	// Cleanup function for all managers
+	cleanupManagers := func() {
+		for i, manager := range managers {
+			if manager != nil {
+				stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer stopCancel() //nolint:revive
+				if err := manager.Stop(stopCtx); err != nil {
+					t.Logf("Failed to stop manager %d: %v", i, err)
+				}
+			}
+		}
+	}
+	defer cleanupManagers()
 
 	// Start all managers concurrently
 	t.Log("Starting 3 managers with 50 partitions...")
@@ -177,7 +183,7 @@ func TestRefreshPartitions_Addition(t *testing.T) {
 	}
 
 	t.Log("RefreshPartitions_Addition test passed - all 70 partitions assigned correctly")
-	t.Logf("Test completed successfully: 50 -> 70 partitions, rebalancing triggered by RefreshPartitions()")
+	t.Log("Test completed successfully: 50 -> 70 partitions, rebalancing triggered by RefreshPartitions()")
 }
 
 func TestRefreshPartitions_Removal(t *testing.T) {
@@ -236,15 +242,21 @@ func TestRefreshPartitions_Removal(t *testing.T) {
 		manager, err := parti.NewManager(cfg, conn, partitionSource, strategy.NewRoundRobin(), parti.WithLogger(debugLogger))
 		require.NoError(t, err, "Failed to create manager %d", i)
 		managers[i] = manager
-
-		defer func(m *parti.Manager, idx int) {
-			stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer stopCancel()
-			if err := m.Stop(stopCtx); err != nil {
-				t.Logf("Failed to stop manager %d: %v", idx, err)
-			}
-		}(manager, i)
 	}
+
+	// Cleanup function for all managers
+	cleanupManagers2 := func() {
+		for i, manager := range managers {
+			if manager != nil {
+				stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer stopCancel() //nolint:revive
+				if err := manager.Stop(stopCtx); err != nil {
+					t.Logf("Failed to stop manager %d: %v", i, err)
+				}
+			}
+		}
+	}
+	defer cleanupManagers2()
 
 	// Start all managers concurrently
 	t.Log("Starting 3 managers with 100 partitions...")
@@ -330,7 +342,7 @@ func TestRefreshPartitions_Removal(t *testing.T) {
 
 			// Check if this is one of the removed partitions (70-99)
 			partNum := -1
-			fmt.Sscanf(partKey, "[partition %d]", &partNum)
+			_, _ = fmt.Sscanf(partKey, "[partition %d]", &partNum)
 			if partNum >= 70 && partNum < 100 {
 				removedPartitionsStillAssigned = append(removedPartitionsStillAssigned, partKey)
 			}
@@ -350,7 +362,7 @@ func TestRefreshPartitions_Removal(t *testing.T) {
 	}
 
 	t.Log("RefreshPartitions_Removal test passed - exactly 70 partitions assigned, 30 removed successfully")
-	t.Logf("Test completed successfully: 100 -> 70 partitions, removed partitions no longer assigned")
+	t.Log("Test completed successfully: 100 -> 70 partitions, removed partitions no longer assigned")
 }
 
 func TestRefreshPartitions_WeightChange(t *testing.T) {
@@ -409,15 +421,21 @@ func TestRefreshPartitions_WeightChange(t *testing.T) {
 		manager, err := parti.NewManager(cfg, conn, partitionSource, strategy.NewConsistentHash(), parti.WithLogger(debugLogger))
 		require.NoError(t, err, "Failed to create manager %d", i)
 		managers[i] = manager
-
-		defer func(m *parti.Manager, idx int) {
-			stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer stopCancel()
-			if err := m.Stop(stopCtx); err != nil {
-				t.Logf("Failed to stop manager %d: %v", idx, err)
-			}
-		}(manager, i)
 	}
+
+	// Cleanup function for all managers
+	cleanupManagers3 := func() {
+		for i, manager := range managers {
+			if manager != nil {
+				stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer stopCancel() //nolint:revive
+				if err := manager.Stop(stopCtx); err != nil {
+					t.Logf("Failed to stop manager %d: %v", i, err)
+				}
+			}
+		}
+	}
+	defer cleanupManagers3()
 
 	// Start all managers concurrently
 	t.Log("Starting 3 managers with 60 partitions (all weight 100)...")
@@ -529,7 +547,7 @@ func TestRefreshPartitions_WeightChange(t *testing.T) {
 	// that all partitions remain assigned and the system remains stable.
 
 	t.Log("RefreshPartitions_WeightChange test passed - all 60 partitions still assigned after weight change")
-	t.Logf("Test completed successfully: Weight change (30 partitions: 100->200) processed correctly")
+	t.Log("Test completed successfully: Weight change (30 partitions: 100->200) processed correctly")
 }
 
 func TestRefreshPartitions_Cooldown(t *testing.T) {
@@ -588,15 +606,21 @@ func TestRefreshPartitions_Cooldown(t *testing.T) {
 		manager, err := parti.NewManager(cfg, conn, partitionSource, strategy.NewRoundRobin(), parti.WithLogger(debugLogger))
 		require.NoError(t, err, "Failed to create manager %d", i)
 		managers[i] = manager
-
-		defer func(m *parti.Manager, idx int) {
-			stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer stopCancel()
-			if err := m.Stop(stopCtx); err != nil {
-				t.Logf("Failed to stop manager %d: %v", idx, err)
-			}
-		}(manager, i)
 	}
+
+	// Cleanup function for all managers
+	cleanupManagers4 := func() {
+		for i, manager := range managers {
+			if manager != nil {
+				stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer stopCancel() //nolint:revive
+				if err := manager.Stop(stopCtx); err != nil {
+					t.Logf("Failed to stop manager %d: %v", i, err)
+				}
+			}
+		}
+	}
+	defer cleanupManagers4()
 
 	// Start all managers concurrently
 	t.Log("Starting 2 managers with 40 partitions...")
@@ -691,5 +715,5 @@ func TestRefreshPartitions_Cooldown(t *testing.T) {
 	}
 
 	t.Log("RefreshPartitions_Cooldown test passed - manual refresh bypasses cooldown as expected")
-	t.Logf("Test completed successfully: Rapid RefreshPartitions() calls handled correctly")
+	t.Log("Test completed successfully: Rapid RefreshPartitions() calls handled correctly")
 }

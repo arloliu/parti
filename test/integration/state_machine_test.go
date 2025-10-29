@@ -165,6 +165,8 @@ func TestStateMachine_PlannedScale(t *testing.T) {
 //   - Rebalancing/Scaling is triggered when a worker dies
 //   - No stabilization window (immediate rebalance)
 //   - Partitions are redistributed to remaining workers
+//
+//nolint:cyclop
 func TestStateMachine_Emergency(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
@@ -423,7 +425,7 @@ func TestStateMachine_StateTransitionValidation(t *testing.T) {
 
 	// Log the state history for inspection
 	tracker := cluster.StateTrackers[0]
-	t.Logf("State history for Worker 0:")
+	t.Log("State history for Worker 0:")
 	for i, state := range tracker.States {
 		t.Logf("  %d: %s", i, state.String())
 	}
