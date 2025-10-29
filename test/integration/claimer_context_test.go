@@ -1,6 +1,3 @@
-//go:build integration
-// +build integration
-
 package integration_test
 
 import (
@@ -68,7 +65,7 @@ func TestClaimerContextLifecycle_StartupContextCancellation(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "worker-0", workerID2, "BUG CONFIRMED: Worker 2 claimed same ID as Worker 1!")
 
-	t.Logf("🚨 BUG VERIFIED: Worker 2 claimed same ID '%s' after Worker 1's renewal stopped!", workerID2)
+	t.Logf("BUG VERIFIED: Worker 2 claimed same ID '%s' after Worker 1's renewal stopped!", workerID2)
 
 	// Cleanup
 	require.NoError(t, claimer2.Release(managerCtx))
@@ -261,11 +258,11 @@ func TestClaimerContextLifecycle_MultipleWorkers(t *testing.T) {
 		newClaimer := stableid.NewClaimer(kv, "worker", 0, 10, ttl, nil)
 		newID, err := newClaimer.Claim(context.Background())
 		if err == nil {
-			t.Logf("🚨 BUG VERIFIED: New claimer claimed previously used ID: %s", newID)
+			t.Logf("BUG VERIFIED: New claimer claimed previously used ID: %s", newID)
 			// Check if this ID was previously claimed
 			for j, oldID := range workerIDs {
 				if oldID == newID {
-					t.Logf("   ⚠️  This ID belonged to Worker %d!", j)
+					t.Logf("   This ID belonged to Worker %d!", j)
 					break
 				}
 			}

@@ -10,7 +10,8 @@ COVERAGE_HTML   := $(COVERAGE_DIR)/coverage.html
 
 # Source files
 ALL_GO_FILES    := $(shell find . -name "*.go" -not -path "./vendor/*")
-TEST_DIRS       := $(sort $(dir $(shell find . -name "*_test.go" -not -path "./vendor/*")))
+TEST_DIRS       := $(sort $(dir $(shell find . -name "*_test.go" -not -path "./vendor/*" -not -path "./test/integration/*")))
+INTEGRATION_DIR := ./test/integration/...
 LATEST_GIT_TAG  := $(shell git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
 
 # Linter configuration
@@ -25,39 +26,39 @@ GOLANGCI_LINT_VERSION := 2.5.0
 ## test: Run unit tests with race detector and CGO disabled
 test: clean-test-results
 	@echo "Running unit tests with race detector..."
-	@CGO_ENABLED=1 go test $(TEST_DIRS) -short -timeout=$(TEST_TIMEOUT) -race || (echo "Tests failed with race detector" && exit 1)
+	@CGO_ENABLED=1 go test $(TEST_DIRS) -timeout=$(TEST_TIMEOUT) -race || (echo "Tests failed with race detector" && exit 1)
 	@echo "Running unit tests with CGO_ENABLED=0..."
-	@CGO_ENABLED=0 go test $(TEST_DIRS) -short -timeout=$(TEST_TIMEOUT) || (echo "Tests failed with CGO disabled" && exit 1)
+	@CGO_ENABLED=0 go test $(TEST_DIRS) -timeout=$(TEST_TIMEOUT) || (echo "Tests failed with CGO disabled" && exit 1)
 	@echo "All unit tests passed!"
 
 ## test-unit: Run only unit tests (fast, same as test-short)
 test-unit: clean-test-results
 	@echo "Running unit tests..."
-	@go test -short ./... -timeout=$(TEST_TIMEOUT)
+	@go test $(TEST_DIRS) -timeout=$(TEST_TIMEOUT)
 
 ## test-integration: Run only integration tests
 test-integration: clean-test-results
 	@echo "Running integration tests..."
-	@go test -tags=integration ./test/integration/... -v -timeout=$(TEST_TIMEOUT)
+	@go test $(INTEGRATION_DIR) -v -timeout=$(TEST_TIMEOUT)
 
 ## test-all: Run both unit and integration tests
 test-all: clean-test-results
 	@echo "Running all tests (unit + integration)..."
 	@echo "==> Running unit tests..."
-	@go test -short ./... -timeout=$(TEST_TIMEOUT)
+	@go test $(TEST_DIRS) -timeout=$(TEST_TIMEOUT)
 	@echo "==> Running integration tests..."
-	@go test -tags=integration ./test/integration/... -v -timeout=$(TEST_TIMEOUT)
+	@go test $(INTEGRATION_DIR) -v -timeout=$(TEST_TIMEOUT)
 	@echo "All tests passed!"
 
 ## test-race: Run tests with race detector only
 test-race: clean-test-results
 	@echo "Running tests with race detector..."
-	@CGO_ENABLED=1 go test ./... -race -timeout=$(TEST_TIMEOUT)
+	@CGO_ENABLED=1 go test $(TEST_DIRS) -race -timeout=$(TEST_TIMEOUT)
 
 ## test-short: Run short tests only
 test-short: clean-test-results
 	@echo "Running short tests..."
-	@go test ./... -short -timeout=$(TEST_TIMEOUT)
+	@go test $(TEST_DIRS) -short -timeout=$(TEST_TIMEOUT)
 
 ## coverage: Generate test coverage report
 coverage: clean-test-results

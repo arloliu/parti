@@ -1,6 +1,3 @@
-//go:build integration
-// +build integration
-
 package integration_test
 
 import (
@@ -160,7 +157,7 @@ func TestConsistentHash_PartitionAffinity(t *testing.T) {
 	require.GreaterOrEqual(t, overallAffinityPct, minAffinityPct,
 		"ConsistentHash should maintain at least %.1f%% partition affinity during rebalancing", minAffinityPct)
 
-	t.Logf("✅ ConsistentHash maintains %.1f%% affinity (exceeds %.1f%% requirement)", overallAffinityPct, minAffinityPct)
+	t.Logf("ConsistentHash maintains %.1f%% affinity (exceeds %.1f%% requirement)", overallAffinityPct, minAffinityPct)
 
 	// Cleanup
 	stopCtx, stopCancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -275,7 +272,7 @@ func TestRoundRobin_EvenDistribution(t *testing.T) {
 	}
 	avgCount := float64(totalCount) / float64(numWorkers)
 
-	t.Logf("✅ Distribution: min=%d, max=%d, avg=%.1f (±%d tolerance met)", minCount, maxCount, avgCount, maxCount-minCount)
+	t.Logf("Distribution: min=%d, max=%d, avg=%.1f (±%d tolerance met)", minCount, maxCount, avgCount, maxCount-minCount)
 	require.Equal(t, numPartitions, totalCount, "Total partitions should equal original count")
 	require.LessOrEqual(t, maxCount-minCount, 1, "RoundRobin should distribute within ±1 partition")
 
@@ -358,7 +355,7 @@ func TestWeightedPartitions_LoadBalancing(t *testing.T) {
 		RestartDetectionRatio: 0.5,
 		Assignment: parti.AssignmentConfig{
 			MinRebalanceThreshold: 0.15,
-			MinRebalanceInterval:     2 * time.Second, // Must be <= ColdStartWindow (3s)
+			MinRebalanceInterval:  2 * time.Second, // Must be <= ColdStartWindow (3s)
 		},
 	}
 
@@ -431,7 +428,7 @@ func TestWeightedPartitions_LoadBalancing(t *testing.T) {
 	}
 
 	avgWeight := float64(totalAssignedWeight) / float64(numWorkers)
-	t.Logf("✅ Weight distribution: min=%d, max=%d, avg=%.1f (within ±65%% tolerance)", minWeight, maxWeight, avgWeight)
+	t.Logf("Weight distribution: min=%d, max=%d, avg=%.1f (within ±65%% tolerance)", minWeight, maxWeight, avgWeight)
 
 	// Cleanup
 	stopCtx, stopCancel := context.WithTimeout(t.Context(), 5*time.Second)

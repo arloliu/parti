@@ -78,7 +78,7 @@ func TestConcurrentKVBucketCreation(t *testing.T) {
 			require.NotNil(t, kv, "Worker %d should have valid KV instance", i)
 		}
 
-		t.Logf("✅ All %d workers successfully created/opened the same KV bucket", numWorkers)
+		t.Logf("All %d workers successfully created/opened the same KV bucket", numWorkers)
 	})
 
 	t.Run("10 concurrent creates with retry - stress test", func(t *testing.T) {
@@ -140,7 +140,7 @@ func TestConcurrentKVBucketCreation(t *testing.T) {
 		}
 
 		require.Equal(t, numWorkers, successful, "All workers should succeed with retry logic")
-		t.Logf("✅ All %d workers succeeded with retry logic", numWorkers)
+		t.Logf("All %d workers succeeded with retry logic", numWorkers)
 	})
 }
 
@@ -184,7 +184,7 @@ func TestKVBucketCreationTimeout(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, kv)
 
-		t.Log("✅ Successfully created bucket with sufficient timeout")
+		t.Log("Successfully created bucket with sufficient timeout")
 	})
 }
 
@@ -207,7 +207,7 @@ func TestEnsureKVBucketWithRetry(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, kv)
 
-		t.Log("✅ Bucket created successfully on first try")
+		t.Log("Bucket created successfully on first try")
 	})
 
 	t.Run("bucket exists - should open it", func(t *testing.T) {
@@ -229,7 +229,7 @@ func TestEnsureKVBucketWithRetry(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, kv2)
 
-		t.Log("✅ Successfully opened existing bucket")
+		t.Log("Successfully opened existing bucket")
 	})
 
 	t.Run("concurrent creates with retry - 10 workers", func(t *testing.T) {
@@ -277,7 +277,7 @@ func TestEnsureKVBucketWithRetry(t *testing.T) {
 			require.NotNil(t, kv, "Worker %d should have valid KV instance", i)
 		}
 
-		t.Logf("✅ All %d workers succeeded concurrently with retry logic", numWorkers)
+		t.Logf("All %d workers succeeded concurrently with retry logic", numWorkers)
 	})
 
 	t.Run("context timeout - should fail gracefully", func(t *testing.T) {
@@ -296,6 +296,6 @@ func TestEnsureKVBucketWithRetry(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "context")
 
-		t.Logf("✅ Failed gracefully with context timeout: %v", err)
+		t.Logf("Failed gracefully with context timeout: %v", err)
 	})
 }

@@ -101,11 +101,11 @@ func testWatchSpecificKey(ctx context.Context, kv jetstream.KeyValue) {
 		select {
 		case entry := <-watcher.Updates():
 			if entry == nil {
-				fmt.Println("  ⚠️  Received nil entry (end of initial values marker)")
+				fmt.Println("  Received nil entry (end of initial values marker)")
 				continue
 			}
 			updateCount++
-			fmt.Printf("  ✓ Update #%d: key=%s, value=%s, op=%s\n",
+			fmt.Printf("  Update #%d: key=%s, value=%s, op=%s\n",
 				updateCount, entry.Key(), string(entry.Value()), entry.Operation())
 
 		case <-timeout:
@@ -148,11 +148,11 @@ func testWatchAll(ctx context.Context, kv jetstream.KeyValue) {
 		case entry := <-watcher.Updates():
 			if entry == nil {
 				nilCount++
-				fmt.Println("  ⚠️  Received nil entry (end of initial values marker)")
+				fmt.Println("  Received nil entry (end of initial values marker)")
 				continue
 			}
 			updateCount++
-			fmt.Printf("  ✓ Update #%d: key=%s, value=%s, op=%s\n",
+			fmt.Printf("  Update #%d: key=%s, value=%s, op=%s\n",
 				updateCount, entry.Key(), string(entry.Value()), entry.Operation())
 
 		case <-timeout:
@@ -195,11 +195,11 @@ func testWatchAllUpdatesOnly(ctx context.Context, kv jetstream.KeyValue) {
 		case entry := <-watcher.Updates():
 			if entry == nil {
 				nilCount++
-				fmt.Println("  ⚠️  Received nil entry")
+				fmt.Println("  Received nil entry")
 				continue
 			}
 			updateCount++
-			fmt.Printf("  ✓ Update #%d: key=%s, value=%s, op=%s\n",
+			fmt.Printf("  Update #%d: key=%s, value=%s, op=%s\n",
 				updateCount, entry.Key(), string(entry.Value()), entry.Operation())
 
 		case <-timeout:
@@ -241,11 +241,11 @@ func testWatchSpecificKeyUpdatesOnly(ctx context.Context, kv jetstream.KeyValue)
 		case entry := <-watcher.Updates():
 			if entry == nil {
 				nilCount++
-				fmt.Println("  ⚠️  Received nil entry")
+				fmt.Println("  Received nil entry")
 				continue
 			}
 			updateCount++
-			fmt.Printf("  ✓ Update #%d: key=%s, value=%s, op=%s\n",
+			fmt.Printf("  Update #%d: key=%s, value=%s, op=%s\n",
 				updateCount, entry.Key(), string(entry.Value()), entry.Operation())
 
 		case <-timeout:

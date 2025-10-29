@@ -1,6 +1,3 @@
-//go:build integration
-// +build integration
-
 package integration_test
 
 import (
@@ -63,7 +60,7 @@ func TestRefreshPartitions_Addition(t *testing.T) {
 		RestartDetectionRatio: 0.5,
 		Assignment: parti.AssignmentConfig{
 			MinRebalanceThreshold: 0.15,
-			MinRebalanceInterval:     2 * time.Second,
+			MinRebalanceInterval:  2 * time.Second,
 		},
 	}
 
@@ -179,7 +176,7 @@ func TestRefreshPartitions_Addition(t *testing.T) {
 		require.True(t, assignedPartitions[partKey], "Partition %s not assigned", partKey)
 	}
 
-	t.Log("✅ RefreshPartitions_Addition test passed - all 70 partitions assigned correctly")
+	t.Log("RefreshPartitions_Addition test passed - all 70 partitions assigned correctly")
 	t.Logf("Test completed successfully: 50 -> 70 partitions, rebalancing triggered by RefreshPartitions()")
 }
 
@@ -227,7 +224,7 @@ func TestRefreshPartitions_Removal(t *testing.T) {
 		RestartDetectionRatio: 0.5,
 		Assignment: parti.AssignmentConfig{
 			MinRebalanceThreshold: 0.15,
-			MinRebalanceInterval:     2 * time.Second,
+			MinRebalanceInterval:  2 * time.Second,
 		},
 	}
 
@@ -352,7 +349,7 @@ func TestRefreshPartitions_Removal(t *testing.T) {
 		require.True(t, assignedPartitions[partKey], "Partition %s not assigned", partKey)
 	}
 
-	t.Log("✅ RefreshPartitions_Removal test passed - exactly 70 partitions assigned, 30 removed successfully")
+	t.Log("RefreshPartitions_Removal test passed - exactly 70 partitions assigned, 30 removed successfully")
 	t.Logf("Test completed successfully: 100 -> 70 partitions, removed partitions no longer assigned")
 }
 
@@ -400,7 +397,7 @@ func TestRefreshPartitions_WeightChange(t *testing.T) {
 		RestartDetectionRatio: 0.5,
 		Assignment: parti.AssignmentConfig{
 			MinRebalanceThreshold: 0.15,
-			MinRebalanceInterval:     2 * time.Second,
+			MinRebalanceInterval:  2 * time.Second,
 		},
 	}
 
@@ -531,7 +528,7 @@ func TestRefreshPartitions_WeightChange(t *testing.T) {
 	// prioritizes partition affinity over perfect load balance. The key test is
 	// that all partitions remain assigned and the system remains stable.
 
-	t.Log("✅ RefreshPartitions_WeightChange test passed - all 60 partitions still assigned after weight change")
+	t.Log("RefreshPartitions_WeightChange test passed - all 60 partitions still assigned after weight change")
 	t.Logf("Test completed successfully: Weight change (30 partitions: 100->200) processed correctly")
 }
 
@@ -579,7 +576,7 @@ func TestRefreshPartitions_Cooldown(t *testing.T) {
 		RestartDetectionRatio: 0.5,
 		Assignment: parti.AssignmentConfig{
 			MinRebalanceThreshold: 0.15,
-			MinRebalanceInterval:     3 * time.Second, // Longer cooldown for this test
+			MinRebalanceInterval:  3 * time.Second, // Longer cooldown for this test
 		},
 	}
 
@@ -693,6 +690,6 @@ func TestRefreshPartitions_Cooldown(t *testing.T) {
 		require.True(t, assignedPartitions[partKey], "Partition %s not assigned", partKey)
 	}
 
-	t.Log("✅ RefreshPartitions_Cooldown test passed - manual refresh bypasses cooldown as expected")
+	t.Log("RefreshPartitions_Cooldown test passed - manual refresh bypasses cooldown as expected")
 	t.Logf("Test completed successfully: Rapid RefreshPartitions() calls handled correctly")
 }

@@ -1,6 +1,3 @@
-//go:build integration
-// +build integration
-
 package integration_test
 
 import (
@@ -193,7 +190,7 @@ func TestLeaderElection_OnlyLeaderRunsCalculator(t *testing.T) {
 	}
 	require.Equal(t, 2, followerCount, "should have 2 followers")
 
-	t.Logf("✅ Verified: Only leader (%s) runs calculator, %d followers are passive",
+	t.Logf("Verified: Only leader (%s) runs calculator, %d followers are passive",
 		leader.WorkerID(), followerCount)
 }
 
@@ -241,7 +238,7 @@ func TestLeaderElection_LeaderRenewal(t *testing.T) {
 	require.Equal(t, initialLeaderID, currentLeaderID,
 		"leader should remain the same after lease renewals")
 
-	t.Logf("✅ Leader %s successfully maintained leadership for 6s", currentLeaderID)
+	t.Logf("Leader %s successfully maintained leadership for 6s", currentLeaderID)
 }
 
 // TestLeaderElection_AssignmentPreservation tests that assignments are preserved during leader transition.
@@ -298,7 +295,7 @@ func TestLeaderElection_AssignmentPreservation(t *testing.T) {
 	// Check for duplicate assignments
 	for key, owners := range allKeysBefore {
 		if len(owners) > 1 {
-			t.Logf("⚠️  Partition key %s assigned to multiple workers: %v", key, owners)
+			t.Logf("Partition key %s assigned to multiple workers: %v", key, owners)
 		}
 	}
 
@@ -414,7 +411,7 @@ func TestLeaderElection_AssignmentPreservation(t *testing.T) {
 			"worker %s should still have assignments after leader transition", workerID)
 	}
 
-	t.Logf("✅ Assignments successfully transitioned: %d unique partitions preserved, no duplicates, no orphans",
+	t.Logf("Assignments successfully transitioned: %d unique partitions preserved, no duplicates, no orphans",
 		len(uniquePartitionsAfter))
 }
 
@@ -542,7 +539,7 @@ func TestLeaderElection_AssignmentVersioning(t *testing.T) {
 	require.LessOrEqual(t, len(versionSet), 2,
 		"should have at most 2 versions (emergency rebalance might increment twice)")
 
-	t.Logf("✅ Version monotonicity preserved: all versions > %d after leader failover", maxVersionBefore)
+	t.Logf("Version monotonicity preserved: all versions > %d after leader failover", maxVersionBefore)
 }
 
 // TestLeaderElection_NoOrphansOnFailover verifies no partitions become orphaned during rapid leader transitions.
@@ -662,7 +659,7 @@ func TestLeaderElection_NoOrphansOnFailover(t *testing.T) {
 		for key, count := range partitionCounts {
 			if count > 1 {
 				duplicates++
-				t.Logf("⚠️ Partition key %s assigned %d times", key, count)
+				t.Logf("Partition key %s assigned %d times", key, count)
 			}
 		}
 		require.Equal(t, 0, duplicates, "no partitions should be duplicated after round %d", round)
@@ -677,10 +674,10 @@ func TestLeaderElection_NoOrphansOnFailover(t *testing.T) {
 				"partition key %s is orphaned after failover round %d", expectedKey, round)
 		}
 
-		t.Logf("✅ Round %d: All 20 partitions assigned, no orphans, no duplicates", round)
+		t.Logf("Round %d: All 20 partitions assigned, no orphans, no duplicates", round)
 	}
 
-	t.Logf("✅ Completed 3 rapid leader transitions: no orphaned partitions detected")
+	t.Logf("Completed 3 rapid leader transitions: no orphaned partitions detected")
 }
 
 // TestLeaderElection_RapidChurn tests system stability under rapid leader changes.
@@ -765,7 +762,7 @@ func TestLeaderElection_RapidChurn(t *testing.T) {
 		time.Sleep(2 * time.Second)
 	}
 
-	t.Logf("✅ System remained stable through 3 rapid leader transitions")
+	t.Logf("System remained stable through 3 rapid leader transitions")
 }
 
 // TestLeaderElection_ShutdownDuringRebalancing tests leader shutdown during active rebalancing.
@@ -855,7 +852,7 @@ func TestLeaderElection_ShutdownDuringRebalancing(t *testing.T) {
 	require.Equal(t, 2, aliveWorkers, "should have 2 alive workers (worker-0 killed)")
 	require.Equal(t, 20, totalPartitions, "all 20 partitions should be assigned")
 
-	t.Logf("✅ System recovered successfully from leader shutdown during rebalancing")
+	t.Logf("System recovered successfully from leader shutdown during rebalancing")
 }
 
 // TestLeaderElection_ShutdownDuringEmergency tests leader shutdown during emergency rebalancing.
@@ -942,7 +939,7 @@ func TestLeaderElection_ShutdownDuringEmergency(t *testing.T) {
 	require.Equal(t, 2, aliveWorkers, "should have 2 alive workers")
 	require.Equal(t, 20, totalPartitions, "all 20 partitions should be assigned")
 
-	t.Logf("✅ System recovered from cascading failures (follower + leader during emergency)")
+	t.Logf("System recovered from cascading failures (follower + leader during emergency)")
 }
 
 // Helper function to get keys from a map

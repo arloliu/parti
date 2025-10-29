@@ -43,7 +43,7 @@ func TestCalculatorCooldown(t *testing.T) {
 		// Default cooldown should be 10s
 		require.Equal(t, 10*time.Second, calc.cooldown)
 
-		t.Log("✅ Default cooldown is 10 seconds")
+		t.Log("Default cooldown is 10 seconds")
 	})
 
 	t.Run("can set custom cooldown", func(t *testing.T) {
@@ -75,7 +75,7 @@ func TestCalculatorCooldown(t *testing.T) {
 
 		require.Equal(t, customCooldown, calc.cooldown)
 
-		t.Logf("✅ Successfully set custom cooldown to %v", customCooldown)
+		t.Logf("Successfully set custom cooldown to %v", customCooldown)
 	})
 
 	t.Run("cooldown blocks rapid rebalances", func(t *testing.T) {
