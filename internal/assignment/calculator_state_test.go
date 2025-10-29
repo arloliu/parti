@@ -74,7 +74,8 @@ func TestCalculator_detectRebalanceType_Emergency(t *testing.T) {
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second, 5*time.Second)
+	// Use shorter intervals for faster test: HeartbeatInterval=1s, GracePeriod=1s (instead of default 0.75*interval)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 1*time.Second, 1*time.Second)
 
 	// Set up previous workers
 	calc.lastWorkers = map[string]bool{
@@ -94,9 +95,8 @@ func TestCalculator_detectRebalanceType_Emergency(t *testing.T) {
 	require.Equal(t, "", reason, "Should be in grace period initially")
 	require.Equal(t, time.Duration(0), window)
 
-	// Wait for grace period to expire (grace period = 0.75 * 10s = 7.5s)
-	// For testing, we can directly simulate by waiting longer or using the emergency detector
-	time.Sleep(8 * time.Second)
+	// Wait for grace period to expire (grace period = 1s, wait 1.1s to be safe)
+	time.Sleep(1100 * time.Millisecond)
 
 	// Second check - should now be emergency
 	reason, window = calc.detectRebalanceType(currentWorkers)
@@ -159,7 +159,8 @@ func TestCalculator_detectRebalanceType_MultipleWorkersCrashed(t *testing.T) {
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second, 5*time.Second)
+	// Use shorter intervals for faster test: HeartbeatInterval=1s, GracePeriod=1s (instead of default 0.75*interval)
+	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 1*time.Second, 1*time.Second)
 
 	// Set up previous workers
 	calc.lastWorkers = map[string]bool{
@@ -181,8 +182,8 @@ func TestCalculator_detectRebalanceType_MultipleWorkersCrashed(t *testing.T) {
 	require.Equal(t, "", reason, "Should be in grace period initially")
 	require.Equal(t, time.Duration(0), window)
 
-	// Wait for grace period to expire (grace period = 0.75 * 10s = 7.5s)
-	time.Sleep(8 * time.Second)
+	// Wait for grace period to expire (grace period = 1s, wait 1.1s to be safe)
+	time.Sleep(1100 * time.Millisecond)
 
 	// Second check - should now be emergency
 	reason, window = calc.detectRebalanceType(currentWorkers)

@@ -286,7 +286,7 @@ func TestNATSElection_LeadershipFailover(t *testing.T) {
 
 		kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{
 			Bucket:  "test-election-failover",
-			TTL:     2 * time.Second, // Short TTL for testing
+			TTL:     1 * time.Second, // Reduced from 2s to 1s for faster test
 			Storage: jetstream.MemoryStorage,
 		})
 		require.NoError(t, err)
@@ -297,8 +297,8 @@ func TestNATSElection_LeadershipFailover(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, isLeader)
 
-		// Wait for TTL to expire
-		time.Sleep(3 * time.Second)
+		// Wait for TTL to expire (1s + margin)
+		time.Sleep(1200 * time.Millisecond)
 
 		// Worker 2 can now become leader
 		election2 := NewNATSElection(kv, "leader")

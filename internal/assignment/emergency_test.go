@@ -38,7 +38,8 @@ func TestEmergencyDetector_Hysteresis(t *testing.T) {
 
 // TestEmergencyDetector_WorkerReappears verifies tracking cleared when worker returns.
 func TestEmergencyDetector_WorkerReappears(t *testing.T) {
-	gracePeriod := 2 * time.Second
+	// Reduce grace period from 2s to 500ms for faster test
+	gracePeriod := 500 * time.Millisecond
 	detector := NewEmergencyDetector(gracePeriod)
 
 	prev := map[string]bool{"worker-1": true, "worker-2": true}
@@ -48,8 +49,8 @@ func TestEmergencyDetector_WorkerReappears(t *testing.T) {
 	emergency, _ := detector.CheckEmergency(prev, curr)
 	require.False(t, emergency)
 
-	// Wait 1 second
-	time.Sleep(1 * time.Second)
+	// Wait 250ms
+	time.Sleep(250 * time.Millisecond)
 
 	// Worker-2 reappears
 	currReappeared := map[string]bool{"worker-1": true, "worker-2": true}
@@ -57,8 +58,8 @@ func TestEmergencyDetector_WorkerReappears(t *testing.T) {
 	require.False(t, emergency)
 	require.Empty(t, workers)
 
-	// Wait another 2 seconds - should still not be emergency (tracking cleared)
-	time.Sleep(2 * time.Second)
+	// Wait another 550ms - should still not be emergency (tracking cleared)
+	time.Sleep(550 * time.Millisecond)
 	emergency, workers = detector.CheckEmergency(prev, currReappeared)
 	require.False(t, emergency)
 	require.Empty(t, workers)

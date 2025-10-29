@@ -156,7 +156,7 @@ func TestCalculator_ScalingTransition_StopBeforeWindow(t *testing.T) {
 	strategy := &mockStrategy{}
 
 	calc := NewCalculator(assignmentKV, heartbeatKV, "test", src, strategy, "heartbeat", 5*time.Second, 1*time.Second)
-	calc.SetStabilizationWindows(2*time.Second, 1*time.Second) // Long window
+	calc.SetStabilizationWindows(500*time.Millisecond, 1*time.Second) // Shorter window for faster test
 	calc.SetCooldown(0)
 
 	ctx := context.Background()
@@ -166,7 +166,7 @@ func TestCalculator_ScalingTransition_StopBeforeWindow(t *testing.T) {
 	require.NoError(t, err)
 
 	// Trigger scaling state manually
-	calc.enterScalingState(ctx, "test_reason", 2*time.Second)
+	calc.enterScalingState(ctx, "test_reason", 500*time.Millisecond)
 
 	require.Equal(t, types.CalcStateScaling, calc.GetState())
 
@@ -176,7 +176,7 @@ func TestCalculator_ScalingTransition_StopBeforeWindow(t *testing.T) {
 	require.NoError(t, err)
 
 	// Wait longer than window would have been
-	time.Sleep(2500 * time.Millisecond)
+	time.Sleep(700 * time.Millisecond)
 
 	// State shouldn't change after Stop
 	state := calc.GetState()

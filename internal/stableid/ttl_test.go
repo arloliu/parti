@@ -20,10 +20,10 @@ func TestNATSKV_PutResetsTTL(t *testing.T) {
 	js, err := jetstream.New(nc)
 	require.NoError(t, err)
 
-	// Create KV bucket with 2 second TTL
+	// Create KV bucket with 500ms TTL for faster test
 	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{
 		Bucket:  "test-ttl",
-		TTL:     2 * time.Second,
+		TTL:     500 * time.Millisecond,
 		History: 1,
 	})
 	require.NoError(t, err)
@@ -33,15 +33,15 @@ func TestNATSKV_PutResetsTTL(t *testing.T) {
 		_, err := kv.Create(ctx, "test-key", []byte("initial"))
 		require.NoError(t, err)
 
-		// Wait 1 second (half of TTL)
-		time.Sleep(1 * time.Second)
+		// Wait 250ms (half of TTL)
+		time.Sleep(250 * time.Millisecond)
 
 		// Use Put() to update the value
 		_, err = kv.Put(ctx, "test-key", []byte("updated-1"))
 		require.NoError(t, err)
 
-		// Wait another 1.5 seconds (would exceed original TTL)
-		time.Sleep(1500 * time.Millisecond)
+		// Wait another 400ms (would exceed original TTL)
+		time.Sleep(400 * time.Millisecond)
 
 		// Entry should still exist because Put() reset the TTL
 		entry, err := kv.Get(ctx, "test-key")
@@ -56,15 +56,15 @@ func TestNATSKV_PutResetsTTL(t *testing.T) {
 		rev, err := kv.Create(ctx, "test-key-2", []byte("initial"))
 		require.NoError(t, err)
 
-		// Wait 1 second (half of TTL)
-		time.Sleep(1 * time.Second)
+		// Wait 250ms (half of TTL)
+		time.Sleep(250 * time.Millisecond)
 
 		// Use Update() to update the value
 		_, err = kv.Update(ctx, "test-key-2", []byte("updated-2"), rev)
 		require.NoError(t, err)
 
-		// Wait another 1.5 seconds (would exceed original TTL)
-		time.Sleep(1500 * time.Millisecond)
+		// Wait another 400ms (would exceed original TTL)
+		time.Sleep(400 * time.Millisecond)
 
 		// Entry should still exist because Update() reset the TTL
 		entry, err := kv.Get(ctx, "test-key-2")
@@ -79,8 +79,8 @@ func TestNATSKV_PutResetsTTL(t *testing.T) {
 		_, err := kv.Create(ctx, "test-key-3", []byte("initial"))
 		require.NoError(t, err)
 
-		// Wait for TTL to expire (2.5 seconds to be safe)
-		time.Sleep(2500 * time.Millisecond)
+		// Wait for TTL to expire (700ms to be safe, TTL is 500ms)
+		time.Sleep(700 * time.Millisecond)
 
 		// Entry should be gone
 		_, err = kv.Get(ctx, "test-key-3")

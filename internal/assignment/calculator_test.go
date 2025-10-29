@@ -241,7 +241,8 @@ func TestCalculator_WorkerMonitoring(t *testing.T) {
 		}
 		strategy := &mockStrategy{}
 
-		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second, 3*time.Second)
+		// Reduce HeartbeatTTL from 6s to 2s for faster test (poll interval = TTL/2 = 1s)
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 2*time.Second, 1*time.Second)
 		calc.SetStabilizationWindows(50*time.Millisecond, 50*time.Millisecond)
 		calc.SetCooldown(100 * time.Millisecond) // Short cooldown for testing
 
@@ -256,8 +257,8 @@ func TestCalculator_WorkerMonitoring(t *testing.T) {
 		_, err = heartbeatKV.Put(ctx, "worker-hb.worker-2", []byte(time.Now().Format(time.RFC3339Nano)))
 		require.NoError(t, err)
 
-		// Wait for monitoring cycle to detect change
-		time.Sleep(3500 * time.Millisecond) // hbTTL/2 + processing time
+		// Wait for monitoring cycle to detect change (TTL/2 + processing = 1s + margin)
+		time.Sleep(1200 * time.Millisecond)
 
 		// Version should increase due to rebalance
 		require.Greater(t, calc.CurrentVersion(), initialVersion)
@@ -290,9 +291,10 @@ func TestCalculator_CooldownPreventsRebalancing(t *testing.T) {
 		}
 		strategy := &mockStrategy{}
 
-		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second, 3*time.Second)
+		// Reduce HeartbeatTTL from 6s to 2s for faster test
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 2*time.Second, 1*time.Second)
 		calc.SetStabilizationWindows(50*time.Millisecond, 50*time.Millisecond)
-		calc.SetCooldown(5 * time.Second) // Long cooldown
+		calc.SetCooldown(2 * time.Second) // Reduced from 5s to 2s
 
 		err = calc.Start(ctx)
 		require.NoError(t, err)
@@ -304,8 +306,8 @@ func TestCalculator_CooldownPreventsRebalancing(t *testing.T) {
 		_, err = heartbeatKV.Put(ctx, "worker-hb.worker-2", []byte(time.Now().Format(time.RFC3339Nano)))
 		require.NoError(t, err)
 
-		// Wait for monitoring cycle
-		time.Sleep(3500 * time.Millisecond)
+		// Wait for monitoring cycle (TTL/2 + margin = 1s + 200ms)
+		time.Sleep(1200 * time.Millisecond)
 
 		// Version should NOT change due to cooldown
 		require.Equal(t, initialVersion, calc.CurrentVersion())

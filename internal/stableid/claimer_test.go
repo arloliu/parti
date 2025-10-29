@@ -137,13 +137,17 @@ func TestClaimer_Release(t *testing.T) {
 		_, nc := partitest.StartEmbeddedNATS(t)
 		kv := partitest.CreateJetStreamKV(t, nc, "test-stable-ids-release")
 
-		claimer := NewClaimer(kv, "worker", 0, 9, 30*time.Second, nil)
+		// Use shorter TTL for faster test
+		claimer := NewClaimer(kv, "worker", 0, 9, 2*time.Second, nil)
 		workerID, err := claimer.Claim(ctx)
 		require.NoError(t, err)
 
-		// Start renewal
+		// Start renewal (renewal interval = TTL/3 = 667ms)
 		err = claimer.StartRenewal(ctx)
 		require.NoError(t, err)
+
+		// Small delay to let renewal goroutine start
+		time.Sleep(50 * time.Millisecond)
 
 		// Release
 		err = claimer.Release(ctx)
@@ -162,18 +166,26 @@ func TestClaimer_Release(t *testing.T) {
 		_, nc := partitest.StartEmbeddedNATS(t)
 		kv := partitest.CreateJetStreamKV(t, nc, "test-stable-ids-release-2")
 
+		// Use shorter TTL for faster test
 		// First claimer
-		claimer1 := NewClaimer(kv, "worker", 0, 9, 30*time.Second, nil)
+		claimer1 := NewClaimer(kv, "worker", 0, 9, 2*time.Second, nil)
 		workerID1, err := claimer1.Claim(ctx)
 		require.NoError(t, err)
 		require.Equal(t, "worker-0", workerID1)
+
+		// Start renewal so Release() doesn't timeout
+		err = claimer1.StartRenewal(ctx)
+		require.NoError(t, err)
+
+		// Small delay to let renewal goroutine start
+		time.Sleep(50 * time.Millisecond)
 
 		// Release it
 		err = claimer1.Release(ctx)
 		require.NoError(t, err)
 
 		// Second claimer should be able to claim the same ID
-		claimer2 := NewClaimer(kv, "worker", 0, 9, 30*time.Second, nil)
+		claimer2 := NewClaimer(kv, "worker", 0, 9, 2*time.Second, nil)
 		workerID2, err := claimer2.Claim(ctx)
 		require.NoError(t, err)
 		require.Equal(t, "worker-0", workerID2)
