@@ -232,7 +232,7 @@ func TestCalculator_StateTransitions_Scaling(t *testing.T) {
 	calc.enterScalingState(ctx, "cold_start", 50*time.Millisecond)
 
 	require.Equal(t, types.CalcStateScaling, calc.GetState())
-	require.Equal(t, "cold_start", calc.scalingReason)
+	require.Equal(t, "cold_start", calc.GetScalingReason())
 
 	// Wait for window to expire and transition to rebalancing
 	time.Sleep(100 * time.Millisecond)
@@ -264,10 +264,7 @@ func TestCalculator_StateTransitions_Emergency(t *testing.T) {
 	}, 1*time.Second, 50*time.Millisecond)
 
 	// Verify scaling reason was cleared
-	calc.mu.RLock()
-	reason := calc.scalingReason
-	calc.mu.RUnlock()
-	require.Equal(t, "", reason) // Should be cleared after returning to idle
+	require.Equal(t, "", calc.GetScalingReason()) // Should be cleared after returning to idle
 }
 
 func TestCalculator_StateTransitions_ReturnToIdle(t *testing.T) {
@@ -282,7 +279,9 @@ func TestCalculator_StateTransitions_ReturnToIdle(t *testing.T) {
 
 	// Manually set state to Rebalancing
 	calc.calcState.Store(int32(types.CalcStateRebalancing))
+	calc.mu.Lock()
 	calc.scalingReason = "test_reason"
+	calc.mu.Unlock()
 
 	require.Equal(t, types.CalcStateRebalancing, calc.GetState())
 
@@ -290,7 +289,7 @@ func TestCalculator_StateTransitions_ReturnToIdle(t *testing.T) {
 	calc.returnToIdleState()
 
 	require.Equal(t, types.CalcStateIdle, calc.GetState())
-	require.Equal(t, "", calc.scalingReason)
+	require.Equal(t, "", calc.GetScalingReason())
 }
 
 func TestCalculator_StateTransitions_PreventsConcurrentRebalance(t *testing.T) {

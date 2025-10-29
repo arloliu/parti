@@ -219,34 +219,33 @@ func TestCalculatorStateChanges(t *testing.T) {
 
 ---
 
-### 1.2 Fix Watcher Lifecycle Race Condition (CRITICAL)
+### 1.2 Fix Watcher Lifecycle Race Condition (CRITICAL) ✅ COMPLETED
 **Issue**: Race between Stop() and processWatcherEvents() (lines 704-719)
 **Impact**: Potential panic, resource leak, unpredictable behavior
 **Priority**: P0
+**Status**: ✅ Completed - October 29, 2025
 
-**Current Code**:
+**Analysis**: The original Stop() sequence had a critical ordering issue:
+1. It stopped the watcher first (while holding watcherMu)
+2. Then closed stopCh to signal goroutines
+3. Finally waited for doneCh
+
+This created a race where:
+- `watcher.Stop()` closed the watcher's channel while `processWatcherEvents()` was still reading from it
+- If the watcher operation hung, the goroutine might not respond to stopCh quickly
+- This could cause Stop() to hang waiting for doneCh
+
+**Solution Implemented**: Reordered Stop() sequence for proper cleanup:
 ```go
 func (c *Calculator) Stop() error {
-    c.watcherMu.Lock()
-    if c.watcher != nil {
-        c.watcher.Stop() // Race with processWatcherEvents
-        c.watcher = nil
-    }
-    c.watcherMu.Unlock()
-    close(c.stopCh)
-}
-```
-
-**Solution**:
-```go
-func (c *Calculator) Stop() error {
-    // 1. Signal stop first
+    // 1. Signal stop first - allows goroutines to exit cleanly
     close(c.stopCh)
 
-    // 2. Wait for goroutines to finish
-    c.wg.Wait()
+    // 2. Wait for monitorWorkers goroutine to finish
+    // This ensures both monitorWorkers and processWatcherEvents have exited
+    <-c.doneCh
 
-    // 3. Then cleanup watcher (safe now)
+    // 3. Now safely cleanup watcher (no concurrent access possible)
     c.watcherMu.Lock()
     if c.watcher != nil {
         c.watcher.Stop()
@@ -257,6 +256,14 @@ func (c *Calculator) Stop() error {
     return nil
 }
 ```
+
+**Why This Works**:
+- `stopCh` closure is seen immediately by both goroutines
+- Goroutines can exit cleanly even if watcher is slow
+- After goroutines exit, watcher cleanup is safe (no concurrent access)
+- No risk of hanging on watcher operations
+
+**Note**: `monitorWorkers` also calls `stopWatcher()` before exiting, which provides redundant cleanup for the context cancellation case. This is safe because `stopWatcher()` checks for nil.
 
 **Testing**: Race detector, concurrent Stop() calls
 **Estimated Time**: 3 hours

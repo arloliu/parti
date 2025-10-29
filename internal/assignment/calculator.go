@@ -397,7 +397,14 @@ func (c *Calculator) Stop() error {
 	}
 	c.mu.Unlock()
 
-	// Stop watcher if running
+	// 1. Signal stop first - allows goroutines to exit cleanly
+	close(c.stopCh)
+
+	// 2. Wait for monitorWorkers goroutine to finish
+	// This ensures both monitorWorkers and processWatcherEvents have exited
+	<-c.doneCh
+
+	// 3. Now safely cleanup watcher (no concurrent access possible)
 	c.watcherMu.Lock()
 	if c.watcher != nil {
 		if err := c.watcher.Stop(); err != nil {
@@ -406,9 +413,6 @@ func (c *Calculator) Stop() error {
 		c.watcher = nil
 	}
 	c.watcherMu.Unlock()
-
-	close(c.stopCh)
-	<-c.doneCh
 
 	c.mu.Lock()
 	c.started = false
@@ -437,6 +441,16 @@ func (c *Calculator) IsStarted() bool {
 //   - types.CalculatorState: Current calculator state (type-safe enum)
 func (c *Calculator) GetState() types.CalculatorState {
 	return types.CalculatorState(c.calcState.Load())
+}
+
+// GetScalingReason returns the reason for the current or last scaling operation.
+//
+// Returns:
+//   - string: Scaling reason ("cold_start", "planned_scale", "emergency", "restart") or empty string if idle
+func (c *Calculator) GetScalingReason() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.scalingReason
 }
 
 // CurrentVersion returns the current assignment version.

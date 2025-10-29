@@ -34,30 +34,25 @@ test: clean-test-results
 ## test-unit: Run only unit tests (fast, same as test-short)
 test-unit: clean-test-results
 	@echo "Running unit tests..."
-	@go test $(TEST_DIRS) -timeout=$(TEST_TIMEOUT)
+	@CGO_ENABLED=1 go test $(TEST_DIRS) -timeout=$(TEST_TIMEOUT) -race
 
 ## test-integration: Run only integration tests
 test-integration: clean-test-results
 	@echo "Running integration tests..."
-	@go test $(INTEGRATION_DIR) -v -timeout=$(TEST_TIMEOUT)
+	@CGO_ENABLED=1 go test $(INTEGRATION_DIR) -v -timeout=$(TEST_TIMEOUT) -race
 
 ## test-all: Run both unit and integration tests
 test-all: clean-test-results
 	@echo "Running all tests (unit + integration)..."
 	@echo "==> Running unit tests..."
-	@go test $(TEST_DIRS) -timeout=$(TEST_TIMEOUT)
+	@CGO_ENABLED=1 go test $(TEST_DIRS) -timeout=$(TEST_TIMEOUT) -race
 	@echo "==> Running integration tests..."
-	@go test $(INTEGRATION_DIR) -v -timeout=$(TEST_TIMEOUT)
+	@CGO_ENABLED=1 go test $(INTEGRATION_DIR) -v -timeout=$(TEST_TIMEOUT) -race
 	@echo "All tests passed!"
 
-## test-race: Run tests with race detector only
-test-race: clean-test-results
-	@echo "Running tests with race detector..."
-	@CGO_ENABLED=1 go test $(TEST_DIRS) -race -timeout=$(TEST_TIMEOUT)
 
-## test-short: Run short tests only
-test-short: clean-test-results
-	@echo "Running short tests..."
+test-quick: clean-test-results
+	@echo "Running unit tests without race detection..."
 	@go test $(TEST_DIRS) -short -timeout=$(TEST_TIMEOUT)
 
 ## coverage: Generate test coverage report
