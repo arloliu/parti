@@ -109,13 +109,14 @@ func TestManager_WaitState_SequentialStates(t *testing.T) {
 	m := &Manager{}
 	m.state.Store(int32(StateInit))
 
-	// Simulate state progression
+	// Simulate state progression with delays longer than polling interval (50ms)
+	// to ensure each state is observed
 	go func() {
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 		m.state.Store(int32(StateClaimingID))
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 		m.state.Store(int32(StateElection))
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 		m.state.Store(int32(StateStable))
 	}()
 
