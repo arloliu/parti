@@ -605,9 +605,9 @@ func (m *Manager) isValidTransition(from, to State) bool {
 		StateInit:              {StateClaimingID, StateShutdown},
 		StateClaimingID:        {StateElection, StateShutdown},
 		StateElection:          {StateWaitingAssignment, StateShutdown},
-		StateWaitingAssignment: {StateStable, StateShutdown},
+		StateWaitingAssignment: {StateStable, StateScaling, StateRebalancing, StateEmergency, StateShutdown},
 		StateStable:            {StateScaling, StateRebalancing, StateEmergency, StateShutdown},
-		StateScaling:           {StateRebalancing, StateWaitingAssignment, StateShutdown},
+		StateScaling:           {StateRebalancing, StateWaitingAssignment, StateStable, StateShutdown},
 		StateRebalancing:       {StateStable, StateWaitingAssignment, StateShutdown},
 		StateEmergency:         {StateStable, StateWaitingAssignment, StateShutdown},
 		StateShutdown:          {}, // Terminal state - no transitions allowed
@@ -855,6 +855,15 @@ func (m *Manager) startCalculator(assignmentKV, heartbeatKV jetstream.KeyValue) 
 
 	m.calculator = calc
 
+	// Start monitoring calculator state BEFORE starting the calculator
+	// This ensures we don't miss any state transitions that happen during startup
+	m.wg.Add(1)
+	go m.monitorCalculatorState()
+
+	// Give the monitor goroutine a moment to set up its subscription
+	// This prevents race conditions where calculator state changes before monitor is ready
+	time.Sleep(10 * time.Millisecond)
+
 	// Start calculator in background
 	if err := calc.Start(m.ctx); err != nil {
 		m.calculator = nil // Clear calculator on start failure
@@ -862,11 +871,6 @@ func (m *Manager) startCalculator(assignmentKV, heartbeatKV jetstream.KeyValue) 
 	}
 
 	m.logger.Info("assignment calculator started", "worker_id", m.WorkerID())
-
-	// Start monitoring calculator state (leader only)
-	m.wg.Add(1)
-
-	go m.monitorCalculatorState()
 
 	return nil
 }
@@ -887,13 +891,21 @@ func (m *Manager) monitorCalculatorState() {
 
 	m.logger.Info("starting calculator state monitor")
 
+	// Subscribe to calculator state changes
+	stateCh, unsubscribe := m.calculator.SubscribeToStateChanges()
+	defer unsubscribe()
+
 	for {
 		select {
 		case <-m.ctx.Done():
 			m.logger.Info("calculator state monitor stopped")
 			return
 
-		case calcState := <-m.calculator.StateChanges():
+		case calcState, ok := <-stateCh:
+			if !ok {
+				m.logger.Info("calculator state channel closed, stopping monitor")
+				return
+			}
 			// Synchronize Manager state based on Calculator state
 			if err := m.syncStateFromCalculator(calcState); err != nil {
 				m.logError("failed to sync state from calculator",
@@ -922,16 +934,33 @@ func (m *Manager) syncStateFromCalculator(calcState types.CalculatorState) error
 	currentState := m.State()
 
 	// Skip if Manager is in initialization or shutdown states
+	// BUT allow Scaling/Rebalancing/Emergency states to be processed even from WaitingAssignment
 	if currentState == StateInit || currentState == StateClaimingID ||
-		currentState == StateElection || currentState == StateWaitingAssignment ||
-		currentState == StateShutdown {
+		currentState == StateElection || currentState == StateShutdown {
 		return nil
+	}
+
+	// Special handling for WaitingAssignment: only process active calculator states
+	if currentState == StateWaitingAssignment {
+		if calcState == types.CalcStateIdle {
+			return nil
+		}
+		// Allow Scaling/Rebalancing/Emergency to transition from WaitingAssignment
 	}
 
 	var targetState State
 
 	switch calcState {
 	case types.CalcStateIdle:
+		// Only transition to Stable if we're in an intermediate state.
+		// This prevents flapping back to Stable when we're already stable,
+		// which can happen when subscribing to calculator state changes
+		// (the calculator sends its current state immediately on subscription).
+		if currentState != StateScaling && currentState != StateRebalancing && currentState != StateEmergency {
+			// Already stable or in a non-active state, no transition needed.
+			return nil
+		}
+
 		targetState = StateStable
 
 	case types.CalcStateScaling:

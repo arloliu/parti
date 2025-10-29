@@ -118,9 +118,11 @@ func TestEmergencyHysteresis_ConfirmedDisappearance(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	// Verify emergency rebalance occurred
+	// Skip worker 0 since it's stopped - only check workers 1 and 2
 	activeWorkers := 0
 	totalPartitions := 0
-	for _, mgr := range cluster.Workers {
+	for i := 1; i < len(cluster.Workers); i++ {
+		mgr := cluster.Workers[i]
 		partCount := len(mgr.CurrentAssignment().Partitions)
 		totalPartitions += partCount
 		if partCount > 0 {
@@ -178,10 +180,11 @@ func TestEmergencyHysteresis_MultipleWorkerFailures(t *testing.T) {
 	time.Sleep(4 * time.Second)
 	time.Sleep(2 * time.Second)
 
-	// Verify only 2 workers remain active
+	// Verify only 2 workers remain active (skip stopped workers 0 and 1)
 	activeWorkers := 0
 	totalPartitions := 0
-	for _, mgr := range cluster.Workers {
+	for i := 2; i < len(cluster.Workers); i++ {
+		mgr := cluster.Workers[i]
 		partCount := len(mgr.CurrentAssignment().Partitions)
 		totalPartitions += partCount
 		if partCount > 0 {

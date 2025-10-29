@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,7 +15,43 @@ import (
 	"github.com/arloliu/parti/internal/metrics"
 	"github.com/arloliu/parti/types"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/puzpuzpuz/xsync/v4"
 )
+
+// stateSubscriber is a helper for managing state change subscriptions.
+type stateSubscriber struct {
+	ch     chan types.CalculatorState
+	mu     sync.Mutex
+	closed bool
+}
+
+// trySend sends a state update to the subscriber's channel without blocking.
+func (s *stateSubscriber) trySend(state types.CalculatorState, metricsCollector types.MetricsCollector) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+
+	select {
+	case s.ch <- state:
+	default:
+		// Subscriber is slow or not ready; they will get the next update.
+		// TODO: Add metricsCollector.RecordSlowSubscriber() when available
+		_ = metricsCollector // Avoid unused parameter warning
+	}
+}
+
+// close safely closes the subscriber's channel.
+func (s *stateSubscriber) close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	s.closed = true
+	close(s.ch)
+}
 
 // Calculator manages partition assignment calculation and distribution.
 //
@@ -63,8 +100,9 @@ type Calculator struct {
 	// Emergency detection
 	emergencyDetector *EmergencyDetector // Hysteresis-based emergency detection
 
-	// State change notification
-	stateChangeChan chan types.CalculatorState // Buffered channel for non-blocking state emission
+	// State management fan-out
+	subscribers      *xsync.Map[string, *stateSubscriber]
+	nextSubscriberID atomic.Uint64
 
 	// Hybrid monitoring: watcher (primary) + polling (fallback)
 	watcher   jetstream.KeyWatcher
@@ -120,7 +158,7 @@ func NewCalculator(
 		currentWorkers:     make(map[string]bool),
 		currentAssignments: make(map[string][]types.Partition),
 		lastWorkers:        make(map[string]bool),
-		stateChangeChan:    make(chan types.CalculatorState, 1), // Buffered for non-blocking
+		subscribers:        xsync.NewMap[string, *stateSubscriber](),
 		stopCh:             make(chan struct{}),
 		doneCh:             make(chan struct{}),
 	}
@@ -209,37 +247,46 @@ func (c *Calculator) SetLogger(l types.Logger) {
 	}
 }
 
-// StateChanges returns a read-only channel for monitoring calculator state transitions.
-//
-// The Manager should listen to this channel to synchronize its state machine
-// with the calculator's state without polling. Channel is buffered (size 1)
-// to prevent blocking the calculator.
-//
-// Returns:
-//   - <-chan types.CalculatorState: Read-only state change notification channel
-func (c *Calculator) StateChanges() <-chan types.CalculatorState {
-	return c.stateChangeChan
+// SubscribeToStateChanges returns a channel for state updates and a function to unsubscribe.
+func (c *Calculator) SubscribeToStateChanges() (<-chan types.CalculatorState, func()) {
+	id := c.nextSubscriberID.Add(1)
+	key := strconv.FormatUint(id, 10)
+
+	// Buffer size of 4 allows Idle -> Scaling -> Rebalancing -> Idle transitions
+	// to be queued without dropping states when subscriber is slow to process
+	sub := &stateSubscriber{ch: make(chan types.CalculatorState, 4)}
+	c.subscribers.Store(key, sub)
+
+	// Immediately send the current state.
+	sub.trySend(c.GetState(), c.metrics)
+
+	unsubscribe := func() {
+		c.removeSubscriber(key)
+	}
+
+	return sub.ch, unsubscribe
 }
 
-// emitStateChange notifies listeners of calculator state change.
-//
-// Non-blocking: uses select with default to prevent calculator stalls.
-// If the channel is full (Manager hasn't read previous state), the emission
-// is skipped. This is acceptable as the Manager will get the latest state
-// on its next read.
-//
-// Parameters:
-//   - state: New calculator state to emit
-func (c *Calculator) emitStateChange(state types.CalculatorState) {
-	select {
-	case c.stateChangeChan <- state:
-		// State change sent successfully
-		c.logger.Debug("emitted state change", "state", state)
-	default:
-		// Channel full (Manager hasn't read previous state yet)
-		// This is OK - Manager will get the latest state on next read
-		c.logger.Debug("skipped state emission (channel full)", "state", state)
+func (c *Calculator) removeSubscriber(key string) {
+	if sub, ok := c.subscribers.LoadAndDelete(key); ok {
+		sub.close()
 	}
+}
+
+// emitStateChange notifies all subscribers of a state transition.
+func (c *Calculator) emitStateChange(state types.CalculatorState) {
+	oldState := c.GetState()
+	if oldState == state {
+		return // No change, no notification needed.
+	}
+
+	c.calcState.Store(int32(state)) //nolint:gosec // G115: state is bounded enum, safe conversion
+	c.logger.Info("state transition", "from", oldState, "to", state)
+
+	c.subscribers.Range(func(key string, sub *stateSubscriber) bool {
+		sub.trySend(state, c.metrics)
+		return true
+	})
 }
 
 // discoverHighestVersion scans existing assignments in KV to find the highest version.
@@ -366,6 +413,13 @@ func (c *Calculator) Stop() error {
 	c.mu.Lock()
 	c.started = false
 	c.mu.Unlock()
+
+	// Clean up all subscribers.
+	c.subscribers.Range(func(key string, sub *stateSubscriber) bool {
+		c.subscribers.Delete(key)
+		sub.close()
+		return true
+	})
 
 	return nil
 }
@@ -561,8 +615,6 @@ func (c *Calculator) enterScalingState(ctx context.Context, reason string, windo
 // Parameters:
 //   - ctx: Context for rebalance operation
 func (c *Calculator) enterRebalancingState(ctx context.Context) {
-	c.calcState.Store(int32(types.CalcStateRebalancing))
-
 	c.logger.Info("entering rebalancing state")
 
 	// Notify Manager of state change
@@ -597,8 +649,6 @@ func (c *Calculator) enterRebalancingState(ctx context.Context) {
 // Parameters:
 //   - ctx: Context for rebalance operation
 func (c *Calculator) enterEmergencyState(ctx context.Context) {
-	c.calcState.Store(int32(types.CalcStateEmergency))
-
 	c.mu.Lock()
 	c.scalingReason = "emergency"
 	c.mu.Unlock()
@@ -634,8 +684,6 @@ func (c *Calculator) enterEmergencyState(ctx context.Context) {
 
 // returnToIdleState transitions the calculator back to idle state after rebalancing completes.
 func (c *Calculator) returnToIdleState() {
-	c.calcState.Store(int32(types.CalcStateIdle))
-
 	c.mu.Lock()
 	c.scalingReason = ""
 	c.mu.Unlock()

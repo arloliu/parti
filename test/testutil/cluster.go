@@ -70,7 +70,7 @@ func FastTestConfig() parti.Config {
 		PlannedScaleWindow:    300 * time.Millisecond,
 		RestartDetectionRatio: 0.5,
 		Assignment: parti.AssignmentConfig{
-			MinRebalanceInterval: 400 * time.Millisecond, // Must be <= ColdStartWindow (500ms)
+			MinRebalanceInterval: 300 * time.Millisecond, // Must be <= PlannedScaleWindow (300ms)
 		},
 	}
 	parti.SetDefaults(&cfg) // Apply default KV bucket names
@@ -352,6 +352,32 @@ func (wc *WorkerCluster) VerifyStateTransition(state types.State) {
 	}
 	require.True(wc.T, found,
 		"no worker entered %s state", state.String())
+}
+
+// VerifyStateTransitionAny verifies that at least one worker went through any of the specified states.
+func (wc *WorkerCluster) VerifyStateTransitionAny(states ...types.State) {
+	found := false
+	foundState := ""
+	for i, tracker := range wc.StateTrackers {
+		for _, state := range states {
+			if tracker.HasState(state) {
+				wc.T.Logf("Worker %d went through %s state", i, state.String())
+				found = true
+				foundState = state.String()
+
+				break
+			}
+		}
+		if found {
+			break
+		}
+	}
+	stateNames := make([]string, len(states))
+	for i, s := range states {
+		stateNames[i] = s.String()
+	}
+	require.True(wc.T, found,
+		"no worker entered any of the expected states: %v (found: %s)", stateNames, foundState)
 }
 
 // GetLeader returns the current leader or nil.

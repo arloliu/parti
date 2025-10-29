@@ -56,7 +56,7 @@ func TestRefreshPartitions_Addition(t *testing.T) {
 		StartupTimeout:        5 * time.Second,
 		ShutdownTimeout:       2 * time.Second,
 		ColdStartWindow:       2 * time.Second,
-		PlannedScaleWindow:    1 * time.Second,
+		PlannedScaleWindow:    2 * time.Second, // Must be >= MinRebalanceInterval
 		RestartDetectionRatio: 0.5,
 		Assignment: parti.AssignmentConfig{
 			MinRebalanceThreshold: 0.15,
@@ -226,7 +226,7 @@ func TestRefreshPartitions_Removal(t *testing.T) {
 		StartupTimeout:        5 * time.Second,
 		ShutdownTimeout:       2 * time.Second,
 		ColdStartWindow:       2 * time.Second,
-		PlannedScaleWindow:    1 * time.Second,
+		PlannedScaleWindow:    2 * time.Second, // Must be >= MinRebalanceInterval
 		RestartDetectionRatio: 0.5,
 		Assignment: parti.AssignmentConfig{
 			MinRebalanceThreshold: 0.15,
@@ -405,7 +405,7 @@ func TestRefreshPartitions_WeightChange(t *testing.T) {
 		StartupTimeout:        5 * time.Second,
 		ShutdownTimeout:       2 * time.Second,
 		ColdStartWindow:       2 * time.Second,
-		PlannedScaleWindow:    1 * time.Second,
+		PlannedScaleWindow:    2 * time.Second, // Must be >= MinRebalanceInterval
 		RestartDetectionRatio: 0.5,
 		Assignment: parti.AssignmentConfig{
 			MinRebalanceThreshold: 0.15,
@@ -590,7 +590,7 @@ func TestRefreshPartitions_Cooldown(t *testing.T) {
 		StartupTimeout:        5 * time.Second,
 		ShutdownTimeout:       2 * time.Second,
 		ColdStartWindow:       4 * time.Second, // Must be >= MinRebalanceInterval
-		PlannedScaleWindow:    2 * time.Second,
+		PlannedScaleWindow:    3 * time.Second, // Must be >= MinRebalanceInterval
 		RestartDetectionRatio: 0.5,
 		Assignment: parti.AssignmentConfig{
 			MinRebalanceThreshold: 0.15,

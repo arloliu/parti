@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/nats-io/nats-server/v2 v2.12.1
 	github.com/nats-io/nats.go v1.47.0
+	github.com/puzpuzpuz/xsync/v4 v4.2.0
 	github.com/stretchr/testify v1.11.1
 	github.com/zeebo/xxh3 v1.0.2
 	gopkg.in/yaml.v3 v3.0.1

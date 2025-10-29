@@ -418,3 +418,73 @@ func TestCalculator_GetActiveWorkers(t *testing.T) {
 		require.Empty(t, workers)
 	})
 }
+
+func TestCalculatorStateChanges(t *testing.T) {
+	t.Run("receives initial and subsequent state changes", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+
+		_, nc := partitest.StartEmbeddedNATS(t)
+		assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-state-assignment")
+		heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-state-heartbeat")
+
+		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
+		strategy := &mockStrategy{}
+
+		calc := NewCalculator(assignmentKV, heartbeatKV, "assignment", source, strategy, "worker-hb", 6*time.Second, 3*time.Second)
+		calc.SetLogger(partitest.NewTestLogger(t))
+
+		// Subscribe and defer unsubscribe.
+		ch, unsubscribe := calc.SubscribeToStateChanges()
+
+		// 1. Wait for initial state.
+		var initialState types.CalculatorState
+		select {
+		case initialState = <-ch:
+			// received
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for initial state")
+		}
+		require.Equal(t, types.CalcStateIdle, initialState)
+
+		// 2. Trigger a state change and verify it's received.
+		calc.emitStateChange(types.CalcStateScaling)
+
+		var scalingState types.CalculatorState
+		select {
+		case scalingState = <-ch:
+			// received
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for scaling state")
+		}
+		require.Equal(t, types.CalcStateScaling, scalingState)
+
+		// 3. Trigger another state change.
+		calc.emitStateChange(types.CalcStateRebalancing)
+
+		var rebalancingState types.CalculatorState
+		select {
+		case rebalancingState = <-ch:
+			// received
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for rebalancing state")
+		}
+		require.Equal(t, types.CalcStateRebalancing, rebalancingState)
+
+		// 4. Unsubscribe and ensure channel is closed.
+		unsubscribe()
+
+		// After unsubscribe, the channel should be closed.
+		// Reading from a closed channel returns the zero value for the type.
+		var finalState types.CalculatorState
+		var ok bool
+		select {
+		case finalState, ok = <-ch:
+			// received
+		case <-time.After(100 * time.Millisecond):
+			t.Fatal("channel was not closed after unsubscribe")
+		}
+		require.False(t, ok, "channel should be closed")
+		require.Equal(t, types.CalculatorState(0), finalState, "zero value should be received from closed channel")
+	})
+}
