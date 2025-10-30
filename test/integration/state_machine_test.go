@@ -271,7 +271,7 @@ func TestStateMachine_Emergency(t *testing.T) {
 	}
 
 	hasRebalanced := false
-	for _, state := range leaderTracker.States {
+	for _, state := range leaderTracker.GetStates() {
 		if state == types.StateScaling || state == types.StateRebalancing || state == types.StateEmergency {
 			hasRebalanced = true
 			t.Logf("Leader went through %s state after worker crash", state.String())
@@ -428,7 +428,7 @@ func TestStateMachine_StateTransitionValidation(t *testing.T) {
 	// Log the state history for inspection
 	tracker := cluster.StateTrackers[0]
 	t.Log("State history for Worker 0:")
-	for i, state := range tracker.States {
+	for i, state := range tracker.GetStates() {
 		t.Logf("  %d: %s", i, state.String())
 	}
 }

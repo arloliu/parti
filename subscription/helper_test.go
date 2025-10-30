@@ -2,6 +2,7 @@ package subscription
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,10 +24,10 @@ func TestHelper_UpdateSubscriptions(t *testing.T) {
 		})
 		defer helper.Close()
 
-		// Create handler that counts messages
-		msgCount := 0
+		// Create handler that counts messages (thread-safe)
+		var msgCount atomic.Int32
 		handler := func(msg *nats.Msg) {
-			msgCount++
+			msgCount.Add(1)
 		}
 
 		// Add partitions
@@ -52,7 +53,7 @@ func TestHelper_UpdateSubscriptions(t *testing.T) {
 
 		// Give time for messages to be received
 		time.Sleep(100 * time.Millisecond)
-		require.Equal(t, 2, msgCount)
+		require.Equal(t, int32(2), msgCount.Load())
 	})
 
 	t.Run("removes subscriptions for removed partitions", func(t *testing.T) {

@@ -3,6 +3,7 @@ package testutil
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -92,10 +93,12 @@ func CreateTestPartitions(n int) []types.Partition {
 }
 
 // StateTracker tracks state transitions for a worker.
+// All methods are thread-safe and can be called concurrently.
 type StateTracker struct {
 	WorkerIndex int
-	States      []types.State
 	T           *testing.T
+	mu          sync.RWMutex
+	States      []types.State
 }
 
 // CreateStateTracker creates a new state tracker.
@@ -111,13 +114,19 @@ func CreateStateTracker(t *testing.T, workerIndex int) *StateTracker {
 func (st *StateTracker) Hook() func(context.Context, types.State, types.State) error {
 	return func(ctx context.Context, from, to types.State) error {
 		st.T.Logf("Worker %d: %s → %s", st.WorkerIndex, from.String(), to.String())
+		st.mu.Lock()
 		st.States = append(st.States, to)
+		st.mu.Unlock()
+
 		return nil
 	}
 }
 
 // HasState checks if the worker went through a specific state.
 func (st *StateTracker) HasState(state types.State) bool {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+
 	for _, s := range st.States {
 		if s == state {
 			return true
@@ -125,6 +134,17 @@ func (st *StateTracker) HasState(state types.State) bool {
 	}
 
 	return false
+}
+
+// GetStates returns a copy of all states.
+func (st *StateTracker) GetStates() []types.State {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+
+	result := make([]types.State, len(st.States))
+	copy(result, st.States)
+
+	return result
 }
 
 // WorkerCluster manages a cluster of workers for testing.

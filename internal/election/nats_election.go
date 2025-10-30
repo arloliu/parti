@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -27,9 +28,12 @@ var (
 //
 // The leader key contains the worker ID and is automatically deleted
 // when the TTL expires, allowing automatic failover.
+//
+// All fields are protected by mu for thread-safe concurrent access.
 type NATSElection struct {
 	kv       jetstream.KeyValue
 	key      string
+	mu       sync.RWMutex
 	workerID string
 	revision uint64
 	isLeader bool
@@ -86,14 +90,17 @@ func (e *NATSElection) RequestLeadership(ctx context.Context, workerID string, l
 		return false, ErrInvalidDuration
 	}
 
+	// Check if already leader with same workerID
+	isLeader, currentWorkerID, _ := e.getLeaderState()
+
 	// If already leader with same workerID, try to renew
-	if e.isLeader && e.workerID == workerID {
+	if isLeader && currentWorkerID == workerID {
 		err := e.RenewLeadership(ctx)
 		if err == nil {
 			return true, nil
 		}
 		// Leadership lost, fall through to try acquiring again
-		e.isLeader = false
+		e.clearLeadership()
 	}
 
 	// Try to acquire leadership atomically
@@ -110,9 +117,7 @@ func (e *NATSElection) RequestLeadership(ctx context.Context, workerID string, l
 	}
 
 	// Successfully acquired leadership
-	e.workerID = workerID
-	e.revision = revision
-	e.isLeader = true
+	e.setLeaderState(true, workerID, revision)
 
 	return true, nil
 }
@@ -128,21 +133,26 @@ func (e *NATSElection) RequestLeadership(ctx context.Context, workerID string, l
 // Returns:
 //   - error: ErrNotLeader if not the leader, ErrLeadershipLost if lost, nil on success
 func (e *NATSElection) RenewLeadership(ctx context.Context) error {
-	if !e.isLeader {
+	isLeader, workerID, revision := e.getLeaderState()
+
+	if !isLeader {
 		return ErrNotLeader
 	}
 
 	// Update with our current revision to renew
-	value := []byte(fmt.Sprintf("%s:%d", e.workerID, time.Now().Unix()))
+	value := []byte(fmt.Sprintf("%s:%d", workerID, time.Now().Unix()))
 
-	revision, err := e.kv.Update(ctx, e.key, value, e.revision)
+	newRevision, err := e.kv.Update(ctx, e.key, value, revision)
 	if err != nil {
-		e.isLeader = false
+		e.clearLeadership()
+
 		return fmt.Errorf("%w: %w", ErrLeadershipLost, err)
 	}
 
 	// Update our revision
-	e.revision = revision
+	e.mu.Lock()
+	e.revision = newRevision
+	e.mu.Unlock()
 
 	return nil
 }
@@ -157,7 +167,9 @@ func (e *NATSElection) RenewLeadership(ctx context.Context) error {
 // Returns:
 //   - error: Release error or context cancellation
 func (e *NATSElection) ReleaseLeadership(ctx context.Context) error {
-	if !e.isLeader {
+	isLeader, _, _ := e.getLeaderState()
+
+	if !isLeader {
 		return ErrNotLeader
 	}
 
@@ -166,9 +178,7 @@ func (e *NATSElection) ReleaseLeadership(ctx context.Context) error {
 		return fmt.Errorf("failed to delete leader key: %w", err)
 	}
 
-	e.isLeader = false
-	e.workerID = ""
-	e.revision = 0
+	e.setLeaderState(false, "", 0)
 
 	return nil
 }
@@ -184,7 +194,9 @@ func (e *NATSElection) ReleaseLeadership(ctx context.Context) error {
 //   - bool: true if this worker is the leader
 //   - error: Check error or context cancellation
 func (e *NATSElection) IsLeader(ctx context.Context) (bool, error) {
-	if !e.isLeader {
+	isLeader, _, revision := e.getLeaderState()
+
+	if !isLeader {
 		return false, nil
 	}
 
@@ -192,7 +204,8 @@ func (e *NATSElection) IsLeader(ctx context.Context) (bool, error) {
 	entry, err := e.kv.Get(ctx, e.key)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			e.isLeader = false
+			e.clearLeadership()
+
 			return false, nil
 		}
 
@@ -200,8 +213,9 @@ func (e *NATSElection) IsLeader(ctx context.Context) (bool, error) {
 	}
 
 	// Check if the key still has our worker ID and revision
-	if entry.Revision() != e.revision {
-		e.isLeader = false
+	if entry.Revision() != revision {
+		e.clearLeadership()
+
 		return false, nil
 	}
 
@@ -213,5 +227,29 @@ func (e *NATSElection) IsLeader(ctx context.Context) (bool, error) {
 // Returns:
 //   - string: Worker ID if this instance is the leader, empty otherwise
 func (e *NATSElection) WorkerID() string {
-	return e.workerID
+	_, workerID, _ := e.getLeaderState()
+	return workerID
+}
+
+// getLeaderState returns the current leadership state (thread-safe).
+func (e *NATSElection) getLeaderState() (isLeader bool, workerID string, revision uint64) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.isLeader, e.workerID, e.revision
+}
+
+// setLeaderState updates the leadership state (thread-safe).
+func (e *NATSElection) setLeaderState(isLeader bool, workerID string, revision uint64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.isLeader = isLeader
+	e.workerID = workerID
+	e.revision = revision
+}
+
+// clearLeadership clears the leadership flag (thread-safe).
+func (e *NATSElection) clearLeadership() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.isLeader = false
 }

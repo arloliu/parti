@@ -2,6 +2,7 @@ package parti
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -58,12 +59,15 @@ func TestManager_LeadershipLoss_StateTransition(t *testing.T) {
 	src := source.NewStatic(partitions)
 	strategy := strategy.NewConsistentHash()
 
-	// Track state transitions
+	// Track state transitions (thread-safe)
+	var stateTransitionsMu sync.RWMutex
 	stateTransitions := make([]string, 0)
 	hooks := &Hooks{
 		OnStateChanged: func(_ context.Context, from, to types.State) error {
 			transition := from.String() + " → " + to.String()
+			stateTransitionsMu.Lock()
 			stateTransitions = append(stateTransitions, transition)
+			stateTransitionsMu.Unlock()
 			t.Logf("State transition: %s", transition)
 
 			return nil
@@ -120,6 +124,8 @@ func TestManager_LeadershipLoss_StateTransition(t *testing.T) {
 	// Due to the short scaling window (500ms), we might miss Scaling state when polling,
 	// so we check the recorded state transitions for evidence of rebalancing activity
 	require.Eventually(t, func() bool {
+		stateTransitionsMu.RLock()
+		defer stateTransitionsMu.RUnlock()
 		for _, transition := range stateTransitions {
 			if transition == "Stable → Scaling" ||
 				transition == "Stable → Rebalancing" ||
@@ -151,13 +157,16 @@ func TestManager_LeadershipLoss_StateTransition(t *testing.T) {
 	// - Scaling → WaitingAssignment (if lost leadership with no assignment)
 
 	t.Log("State transitions:")
+	stateTransitionsMu.RLock()
 	for i, transition := range stateTransitions {
 		t.Logf("  %d. %s", i+1, transition)
 	}
+	stateTransitionsMu.RUnlock()
 
 	// Verify we had a valid transition involving rebalancing activity
 	// Accept either Scaling or Rebalancing as evidence of the rebalancing process
 	foundValidExit := false
+	stateTransitionsMu.RLock()
 	for _, transition := range stateTransitions {
 		if transition == "Scaling → Rebalancing" ||
 			transition == "Rebalancing → Stable" ||
@@ -169,6 +178,7 @@ func TestManager_LeadershipLoss_StateTransition(t *testing.T) {
 			break
 		}
 	}
+	stateTransitionsMu.RUnlock()
 
 	require.True(t, foundValidExit, "did not find valid rebalancing transition")
 	t.Log("Successfully transitioned through rebalancing states")
