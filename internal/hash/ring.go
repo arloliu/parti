@@ -64,25 +64,6 @@ func NewRing(workers []string, virtualNodesPerWorker int, seed uint64) *Ring {
 	return ring
 }
 
-// addWorker adds virtual nodes for a worker to the ring.
-func (r *Ring) addWorker(workerID string, virtualNodes int) {
-	// Pre-allocate buffer for virtual node key to avoid allocations
-	buf := make([]byte, 8)
-
-	for i := range virtualNodes {
-		// Create unique key for each virtual node
-		// Format: "worker-0#<i>" where i is encoded as little-endian uint64
-		binary.LittleEndian.PutUint64(buf, uint64(i)) //nolint:gosec // index overflow is not a concern
-		vnodeKey := workerID + "#" + string(buf)
-		hash := r.hash(vnodeKey)
-
-		r.nodes = append(r.nodes, virtualNode{
-			hash:     hash,
-			workerID: workerID,
-		})
-	}
-}
-
 // GetNode finds the worker responsible for a partition key.
 //
 // Uses binary search to find the first virtual node whose hash is >= partition hash.
@@ -133,17 +114,6 @@ func (r *Ring) GetNodeForPartition(partition types.Partition) string {
 	return r.GetNode(key)
 }
 
-// hash computes a 64-bit hash of the key using XXH3.
-//
-// Uses XXH3 for both seeded and unseeded hashing for consistent performance.
-func (r *Ring) hash(key string) uint64 {
-	if r.seed != 0 {
-		return xxh3.HashStringSeed(key, r.seed)
-	}
-
-	return xxh3.HashString(key)
-}
-
 // Workers returns the list of unique workers on the ring.
 func (r *Ring) Workers() []string {
 	seen := make(map[string]bool)
@@ -162,6 +132,36 @@ func (r *Ring) Workers() []string {
 // Size returns the total number of virtual nodes on the ring.
 func (r *Ring) Size() int {
 	return len(r.nodes)
+}
+
+// addWorker adds virtual nodes for a worker to the ring.
+func (r *Ring) addWorker(workerID string, virtualNodes int) {
+	// Pre-allocate buffer for virtual node key to avoid allocations
+	buf := make([]byte, 8)
+
+	for i := range virtualNodes {
+		// Create unique key for each virtual node
+		// Format: "worker-0#<i>" where i is encoded as little-endian uint64
+		binary.LittleEndian.PutUint64(buf, uint64(i)) //nolint:gosec // index overflow is not a concern
+		vnodeKey := workerID + "#" + string(buf)
+		hash := r.hash(vnodeKey)
+
+		r.nodes = append(r.nodes, virtualNode{
+			hash:     hash,
+			workerID: workerID,
+		})
+	}
+}
+
+// hash computes a 64-bit hash of the key using XXH3.
+//
+// Uses XXH3 for both seeded and unseeded hashing for consistent performance.
+func (r *Ring) hash(key string) uint64 {
+	if r.seed != 0 {
+		return xxh3.HashStringSeed(key, r.seed)
+	}
+
+	return xxh3.HashString(key)
 }
 
 // WeightedRing extends Ring with partition weight awareness.
@@ -253,6 +253,11 @@ func (wr *WeightedRing) AssignPartitions(partitions []types.Partition) map[strin
 	return assignments
 }
 
+// GetWorkerWeight returns the total weight assigned to a worker.
+func (wr *WeightedRing) GetWorkerWeight(workerID string) int64 {
+	return wr.workerWeights[workerID]
+}
+
 // findLightestWorker returns the worker with lowest current weight.
 func (wr *WeightedRing) findLightestWorker() string {
 	workers := wr.Workers()
@@ -271,9 +276,4 @@ func (wr *WeightedRing) findLightestWorker() string {
 	}
 
 	return minWorker
-}
-
-// GetWorkerWeight returns the total weight assigned to a worker.
-func (wr *WeightedRing) GetWorkerWeight(workerID string) int64 {
-	return wr.workerWeights[workerID]
 }

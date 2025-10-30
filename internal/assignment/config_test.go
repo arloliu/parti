@@ -219,22 +219,22 @@ func TestNewCalculator(t *testing.T) {
 	require.NotNil(t, calc)
 
 	// Check required fields were set
-	require.Equal(t, cfg.AssignmentKV, calc.assignmentKV)
-	require.Equal(t, cfg.HeartbeatKV, calc.heartbeatKV)
-	require.Equal(t, "assignment", calc.prefix)
-	require.Equal(t, cfg.Source, calc.source)
-	require.Equal(t, cfg.Strategy, calc.strategy)
-	require.Equal(t, "heartbeat", calc.hbPrefix)
-	require.Equal(t, 3*time.Second, calc.hbTTL)
+	require.Equal(t, cfg.AssignmentKV, calc.AssignmentKV)
+	require.Equal(t, cfg.HeartbeatKV, calc.HeartbeatKV)
+	require.Equal(t, "assignment", calc.AssignmentPrefix)
+	require.Equal(t, cfg.Source, calc.Source)
+	require.Equal(t, cfg.Strategy, calc.Strategy)
+	require.Equal(t, "heartbeat", calc.HeartbeatPrefix)
+	require.Equal(t, 3*time.Second, calc.HeartbeatTTL)
 
 	// Check defaults were applied
-	require.Equal(t, 10*time.Second, calc.cooldown)
-	require.Equal(t, 0.2, calc.minThreshold)
-	require.Equal(t, 0.5, calc.restartRatio)
-	require.Equal(t, 30*time.Second, calc.coldStartWindow)
-	require.Equal(t, 10*time.Second, calc.plannedScaleWin)
-	require.NotNil(t, calc.metrics)
-	require.NotNil(t, calc.logger)
+	require.Equal(t, 10*time.Second, calc.Cooldown)
+	require.Equal(t, 0.2, calc.MinThreshold)
+	require.Equal(t, 0.5, calc.RestartRatio)
+	require.Equal(t, 30*time.Second, calc.ColdStartWindow)
+	require.Equal(t, 10*time.Second, calc.PlannedScaleWindow)
+	require.NotNil(t, calc.Metrics)
+	require.NotNil(t, calc.Logger)
 
 	// Check cached patterns were computed
 	require.Equal(t, "heartbeat.*", calc.hbWatchPattern)
@@ -285,11 +285,11 @@ func TestNewCalculator_CustomValues(t *testing.T) {
 	require.NotNil(t, calc)
 
 	// Check custom values were used
-	require.Equal(t, 15*time.Second, calc.cooldown)
-	require.Equal(t, 0.3, calc.minThreshold)
-	require.Equal(t, 0.6, calc.restartRatio)
-	require.Equal(t, 45*time.Second, calc.coldStartWindow)
-	require.Equal(t, 12*time.Second, calc.plannedScaleWin)
-	require.Equal(t, customLogger, calc.logger)
-	require.Equal(t, customMetrics, calc.metrics)
+	require.Equal(t, 15*time.Second, calc.Cooldown)
+	require.Equal(t, 0.3, calc.MinThreshold)
+	require.Equal(t, 0.6, calc.RestartRatio)
+	require.Equal(t, 45*time.Second, calc.ColdStartWindow)
+	require.Equal(t, 12*time.Second, calc.PlannedScaleWindow)
+	require.Equal(t, customLogger, calc.Logger)
+	require.Equal(t, customMetrics, calc.Metrics)
 }

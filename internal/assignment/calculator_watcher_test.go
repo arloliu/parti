@@ -81,7 +81,7 @@ func TestWatcher_DetectsHeartbeatUpdates(t *testing.T) {
 
 	// Publish a heartbeat
 	t.Log("Publishing heartbeat for worker-1...")
-	key := fmt.Sprintf("%s.%s", calc.hbPrefix, "worker-1")
+	key := fmt.Sprintf("%s.%s", calc.HeartbeatPrefix, "worker-1")
 	_, err = heartbeatKV.Put(ctx, key, []byte(fmt.Sprintf("%d", time.Now().Unix())))
 	require.NoError(t, err)
 
@@ -122,7 +122,7 @@ func TestWatcher_Debouncing(t *testing.T) {
 
 	// Publish multiple rapid heartbeat updates
 	t.Log("Publishing rapid heartbeat updates...")
-	key := fmt.Sprintf("%s.%s", calc.hbPrefix, "worker-1")
+	key := fmt.Sprintf("%s.%s", calc.HeartbeatPrefix, "worker-1")
 
 	startTime := time.Now()
 	for i := 0; i < 10; i++ {
@@ -162,7 +162,7 @@ func TestWatcher_MultipleWorkers(t *testing.T) {
 	// Publish heartbeats for 3 workers
 	t.Log("Publishing heartbeats for 3 workers...")
 	for i := 1; i <= 3; i++ {
-		key := fmt.Sprintf("%s.worker-%d", calc.hbPrefix, i)
+		key := fmt.Sprintf("%s.worker-%d", calc.HeartbeatPrefix, i)
 		_, err = heartbeatKV.Put(ctx, key, []byte(fmt.Sprintf("%d", time.Now().Unix())))
 		require.NoError(t, err)
 		time.Sleep(50 * time.Millisecond) // Stagger slightly
@@ -200,7 +200,7 @@ func TestWatcher_PatternFiltering(t *testing.T) {
 
 	// Publish heartbeat key (should be detected)
 	t.Log("Publishing heartbeat key...")
-	heartbeatKey := fmt.Sprintf("%s.worker-1", calc.hbPrefix)
+	heartbeatKey := fmt.Sprintf("%s.worker-1", calc.HeartbeatPrefix)
 	_, err = heartbeatKV.Put(ctx, heartbeatKey, []byte(fmt.Sprintf("%d", time.Now().Unix())))
 	require.NoError(t, err)
 
@@ -243,7 +243,7 @@ func TestWatcher_DetectionLatency(t *testing.T) {
 	startTime := time.Now()
 
 	// Publish heartbeat
-	key := fmt.Sprintf("%s.worker-test", calc.hbPrefix)
+	key := fmt.Sprintf("%s.worker-test", calc.HeartbeatPrefix)
 	_, err = heartbeatKV.Put(ctx, key, []byte(fmt.Sprintf("%d", time.Now().Unix())))
 	require.NoError(t, err)
 
@@ -304,7 +304,7 @@ func TestWatcher_StopDuringProcessing(t *testing.T) {
 	t.Log("Publishing rapid updates while stopping...")
 	go func() {
 		for i := 0; i < 20; i++ {
-			key := fmt.Sprintf("%s.worker-%d", calc.hbPrefix, i)
+			key := fmt.Sprintf("%s.worker-%d", calc.HeartbeatPrefix, i)
 			_, _ = heartbeatKV.Put(ctx, key, []byte(fmt.Sprintf("%d", time.Now().Unix())))
 			time.Sleep(10 * time.Millisecond)
 		}

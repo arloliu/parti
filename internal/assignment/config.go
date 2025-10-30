@@ -2,14 +2,12 @@ package assignment
 
 import (
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/arloliu/parti/internal/logging"
 	"github.com/arloliu/parti/internal/metrics"
 	"github.com/arloliu/parti/types"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/puzpuzpuz/xsync/v4"
 )
 
 // Config holds calculator configuration.
@@ -102,72 +100,4 @@ func (c *Config) SetDefaults() {
 	if c.Logger == nil {
 		c.Logger = logging.NewNop()
 	}
-}
-
-// NewCalculator creates a calculator with validated configuration.
-//
-// This constructor provides clear, self-documenting configuration and
-// validation of required fields.
-//
-// Parameters:
-//   - cfg: Calculator configuration (required fields must be set)
-//
-// Returns:
-//   - *Calculator: New calculator instance ready to start
-//   - error: Validation error if required fields are missing
-//
-// Example:
-//
-//	calc, err := assignment.NewCalculator(&assignment.Config{
-//	    AssignmentKV:     assignKV,
-//	    HeartbeatKV:      heartbeatKV,
-//	    Source:           source,
-//	    Strategy:         strategy,
-//	    AssignmentPrefix: "assignment",
-//	    HeartbeatPrefix:  "heartbeat",
-//	    HeartbeatTTL:     3 * time.Second,
-//	    // Optional fields use sensible defaults
-//	    Logger:           logger,
-//	})
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-func NewCalculator(cfg *Config) (*Calculator, error) {
-	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid config: %w", err)
-	}
-	cfg.SetDefaults()
-
-	c := &Calculator{
-		assignmentKV:        cfg.AssignmentKV,
-		heartbeatKV:         cfg.HeartbeatKV,
-		prefix:              cfg.AssignmentPrefix,
-		source:              cfg.Source,
-		strategy:            cfg.Strategy,
-		hbPrefix:            cfg.HeartbeatPrefix,
-		hbTTL:               cfg.HeartbeatTTL,
-		cooldown:            cfg.Cooldown,
-		minThreshold:        cfg.MinThreshold,
-		restartRatio:        cfg.RestartRatio,
-		coldStartWindow:     cfg.ColdStartWindow,
-		plannedScaleWin:     cfg.PlannedScaleWindow,
-		metrics:             cfg.Metrics,
-		logger:              cfg.Logger,
-		hbWatchPattern:      fmt.Sprintf("%s.*", cfg.HeartbeatPrefix),
-		assignmentKeyPrefix: fmt.Sprintf("%s.", cfg.AssignmentPrefix),
-		currentWorkers:      make(map[string]bool),
-		currentAssignments:  make(map[string][]types.Partition),
-		lastWorkers:         make(map[string]bool),
-		subscribers:         xsync.NewMap[uint64, *stateSubscriber](),
-		stopCh:              make(chan struct{}),
-		doneCh:              make(chan struct{}),
-	}
-
-	// Initialize calculator state to Idle
-	c.calcState.Store(int32(types.CalcStateIdle))
-
-	// Initialize emergency detector with configured grace period
-	c.emergencyDetector = NewEmergencyDetector(cfg.EmergencyGracePeriod)
-
-	return c, nil
 }

@@ -41,7 +41,7 @@ func TestCalculator_detectRebalanceType_ColdStart(t *testing.T) {
 	reason, window := calc.detectRebalanceType(lastWorkers, currentWorkers)
 
 	require.Equal(t, "cold_start", reason)
-	require.Equal(t, calc.coldStartWindow, window)
+	require.Equal(t, calc.ColdStartWindow, window)
 	require.Equal(t, 30*time.Second, window)
 }
 
@@ -83,7 +83,7 @@ func TestCalculator_detectRebalanceType_PlannedScale(t *testing.T) {
 	reason, window := calc.detectRebalanceType(lastWorkers, currentWorkers)
 
 	require.Equal(t, "planned_scale", reason)
-	require.Equal(t, calc.plannedScaleWin, window)
+	require.Equal(t, calc.PlannedScaleWindow, window)
 	require.Equal(t, 10*time.Second, window)
 }
 
@@ -188,7 +188,7 @@ func TestCalculator_detectRebalanceType_Restart(t *testing.T) {
 	reason, window := calc.detectRebalanceType(lastWorkers, currentWorkers)
 
 	require.Equal(t, "planned_scale", reason)
-	require.Equal(t, calc.plannedScaleWin, window)
+	require.Equal(t, calc.PlannedScaleWindow, window)
 	require.Equal(t, 10*time.Second, window)
 }
 
@@ -349,9 +349,14 @@ func TestCalculator_StateTransitions_Emergency(t *testing.T) {
 }
 
 func TestCalculator_StateTransitions_ReturnToIdle(t *testing.T) {
+	ctx := t.Context()
 	_, nc := partitest.StartEmbeddedNATS(t)
 	assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-returnidle-assignment")
 	heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-returnidle-heartbeat")
+
+	// Create a heartbeat for worker-1
+	_, err := heartbeatKV.Put(ctx, "test-hb.worker-1", []byte(time.Now().Format(time.RFC3339Nano)))
+	require.NoError(t, err)
 
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
@@ -368,18 +373,20 @@ func TestCalculator_StateTransitions_ReturnToIdle(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Manually set state to Rebalancing
-	calc.calcState.Store(int32(types.CalcStateRebalancing))
-	calc.mu.Lock()
-	calc.scalingReason = "test_reason"
-	calc.mu.Unlock()
+	// Enter scaling state (this will transition through Scaling -> Rebalancing -> Idle)
+	calc.enterScalingState(ctx, "test_reason", 10*time.Millisecond)
 
-	require.Equal(t, types.CalcStateRebalancing, calc.GetState())
+	// Wait for state to reach Rebalancing
+	require.Eventually(t, func() bool {
+		return calc.GetState() == types.CalcStateRebalancing
+	}, 1*time.Second, 10*time.Millisecond)
 
-	// Return to idle
-	calc.returnToIdleState()
+	// Wait for return to idle (happens after rebalance completes)
+	require.Eventually(t, func() bool {
+		return calc.GetState() == types.CalcStateIdle
+	}, 1*time.Second, 10*time.Millisecond)
 
-	require.Equal(t, types.CalcStateIdle, calc.GetState())
+	// Verify scaling reason was cleared
 	require.Equal(t, "", calc.GetScalingReason())
 }
 
@@ -438,61 +445,6 @@ func TestCalculator_StateTransitions_PreventsConcurrentRebalance(t *testing.T) {
 
 	// Should still be in Scaling state (not started new rebalance)
 	require.Equal(t, types.CalcStateScaling, calc.GetState())
-}
-
-func TestCalculator_StateTransitions_CooldownPreventsRebalance(t *testing.T) {
-	_, nc := partitest.StartEmbeddedNATS(t)
-	assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-cooldown-state-assignment")
-	heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-cooldown-state-heartbeat")
-
-	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
-	strategy := &mockStrategy{}
-
-	calc, err := NewCalculator(&Config{
-		AssignmentKV:         assignmentKV,
-		HeartbeatKV:          heartbeatKV,
-		AssignmentPrefix:     "test-assignment",
-		Source:               source,
-		Strategy:             strategy,
-		HeartbeatPrefix:      "test-hb",
-		HeartbeatTTL:         1 * time.Second,
-		EmergencyGracePeriod: 500 * time.Millisecond,
-	})
-	require.NoError(t, err)
-	calc.SetCooldown(500 * time.Millisecond)
-	calc.SetStabilizationWindows(500*time.Millisecond, 300*time.Millisecond) // Fast windows for test
-
-	ctx := context.Background()
-
-	// Start calculator
-	err = calc.Start(ctx)
-	require.NoError(t, err)
-	defer func() { _ = calc.Stop() }()
-
-	// Publish heartbeats
-	hbKV := partitest.CreateJetStreamKV(t, nc, "test-hb")
-
-	_, err = hbKV.Put(ctx, "worker-0", []byte("alive"))
-	require.NoError(t, err)
-
-	// Wait for initial assignment
-	time.Sleep(200 * time.Millisecond)
-
-	// Set up lastWorkers for comparison
-	calc.mu.Lock()
-	calc.lastWorkers = map[string]bool{"worker-0": true}
-	calc.lastRebalance = time.Now() // Set recent rebalance
-	calc.mu.Unlock()
-
-	// Try to trigger rebalance during cooldown
-	_, err = hbKV.Put(ctx, "worker-1", []byte("alive"))
-	require.NoError(t, err)
-
-	err = calc.checkForChanges(ctx)
-	require.NoError(t, err)
-
-	// Should remain in Idle (cooldown prevented rebalance)
-	require.Equal(t, types.CalcStateIdle, calc.GetState())
 }
 
 func TestCalculator_StateString(t *testing.T) {

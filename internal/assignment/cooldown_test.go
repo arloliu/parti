@@ -42,7 +42,7 @@ func TestCalculatorCooldown(t *testing.T) {
 		require.NoError(t, err)
 
 		// Default cooldown should be 10s
-		require.Equal(t, 10*time.Second, calc.cooldown)
+		require.Equal(t, 10*time.Second, calc.Cooldown)
 
 		t.Log("Default cooldown is 10 seconds")
 	})
@@ -75,7 +75,7 @@ func TestCalculatorCooldown(t *testing.T) {
 		customCooldown := 2 * time.Second
 		calc.SetCooldown(customCooldown)
 
-		require.Equal(t, customCooldown, calc.cooldown)
+		require.Equal(t, customCooldown, calc.Cooldown)
 
 		t.Logf("Successfully set custom cooldown to %v", customCooldown)
 	})

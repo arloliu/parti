@@ -73,7 +73,7 @@ func TestCalculator_SetMethods(t *testing.T) {
 		require.NoError(t, err)
 		calc.SetCooldown(5 * time.Second)
 
-		require.Equal(t, 5*time.Second, calc.cooldown)
+		require.Equal(t, 5*time.Second, calc.Cooldown)
 	})
 
 	t.Run("sets min threshold successfully", func(t *testing.T) {
@@ -97,7 +97,7 @@ func TestCalculator_SetMethods(t *testing.T) {
 		require.NoError(t, err)
 		calc.SetMinThreshold(0.3)
 
-		require.Equal(t, 0.3, calc.minThreshold)
+		require.Equal(t, 0.3, calc.MinThreshold)
 	})
 
 	t.Run("sets restart detection ratio successfully", func(t *testing.T) {
@@ -121,7 +121,7 @@ func TestCalculator_SetMethods(t *testing.T) {
 		require.NoError(t, err)
 		calc.SetRestartDetectionRatio(0.7)
 
-		require.Equal(t, 0.7, calc.restartRatio)
+		require.Equal(t, 0.7, calc.RestartRatio)
 	})
 
 	t.Run("sets stabilization windows successfully", func(t *testing.T) {
@@ -145,8 +145,8 @@ func TestCalculator_SetMethods(t *testing.T) {
 		require.NoError(t, err)
 		calc.SetStabilizationWindows(20*time.Second, 5*time.Second)
 
-		require.Equal(t, 20*time.Second, calc.coldStartWindow)
-		require.Equal(t, 5*time.Second, calc.plannedScaleWin)
+		require.Equal(t, 20*time.Second, calc.ColdStartWindow)
+		require.Equal(t, 5*time.Second, calc.PlannedScaleWindow)
 	})
 }
 
@@ -451,7 +451,7 @@ func TestCalculator_StabilizationWindow(t *testing.T) {
 		calc.SetRestartDetectionRatio(0.5) // 5 workers / 2 expected = 2.5 ratio > 0.5
 
 		window := calc.selectStabilizationWindow(ctx)
-		require.Equal(t, calc.coldStartWindow, window)
+		require.Equal(t, calc.ColdStartWindow, window)
 	})
 
 	t.Run("selects planned scale window for few workers", func(t *testing.T) {
@@ -488,7 +488,7 @@ func TestCalculator_StabilizationWindow(t *testing.T) {
 		calc.SetRestartDetectionRatio(0.5) // 1 worker / 5 expected = 0.2 ratio < 0.5
 
 		window := calc.selectStabilizationWindow(ctx)
-		require.Equal(t, calc.plannedScaleWin, window)
+		require.Equal(t, calc.PlannedScaleWindow, window)
 	})
 }
 
@@ -568,6 +568,10 @@ func TestCalculatorStateChanges(t *testing.T) {
 		assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-state-assignment")
 		heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-state-heartbeat")
 
+		// Create a heartbeat for worker-1
+		_, err := heartbeatKV.Put(ctx, "worker-hb.worker-1", []byte(time.Now().Format(time.RFC3339Nano)))
+		require.NoError(t, err)
+
 		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
 		strategy := &mockStrategy{}
 
@@ -586,6 +590,7 @@ func TestCalculatorStateChanges(t *testing.T) {
 
 		// Subscribe and defer unsubscribe.
 		ch, unsubscribe := calc.SubscribeToStateChanges()
+		defer unsubscribe()
 
 		// 1. Wait for initial state.
 		var initialState types.CalculatorState
@@ -597,8 +602,8 @@ func TestCalculatorStateChanges(t *testing.T) {
 		}
 		require.Equal(t, types.CalcStateIdle, initialState)
 
-		// 2. Trigger a state change and verify it's received.
-		calc.emitStateChange(types.CalcStateScaling)
+		// 2. Trigger a state change by entering scaling state and verify it's received.
+		calc.enterScalingState(ctx, "test", 500*time.Millisecond)
 
 		var scalingState types.CalculatorState
 		select {
@@ -609,9 +614,7 @@ func TestCalculatorStateChanges(t *testing.T) {
 		}
 		require.Equal(t, types.CalcStateScaling, scalingState)
 
-		// 3. Trigger another state change.
-		calc.emitStateChange(types.CalcStateRebalancing)
-
+		// 3. Wait for automatic transition to rebalancing (after timer fires).
 		var rebalancingState types.CalculatorState
 		select {
 		case rebalancingState = <-ch:
@@ -621,11 +624,20 @@ func TestCalculatorStateChanges(t *testing.T) {
 		}
 		require.Equal(t, types.CalcStateRebalancing, rebalancingState)
 
-		// 4. Unsubscribe and ensure channel is closed.
+		// 4. Wait for automatic return to idle (after rebalance completes).
+		var idleState types.CalculatorState
+		select {
+		case idleState = <-ch:
+			// received
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for return to idle state")
+		}
+		require.Equal(t, types.CalcStateIdle, idleState)
+
+		// 5. Unsubscribe and ensure channel is closed.
 		unsubscribe()
 
 		// After unsubscribe, the channel should be closed.
-		// Reading from a closed channel returns the zero value for the type.
 		var finalState types.CalculatorState
 		var ok bool
 		select {

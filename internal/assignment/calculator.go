@@ -2,10 +2,8 @@ package assignment
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,63 +12,38 @@ import (
 	"github.com/arloliu/parti/internal/metrics"
 	"github.com/arloliu/parti/types"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/puzpuzpuz/xsync/v4"
 )
 
 // Calculator manages partition assignment calculation and distribution.
 //
-// The calculator runs on the leader worker and is responsible for:
-//   - Monitoring worker health via heartbeats
-//   - Calculating partition assignments using the configured strategy
-//   - Publishing assignments to NATS KV for worker discovery
-//   - Handling rebalancing triggers (worker join/leave events)
-//   - Applying rebalance cooldown to prevent thrashing
+// The calculator runs on the leader worker and orchestrates three focused components:
+//   - WorkerMonitor: Detects worker health changes via NATS KV heartbeats
+//   - StateMachine: Manages state transitions (Idle, Scaling, Rebalancing, Emergency)
+//   - AssignmentPublisher: Publishes partition assignments to NATS KV
 //
-// The calculator does NOT run on follower workers.
+// The calculator handles rebalancing logic and coordinates these components.
+// It does NOT run on follower workers.
 type Calculator struct {
-	assignmentKV jetstream.KeyValue // KV bucket for assignments
-	heartbeatKV  jetstream.KeyValue // KV bucket for heartbeats
-	prefix       string
-	source       types.PartitionSource
-	strategy     types.AssignmentStrategy
+	Config
 
-	// Configuration
-	hbPrefix        string
-	hbTTL           time.Duration
-	cooldown        time.Duration
-	minThreshold    float64
-	restartRatio    float64
-	coldStartWindow time.Duration
-	plannedScaleWin time.Duration
-
-	// Optional dependencies
-	metrics types.MetricsCollector
-	logger  types.Logger
-
-	// Cached string patterns (for performance)
-	hbWatchPattern      string // "hbPrefix.*" - cached for Watch() calls
-	assignmentKeyPrefix string // "prefix." - cached for key construction
-
-	// State management
-	mu                 sync.RWMutex
-	started            bool
-	currentVersion     int64
-	currentWorkers     map[string]bool
-	currentAssignments map[string][]types.Partition
-	lastRebalance      time.Time
-
-	// Calculator state machine
-	calcState     atomic.Int32    // types.CalculatorState
-	scalingStart  time.Time       // When scaling window started
-	scalingReason string          // Reason: "cold_start", "planned_scale", "emergency", "restart"
-	lastWorkers   map[string]bool // Previous worker set for comparison
-
-	// Emergency detection
+	// Core components
+	monitor           *WorkerMonitor
+	stateMach         *StateMachine
+	publisher         *AssignmentPublisher
 	emergencyDetector *EmergencyDetector // Hysteresis-based emergency detection
 
-	// State management fan-out
-	subscribers      *xsync.Map[uint64, *stateSubscriber]
-	nextSubscriberID atomic.Uint64
+	// Cached string patterns (for performance)
+	hbWatchPattern      string // "HeartbeatPrefix.*" - cached for Watch() calls
+	assignmentKeyPrefix string // "AssignmentPrefix." - cached for key construction
+
+	// State management
+	started            atomic.Bool
+	mu                 sync.RWMutex
+	currentWorkers     map[string]bool
+	currentAssignments map[string][]types.Partition
+
+	// Worker tracking for change detection
+	lastWorkers map[string]bool // Previous worker set for comparison
 
 	// Hybrid monitoring: watcher (primary) + polling (fallback)
 	watcher   jetstream.KeyWatcher
@@ -80,6 +53,82 @@ type Calculator struct {
 	stopCh chan struct{}
 	doneCh chan struct{}
 	wg     sync.WaitGroup // Tracks all goroutines for clean shutdown
+}
+
+// NewCalculator creates a calculator with validated configuration.
+//
+// This constructor provides clear, self-documenting configuration and
+// validation of required fields.
+//
+// Parameters:
+//   - cfg: Calculator configuration (required fields must be set)
+//
+// Returns:
+//   - *Calculator: New calculator instance ready to start
+//   - error: Validation error if required fields are missing
+//
+// Example:
+//
+//	calc, err := assignment.NewCalculator(&assignment.Config{
+//	    AssignmentKV:     assignKV,
+//	    HeartbeatKV:      heartbeatKV,
+//	    Source:           source,
+//	    Strategy:         strategy,
+//	    AssignmentPrefix: "assignment",
+//	    HeartbeatPrefix:  "heartbeat",
+//	    HeartbeatTTL:     3 * time.Second,
+//	    // Optional fields use sensible defaults
+//	    Logger:           logger,
+//	})
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+func NewCalculator(cfg *Config) (*Calculator, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid config: %w", err)
+	}
+	cfg.SetDefaults()
+
+	stopCh := make(chan struct{})
+
+	c := &Calculator{
+		Config:              *cfg, // Anonymous embedding - copy config
+		hbWatchPattern:      fmt.Sprintf("%s.*", cfg.HeartbeatPrefix),
+		assignmentKeyPrefix: fmt.Sprintf("%s.", cfg.AssignmentPrefix),
+		currentWorkers:      make(map[string]bool),
+		currentAssignments:  make(map[string][]types.Partition),
+		lastWorkers:         make(map[string]bool),
+		stopCh:              stopCh,
+		doneCh:              make(chan struct{}),
+	}
+
+	// Initialize emergency detector with configured grace period
+	c.emergencyDetector = NewEmergencyDetector(cfg.EmergencyGracePeriod)
+
+	// Initialize components (Phase 3.2)
+	c.publisher = NewAssignmentPublisher(
+		cfg.AssignmentKV,
+		cfg.AssignmentPrefix,
+		cfg.Logger,
+		cfg.Metrics,
+	)
+
+	c.stateMach = NewStateMachine(
+		cfg.Logger,
+		cfg.Metrics,
+		c.handleRebalance,
+		stopCh,
+	)
+
+	c.monitor = NewWorkerMonitor(
+		cfg.HeartbeatKV,
+		cfg.HeartbeatPrefix,
+		cfg.HeartbeatTTL,
+		c.pollForChanges,
+		cfg.Logger,
+	)
+
+	return c, nil
 }
 
 // SetCooldown sets the rebalance cooldown duration.
@@ -92,7 +141,7 @@ type Calculator struct {
 func (c *Calculator) SetCooldown(cooldown time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.cooldown = cooldown
+	c.Cooldown = cooldown
 }
 
 // SetMinThreshold sets the minimum rebalance threshold.
@@ -104,7 +153,7 @@ func (c *Calculator) SetCooldown(cooldown time.Duration) {
 func (c *Calculator) SetMinThreshold(threshold float64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.minThreshold = threshold
+	c.MinThreshold = threshold
 }
 
 // SetRestartDetectionRatio sets the restart detection ratio.
@@ -117,7 +166,7 @@ func (c *Calculator) SetMinThreshold(threshold float64) {
 func (c *Calculator) SetRestartDetectionRatio(ratio float64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.restartRatio = ratio
+	c.RestartRatio = ratio
 }
 
 // SetStabilizationWindows sets the cold start and planned scale windows.
@@ -132,8 +181,8 @@ func (c *Calculator) SetRestartDetectionRatio(ratio float64) {
 func (c *Calculator) SetStabilizationWindows(coldStart, plannedScale time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.coldStartWindow = coldStart
-	c.plannedScaleWin = plannedScale
+	c.ColdStartWindow = coldStart
+	c.PlannedScaleWindow = plannedScale
 }
 
 // SetMetrics sets the metrics collector.
@@ -141,9 +190,9 @@ func (c *Calculator) SetMetrics(m types.MetricsCollector) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if m == nil {
-		c.metrics = metrics.NewNop()
+		c.Metrics = metrics.NewNop()
 	} else {
-		c.metrics = m
+		c.Metrics = m
 	}
 }
 
@@ -152,102 +201,21 @@ func (c *Calculator) SetLogger(l types.Logger) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if l == nil {
-		c.logger = logging.NewNop()
+		c.Logger = logging.NewNop()
 	} else {
-		c.logger = l
+		c.Logger = l
 	}
 }
 
 // SubscribeToStateChanges returns a channel for state updates and a function to unsubscribe.
 func (c *Calculator) SubscribeToStateChanges() (<-chan types.CalculatorState, func()) {
-	id := c.nextSubscriberID.Add(1)
-
-	// Buffer size of 4 allows Idle -> Scaling -> Rebalancing -> Idle transitions
-	// to be queued without dropping states when subscriber is slow to process
-	sub := &stateSubscriber{ch: make(chan types.CalculatorState, 4)}
-	c.subscribers.Store(id, sub)
-
-	// Immediately send the current state.
-	sub.trySend(c.GetState(), c.metrics)
-
-	unsubscribe := func() {
-		c.removeSubscriber(id)
-	}
-
-	return sub.ch, unsubscribe
-}
-
-func (c *Calculator) removeSubscriber(id uint64) {
-	if sub, ok := c.subscribers.LoadAndDelete(id); ok {
-		sub.close()
-	}
-}
-
-// emitStateChange notifies all subscribers of a state transition.
-func (c *Calculator) emitStateChange(state types.CalculatorState) {
-	oldState := c.GetState()
-	if oldState == state {
-		return // No change, no notification needed.
-	}
-
-	c.calcState.Store(int32(state)) //nolint:gosec // G115: state is bounded enum, safe conversion
-	c.logger.Info("state transition", "from", oldState, "to", state)
-
-	c.subscribers.Range(func(_ uint64, sub *stateSubscriber) bool {
-		sub.trySend(state, c.metrics)
-		return true
-	})
+	return c.stateMach.Subscribe()
 }
 
 // discoverHighestVersion scans existing assignments in KV to find the highest version.
 // This ensures version monotonicity across leader changes.
 func (c *Calculator) discoverHighestVersion(ctx context.Context) error {
-	keys, err := c.assignmentKV.Keys(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to list KV keys: %w", err)
-	}
-
-	c.logger.Debug("discovering highest version", "total_keys", len(keys), "prefix", c.prefix)
-
-	highestVersion := int64(0)
-	checkedCount := 0
-	for _, key := range keys {
-		// Skip non-assignment keys (heartbeats, etc.)
-		if !strings.HasPrefix(key, c.prefix+".") {
-			c.logger.Debug("skipping non-assignment key", "key", key, "prefix", c.prefix)
-			continue
-		}
-
-		checkedCount++
-		entry, err := c.assignmentKV.Get(ctx, key)
-		if err != nil {
-			c.logger.Debug("failed to read assignment key", "key", key, "error", err)
-			continue // Skip entries we can't read
-		}
-
-		var asgn types.Assignment
-		if err := json.Unmarshal(entry.Value(), &asgn); err != nil {
-			c.logger.Debug("failed to unmarshal assignment", "key", key, "error", err)
-			continue // Skip malformed entries
-		}
-
-		c.logger.Debug("found assignment", "key", key, "version", asgn.Version)
-		if asgn.Version > highestVersion {
-			highestVersion = asgn.Version
-		}
-	}
-
-	c.mu.Lock()
-	c.currentVersion = highestVersion
-	c.mu.Unlock()
-
-	if highestVersion > 0 {
-		c.logger.Info("discovered existing assignments", "highest_version", highestVersion, "checked_keys", checkedCount)
-	} else {
-		c.logger.Debug("no existing assignments found", "checked_keys", checkedCount)
-	}
-
-	return nil
+	return c.publisher.DiscoverHighestVersion(ctx)
 }
 
 // Start begins monitoring workers and calculating assignments.
@@ -263,34 +231,31 @@ func (c *Calculator) discoverHighestVersion(ctx context.Context) error {
 // Returns:
 //   - error: Start error (e.g., already started, KV operation failed)
 func (c *Calculator) Start(ctx context.Context) error {
-	c.logger.Info("calculator Start() called")
+	c.Logger.Info("calculator Start() called")
 
-	c.mu.Lock()
-	if c.started {
-		c.mu.Unlock()
+	// Atomically check and set started flag
+	if !c.started.CompareAndSwap(false, true) {
 		return errors.New("calculator already started")
 	}
-	c.started = true
-	c.mu.Unlock()
 
 	// Discover highest version from existing assignments to ensure monotonicity across leader changes
 	if err := c.discoverHighestVersion(ctx); err != nil {
-		c.logger.Warn("failed to discover existing versions, starting from 0", "error", err)
+		c.Logger.Warn("failed to discover existing versions, starting from 0", "error", err)
 	}
 
-	c.logger.Info("performing initial assignment")
+	c.Logger.Info("performing initial assignment")
 
 	// Perform initial assignment with stabilization window
 	if err := c.initialAssignment(ctx); err != nil {
-		c.mu.Lock()
-		c.started = false
-		c.mu.Unlock()
-
+		c.started.Store(false)
 		return fmt.Errorf("initial assignment failed: %w", err)
 	}
 
-	// Start hybrid monitoring: watcher (primary) + polling (fallback)
-	go c.monitorWorkers(ctx)
+	// Start worker monitoring component
+	if err := c.monitor.Start(ctx); err != nil {
+		c.started.Store(false)
+		return fmt.Errorf("failed to start worker monitor: %w", err)
+	}
 
 	return nil
 }
@@ -300,52 +265,31 @@ func (c *Calculator) Start(ctx context.Context) error {
 // Returns:
 //   - error: Stop error (e.g., not started)
 func (c *Calculator) Stop() error {
-	c.mu.Lock()
-	if !c.started {
-		c.mu.Unlock()
+	// Atomically check and clear started flag
+	if !c.started.CompareAndSwap(true, false) {
 		return errors.New("calculator not started")
 	}
-	c.mu.Unlock()
 
-	// 1. Signal stop first - allows goroutines to exit cleanly
+	// 1. Signal stop to all components
 	close(c.stopCh)
 
-	// 2. Wait for monitorWorkers goroutine to finish
-	// This ensures both monitorWorkers and processWatcherEvents have exited
-	<-c.doneCh
-
-	// 3. Wait for all other goroutines (scaling timers, etc.)
-	c.wg.Wait()
-
-	// 4. Now safely cleanup watcher (no concurrent access possible)
-	c.watcherMu.Lock()
-	if c.watcher != nil {
-		if err := c.watcher.Stop(); err != nil {
-			c.logger.Error("failed to stop watcher", "error", err)
-		}
-		c.watcher = nil
+	// 2. Stop worker monitor (stops watcher and monitoring goroutines)
+	if err := c.monitor.Stop(); err != nil {
+		c.Logger.Error("failed to stop worker monitor", "error", err)
 	}
-	c.watcherMu.Unlock()
 
-	c.mu.Lock()
-	c.started = false
-	c.mu.Unlock()
+	// 3. Wait for state machine goroutines (scaling timers)
+	c.stateMach.WaitForShutdown()
 
-	// Clean up all subscribers.
-	c.subscribers.Range(func(id uint64, sub *stateSubscriber) bool {
-		c.subscribers.Delete(id)
-		sub.close()
-		return true
-	})
+	// 4. Wait for legacy goroutines (if any)
+	c.wg.Wait()
 
 	return nil
 }
 
 // IsStarted returns true if the calculator is currently running.
 func (c *Calculator) IsStarted() bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.started
+	return c.started.Load()
 }
 
 // GetState returns the current calculator state.
@@ -353,7 +297,7 @@ func (c *Calculator) IsStarted() bool {
 // Returns:
 //   - types.CalculatorState: Current calculator state (type-safe enum)
 func (c *Calculator) GetState() types.CalculatorState {
-	return types.CalculatorState(c.calcState.Load())
+	return c.stateMach.GetState()
 }
 
 // GetScalingReason returns the reason for the current or last scaling operation.
@@ -361,16 +305,12 @@ func (c *Calculator) GetState() types.CalculatorState {
 // Returns:
 //   - string: Scaling reason ("cold_start", "planned_scale", "emergency", "restart") or empty string if idle
 func (c *Calculator) GetScalingReason() string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.scalingReason
+	return c.stateMach.GetScalingReason()
 }
 
 // CurrentVersion returns the current assignment version.
 func (c *Calculator) CurrentVersion() int64 {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.currentVersion
+	return c.publisher.CurrentVersion()
 }
 
 // TriggerRebalance forces an immediate rebalance, bypassing cooldown.
@@ -388,7 +328,7 @@ func (c *Calculator) TriggerRebalance(ctx context.Context) error {
 		return errors.New("calculator not started")
 	}
 
-	c.logger.Info("manual rebalance triggered")
+	c.Logger.Info("manual rebalance triggered")
 
 	return c.rebalance(ctx, "manual-refresh")
 }
@@ -397,7 +337,7 @@ func (c *Calculator) TriggerRebalance(ctx context.Context) error {
 func (c *Calculator) initialAssignment(ctx context.Context) error {
 	// Wait for stabilization window
 	window := c.selectStabilizationWindow(ctx)
-	c.logger.Info("waiting for stabilization", "window", window)
+	c.Logger.Info("waiting for stabilization", "window", window)
 
 	select {
 	case <-time.After(window):
@@ -421,7 +361,7 @@ func (c *Calculator) initialAssignment(ctx context.Context) error {
 	workerCount := len(c.lastWorkers)
 	c.mu.Unlock()
 
-	c.logger.Info("initial assignment complete", "workers", workerCount)
+	c.Logger.Info("initial assignment complete", "workers", workerCount)
 
 	return nil
 }
@@ -449,7 +389,7 @@ func (c *Calculator) detectRebalanceType(lastWorkers, currentWorkers map[string]
 		emergency, disappearedWorkers := c.emergencyDetector.CheckEmergency(lastWorkers, currentWorkers)
 
 		if emergency {
-			c.logger.Warn("emergency: workers disappeared beyond grace period",
+			c.Logger.Warn("emergency: workers disappeared beyond grace period",
 				"disappeared", disappearedWorkers,
 				"prev_count", prevCount,
 				"curr_count", currCount,
@@ -459,7 +399,7 @@ func (c *Calculator) detectRebalanceType(lastWorkers, currentWorkers map[string]
 		}
 
 		// Still in grace period - no action yet
-		c.logger.Info("workers disappeared but within grace period",
+		c.Logger.Info("workers disappeared but within grace period",
 			"prev_count", prevCount,
 			"curr_count", currCount,
 		)
@@ -469,22 +409,22 @@ func (c *Calculator) detectRebalanceType(lastWorkers, currentWorkers map[string]
 
 	// Case 2: Cold start - First workers joining
 	if prevCount == 0 {
-		c.logger.Info("cold start detected",
+		c.Logger.Info("cold start detected",
 			"worker_count", currCount,
-			"window", c.coldStartWindow,
+			"window", c.ColdStartWindow,
 		)
 
-		return "cold_start", c.coldStartWindow
+		return "cold_start", c.ColdStartWindow
 	}
 
 	// Case 3: Planned scale - Worker(s) added
-	c.logger.Info("planned scale detected",
+	c.Logger.Info("planned scale detected",
 		"prev_count", prevCount,
 		"curr_count", currCount,
-		"window", c.plannedScaleWin,
+		"window", c.PlannedScaleWindow,
 	)
 
-	return "planned_scale", c.plannedScaleWin
+	return "planned_scale", c.PlannedScaleWindow
 }
 
 // enterScalingState transitions the calculator into scaling state with stabilization window.
@@ -494,84 +434,7 @@ func (c *Calculator) detectRebalanceType(lastWorkers, currentWorkers map[string]
 //   - reason: Reason for scaling ("cold_start", "planned_scale", "restart")
 //   - window: Stabilization window duration to wait before rebalancing
 func (c *Calculator) enterScalingState(ctx context.Context, reason string, window time.Duration) {
-	// Only enter if currently idle
-	oldState := types.CalculatorState(c.calcState.Swap(int32(types.CalcStateScaling)))
-	if oldState != types.CalcStateIdle {
-		c.logger.Warn("attempted to enter scaling state from non-idle state",
-			"current_state", oldState.String(),
-			"reason", reason)
-		// Restore old state
-		c.calcState.Store(int32(oldState)) //nolint:gosec // State values are small constants
-
-		return
-	}
-
-	c.mu.Lock()
-	c.scalingStart = time.Now()
-	c.scalingReason = reason
-	c.mu.Unlock()
-
-	c.logger.Info("entering scaling state",
-		"reason", reason,
-		"window", window,
-	)
-
-	// Notify Manager of state change
-	c.emitStateChange(types.CalcStateScaling)
-
-	// Start timer for scaling window with tracked goroutine
-	c.wg.Go(func() {
-		c.logger.Info("scaling timer goroutine started", "window", window)
-
-		timer := time.NewTimer(window)
-		defer timer.Stop()
-
-		select {
-		case <-timer.C:
-			c.logger.Info("scaling timer fired, entering rebalancing state")
-			c.enterRebalancingState(ctx)
-		case <-c.stopCh:
-			c.logger.Info("scaling timer cancelled by stopCh")
-			return
-		case <-ctx.Done():
-			c.logger.Info("scaling timer cancelled by context", "error", ctx.Err())
-			return
-		}
-	})
-}
-
-// enterRebalancingState transitions the calculator into rebalancing state.
-//
-// This triggers the actual assignment calculation and publishes new assignments.
-//
-// Parameters:
-//   - ctx: Context for rebalance operation
-func (c *Calculator) enterRebalancingState(ctx context.Context) {
-	c.logger.Info("entering rebalancing state")
-
-	// Notify Manager of state change
-	c.emitStateChange(types.CalcStateRebalancing)
-
-	// Perform rebalance
-	if err := c.rebalance(ctx, c.scalingReason); err != nil {
-		c.logger.Error("rebalancing failed", "error", err)
-		// Return to idle even on error to allow retry
-		c.returnToIdleState()
-
-		return
-	}
-
-	// After successful rebalance, update lastWorkers to match currentWorkers
-	// This prevents immediately re-entering scaling on the next poll
-	c.mu.Lock()
-	clear(c.lastWorkers)
-	for w := range c.currentWorkers {
-		c.lastWorkers[w] = true
-	}
-	c.mu.Unlock()
-
-	// Successfully rebalanced, return to idle
-	c.returnToIdleState()
+	c.stateMach.EnterScaling(ctx, reason, window)
 }
 
 // enterEmergencyState transitions the calculator into emergency state for immediate rebalancing.
@@ -581,115 +444,33 @@ func (c *Calculator) enterRebalancingState(ctx context.Context) {
 // Parameters:
 //   - ctx: Context for rebalance operation
 func (c *Calculator) enterEmergencyState(ctx context.Context) {
-	c.mu.Lock()
-	c.scalingReason = "emergency"
-	c.mu.Unlock()
-
-	c.logger.Warn("entering emergency state - immediate rebalance")
-
-	// Notify Manager of state change
-	c.emitStateChange(types.CalcStateEmergency)
-
-	// Perform immediate rebalance
-	if err := c.rebalance(ctx, "emergency"); err != nil {
-		c.logger.Error("emergency rebalancing failed", "error", err)
-		// Return to idle to allow retry
-		c.returnToIdleState()
-
-		return
-	}
-
-	// After successful rebalance, update lastWorkers to match currentWorkers
-	c.mu.Lock()
-	clear(c.lastWorkers)
-	for w := range c.currentWorkers {
-		c.lastWorkers[w] = true
-	}
-	c.mu.Unlock()
-
-	// Reset emergency detector after successful emergency rebalance
-	c.emergencyDetector.Reset()
-
-	// Successfully rebalanced, return to idle
-	c.returnToIdleState()
+	c.stateMach.EnterEmergency(ctx)
 }
-
-// returnToIdleState transitions the calculator back to idle state after rebalancing completes.
-func (c *Calculator) returnToIdleState() {
-	c.mu.Lock()
-	c.scalingReason = ""
-	c.mu.Unlock()
-
-	c.logger.Info("returned to idle state")
-
-	// Notify Manager of state change
-	c.emitStateChange(types.CalcStateIdle)
-}
-
-// selectStabilizationWindow chooses between cold start and planned scale window.
 
 // selectStabilizationWindow chooses between cold start and planned scale window.
 func (c *Calculator) selectStabilizationWindow(ctx context.Context) time.Duration {
 	workers, _ := c.getActiveWorkers(ctx)
 	if len(workers) == 0 {
-		return c.coldStartWindow
+		return c.ColdStartWindow
 	}
 
 	// If many workers appear at once, it's likely a cold start
 	// Use restart ratio to decide
-	partitions, _ := c.source.ListPartitions(ctx)
+	partitions, _ := c.Source.ListPartitions(ctx)
 	expectedWorkers := len(partitions) / 10 // Rough estimate
 	if expectedWorkers == 0 {
 		expectedWorkers = 1
 	}
 
 	ratio := float64(len(workers)) / float64(expectedWorkers)
-	if ratio >= c.restartRatio {
-		c.logger.Info("detected cold start", "workers", len(workers), "ratio", ratio)
-		return c.coldStartWindow
+	if ratio >= c.RestartRatio {
+		c.Logger.Info("detected cold start", "workers", len(workers), "ratio", ratio)
+		return c.ColdStartWindow
 	}
 
-	c.logger.Info("detected planned scale", "workers", len(workers), "ratio", ratio)
+	c.Logger.Info("detected planned scale", "workers", len(workers), "ratio", ratio)
 
-	return c.plannedScaleWin
-}
-
-// monitorWorkers runs in the background and triggers rebalancing on worker changes.
-//
-// Current implementation: Polling-only
-//   - Polls NATS KV heartbeats every HeartbeatTTL/2 (1.5s typical)
-//   - Simple, reliable, and proven in tests
-//
-// Hybrid monitoring: watcher (primary, <100ms) + polling (fallback, ~1.5s)
-func (c *Calculator) monitorWorkers(ctx context.Context) {
-	defer close(c.doneCh)
-
-	// Start watcher for fast detection
-	if err := c.startWatcher(ctx); err != nil {
-		c.logger.Warn("failed to start watcher, falling back to polling only", "error", err)
-	}
-
-	// Polling ticker for worker changes (fallback)
-	ticker := time.NewTicker(c.hbTTL / 2) // Check twice per TTL
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			// Check for worker changes via polling (fallback)
-			if err := c.pollForChanges(ctx); err != nil {
-				c.logger.Error("polling error", "error", err)
-			}
-
-		case <-c.stopCh:
-			c.stopWatcher()
-			return
-
-		case <-ctx.Done():
-			c.stopWatcher()
-			return
-		}
-	}
+	return c.PlannedScaleWindow
 }
 
 // startWatcher starts the NATS KV watcher for fast worker change detection.
@@ -702,15 +483,15 @@ func (c *Calculator) startWatcher(ctx context.Context) error {
 	}
 
 	// Watch all heartbeat keys with prefix pattern
-	watcher, err := c.heartbeatKV.Watch(ctx, c.hbWatchPattern)
+	watcher, err := c.HeartbeatKV.Watch(ctx, c.hbWatchPattern)
 	if err != nil {
 		return fmt.Errorf("failed to start watcher: %w", err)
 	}
 
 	c.watcher = watcher
-	c.logger.Info("watcher started for fast worker detection",
+	c.Logger.Info("watcher started for fast worker detection",
 		"pattern", c.hbWatchPattern,
-		"hbPrefix", c.hbPrefix,
+		"hbPrefix", c.HeartbeatPrefix,
 	)
 
 	// Start goroutine to process watcher events
@@ -726,24 +507,24 @@ func (c *Calculator) stopWatcher() {
 
 	if c.watcher != nil {
 		if err := c.watcher.Stop(); err != nil {
-			c.logger.Warn("failed to stop watcher", "error", err)
+			c.Logger.Warn("failed to stop watcher", "error", err)
 		}
 		c.watcher = nil
-		c.logger.Debug("watcher stopped")
+		c.Logger.Debug("watcher stopped")
 	}
 }
 
 // processWatcherEvents processes events from the NATS KV watcher.
 func (c *Calculator) processWatcherEvents(ctx context.Context) {
-	c.logger.Debug("watcher event processor goroutine started")
-	defer c.logger.Debug("watcher event processor goroutine stopped")
+	c.Logger.Debug("watcher event processor goroutine started")
+	defer c.Logger.Debug("watcher event processor goroutine stopped")
 
 	c.watcherMu.Lock()
 	watcher := c.watcher
 	c.watcherMu.Unlock()
 
 	if watcher == nil {
-		c.logger.Warn("watcher is nil, cannot process events")
+		c.Logger.Warn("watcher is nil, cannot process events")
 		return
 	}
 
@@ -761,12 +542,12 @@ func (c *Calculator) processWatcherEvents(ctx context.Context) {
 		case entry := <-watcher.Updates():
 			if entry == nil {
 				// Watcher stopped or initial replay done
-				c.logger.Debug("watcher: nil entry (replay done or stopped)")
+				c.Logger.Debug("watcher: nil entry (replay done or stopped)")
 				continue
 			}
 
 			// Heartbeat key changed (worker added or updated)
-			c.logger.Debug("watcher: received entry", "key", entry.Key(), "operation", entry.Operation())
+			c.Logger.Debug("watcher: received entry", "key", entry.Key(), "operation", entry.Operation())
 
 			// Schedule a debounced check
 			if !pendingCheck {
@@ -777,11 +558,11 @@ func (c *Calculator) processWatcherEvents(ctx context.Context) {
 		case <-debounceTimer.C:
 			if pendingCheck {
 				pendingCheck = false
-				c.logger.Debug("watcher detected change, triggering check")
+				c.Logger.Debug("watcher detected change, triggering check")
 
 				// Check for worker changes
 				if err := c.pollForChanges(ctx); err != nil {
-					c.logger.Error("watcher-triggered check failed", "error", err)
+					c.Logger.Error("watcher-triggered check failed", "error", err)
 				}
 			}
 		}
@@ -808,7 +589,7 @@ func (c *Calculator) pollForChanges(ctx context.Context) error {
 		return nil
 	}
 
-	c.logger.Info("polling detected worker change", "workers", len(workers))
+	c.Logger.Info("polling detected worker change", "workers", len(workers))
 
 	// Trigger rebalancing
 	return c.checkForChanges(ctx, currentWorkers)
@@ -857,8 +638,8 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 
 	c.mu.RLock()
 	changed := c.hasWorkersChangedMap(workers)
-	cooldownActive := time.Since(c.lastRebalance) < c.cooldown
-	currentState := types.CalculatorState(c.calcState.Load())
+	cooldownActive := time.Since(c.publisher.LastRebalanceTime()) < c.Cooldown
+	currentState := c.GetState()
 	lastWorkerCount := len(c.lastWorkers)
 	// Make a copy of lastWorkers to avoid race in detectRebalanceType
 	lastWorkersCopy := make(map[string]bool, len(c.lastWorkers))
@@ -867,7 +648,7 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 	}
 	c.mu.RUnlock()
 
-	c.logger.Debug("checkForChanges",
+	c.Logger.Debug("checkForChanges",
 		"current_workers", len(workers),
 		"last_workers", lastWorkerCount,
 		"changed", changed,
@@ -880,7 +661,7 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 
 	// Don't trigger rebalance if already scaling/rebalancing
 	if currentState != types.CalcStateIdle {
-		c.logger.Info("worker change detected but calculator not idle",
+		c.Logger.Info("worker change detected but calculator not idle",
 			"state", currentState.String(),
 		)
 
@@ -890,26 +671,27 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 	// TIER 3: Rate limiting - Enforce MinRebalanceInterval FIRST
 	// This prevents thrashing during rapid successive changes
 	if cooldownActive {
-		timeSinceLastRebalance := time.Since(c.lastRebalance)
-		remaining := c.cooldown - timeSinceLastRebalance
-		c.logger.Info("worker change detected but rate limit active",
-			"min_rebalance_interval", c.cooldown,
+		lastRebalanceTime := c.publisher.LastRebalanceTime()
+		timeSinceLastRebalance := time.Since(lastRebalanceTime)
+		remaining := c.Cooldown - timeSinceLastRebalance
+		c.Logger.Info("worker change detected but rate limit active",
+			"min_rebalance_interval", c.Cooldown,
 			"time_since_last", timeSinceLastRebalance,
 			"remaining", remaining,
-			"next_allowed", c.lastRebalance.Add(c.cooldown),
+			"next_allowed", lastRebalanceTime.Add(c.Cooldown),
 		)
 
 		return nil // Defer - will be checked again by next poll/watcher event
 	}
 
-	c.logger.Info("worker change detected", "workers", len(workers))
+	c.Logger.Info("worker change detected", "workers", len(workers))
 
 	// TIER 2: Determine rebalance type and stabilization window
 	reason, window := c.detectRebalanceType(lastWorkersCopy, workers)
 
 	// Handle grace period for worker disappearance
 	if reason == "" {
-		c.logger.Info("worker change in grace period - waiting for confirmation")
+		c.Logger.Info("worker change in grace period - waiting for confirmation")
 		// Don't update lastWorkers - keep tracking the disappeared workers
 		return nil
 	}
@@ -951,35 +733,41 @@ func (c *Calculator) hasWorkersChangedMap(workers map[string]bool) bool {
 
 // getActiveWorkers retrieves the list of workers with active heartbeats.
 func (c *Calculator) getActiveWorkers(ctx context.Context) ([]string, error) {
-	// List all keys with heartbeat prefix
-	keys, err := c.heartbeatKV.Keys(ctx)
-	if err != nil {
-		// Handle "no keys found" as empty list
-		if err.Error() == "nats: no keys found" {
-			c.logger.Debug("no heartbeat keys found")
-			return []string{}, nil
-		}
+	return c.monitor.GetActiveWorkers(ctx)
+}
 
-		return nil, fmt.Errorf("failed to list heartbeat keys: %w", err)
+// handleRebalance is the callback invoked by StateMachine when rebalancing should occur.
+//
+// This method bridges the StateMachine component to the Calculator's rebalancing logic.
+// It also handles post-rebalance state updates (updating lastWorkers, resetting emergency detector).
+//
+// Parameters:
+//   - ctx: Context for the rebalance operation
+//   - reason: Rebalance reason ("cold_start", "planned_scale", "emergency", "restart")
+//
+// Returns:
+//   - error: Nil on success, error on rebalance failure
+func (c *Calculator) handleRebalance(ctx context.Context, reason string) error {
+	// Perform the rebalance
+	if err := c.rebalance(ctx, reason); err != nil {
+		return err
 	}
 
-	c.logger.Debug("scanning heartbeat keys", "total_keys", len(keys), "hb_prefix", c.hbPrefix)
+	// After successful rebalance, update lastWorkers to match currentWorkers
+	// This prevents immediately re-entering scaling on the next poll
+	c.mu.Lock()
+	clear(c.lastWorkers)
+	for w := range c.currentWorkers {
+		c.lastWorkers[w] = true
+	}
+	c.mu.Unlock()
 
-	workers := make([]string, 0, len(keys))
-	for _, key := range keys {
-		// Extract worker ID from key (format: "hbPrefix.workerID")
-		if len(key) > len(c.hbPrefix)+1 && key[:len(c.hbPrefix)] == c.hbPrefix {
-			workerID := key[len(c.hbPrefix)+1:]
-			workers = append(workers, workerID)
-			c.logger.Debug("found active worker heartbeat", "key", key, "worker_id", workerID)
-		} else {
-			c.logger.Debug("skipping non-heartbeat key", "key", key, "hb_prefix", c.hbPrefix)
-		}
+	// Reset emergency detector after successful emergency rebalance
+	if reason == "emergency" {
+		c.emergencyDetector.Reset()
 	}
 
-	c.logger.Debug("active workers discovered", "count", len(workers), "workers", workers)
-
-	return workers, nil
+	return nil
 }
 
 // rebalance calculates and publishes new assignments.
@@ -993,54 +781,32 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 		return err
 	}
 
-	c.logger.Debug("rebalance started", "lifecycle", lifecycle, "worker_count", len(workers), "workers", workers)
+	c.Logger.Debug("rebalance started", "lifecycle", lifecycle, "worker_count", len(workers), "workers", workers)
 
-	partitions, err := c.source.ListPartitions(ctx)
+	partitions, err := c.Source.ListPartitions(ctx)
 	if err != nil {
 		return err
 	}
 
-	c.logger.Debug("partitions retrieved", "partition_count", len(partitions))
+	c.Logger.Debug("partitions retrieved", "partition_count", len(partitions))
 
 	if len(workers) == 0 {
-		c.logger.Info("no active workers for assignment")
+		c.Logger.Info("no active workers for assignment")
 		return nil
 	}
 
 	// Calculate new assignments using strategy
-	assignments, err := c.strategy.Assign(workers, partitions)
+	assignments, err := c.Strategy.Assign(workers, partitions)
 	if err != nil {
 		return fmt.Errorf("assignment calculation failed: %w", err)
 	}
 
-	c.logger.Debug("assignments calculated", "worker_count", len(assignments))
+	c.Logger.Debug("assignments calculated", "worker_count", len(assignments))
 
-	// Increment version
-	c.currentVersion++
-
-	c.logger.Debug("publishing assignments to KV", "version", c.currentVersion, "worker_count", len(assignments))
-
-	// Publish assignments to KV
-	for workerID, parts := range assignments {
-		assignment := types.Assignment{
-			Version:    c.currentVersion,
-			Lifecycle:  lifecycle,
-			Partitions: parts,
-		}
-
-		data, err := json.Marshal(assignment)
-		if err != nil {
-			return fmt.Errorf("failed to marshal assignment: %w", err)
-		}
-
-		key := c.assignmentKeyPrefix + workerID
-		c.logger.Debug("publishing assignment", "key", key, "worker_id", workerID, "partitions", len(parts), "version", c.currentVersion)
-		if _, err := c.assignmentKV.Put(ctx, key, data); err != nil {
-			return fmt.Errorf("failed to publish assignment: %w", err)
-		}
+	// Publish assignments via publisher component
+	if err := c.publisher.Publish(ctx, workers, assignments, lifecycle); err != nil {
+		return err
 	}
-
-	c.logger.Debug("all assignments published successfully", "version", c.currentVersion, "workers", len(assignments))
 
 	// Update tracking state
 	clear(c.currentWorkers)
@@ -1048,15 +814,9 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 		c.currentWorkers[w] = true
 	}
 	c.currentAssignments = assignments
-	c.lastRebalance = time.Now()
 
-	// Record metrics
-	for _, parts := range assignments {
-		c.metrics.RecordAssignmentChange(len(parts), 0, c.currentVersion)
-	}
-
-	c.logger.Info("rebalance complete",
-		"version", c.currentVersion,
+	c.Logger.Info("rebalance complete",
+		"version", c.publisher.CurrentVersion(),
 		"workers", len(workers),
 		"partitions", len(partitions),
 		"lifecycle", lifecycle)
