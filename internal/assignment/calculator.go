@@ -47,6 +47,10 @@ type Calculator struct {
 	metrics types.MetricsCollector
 	logger  types.Logger
 
+	// Cached string patterns (for performance)
+	hbWatchPattern      string // "hbPrefix.*" - cached for Watch() calls
+	assignmentKeyPrefix string // "prefix." - cached for key construction
+
 	// State management
 	mu                 sync.RWMutex
 	started            bool
@@ -76,64 +80,6 @@ type Calculator struct {
 	stopCh chan struct{}
 	doneCh chan struct{}
 	wg     sync.WaitGroup // Tracks all goroutines for clean shutdown
-}
-
-// NewCalculator creates a new assignment calculator.
-//
-// The calculator monitors worker health and calculates partition assignments.
-// It should only be started on the leader worker.
-//
-// Parameters:
-//   - assignmentKV: NATS KV bucket for storing assignments
-//   - heartbeatKV: NATS KV bucket for reading worker heartbeats
-//   - prefix: Key prefix for assignment storage (e.g., "assignment")
-//   - source: Partition source for discovering available partitions
-//   - strategy: Assignment strategy for distributing partitions
-//   - hbPrefix: Heartbeat key prefix for monitoring workers
-//   - hbTTL: Heartbeat TTL duration for detecting dead workers
-//   - emergencyGracePeriod: Minimum time workers must be missing before emergency (hysteresis)
-//
-// Returns:
-//   - *Calculator: New calculator instance ready to start
-func NewCalculator(
-	assignmentKV jetstream.KeyValue,
-	heartbeatKV jetstream.KeyValue,
-	prefix string,
-	source types.PartitionSource,
-	strategy types.AssignmentStrategy,
-	hbPrefix string,
-	hbTTL time.Duration,
-	emergencyGracePeriod time.Duration,
-) *Calculator {
-	c := &Calculator{
-		assignmentKV:       assignmentKV,
-		heartbeatKV:        heartbeatKV,
-		prefix:             prefix,
-		source:             source,
-		strategy:           strategy,
-		hbPrefix:           hbPrefix,
-		hbTTL:              hbTTL,
-		cooldown:           10 * time.Second,
-		minThreshold:       0.2,
-		restartRatio:       0.5,
-		coldStartWindow:    30 * time.Second,
-		plannedScaleWin:    10 * time.Second,
-		metrics:            metrics.NewNop(),
-		logger:             logging.NewNop(),
-		currentWorkers:     make(map[string]bool),
-		currentAssignments: make(map[string][]types.Partition),
-		lastWorkers:        make(map[string]bool),
-		subscribers:        xsync.NewMap[uint64, *stateSubscriber](),
-		stopCh:             make(chan struct{}),
-		doneCh:             make(chan struct{}),
-	}
-	// Initialize calculator state to Idle
-	c.calcState.Store(int32(types.CalcStateIdle))
-
-	// Initialize emergency detector with configured grace period
-	c.emergencyDetector = NewEmergencyDetector(emergencyGracePeriod)
-
-	return c
 }
 
 // SetCooldown sets the rebalance cooldown duration.
@@ -468,7 +414,7 @@ func (c *Calculator) initialAssignment(ctx context.Context) error {
 	// Initialize lastWorkers with the workers from initial assignment
 	// This prevents immediately re-entering scaling when monitorWorkers starts
 	c.mu.Lock()
-	c.lastWorkers = make(map[string]bool)
+	clear(c.lastWorkers)
 	for w := range c.currentWorkers {
 		c.lastWorkers[w] = true
 	}
@@ -618,7 +564,7 @@ func (c *Calculator) enterRebalancingState(ctx context.Context) {
 	// After successful rebalance, update lastWorkers to match currentWorkers
 	// This prevents immediately re-entering scaling on the next poll
 	c.mu.Lock()
-	c.lastWorkers = make(map[string]bool)
+	clear(c.lastWorkers)
 	for w := range c.currentWorkers {
 		c.lastWorkers[w] = true
 	}
@@ -655,7 +601,7 @@ func (c *Calculator) enterEmergencyState(ctx context.Context) {
 
 	// After successful rebalance, update lastWorkers to match currentWorkers
 	c.mu.Lock()
-	c.lastWorkers = make(map[string]bool)
+	clear(c.lastWorkers)
 	for w := range c.currentWorkers {
 		c.lastWorkers[w] = true
 	}
@@ -756,15 +702,14 @@ func (c *Calculator) startWatcher(ctx context.Context) error {
 	}
 
 	// Watch all heartbeat keys with prefix pattern
-	pattern := fmt.Sprintf("%s.*", c.hbPrefix)
-	watcher, err := c.heartbeatKV.Watch(ctx, pattern)
+	watcher, err := c.heartbeatKV.Watch(ctx, c.hbWatchPattern)
 	if err != nil {
 		return fmt.Errorf("failed to start watcher: %w", err)
 	}
 
 	c.watcher = watcher
 	c.logger.Info("watcher started for fast worker detection",
-		"pattern", pattern,
+		"pattern", c.hbWatchPattern,
 		"hbPrefix", c.hbPrefix,
 	)
 
@@ -971,7 +916,7 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 
 	// Update lastWorkers for next comparison
 	c.mu.Lock()
-	c.lastWorkers = make(map[string]bool)
+	clear(c.lastWorkers)
 	for w := range workers {
 		c.lastWorkers[w] = true
 	}
@@ -1020,7 +965,7 @@ func (c *Calculator) getActiveWorkers(ctx context.Context) ([]string, error) {
 
 	c.logger.Debug("scanning heartbeat keys", "total_keys", len(keys), "hb_prefix", c.hbPrefix)
 
-	var workers []string
+	workers := make([]string, 0, len(keys))
 	for _, key := range keys {
 		// Extract worker ID from key (format: "hbPrefix.workerID")
 		if len(key) > len(c.hbPrefix)+1 && key[:len(c.hbPrefix)] == c.hbPrefix {
@@ -1088,7 +1033,7 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 			return fmt.Errorf("failed to marshal assignment: %w", err)
 		}
 
-		key := fmt.Sprintf("%s.%s", c.prefix, workerID)
+		key := c.assignmentKeyPrefix + workerID
 		c.logger.Debug("publishing assignment", "key", key, "worker_id", workerID, "partitions", len(parts), "version", c.currentVersion)
 		if _, err := c.assignmentKV.Put(ctx, key, data); err != nil {
 			return fmt.Errorf("failed to publish assignment: %w", err)
@@ -1098,7 +1043,7 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 	c.logger.Debug("all assignments published successfully", "version", c.currentVersion, "workers", len(assignments))
 
 	// Update tracking state
-	c.currentWorkers = make(map[string]bool)
+	clear(c.currentWorkers)
 	for _, w := range workers {
 		c.currentWorkers[w] = true
 	}

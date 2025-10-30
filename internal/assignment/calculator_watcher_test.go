@@ -356,16 +356,17 @@ func setupCalculatorForWatcherTest(t *testing.T) (*Calculator, jetstream.KeyValu
 	strategy := strategy.NewRoundRobin()
 
 	// Create calculator with test logger
-	calc := NewCalculator(
-		assignmentKV,
-		heartbeatKV,
-		"assignment",
-		src,
-		strategy,
-		"heartbeat",
-		5*time.Second,
-		2*time.Second, // Emergency grace period
-	)
+	calc, err := NewCalculator(&Config{
+		AssignmentKV:         assignmentKV,
+		HeartbeatKV:          heartbeatKV,
+		AssignmentPrefix:     "assignment",
+		Source:               src,
+		Strategy:             strategy,
+		HeartbeatPrefix:      "heartbeat",
+		HeartbeatTTL:         5 * time.Second,
+		EmergencyGracePeriod: 2 * time.Second, // Emergency grace period,
+	})
+	require.NoError(t, err)
 	calc.SetLogger(logging.NewTest(t))
 
 	cleanup := func() {

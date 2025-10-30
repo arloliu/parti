@@ -18,7 +18,17 @@ func TestCalculator_detectRebalanceType_ColdStart(t *testing.T) {
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second, 5*time.Second)
+	calc, err := NewCalculator(&Config{
+		AssignmentKV:         assignmentKV,
+		HeartbeatKV:          heartbeatKV,
+		AssignmentPrefix:     "test-assignment",
+		Source:               source,
+		Strategy:             strategy,
+		HeartbeatPrefix:      "test-hb",
+		HeartbeatTTL:         10 * time.Second,
+		EmergencyGracePeriod: 5 * time.Second,
+	})
+	require.NoError(t, err)
 
 	// Cold start: 0 → 3 workers
 	lastWorkers := map[string]bool{} // Empty - cold start
@@ -43,7 +53,17 @@ func TestCalculator_detectRebalanceType_PlannedScale(t *testing.T) {
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second, 5*time.Second)
+	calc, err := NewCalculator(&Config{
+		AssignmentKV:         assignmentKV,
+		HeartbeatKV:          heartbeatKV,
+		AssignmentPrefix:     "test-assignment",
+		Source:               source,
+		Strategy:             strategy,
+		HeartbeatPrefix:      "test-hb",
+		HeartbeatTTL:         10 * time.Second,
+		EmergencyGracePeriod: 5 * time.Second,
+	})
+	require.NoError(t, err)
 
 	// Set up previous workers
 	lastWorkers := map[string]bool{
@@ -76,7 +96,17 @@ func TestCalculator_detectRebalanceType_Emergency(t *testing.T) {
 	strategy := &mockStrategy{}
 
 	// Use shorter intervals for faster test: HeartbeatInterval=1s, GracePeriod=1s (instead of default 0.75*interval)
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 1*time.Second, 1*time.Second)
+	calc, err := NewCalculator(&Config{
+		AssignmentKV:         assignmentKV,
+		HeartbeatKV:          heartbeatKV,
+		AssignmentPrefix:     "test-assignment",
+		Source:               source,
+		Strategy:             strategy,
+		HeartbeatPrefix:      "test-hb",
+		HeartbeatTTL:         1 * time.Second,
+		EmergencyGracePeriod: 1 * time.Second,
+	})
+	require.NoError(t, err)
 
 	// Set up previous workers
 	lastWorkers := map[string]bool{
@@ -113,7 +143,17 @@ func TestCalculator_detectRebalanceType_Restart(t *testing.T) {
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second, 5*time.Second)
+	calc, err := NewCalculator(&Config{
+		AssignmentKV:         assignmentKV,
+		HeartbeatKV:          heartbeatKV,
+		AssignmentPrefix:     "test-assignment",
+		Source:               source,
+		Strategy:             strategy,
+		HeartbeatPrefix:      "test-hb",
+		HeartbeatTTL:         10 * time.Second,
+		EmergencyGracePeriod: 5 * time.Second,
+	})
+	require.NoError(t, err)
 	calc.SetRestartDetectionRatio(0.5) // 50% threshold (not used anymore - removed restart detection)
 
 	// Set up previous workers (10 workers)
@@ -161,7 +201,17 @@ func TestCalculator_detectRebalanceType_MultipleWorkersCrashed(t *testing.T) {
 	strategy := &mockStrategy{}
 
 	// Use shorter intervals for faster test: HeartbeatInterval=1s, GracePeriod=1s (instead of default 0.75*interval)
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 1*time.Second, 1*time.Second)
+	calc, err := NewCalculator(&Config{
+		AssignmentKV:         assignmentKV,
+		HeartbeatKV:          heartbeatKV,
+		AssignmentPrefix:     "test-assignment",
+		Source:               source,
+		Strategy:             strategy,
+		HeartbeatPrefix:      "test-hb",
+		HeartbeatTTL:         1 * time.Second,
+		EmergencyGracePeriod: 1 * time.Second,
+	})
+	require.NoError(t, err)
 
 	// Set up previous workers
 	lastWorkers := map[string]bool{
@@ -200,7 +250,17 @@ func TestCalculator_StateTransitions_GetState(t *testing.T) {
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second, 5*time.Second)
+	calc, err := NewCalculator(&Config{
+		AssignmentKV:         assignmentKV,
+		HeartbeatKV:          heartbeatKV,
+		AssignmentPrefix:     "test-assignment",
+		Source:               source,
+		Strategy:             strategy,
+		HeartbeatPrefix:      "test-hb",
+		HeartbeatTTL:         10 * time.Second,
+		EmergencyGracePeriod: 5 * time.Second,
+	})
+	require.NoError(t, err)
 
 	// Initial state should be Idle
 	require.Equal(t, types.CalcStateIdle, calc.GetState())
@@ -225,7 +285,17 @@ func TestCalculator_StateTransitions_Scaling(t *testing.T) {
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second, 5*time.Second)
+	calc, err := NewCalculator(&Config{
+		AssignmentKV:         assignmentKV,
+		HeartbeatKV:          heartbeatKV,
+		AssignmentPrefix:     "test-assignment",
+		Source:               source,
+		Strategy:             strategy,
+		HeartbeatPrefix:      "test-hb",
+		HeartbeatTTL:         10 * time.Second,
+		EmergencyGracePeriod: 5 * time.Second,
+	})
+	require.NoError(t, err)
 
 	ctx := context.Background()
 
@@ -252,7 +322,17 @@ func TestCalculator_StateTransitions_Emergency(t *testing.T) {
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second, 5*time.Second)
+	calc, err := NewCalculator(&Config{
+		AssignmentKV:         assignmentKV,
+		HeartbeatKV:          heartbeatKV,
+		AssignmentPrefix:     "test-assignment",
+		Source:               source,
+		Strategy:             strategy,
+		HeartbeatPrefix:      "test-hb",
+		HeartbeatTTL:         10 * time.Second,
+		EmergencyGracePeriod: 5 * time.Second,
+	})
+	require.NoError(t, err)
 
 	ctx := context.Background()
 
@@ -276,7 +356,17 @@ func TestCalculator_StateTransitions_ReturnToIdle(t *testing.T) {
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second, 5*time.Second)
+	calc, err := NewCalculator(&Config{
+		AssignmentKV:         assignmentKV,
+		HeartbeatKV:          heartbeatKV,
+		AssignmentPrefix:     "test-assignment",
+		Source:               source,
+		Strategy:             strategy,
+		HeartbeatPrefix:      "test-hb",
+		HeartbeatTTL:         10 * time.Second,
+		EmergencyGracePeriod: 5 * time.Second,
+	})
+	require.NoError(t, err)
 
 	// Manually set state to Rebalancing
 	calc.calcState.Store(int32(types.CalcStateRebalancing))
@@ -301,14 +391,24 @@ func TestCalculator_StateTransitions_PreventsConcurrentRebalance(t *testing.T) {
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 1*time.Second, 500*time.Millisecond)
+	calc, err := NewCalculator(&Config{
+		AssignmentKV:         assignmentKV,
+		HeartbeatKV:          heartbeatKV,
+		AssignmentPrefix:     "test-assignment",
+		Source:               source,
+		Strategy:             strategy,
+		HeartbeatPrefix:      "test-hb",
+		HeartbeatTTL:         1 * time.Second,
+		EmergencyGracePeriod: 500 * time.Millisecond,
+	})
+	require.NoError(t, err)
 	calc.SetCooldown(100 * time.Millisecond)
 	calc.SetStabilizationWindows(500*time.Millisecond, 300*time.Millisecond) // Fast windows for test
 
 	ctx := context.Background()
 
 	// Start calculator to set up KV buckets
-	err := calc.Start(ctx)
+	err = calc.Start(ctx)
 	require.NoError(t, err)
 	defer func() { _ = calc.Stop() }()
 
@@ -348,14 +448,24 @@ func TestCalculator_StateTransitions_CooldownPreventsRebalance(t *testing.T) {
 	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 1*time.Second, 500*time.Millisecond)
+	calc, err := NewCalculator(&Config{
+		AssignmentKV:         assignmentKV,
+		HeartbeatKV:          heartbeatKV,
+		AssignmentPrefix:     "test-assignment",
+		Source:               source,
+		Strategy:             strategy,
+		HeartbeatPrefix:      "test-hb",
+		HeartbeatTTL:         1 * time.Second,
+		EmergencyGracePeriod: 500 * time.Millisecond,
+	})
+	require.NoError(t, err)
 	calc.SetCooldown(500 * time.Millisecond)
 	calc.SetStabilizationWindows(500*time.Millisecond, 300*time.Millisecond) // Fast windows for test
 
 	ctx := context.Background()
 
 	// Start calculator
-	err := calc.Start(ctx)
+	err = calc.Start(ctx)
 	require.NoError(t, err)
 	defer func() { _ = calc.Stop() }()
 

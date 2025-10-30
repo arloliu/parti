@@ -25,7 +25,17 @@ func TestCalculator_ScalingTransition_TimerFires(t *testing.T) {
 	}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test", src, strategy, "heartbeat", 5*time.Second, 1*time.Second)
+	calc, err := NewCalculator(&Config{
+		AssignmentKV:         assignmentKV,
+		HeartbeatKV:          heartbeatKV,
+		AssignmentPrefix:     "test",
+		Source:               src,
+		Strategy:             strategy,
+		HeartbeatPrefix:      "heartbeat",
+		HeartbeatTTL:         5 * time.Second,
+		EmergencyGracePeriod: 1 * time.Second,
+	})
+	require.NoError(t, err)
 	calc.SetStabilizationWindows(100*time.Millisecond, 50*time.Millisecond) // Very short windows for testing
 
 	ctx := context.Background()
@@ -62,7 +72,17 @@ func TestCalculator_ScalingTransition_WithRealStart(t *testing.T) {
 	}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test", src, strategy, "heartbeat", 1*time.Second, 500*time.Millisecond)
+	calc, err := NewCalculator(&Config{
+		AssignmentKV:         assignmentKV,
+		HeartbeatKV:          heartbeatKV,
+		AssignmentPrefix:     "test",
+		Source:               src,
+		Strategy:             strategy,
+		HeartbeatPrefix:      "heartbeat",
+		HeartbeatTTL:         1 * time.Second,
+		EmergencyGracePeriod: 500 * time.Millisecond,
+	})
+	require.NoError(t, err)
 	calc.SetStabilizationWindows(500*time.Millisecond, 250*time.Millisecond) // Short windows for testing
 	calc.SetCooldown(0)                                                      // No cooldown for this test
 
@@ -70,7 +90,7 @@ func TestCalculator_ScalingTransition_WithRealStart(t *testing.T) {
 	defer cancel()
 
 	// Create initial heartbeat (simulate 1 worker)
-	err := publishHeartbeat(ctx, heartbeatKV, "heartbeat.worker-1", 2*time.Second)
+	err = publishHeartbeat(ctx, heartbeatKV, "heartbeat.worker-1", 2*time.Second)
 	require.NoError(t, err)
 
 	// Start calculator
@@ -121,7 +141,17 @@ func TestCalculator_ScalingTransition_ContextCancellation(t *testing.T) {
 	}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test", src, strategy, "heartbeat", 5*time.Second, 1*time.Second)
+	calc, err := NewCalculator(&Config{
+		AssignmentKV:         assignmentKV,
+		HeartbeatKV:          heartbeatKV,
+		AssignmentPrefix:     "test",
+		Source:               src,
+		Strategy:             strategy,
+		HeartbeatPrefix:      "heartbeat",
+		HeartbeatTTL:         5 * time.Second,
+		EmergencyGracePeriod: 1 * time.Second,
+	})
+	require.NoError(t, err)
 	calc.SetStabilizationWindows(2*time.Second, 1*time.Second) // Long window
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -155,14 +185,24 @@ func TestCalculator_ScalingTransition_StopBeforeWindow(t *testing.T) {
 	}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test", src, strategy, "heartbeat", 5*time.Second, 1*time.Second)
+	calc, err := NewCalculator(&Config{
+		AssignmentKV:         assignmentKV,
+		HeartbeatKV:          heartbeatKV,
+		AssignmentPrefix:     "test",
+		Source:               src,
+		Strategy:             strategy,
+		HeartbeatPrefix:      "heartbeat",
+		HeartbeatTTL:         5 * time.Second,
+		EmergencyGracePeriod: 1 * time.Second,
+	})
+	require.NoError(t, err)
 	calc.SetStabilizationWindows(500*time.Millisecond, 1*time.Second) // Shorter window for faster test
 	calc.SetCooldown(0)
 
 	ctx := context.Background()
 
 	// Start calculator
-	err := calc.Start(ctx)
+	err = calc.Start(ctx)
 	require.NoError(t, err)
 
 	// Trigger scaling state manually
@@ -195,7 +235,17 @@ func TestCalculator_ScalingTransition_RapidStateChanges(t *testing.T) {
 	}}
 	strategy := &mockStrategy{}
 
-	calc := NewCalculator(assignmentKV, heartbeatKV, "test", src, strategy, "heartbeat", 500*time.Millisecond, 300*time.Millisecond)
+	calc, err := NewCalculator(&Config{
+		AssignmentKV:         assignmentKV,
+		HeartbeatKV:          heartbeatKV,
+		AssignmentPrefix:     "test",
+		Source:               src,
+		Strategy:             strategy,
+		HeartbeatPrefix:      "heartbeat",
+		HeartbeatTTL:         500 * time.Millisecond,
+		EmergencyGracePeriod: 300 * time.Millisecond,
+	})
+	require.NoError(t, err)
 	calc.SetStabilizationWindows(300*time.Millisecond, 150*time.Millisecond)
 	calc.SetCooldown(0)
 
@@ -203,7 +253,7 @@ func TestCalculator_ScalingTransition_RapidStateChanges(t *testing.T) {
 	defer cancel()
 
 	// Create initial worker
-	err := publishHeartbeat(ctx, heartbeatKV, "heartbeat.worker-1", 1*time.Second)
+	err = publishHeartbeat(ctx, heartbeatKV, "heartbeat.worker-1", 1*time.Second)
 	require.NoError(t, err)
 
 	// Start calculator

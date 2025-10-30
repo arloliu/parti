@@ -29,16 +29,17 @@ func TestCalculatorCooldown(t *testing.T) {
 		partitionSource := source.NewStatic(partitions)
 		assignmentStrategy := strategy.NewRoundRobin()
 
-		calc := NewCalculator(
-			assignmentKV,
-			heartbeatKV,
-			"test-assignment",
-			partitionSource,
-			assignmentStrategy,
-			"worker",
-			5*time.Second,
-			2*time.Second, // Emergency grace period
-		)
+		calc, err := NewCalculator(&Config{
+			AssignmentKV:         assignmentKV,
+			HeartbeatKV:          heartbeatKV,
+			AssignmentPrefix:     "test-assignment",
+			Source:               partitionSource,
+			Strategy:             assignmentStrategy,
+			HeartbeatPrefix:      "worker",
+			HeartbeatTTL:         5 * time.Second,
+			EmergencyGracePeriod: 2 * time.Second, // Emergency grace period,
+		})
+		require.NoError(t, err)
 
 		// Default cooldown should be 10s
 		require.Equal(t, 10*time.Second, calc.cooldown)
@@ -58,16 +59,17 @@ func TestCalculatorCooldown(t *testing.T) {
 		partitionSource := source.NewStatic(partitions)
 		assignmentStrategy := strategy.NewRoundRobin()
 
-		calc := NewCalculator(
-			assignmentKV,
-			heartbeatKV,
-			"test-assignment",
-			partitionSource,
-			assignmentStrategy,
-			"worker",
-			5*time.Second,
-			2*time.Second, // Emergency grace period
-		)
+		calc, err := NewCalculator(&Config{
+			AssignmentKV:         assignmentKV,
+			HeartbeatKV:          heartbeatKV,
+			AssignmentPrefix:     "test-assignment",
+			Source:               partitionSource,
+			Strategy:             assignmentStrategy,
+			HeartbeatPrefix:      "worker",
+			HeartbeatTTL:         5 * time.Second,
+			EmergencyGracePeriod: 2 * time.Second, // Emergency grace period,
+		})
+		require.NoError(t, err)
 
 		// Set custom cooldown
 		customCooldown := 2 * time.Second

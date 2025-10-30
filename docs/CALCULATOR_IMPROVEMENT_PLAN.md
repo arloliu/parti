@@ -462,64 +462,55 @@ This created a goroutine leak because:
 
 ## Phase 2: High Priority Performance Fixes
 
-### 2.1 Optimize Map Allocations (HIGH)
-**Issue**: Creating new maps on every call (lines 551, 741, 791, 827)
-**Additional Improvements**:
-- Replaced `time.After()` with `time.NewTimer()` + `defer timer.Stop()` to prevent timer leaks
-- Proper cleanup even if goroutine exits via stopCh or ctx.Done()
-- Guaranteed clean shutdown sequence
-
-**Benefits**:
-- ✅ Eliminates goroutine leaks
-- ✅ Guarantees clean shutdown
-- ✅ Prevents resource exhaustion
-- ✅ Better timer resource management
-- ✅ Detectable with standard leak detection tools
-
-**Testing**:
-- All scaling transition tests pass
-- Full test suite with race detector passes (0 races)
-- Integration tests pass (186s)
-- Zero linting issues
-
-**Completion Date**: October 30, 2025
-
----
-
-## Phase 2: High Priority Performance Fixes
-
-### 2.1 Optimize Map Allocations (HIGH)
-**Issue**: Creating new maps on every call (lines 551, 741, 791, 827)
-````
-
-**Completion Date**: October 30, 2025
-
----
-
-## Phase 2: High Priority Performance Fixes
-
-### 2.1 Optimize Map Allocations (HIGH)
-**Issue**: Creating new maps on every call (lines 551, 741, 791, 827)
+### 2.1 Optimize Map Allocations (HIGH) ✅ COMPLETED
+**Issue**: Creating new maps on every call (lines 471, 621, 658, 974, 1101)
 **Impact**: GC pressure, allocation overhead
 **Priority**: P1
+**Status**: ✅ Completed - October 30, 2025
 
-**Solution**:
+**Solution Implemented**:
 ```go
 // Use clear() (Go 1.21+) instead of recreating maps
 clear(c.lastWorkers)
 for w := range c.currentWorkers {
     c.lastWorkers[w] = true
 }
+
+// Also applied to c.currentWorkers
+clear(c.currentWorkers)
+for _, w := range workers {
+    c.currentWorkers[w] = true
+}
 ```
+
+**Changes Made**:
+- Line 471: `clear(c.lastWorkers)` instead of `make(map[string]bool)`
+- Line 621: `clear(c.lastWorkers)` instead of `make(map[string]bool)`
+- Line 658: `clear(c.lastWorkers)` instead of `make(map[string]bool)`
+- Line 974: `clear(c.lastWorkers)` instead of `make(map[string]bool)`
+- Line 1101: `clear(c.currentWorkers)` instead of `make(map[string]bool)`
+
+**Benefits**:
+- ✅ Eliminates map reallocations
+- ✅ Reduces GC pressure
+- ✅ Reuses existing map capacity
+- ✅ Better memory efficiency
+
+**Testing**:
+- All assignment tests pass with race detector (24.3s)
+- Zero linting issues
+
+**Completion Date**: October 30, 2025
 
 ---
 
-### 2.2 Pre-allocate Slices (HIGH)
-**Issue**: Dynamic append without capacity hints (line 961)
+### 2.2 Pre-allocate Slices (HIGH) ✅ COMPLETED
+**Issue**: Dynamic append without capacity hints (line 1023)
 **Impact**: Multiple reallocations, memory churn
 **Priority**: P1
+**Status**: ✅ Completed - October 30, 2025
 
-**Solution**:
+**Solution Implemented**:
 ```go
 // Before
 var workers []string
@@ -534,205 +525,643 @@ for _, key := range keys {
 }
 ```
 
-**Estimated Time**: 1 hour
-**Owner**: TBD
+**Benefits**:
+- ✅ Eliminates slice reallocations during append
+- ✅ Reduces memory churn
+- ✅ Pre-allocates exact capacity needed
+
+**Testing**:
+- All assignment tests pass with race detector (24.3s)
+- Zero linting issues
+
+**Completion Date**: October 30, 2025
 
 ---
 
-### 2.3 Cache Frequently Computed Strings (HIGH)
-**Issue**: String formatting in hot paths (lines 900, 1050)
-**Impact**: Unnecessary allocations
+### 2.3 Cache Frequently Computed Strings (HIGH) ✅ COMPLETED
+**Issue**: String formatting in hot paths (lines 759, 1091)
+**Impact**: Unnecessary allocations on every Watch() call and assignment publish
 **Priority**: P1
+**Status**: ✅ Completed - October 30, 2025
 
-**Solution**:
+**Solution Implemented**:
 ```go
 type Calculator struct {
     // ... existing fields
 
-    // Cached patterns
-    workerKeyPattern string // "heartbeat.*"
-    assignmentPrefix string // "assignment."
+    // Cached patterns (for performance)
+    hbWatchPattern     string // "hbPrefix.*" - cached for Watch() calls
+    assignmentKeyPrefix string // "prefix." - cached for key construction
 }
 
 func NewCalculator(...) *Calculator {
     c := &Calculator{
-        workerKeyPattern: fmt.Sprintf("%s.*", hbPrefix),
-        assignmentPrefix: fmt.Sprintf("%s.", prefix),
+        // ... other fields
+        hbWatchPattern:     fmt.Sprintf("%s.*", hbPrefix),
+        assignmentKeyPrefix: fmt.Sprintf("%s.", prefix),
     }
     return c
 }
+
+// Usage in hot paths:
+watcher, err := c.heartbeatKV.Watch(ctx, c.hbWatchPattern)  // Instead of fmt.Sprintf
+key := c.assignmentKeyPrefix + workerID                      // Instead of fmt.Sprintf
 ```
 
-**Estimated Time**: 2 hours
-**Owner**: TBD
+**Benefits**:
+- ✅ Eliminates string formatting in hot paths
+- ✅ Reduces allocations during Watch() calls (called on every reconnect)
+- ✅ Reduces allocations in publishAssignment (called for every worker)
+- ✅ Pre-computed at initialization time
+
+**Testing**:
+- All assignment tests pass with race detector (24.5s)
+- Zero linting issues
+
+**Completion Date**: October 30, 2025
 
 ---
 
-### 2.4 Implement Circuit Breaker (HIGH)
+### 2.4 Implement Circuit Breaker (HIGH) - DEFERRED
 **Issue**: Infinite retry loop on rebalance failures (line 866)
 **Impact**: CPU waste, log spam
 **Priority**: P1
+**Status**: Deferred to Phase 3 (requires architectural refactoring)
 
-**Solution**:
-```go
-type CircuitBreaker struct {
-    failures      atomic.Int32
-    lastFailTime  time.Time
-    mu            sync.Mutex
-}
-
-func (c *Calculator) rebalanceWithCircuitBreaker(ctx context.Context, reason string) error {
-    if c.circuitBreaker.IsOpen() {
-        return ErrCircuitOpen
-    }
-
-    err := c.rebalance(ctx, reason)
-    c.circuitBreaker.RecordResult(err)
-    return err
-}
-```
-
-**Estimated Time**: 4 hours
-**Owner**: TBD
+**Rationale**: Circuit breaker implementation requires:
+- Error classification (transient vs permanent)
+- State machine for circuit states
+- Integration with metrics/observability
+- Better suited for Phase 3 architectural improvements
 
 ---
 
-### 2.5 Add Retry with Backoff (HIGH)
+### 2.5 Add Retry with Backoff (HIGH) - DEFERRED
 **Issue**: No backoff on transient failures
 **Impact**: Unnecessary load, poor error handling
 **Priority**: P1
+**Status**: Deferred to Phase 3 (requires error handling refactoring)
 
-**Solution**:
-```go
-func (c *Calculator) rebalanceWithRetry(ctx context.Context, reason string) error {
-    backoff := 100 * time.Millisecond
-    maxBackoff := 5 * time.Second
-
-    for attempt := 0; attempt < 3; attempt++ {
-        if err := c.rebalance(ctx, reason); err == nil {
-            return nil
-        }
-
-        select {
-        case <-ctx.Done():
-            return ctx.Err()
-        case <-time.After(backoff):
-            backoff = min(backoff*2, maxBackoff)
-        }
-    }
-    return ErrRebalanceFailed
-}
-```
-
-**Estimated Time**: 3 hours
-**Owner**: TBD
+**Rationale**: Retry logic requires:
+- Better error classification
+- Context deadline management
+- Coordination with circuit breaker
+- Better suited for Phase 3 architectural improvements
 
 ---
 
-### 2.6 Batch KV Operations (HIGH)
+### 2.6 Batch KV Operations (HIGH) - DEFERRED
 **Issue**: Individual puts for each worker assignment (line 1031)
 **Impact**: Network roundtrips, latency
 **Priority**: P1
+**Status**: Deferred (requires NATS JetStream API evaluation)
 
-**Solution**:
-```go
-// Use KV.PutAll or batch operations if available
-// Otherwise, use goroutines with rate limiting
-const maxConcurrentPuts = 10
-sem := make(chan struct{}, maxConcurrentPuts)
+**Rationale**: Batching requires:
+- Evaluation of NATS JetStream batch API capabilities
+- Error handling for partial failures
+- Trade-offs between latency and throughput
+- May not provide significant benefit for small worker counts
+- Current sequential approach is simple and reliable
 
-for workerID, parts := range assignments {
-    sem <- struct{}{}
-    go func(id string, p []types.Partition) {
-        defer func() { <-sem }()
-        c.publishAssignment(ctx, id, p, version)
-    }(workerID, parts)
-}
-```
+---
 
-**Estimated Time**: 4 hours
-**Owner**: TBD
+## Phase 2 Summary
+
+**Completed Items**: 3/6
+- ✅ 2.1: Optimize Map Allocations - Uses `clear()` to reuse map capacity
+- ✅ 2.2: Pre-allocate Slices - Pre-allocates slice capacity for worker discovery
+- ✅ 2.3: Cache Frequently Computed Strings - Pre-computes patterns at initialization
+
+**Deferred Items**: 3/6 (to Phase 3)
+- 🔄 2.4: Circuit Breaker - Requires architectural refactoring
+- 🔄 2.5: Retry with Backoff - Requires error handling improvements
+- 🔄 2.6: Batch KV Operations - Requires NATS API evaluation
+
+**Impact**: Phase 2 improvements reduce GC pressure and allocations in hot paths without requiring major architectural changes. Deferred items are moved to Phase 3 for more comprehensive refactoring.
 
 ---
 
 ## Phase 3: Architectural Improvements
 
-### 3.1 Separate Concerns (MEDIUM)
-**Issue**: Calculator handles too many responsibilities
-**Impact**: Hard to test, maintain, reason about
-**Priority**: P2
+### Overview
 
-**Proposed Structure**:
-```go
-// Split into focused components
-type Calculator struct {
-    monitor   *WorkerMonitor        // Worker health detection
-    state     *StateMachine         // State management
-    publisher *AssignmentPublisher  // KV operations
-    detector  *EmergencyDetector    // Emergency detection
+**Current State Analysis:**
+- **Calculator.go**: 1,125 lines, 33KB, 33 methods
+- **8 constructor parameters** (extremely high, error-prone)
+- **24 struct fields** across multiple concerns
+- **God Object anti-pattern** - handles everything
 
-    rebalanceCh chan RebalanceRequest
-    metrics     *CalculatorMetrics
-}
+**Problems:**
+1. ❌ **Single Responsibility Violation** - Calculator does state management, worker monitoring, KV publishing, subscription management
+2. ❌ **Constructor Complexity** - 8 required parameters, impossible to remember order
+3. ❌ **Single File Problem** - Hard to navigate, merge conflicts, no clear boundaries
+4. ❌ **Testing Difficulty** - Must mock entire Calculator, can't test components in isolation
 
-// Each component has clear responsibility
-type WorkerMonitor struct {
-    heartbeatKV jetstream.KeyValue
-    detector    *EmergencyDetector
-}
-
-type AssignmentPublisher struct {
-    assignmentKV jetstream.KeyValue
-    mu           sync.Mutex
-}
-```
-
-**Benefits**:
-- Easier testing (mock individual components)
-- Better code organization
-- Reduced complexity per component
-- Clearer interfaces
-
-**Estimated Time**: 16 hours (2 days)
-**Owner**: TBD
+**Phase 3 Strategy:**
+- **Step 1**: Config Object Pattern (2 hours) - Quick win, zero risk
+- **Step 2**: Component Extraction (8 hours) - Split into focused components
+- **Step 3**: File Organization (included in Step 2)
 
 ---
 
-### 3.2 Implement Formal State Machine (MEDIUM)
-**Issue**: Implicit state transitions, no validation
-**Impact**: Hard to reason about, potential invalid states
-**Priority**: P2
+### 3.1 Refactor Constructor with Config Object ✅ COMPLETE
+**Issue**: 8 required constructor parameters, impossible to remember order
+**Impact**: Error-prone initialization, hard to extend
+**Priority**: P0 - Quick win with immediate benefits
+**Estimated Time**: 2 hours
+**Status**: ✅ **COMPLETE** (October 30, 2025)
 
-**Solution**:
+**Implementation Summary:**
+- Created `internal/assignment/config.go` with `Config` struct
+- Implemented `Validate()` and `SetDefaults()` methods
+- Created `NewCalculatorWithConfig(cfg)` constructor
+- Added comprehensive tests in `config_test.go` (14 test cases, all passing)
+- Old `NewCalculator()` remains for backward compatibility
+
+**Current Problem:**
 ```go
-type StateMachine struct {
-    current     types.CalculatorState
-    mu          sync.RWMutex
-    transitions map[types.CalculatorState][]types.CalculatorState
-    onChange    func(from, to types.CalculatorState)
+// Error-prone: What's the 6th parameter? 7th? 8th?
+calc := assignment.NewCalculator(
+    assignKV,          // 1
+    heartbeatKV,       // 2
+    "assignment",      // 3 - what is this?
+    source,            // 4
+    strategy,          // 5
+    "heartbeat",       // 6 - and this?
+    3*time.Second,     // 7 - TTL or grace period?
+    5*time.Second,     // 8 - which one?
+)
+```
+
+**Solution: Config Struct Pattern**
+
+Create `internal/assignment/config.go`:
+```go
+// Config holds calculator configuration.
+//
+// Use NewCalculator(cfg) to create a calculator with validated configuration
+// and sensible defaults for optional fields.
+type Config struct {
+    // Required dependencies
+    AssignmentKV jetstream.KeyValue
+    HeartbeatKV  jetstream.KeyValue
+    Source       types.PartitionSource
+    Strategy     types.AssignmentStrategy
+
+    // Required configuration
+    AssignmentPrefix string        // e.g., "assignment"
+    HeartbeatPrefix  string        // e.g., "heartbeat"
+    HeartbeatTTL     time.Duration // e.g., 3*time.Second
+
+    // Optional configuration (with defaults)
+    EmergencyGracePeriod time.Duration // default: 5s
+    Cooldown            time.Duration // default: 10s
+    MinThreshold        float64       // default: 0.2
+    RestartRatio        float64       // default: 0.5
+    ColdStartWindow     time.Duration // default: 30s
+    PlannedScaleWindow  time.Duration // default: 10s
+
+    // Optional dependencies
+    Metrics types.MetricsCollector
+    Logger  types.Logger
 }
 
-func (sm *StateMachine) Transition(to types.CalculatorState) error {
-    sm.mu.Lock()
-    defer sm.mu.Unlock()
-
-    if !sm.isValidTransition(sm.current, to) {
-        return ErrInvalidTransition
+// Validate checks configuration validity.
+func (c *Config) Validate() error {
+    if c.AssignmentKV == nil {
+        return errors.New("AssignmentKV is required")
     }
-
-    from := sm.current
-    sm.current = to
-
-    if sm.onChange != nil {
-        go sm.onChange(from, to)
+    if c.HeartbeatKV == nil {
+        return errors.New("HeartbeatKV is required")
     }
-
+    if c.Source == nil {
+        return errors.New("Source is required")
+    }
+    if c.Strategy == nil {
+        return errors.New("Strategy is required")
+    }
+    if c.AssignmentPrefix == "" {
+        return errors.New("AssignmentPrefix is required")
+    }
+    if c.HeartbeatPrefix == "" {
+        return errors.New("HeartbeatPrefix is required")
+    }
+    if c.HeartbeatTTL == 0 {
+        return errors.New("HeartbeatTTL is required")
+    }
     return nil
+}
+
+// SetDefaults applies default values for optional fields.
+func (c *Config) SetDefaults() {
+    if c.EmergencyGracePeriod == 0 {
+        c.EmergencyGracePeriod = 5 * time.Second
+    }
+    if c.Cooldown == 0 {
+        c.Cooldown = 10 * time.Second
+    }
+    if c.MinThreshold == 0 {
+        c.MinThreshold = 0.2
+    }
+    if c.RestartRatio == 0 {
+        c.RestartRatio = 0.5
+    }
+    if c.ColdStartWindow == 0 {
+        c.ColdStartWindow = 30 * time.Second
+    }
+    if c.PlannedScaleWindow == 0 {
+        c.PlannedScaleWindow = 10 * time.Second
+    }
+    if c.Metrics == nil {
+        c.Metrics = metrics.NewNop()
+    }
+    if c.Logger == nil {
+        c.Logger = logging.NewNop()
+    }
+}
+
+// NewCalculator creates a calculator with validated configuration.
+func NewCalculator(cfg *Config) (*Calculator, error) {
+    if err := cfg.Validate(); err != nil {
+        return nil, fmt.Errorf("invalid config: %w", err)
+    }
+    cfg.SetDefaults()
+
+    c := &Calculator{
+        assignmentKV:        cfg.AssignmentKV,
+        heartbeatKV:         cfg.HeartbeatKV,
+        prefix:              cfg.AssignmentPrefix,
+        source:              cfg.Source,
+        strategy:            cfg.Strategy,
+        hbPrefix:            cfg.HeartbeatPrefix,
+        hbTTL:               cfg.HeartbeatTTL,
+        cooldown:            cfg.Cooldown,
+        minThreshold:        cfg.MinThreshold,
+        restartRatio:        cfg.RestartRatio,
+        coldStartWindow:     cfg.ColdStartWindow,
+        plannedScaleWin:     cfg.PlannedScaleWindow,
+        metrics:             cfg.Metrics,
+        logger:              cfg.Logger,
+        hbWatchPattern:      fmt.Sprintf("%s.*", cfg.HeartbeatPrefix),
+        assignmentKeyPrefix: fmt.Sprintf("%s.", cfg.AssignmentPrefix),
+        currentWorkers:      make(map[string]bool),
+        currentAssignments:  make(map[string][]types.Partition),
+        lastWorkers:         make(map[string]bool),
+        subscribers:         xsync.NewMap[uint64, *stateSubscriber](),
+        stopCh:              make(chan struct{}),
+        doneCh:              make(chan struct{}),
+    }
+
+    c.calcState.Store(int32(types.CalcStateIdle))
+    c.emergencyDetector = NewEmergencyDetector(cfg.EmergencyGracePeriod)
+
+    return c, nil
 }
 ```
 
+**Usage:**
+```go
+// Clear, self-documenting, extensible
+calc, err := assignment.NewCalculator(&assignment.Config{
+    AssignmentKV:     assignKV,
+    HeartbeatKV:      heartbeatKV,
+    Source:           src,
+    Strategy:         strat,
+    AssignmentPrefix: "assignment",
+    HeartbeatPrefix:  "heartbeat",
+    HeartbeatTTL:     3 * time.Second,
+    // Optional fields use sensible defaults
+    Logger:           logger,
+})
+if err != nil {
+    log.Fatal(err)
+}
+```
+
+**Benefits:**
+- ✅ **Clear parameter names** - No order confusion
+- ✅ **Easy to extend** - Add new config without breaking API
+- ✅ **Self-documenting** - Struct fields have clear names
+- ✅ **Validation** - Catch configuration errors early
+- ✅ **Defaults** - Sensible defaults for optional fields
+
+**Migration Strategy:**
+1. Add `Config` struct and new `NewCalculator(cfg)`
+2. Keep old constructor as deprecated wrapper:
+   ```go
+   // Deprecated: Use NewCalculator(cfg) instead.
+   func NewCalculatorLegacy(...) *Calculator {
+       cfg := &Config{ /* map params */ }
+       calc, _ := NewCalculator(cfg)
+       return calc
+   }
+   ```
+3. Update tests gradually
+4. Remove deprecated constructor in next major version
+
+---
+
+### 3.2 Extract Components and Reorganize Files (MEDIUM) 📁
+**Issue**: 1,125-line God Object handling everything
+**Impact**: Hard to test, maintain, navigate, merge conflicts
+**Priority**: P1
 **Estimated Time**: 8 hours (1 day)
-**Owner**: TBD
+
+**Proposed File Structure:**
+```
+internal/assignment/
+├── calculator.go          # 300 lines - Main orchestrator (REDUCED)
+├── config.go             # 100 lines - Configuration (NEW)
+├── worker_monitor.go     # 250 lines - Worker health monitoring (NEW)
+├── state_machine.go      # 200 lines - State transitions (NEW)
+├── assignment_publisher.go # 150 lines - KV publishing (NEW)
+├── state_subscriber.go   # 100 lines - Already exists ✓
+├── emergency.go          # 100 lines - Already exists ✓
+├── doc.go                # Already exists ✓
+└── *_test.go             # Test files (one per component)
+```
+
+**Size Comparison:**
+
+| File | Before | After | Reduction |
+|------|--------|-------|-----------|
+| `calculator.go` | 1,125 lines | ~300 lines | **73% smaller** |
+| Component files | N/A | ~700 lines | Split across 4 files |
+| **Total** | 1,125 lines | ~1,000 lines | Organized, navigable |
+
+---
+
+#### **Component 1: WorkerMonitor** (worker_monitor.go ~250 lines)
+
+**Responsibility:** Worker health detection and change notification
+
+```go
+// WorkerMonitor handles worker health detection via NATS KV heartbeats.
+//
+// It provides hybrid monitoring:
+//   - Watcher (primary): Fast detection <100ms via NATS KV Watch
+//   - Polling (fallback): Reliable detection ~1.5s via periodic KV scan
+type WorkerMonitor struct {
+    heartbeatKV    jetstream.KeyValue
+    hbPrefix       string
+    hbTTL          time.Duration
+    hbWatchPattern string // cached "hbPrefix.*"
+
+    emergency      *EmergencyDetector
+    watcher        jetstream.KeyWatcher
+    watcherMu      sync.Mutex
+
+    logger         types.Logger
+
+    stopCh         chan struct{}
+    doneCh         chan struct{}
+}
+
+// NewWorkerMonitor creates a new worker monitor.
+func NewWorkerMonitor(
+    heartbeatKV jetstream.KeyValue,
+    hbPrefix string,
+    hbTTL time.Duration,
+    emergency *EmergencyDetector,
+    logger types.Logger,
+) *WorkerMonitor
+
+// Start begins monitoring workers.
+func (m *WorkerMonitor) Start(ctx context.Context) error
+
+// Stop stops monitoring and waits for cleanup.
+func (m *WorkerMonitor) Stop() error
+
+// GetActiveWorkers returns current active workers.
+func (m *WorkerMonitor) GetActiveWorkers(ctx context.Context) ([]string, error)
+
+// Changes returns a channel that receives worker change events.
+func (m *WorkerMonitor) Changes() <-chan []string
+
+// Private methods (moved from Calculator):
+func (m *WorkerMonitor) monitorWorkers(ctx context.Context)
+func (m *WorkerMonitor) startWatcher(ctx context.Context) error
+func (m *WorkerMonitor) stopWatcher()
+func (m *WorkerMonitor) processWatcherEvents(ctx context.Context)
+func (m *WorkerMonitor) pollForChanges(ctx context.Context) error
+```
+
+**Extracted Methods (5 from Calculator):**
+- `monitorWorkers` → WorkerMonitor
+- `startWatcher` → WorkerMonitor
+- `stopWatcher` → WorkerMonitor
+- `processWatcherEvents` → WorkerMonitor
+- `getActiveWorkers` → WorkerMonitor (now public)
+
+---
+
+#### **Component 2: StateMachine** (state_machine.go ~200 lines)
+
+**Responsibility:** Calculator state transitions with validation
+
+```go
+// StateMachine manages calculator state transitions.
+//
+// Implements a validated state machine with these states:
+//   - Idle: Ready for rebalancing
+//   - Scaling: Waiting for stabilization window
+//   - Rebalancing: Computing/publishing assignments
+//   - Emergency: Immediate rebalancing (no window)
+//
+// Valid transitions are enforced to prevent invalid states.
+type StateMachine struct {
+    current      atomic.Int32 // types.CalculatorState
+    transitions  map[types.CalculatorState][]types.CalculatorState
+    mu           sync.RWMutex
+
+    scalingStart  time.Time
+    scalingReason string
+
+    logger        types.Logger
+    metrics       types.MetricsCollector
+
+    // Fan-out to subscribers
+    subscribers      *xsync.Map[uint64, *stateSubscriber]
+    nextSubscriberID atomic.Uint64
+}
+
+// NewStateMachine creates a new state machine.
+func NewStateMachine(logger types.Logger, metrics types.MetricsCollector) *StateMachine
+
+// GetState returns current state.
+func (sm *StateMachine) GetState() types.CalculatorState
+
+// GetScalingReason returns the scaling reason.
+func (sm *StateMachine) GetScalingReason() string
+
+// EnterScaling transitions to scaling state.
+func (sm *StateMachine) EnterScaling(reason string, window time.Duration) error
+
+// EnterRebalancing transitions to rebalancing state.
+func (sm *StateMachine) EnterRebalancing() error
+
+// EnterEmergency transitions to emergency state.
+func (sm *StateMachine) EnterEmergency() error
+
+// ReturnToIdle transitions back to idle state.
+func (sm *StateMachine) ReturnToIdle() error
+
+// Subscribe returns a channel for state change notifications.
+func (sm *StateMachine) Subscribe() (<-chan types.CalculatorState, func())
+
+// Private methods (moved from Calculator):
+func (sm *StateMachine) isValidTransition(from, to types.CalculatorState) bool
+func (sm *StateMachine) emitStateChange(state types.CalculatorState)
+func (sm *StateMachine) removeSubscriber(id uint64)
+```
+
+**Extracted Methods (4 from Calculator):**
+- `enterScalingState` → `EnterScaling`
+- `enterRebalancingState` → `EnterRebalancing`
+- `enterEmergencyState` → `EnterEmergency`
+- `returnToIdleState` → `ReturnToIdle`
+- `emitStateChange` → StateMachine (internal)
+- `SubscribeToStateChanges` → `Subscribe`
+
+---
+
+#### **Component 3: AssignmentPublisher** (assignment_publisher.go ~150 lines)
+
+**Responsibility:** Publishing assignments to NATS KV
+
+```go
+// AssignmentPublisher handles publishing partition assignments to NATS KV.
+//
+// Manages version monotonicity across leader changes by discovering
+// the highest existing version on startup.
+type AssignmentPublisher struct {
+    assignmentKV jetstream.KeyValue
+    prefix       string
+    keyPrefix    string // cached "prefix."
+
+    mu              sync.Mutex
+    currentVersion  int64
+
+    logger          types.Logger
+    metrics         types.MetricsCollector
+}
+
+// NewAssignmentPublisher creates a new assignment publisher.
+func NewAssignmentPublisher(
+    assignmentKV jetstream.KeyValue,
+    prefix string,
+    logger types.Logger,
+    metrics types.MetricsCollector,
+) *AssignmentPublisher
+
+// Publish publishes assignments to NATS KV.
+func (p *AssignmentPublisher) Publish(
+    ctx context.Context,
+    workers []string,
+    assignments map[string][]types.Partition,
+    lifecycle string,
+) error
+
+// DiscoverHighestVersion scans KV for highest version.
+func (p *AssignmentPublisher) DiscoverHighestVersion(ctx context.Context) error
+
+// CurrentVersion returns the current assignment version.
+func (p *AssignmentPublisher) CurrentVersion() int64
+
+// Private methods (moved from Calculator):
+func (p *AssignmentPublisher) publishAssignment(ctx context.Context, workerID string, parts []types.Partition, version int64, lifecycle string) error
+```
+
+**Extracted Methods (2 from Calculator):**
+- `discoverHighestVersion` → `DiscoverHighestVersion`
+- Publishing logic from `rebalance` → `Publish`
+
+---
+
+#### **Component 4: Calculator (Orchestrator)** (calculator.go ~300 lines)
+
+**Reduced Responsibility:** Orchestrate components, manage rebalancing logic
+
+```go
+// Calculator orchestrates assignment calculation using focused components.
+//
+// Components:
+//   - WorkerMonitor: Detects worker health changes
+//   - StateMachine: Manages state transitions
+//   - AssignmentPublisher: Publishes assignments to NATS KV
+//   - EmergencyDetector: Detects emergency rebalancing scenarios
+type Calculator struct {
+    // Core components
+    monitor   *WorkerMonitor
+    stateMach *StateMachine
+    publisher *AssignmentPublisher
+    emergency *EmergencyDetector
+
+    // Strategy
+    source    types.PartitionSource
+    strategy  types.AssignmentStrategy
+
+    // Configuration
+    cooldown        time.Duration
+    minThreshold    float64
+    restartRatio    float64
+    coldStartWindow time.Duration
+    plannedScaleWin time.Duration
+
+    // State
+    mu             sync.RWMutex
+    started        bool
+    lastWorkers    map[string]bool
+    lastRebalance  time.Time
+
+    // Lifecycle
+    ctx    context.Context
+    cancel context.CancelFunc
+    wg     sync.WaitGroup
+
+    logger  types.Logger
+    metrics types.MetricsCollector
+}
+
+// Public API (thin wrappers):
+func (c *Calculator) Start(ctx context.Context) error
+func (c *Calculator) Stop() error
+func (c *Calculator) GetState() types.CalculatorState
+func (c *Calculator) TriggerRebalance(ctx context.Context) error
+func (c *Calculator) SubscribeToStateChanges() (<-chan types.CalculatorState, func())
+func (c *Calculator) CurrentVersion() int64
+
+// Private orchestration:
+func (c *Calculator) run(ctx context.Context) // main event loop
+func (c *Calculator) handleWorkerChange(ctx context.Context, workers []string)
+func (c *Calculator) detectRebalanceType(lastWorkers, currentWorkers map[string]bool) (string, time.Duration)
+func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error
+func (c *Calculator) initialAssignment(ctx context.Context) error
+```
+
+**Remaining Methods (~8):**
+- `Start` - orchestrates component startup
+- `Stop` - orchestrates component shutdown
+- `run` - main event loop (new, cleaner)
+- `handleWorkerChange` - orchestrates state transitions
+- `detectRebalanceType` - rebalancing logic
+- `rebalance` - assignment calculation
+- `initialAssignment` - startup logic
+- Thin wrapper methods for delegation
+
+---
+
+**Benefits of Component Extraction:**
+
+| Aspect | Before | After |
+|--------|--------|-------|
+| **File size** | 1,125 lines | ~300 lines (orchestrator) |
+| **Testability** | Must mock entire Calculator | Test each component independently |
+| **Navigation** | Scroll through 1 huge file | Jump to specific component file |
+| **Merge conflicts** | High probability | Lower (separate files) |
+| **Complexity** | 33 methods on one type | ~8 methods per component |
+| **Responsibilities** | Everything | Single responsibility per component |
+| **Unit testing** | Integration tests only | True unit tests per component |
 
 ---
 
@@ -741,31 +1170,182 @@ func (sm *StateMachine) Transition(to types.CalculatorState) error {
 **Impact**: Hard to debug production issues
 **Priority**: P2
 
-**Metrics to Add**:
+**Design Approach**: Interface Composition + Prometheus Implementation
+
+**Step 1: Extend MetricsCollector Interface**
 ```go
-type CalculatorMetrics struct {
-    // Performance
-    rebalanceDuration      prometheus.Histogram
-    kvOperationLatency     prometheus.Histogram
+// types/observability.go
 
-    // Reliability
-    rebalanceAttempts      prometheus.Counter
-    rebalanceFailures      prometheus.Counter
-    droppedStateChanges    prometheus.Counter
-    circuitBreakerOpens    prometheus.Counter
+// MetricsCollector defines methods for recording operational metrics.
+type MetricsCollector interface {
+    // Existing methods (backward compatible)
+    RecordStateTransition(from, to State, duration float64)
+    RecordAssignmentChange(added, removed int, version int64)
+    RecordHeartbeat(workerID string, success bool)
+    RecordLeadershipChange(newLeader string)
 
-    // Health
-    activeWorkerCount      prometheus.Gauge
-    partitionCount         prometheus.Gauge
-    assignmentVersion      prometheus.Gauge
+    // NEW: Compose calculator-specific metrics
+    CalculatorMetrics
+}
 
-    // State tracking
-    stateTransitions       prometheus.CounterVec
-    stateDuration          prometheus.HistogramVec
+// CalculatorMetrics defines calculator-specific metrics.
+//
+// These metrics provide detailed observability into assignment calculation,
+// rebalancing, and worker monitoring operations.
+type CalculatorMetrics interface {
+    // RecordRebalanceDuration records the time taken for a rebalance operation.
+    RecordRebalanceDuration(duration float64, reason string)
+
+    // RecordRebalanceAttempt records a rebalance attempt (success or failure).
+    RecordRebalanceAttempt(reason string, success bool)
+
+    // RecordWorkerChange records worker topology changes.
+    RecordWorkerChange(added, removed int)
+
+    // RecordActiveWorkers sets the current active worker count.
+    RecordActiveWorkers(count int)
+
+    // RecordPartitionCount sets the current partition count.
+    RecordPartitionCount(count int)
+
+    // RecordKVOperationDuration records KV operation latency.
+    RecordKVOperationDuration(operation string, duration float64)
+
+    // RecordStateChangeDropped records when state change notifications are dropped.
+    RecordStateChangeDropped()
+
+    // RecordEmergencyRebalance records an emergency rebalance trigger.
+    RecordEmergencyRebalance(disappearedWorkers int)
 }
 ```
 
-**Estimated Time**: 6 hours
+**Step 2: Update NopMetrics**
+```go
+// internal/metrics/nop.go
+
+func (n *NopMetrics) RecordRebalanceDuration(_ float64, _ string) {}
+func (n *NopMetrics) RecordRebalanceAttempt(_ string, _ bool) {}
+func (n *NopMetrics) RecordWorkerChange(_, _ int) {}
+func (n *NopMetrics) RecordActiveWorkers(_ int) {}
+func (n *NopMetrics) RecordPartitionCount(_ int) {}
+func (n *NopMetrics) RecordKVOperationDuration(_ string, _ float64) {}
+func (n *NopMetrics) RecordStateChangeDropped() {}
+func (n *NopMetrics) RecordEmergencyRebalance(_ int) {}
+```
+
+**Step 3: Create Prometheus Implementation**
+```go
+// metrics/prometheus.go (NEW public package)
+
+package metrics
+
+import (
+    "github.com/prometheus/client_golang/prometheus"
+    "github.com/arloliu/parti/types"
+)
+
+// PrometheusMetrics provides Prometheus-based metrics collection.
+type PrometheusMetrics struct {
+    // Basic metrics (types.MetricsCollector)
+    stateTransitions   *prometheus.CounterVec
+    assignmentChanges  *prometheus.CounterVec
+    heartbeats         *prometheus.CounterVec
+    leadershipChanges  prometheus.Counter
+
+    // Calculator metrics (types.CalculatorMetrics)
+    rebalanceDuration  *prometheus.HistogramVec
+    rebalanceAttempts  *prometheus.CounterVec
+    workerChanges      *prometheus.CounterVec
+    activeWorkers      prometheus.Gauge
+    partitionCount     prometheus.Gauge
+    kvOpDuration       *prometheus.HistogramVec
+    stateDropped       prometheus.Counter
+    emergencyRebalance *prometheus.CounterVec
+}
+
+// NewPrometheus creates Prometheus metrics with default configuration.
+func NewPrometheus(namespace, subsystem string) *PrometheusMetrics {
+    // ... implementation
+}
+
+// NewPrometheusWithRegistry creates Prometheus metrics with custom registry.
+func NewPrometheusWithRegistry(reg prometheus.Registerer, namespace, subsystem string) *PrometheusMetrics {
+    // ... implementation
+}
+
+// Implements both types.MetricsCollector and types.CalculatorMetrics
+var _ types.MetricsCollector = (*PrometheusMetrics)(nil)
+```
+
+**Step 4: Instrument Calculator**
+```go
+// In calculator.go rebalance() method:
+func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
+    start := time.Now()
+    defer func() {
+        c.metrics.RecordRebalanceDuration(time.Since(start).Seconds(), lifecycle)
+    }()
+
+    // ... existing rebalance logic ...
+
+    c.metrics.RecordRebalanceAttempt(lifecycle, err == nil)
+    c.metrics.RecordActiveWorkers(len(workers))
+    c.metrics.RecordPartitionCount(len(partitions))
+
+    return err
+}
+
+// In checkForChanges():
+added := len(currentWorkers) - len(lastWorkers)
+removed := len(lastWorkers) - len(currentWorkers)
+c.metrics.RecordWorkerChange(max(0, added), max(0, removed))
+
+// In state subscriber trySend():
+func (s *stateSubscriber) trySend(state types.CalculatorState, metrics types.MetricsCollector) {
+    select {
+    case s.ch <- state:
+    default:
+        metrics.RecordStateChangeDropped()
+    }
+}
+```
+
+**Benefits**:
+- ✅ **Interface composition** - Follows Go idioms, clean separation of concerns
+- ✅ **Backward compatible** - Existing implementations add new methods incrementally
+- ✅ **Type-safe** - Calculator uses `c.metrics.RecordRebalanceDuration()` directly
+- ✅ **Flexible** - Users can implement minimal (Nop) or comprehensive (Prometheus) metrics
+- ✅ **Optional dependency** - Prometheus only imported by users who choose it
+- ✅ **Clear abstraction** - Calculator-specific metrics are explicitly defined
+
+**Usage Examples**:
+```go
+// Simple case - use Prometheus
+import "github.com/arloliu/parti/metrics"
+
+promMetrics := metrics.NewPrometheus("parti", "worker")
+mgr := parti.NewManager(&cfg, conn, src, strategy,
+    parti.WithMetrics(promMetrics))
+
+// Advanced case - custom metrics
+type MyMetrics struct{}
+func (m *MyMetrics) RecordRebalanceDuration(...) { /* custom */ }
+// ... implement all interface methods
+
+customMetrics := &MyMetrics{}
+mgr := parti.NewManager(&cfg, conn, src, strategy,
+    parti.WithMetrics(customMetrics))
+```
+
+**Implementation Plan**:
+1. Extend `types.MetricsCollector` interface with `CalculatorMetrics` composition
+2. Update `internal/metrics/nop.go` with no-op implementations
+3. Create `metrics/prometheus.go` with full Prometheus implementation
+4. Instrument Calculator with metrics calls (rebalance duration, worker changes, etc.)
+5. Add metrics documentation and examples
+6. Write unit tests for Prometheus implementation
+
+**Estimated Time**: 8 hours (1 day)
 **Owner**: TBD
 
 ---

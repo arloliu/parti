@@ -832,26 +832,26 @@ func (m *Manager) startCalculator(assignmentKV, heartbeatKV jetstream.KeyValue) 
 		return nil // Already started
 	}
 
-	calc := assignment.NewCalculator(
-		assignmentKV, // Assignment KV bucket (no TTL)
-		heartbeatKV,  // Heartbeat KV bucket (with TTL)
-		"assignment", // Prefix for assignment keys
-		m.source,
-		m.strategy,
-		"heartbeat",                // Prefix for heartbeat keys
-		m.cfg.HeartbeatTTL,         // Heartbeat TTL for worker liveness detection
-		m.cfg.EmergencyGracePeriod, // Emergency grace period for hysteresis
-	)
-
-	// Configure calculator with settings from config
-	calc.SetCooldown(m.cfg.Assignment.MinRebalanceInterval)
-	calc.SetMinThreshold(m.cfg.Assignment.MinRebalanceThreshold)
-	calc.SetRestartDetectionRatio(m.cfg.RestartDetectionRatio)
-	calc.SetStabilizationWindows(m.cfg.ColdStartWindow, m.cfg.PlannedScaleWindow)
-
-	// Set optional dependencies
-	calc.SetMetrics(m.metrics)
-	calc.SetLogger(m.logger)
+	calc, err := assignment.NewCalculator(&assignment.Config{
+		AssignmentKV:         assignmentKV,
+		HeartbeatKV:          heartbeatKV,
+		Source:               m.source,
+		Strategy:             m.strategy,
+		AssignmentPrefix:     "assignment",
+		HeartbeatPrefix:      "heartbeat",
+		HeartbeatTTL:         m.cfg.HeartbeatTTL,
+		EmergencyGracePeriod: m.cfg.EmergencyGracePeriod,
+		Cooldown:             m.cfg.Assignment.MinRebalanceInterval,
+		MinThreshold:         m.cfg.Assignment.MinRebalanceThreshold,
+		RestartRatio:         m.cfg.RestartDetectionRatio,
+		ColdStartWindow:      m.cfg.ColdStartWindow,
+		PlannedScaleWindow:   m.cfg.PlannedScaleWindow,
+		Metrics:              m.metrics,
+		Logger:               m.logger,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create calculator: %w", err)
+	}
 
 	m.calculator = calc
 
