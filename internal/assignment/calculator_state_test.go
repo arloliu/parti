@@ -21,13 +21,14 @@ func TestCalculator_detectRebalanceType_ColdStart(t *testing.T) {
 	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second, 5*time.Second)
 
 	// Cold start: 0 → 3 workers
+	lastWorkers := map[string]bool{} // Empty - cold start
 	currentWorkers := map[string]bool{
 		"worker-0": true,
 		"worker-1": true,
 		"worker-2": true,
 	}
 
-	reason, window := calc.detectRebalanceType(currentWorkers)
+	reason, window := calc.detectRebalanceType(lastWorkers, currentWorkers)
 
 	require.Equal(t, "cold_start", reason)
 	require.Equal(t, calc.coldStartWindow, window)
@@ -45,7 +46,7 @@ func TestCalculator_detectRebalanceType_PlannedScale(t *testing.T) {
 	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 10*time.Second, 5*time.Second)
 
 	// Set up previous workers
-	calc.lastWorkers = map[string]bool{
+	lastWorkers := map[string]bool{
 		"worker-0": true,
 		"worker-1": true,
 		"worker-2": true,
@@ -59,7 +60,7 @@ func TestCalculator_detectRebalanceType_PlannedScale(t *testing.T) {
 		"worker-3": true,
 	}
 
-	reason, window := calc.detectRebalanceType(currentWorkers)
+	reason, window := calc.detectRebalanceType(lastWorkers, currentWorkers)
 
 	require.Equal(t, "planned_scale", reason)
 	require.Equal(t, calc.plannedScaleWin, window)
@@ -78,7 +79,7 @@ func TestCalculator_detectRebalanceType_Emergency(t *testing.T) {
 	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 1*time.Second, 1*time.Second)
 
 	// Set up previous workers
-	calc.lastWorkers = map[string]bool{
+	lastWorkers := map[string]bool{
 		"worker-0": true,
 		"worker-1": true,
 		"worker-2": true,
@@ -91,7 +92,7 @@ func TestCalculator_detectRebalanceType_Emergency(t *testing.T) {
 	}
 
 	// First check - should return empty (grace period)
-	reason, window := calc.detectRebalanceType(currentWorkers)
+	reason, window := calc.detectRebalanceType(lastWorkers, currentWorkers)
 	require.Equal(t, "", reason, "Should be in grace period initially")
 	require.Equal(t, time.Duration(0), window)
 
@@ -99,7 +100,7 @@ func TestCalculator_detectRebalanceType_Emergency(t *testing.T) {
 	time.Sleep(1100 * time.Millisecond)
 
 	// Second check - should now be emergency
-	reason, window = calc.detectRebalanceType(currentWorkers)
+	reason, window = calc.detectRebalanceType(lastWorkers, currentWorkers)
 	require.Equal(t, "emergency", reason)
 	require.Equal(t, time.Duration(0), window)
 }
@@ -116,7 +117,7 @@ func TestCalculator_detectRebalanceType_Restart(t *testing.T) {
 	calc.SetRestartDetectionRatio(0.5) // 50% threshold (not used anymore - removed restart detection)
 
 	// Set up previous workers (10 workers)
-	calc.lastWorkers = map[string]bool{
+	lastWorkers := map[string]bool{
 		"worker-0": true,
 		"worker-1": true,
 		"worker-2": true,
@@ -144,7 +145,7 @@ func TestCalculator_detectRebalanceType_Restart(t *testing.T) {
 		"worker-15": true, // New
 	}
 
-	reason, window := calc.detectRebalanceType(currentWorkers)
+	reason, window := calc.detectRebalanceType(lastWorkers, currentWorkers)
 
 	require.Equal(t, "planned_scale", reason)
 	require.Equal(t, calc.plannedScaleWin, window)
@@ -163,7 +164,7 @@ func TestCalculator_detectRebalanceType_MultipleWorkersCrashed(t *testing.T) {
 	calc := NewCalculator(assignmentKV, heartbeatKV, "test-assignment", source, strategy, "test-hb", 1*time.Second, 1*time.Second)
 
 	// Set up previous workers
-	calc.lastWorkers = map[string]bool{
+	lastWorkers := map[string]bool{
 		"worker-0": true,
 		"worker-1": true,
 		"worker-2": true,
@@ -178,7 +179,7 @@ func TestCalculator_detectRebalanceType_MultipleWorkersCrashed(t *testing.T) {
 	}
 
 	// First check - should return empty (grace period)
-	reason, window := calc.detectRebalanceType(currentWorkers)
+	reason, window := calc.detectRebalanceType(lastWorkers, currentWorkers)
 	require.Equal(t, "", reason, "Should be in grace period initially")
 	require.Equal(t, time.Duration(0), window)
 
@@ -186,7 +187,7 @@ func TestCalculator_detectRebalanceType_MultipleWorkersCrashed(t *testing.T) {
 	time.Sleep(1100 * time.Millisecond)
 
 	// Second check - should now be emergency
-	reason, window = calc.detectRebalanceType(currentWorkers)
+	reason, window = calc.detectRebalanceType(lastWorkers, currentWorkers)
 	require.Equal(t, "emergency", reason)
 	require.Equal(t, time.Duration(0), window)
 }

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,41 +16,6 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/puzpuzpuz/xsync/v4"
 )
-
-// stateSubscriber is a helper for managing state change subscriptions.
-type stateSubscriber struct {
-	ch     chan types.CalculatorState
-	mu     sync.Mutex
-	closed bool
-}
-
-// trySend sends a state update to the subscriber's channel without blocking.
-func (s *stateSubscriber) trySend(state types.CalculatorState, metricsCollector types.MetricsCollector) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return
-	}
-
-	select {
-	case s.ch <- state:
-	default:
-		// Subscriber is slow or not ready; they will get the next update.
-		// TODO: Add metricsCollector.RecordSlowSubscriber() when available
-		_ = metricsCollector // Avoid unused parameter warning
-	}
-}
-
-// close safely closes the subscriber's channel.
-func (s *stateSubscriber) close() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return
-	}
-	s.closed = true
-	close(s.ch)
-}
 
 // Calculator manages partition assignment calculation and distribution.
 //
@@ -101,7 +65,7 @@ type Calculator struct {
 	emergencyDetector *EmergencyDetector // Hysteresis-based emergency detection
 
 	// State management fan-out
-	subscribers      *xsync.Map[string, *stateSubscriber]
+	subscribers      *xsync.Map[uint64, *stateSubscriber]
 	nextSubscriberID atomic.Uint64
 
 	// Hybrid monitoring: watcher (primary) + polling (fallback)
@@ -111,6 +75,7 @@ type Calculator struct {
 	// Lifecycle
 	stopCh chan struct{}
 	doneCh chan struct{}
+	wg     sync.WaitGroup // Tracks all goroutines for clean shutdown
 }
 
 // NewCalculator creates a new assignment calculator.
@@ -158,7 +123,7 @@ func NewCalculator(
 		currentWorkers:     make(map[string]bool),
 		currentAssignments: make(map[string][]types.Partition),
 		lastWorkers:        make(map[string]bool),
-		subscribers:        xsync.NewMap[string, *stateSubscriber](),
+		subscribers:        xsync.NewMap[uint64, *stateSubscriber](),
 		stopCh:             make(chan struct{}),
 		doneCh:             make(chan struct{}),
 	}
@@ -250,25 +215,24 @@ func (c *Calculator) SetLogger(l types.Logger) {
 // SubscribeToStateChanges returns a channel for state updates and a function to unsubscribe.
 func (c *Calculator) SubscribeToStateChanges() (<-chan types.CalculatorState, func()) {
 	id := c.nextSubscriberID.Add(1)
-	key := strconv.FormatUint(id, 10)
 
 	// Buffer size of 4 allows Idle -> Scaling -> Rebalancing -> Idle transitions
 	// to be queued without dropping states when subscriber is slow to process
 	sub := &stateSubscriber{ch: make(chan types.CalculatorState, 4)}
-	c.subscribers.Store(key, sub)
+	c.subscribers.Store(id, sub)
 
 	// Immediately send the current state.
 	sub.trySend(c.GetState(), c.metrics)
 
 	unsubscribe := func() {
-		c.removeSubscriber(key)
+		c.removeSubscriber(id)
 	}
 
 	return sub.ch, unsubscribe
 }
 
-func (c *Calculator) removeSubscriber(key string) {
-	if sub, ok := c.subscribers.LoadAndDelete(key); ok {
+func (c *Calculator) removeSubscriber(id uint64) {
+	if sub, ok := c.subscribers.LoadAndDelete(id); ok {
 		sub.close()
 	}
 }
@@ -283,7 +247,7 @@ func (c *Calculator) emitStateChange(state types.CalculatorState) {
 	c.calcState.Store(int32(state)) //nolint:gosec // G115: state is bounded enum, safe conversion
 	c.logger.Info("state transition", "from", oldState, "to", state)
 
-	c.subscribers.Range(func(key string, sub *stateSubscriber) bool {
+	c.subscribers.Range(func(_ uint64, sub *stateSubscriber) bool {
 		sub.trySend(state, c.metrics)
 		return true
 	})
@@ -404,7 +368,10 @@ func (c *Calculator) Stop() error {
 	// This ensures both monitorWorkers and processWatcherEvents have exited
 	<-c.doneCh
 
-	// 3. Now safely cleanup watcher (no concurrent access possible)
+	// 3. Wait for all other goroutines (scaling timers, etc.)
+	c.wg.Wait()
+
+	// 4. Now safely cleanup watcher (no concurrent access possible)
 	c.watcherMu.Lock()
 	if c.watcher != nil {
 		if err := c.watcher.Stop(); err != nil {
@@ -419,8 +386,8 @@ func (c *Calculator) Stop() error {
 	c.mu.Unlock()
 
 	// Clean up all subscribers.
-	c.subscribers.Range(func(key string, sub *stateSubscriber) bool {
-		c.subscribers.Delete(key)
+	c.subscribers.Range(func(id uint64, sub *stateSubscriber) bool {
+		c.subscribers.Delete(id)
 		sub.close()
 		return true
 	})
@@ -521,18 +488,19 @@ func (c *Calculator) initialAssignment(ctx context.Context) error {
 //   - Planned scale: Gradual worker additions → Use 10s stabilization window
 //
 // Parameters:
+//   - lastWorkers: Previous set of active workers
 //   - currentWorkers: Current set of active workers
 //
 // Returns:
 //   - reason: Rebalance type ("emergency", "cold_start", "planned_scale", or "" if in grace period)
 //   - window: Stabilization window duration (0 for emergency or during grace period)
-func (c *Calculator) detectRebalanceType(currentWorkers map[string]bool) (reason string, window time.Duration) {
-	prevCount := len(c.lastWorkers)
+func (c *Calculator) detectRebalanceType(lastWorkers, currentWorkers map[string]bool) (reason string, window time.Duration) {
+	prevCount := len(lastWorkers)
 	currCount := len(currentWorkers)
 
 	// Case 1: Worker(s) disappeared - Check for emergency with hysteresis
 	if currCount < prevCount {
-		emergency, disappearedWorkers := c.emergencyDetector.CheckEmergency(c.lastWorkers, currentWorkers)
+		emergency, disappearedWorkers := c.emergencyDetector.CheckEmergency(lastWorkers, currentWorkers)
 
 		if emergency {
 			c.logger.Warn("emergency: workers disappeared beyond grace period",
@@ -605,11 +573,15 @@ func (c *Calculator) enterScalingState(ctx context.Context, reason string, windo
 	// Notify Manager of state change
 	c.emitStateChange(types.CalcStateScaling)
 
-	// Start timer for scaling window
-	go func() {
+	// Start timer for scaling window with tracked goroutine
+	c.wg.Go(func() {
 		c.logger.Info("scaling timer goroutine started", "window", window)
+
+		timer := time.NewTimer(window)
+		defer timer.Stop()
+
 		select {
-		case <-time.After(window):
+		case <-timer.C:
 			c.logger.Info("scaling timer fired, entering rebalancing state")
 			c.enterRebalancingState(ctx)
 		case <-c.stopCh:
@@ -619,7 +591,7 @@ func (c *Calculator) enterScalingState(ctx context.Context, reason string, windo
 			c.logger.Info("scaling timer cancelled by context", "error", ctx.Err())
 			return
 		}
-	}()
+	})
 }
 
 // enterRebalancingState transitions the calculator into rebalancing state.
@@ -943,6 +915,11 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 	cooldownActive := time.Since(c.lastRebalance) < c.cooldown
 	currentState := types.CalculatorState(c.calcState.Load())
 	lastWorkerCount := len(c.lastWorkers)
+	// Make a copy of lastWorkers to avoid race in detectRebalanceType
+	lastWorkersCopy := make(map[string]bool, len(c.lastWorkers))
+	for w := range c.lastWorkers {
+		lastWorkersCopy[w] = true
+	}
 	c.mu.RUnlock()
 
 	c.logger.Debug("checkForChanges",
@@ -983,7 +960,7 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 	c.logger.Info("worker change detected", "workers", len(workers))
 
 	// TIER 2: Determine rebalance type and stabilization window
-	reason, window := c.detectRebalanceType(workers)
+	reason, window := c.detectRebalanceType(lastWorkersCopy, workers)
 
 	// Handle grace period for worker disappearance
 	if reason == "" {
