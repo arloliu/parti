@@ -136,7 +136,7 @@ package integration_test
 
 This allows:
 - Skip integration tests by default: `go test -short ./...`
-- Run integration tests explicitly: `go test -tags=integration ./test/integration/...`
+- Run integration tests explicitly: `go test ./test/integration/...`
 - Use in CI for separate pipelines
 
 ## Migration Checklist
@@ -233,7 +233,7 @@ $ make test-all
 $ go test ./test/integration/... -v
 # Should skip (no build tag)
 
-$ go test -tags=integration ./test/integration/... -v
+$ go test ./test/integration/... -v
 # Should run
 ```
 

@@ -148,7 +148,7 @@ go test -short ./...
 ```bash
 make test-integration
 # or
-go test -tags=integration ./test/integration/... -v
+go test ./test/integration/... -v
 ```
 
 **All tests**:
@@ -156,7 +156,7 @@ go test -tags=integration ./test/integration/... -v
 make test-all
 # or run separately:
 go test -short ./...
-go test -tags=integration ./test/integration/...
+go test ./test/integration/...
 ```
 
 **With race detector** (unit tests):
@@ -168,7 +168,7 @@ go test -race ./...
 
 **Specific integration test**:
 ```bash
-go test -tags=integration ./test/integration/... -run TestLeaderFailover -v
+go test ./test/integration/... -run TestLeaderFailover -v
 ```
 
 **With coverage**:
@@ -422,14 +422,14 @@ func BenchmarkConsistentHash_Assign(b *testing.B) {
 
 ```bash
 go test -v ./...
-go test -tags=integration ./test/integration/... -v
+go test ./test/integration/... -v
 ```
 
 ### Run Specific Test
 
 ```bash
 go test ./manager_test.go -run TestNewManager_NilSafety -v
-go test -tags=integration ./test/integration/... -run TestLeaderFailover -v
+go test ./test/integration/... -run TestLeaderFailover -v
 ```
 
 ### Disable Test Cache

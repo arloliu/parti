@@ -1,4 +1,3 @@
-// Package assignment provides partition assignment calculation.
 package assignment
 
 import (

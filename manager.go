@@ -861,7 +861,7 @@ func (m *Manager) startCalculator(assignmentKV, heartbeatKV jetstream.KeyValue) 
 
 	// Start calculator in background
 	if err := calc.Start(m.ctx); err != nil {
-		m.calculator = nil // Clear calculator on start failure
+		m.calculator = nil
 		return fmt.Errorf("failed to start calculator: %w", err)
 	}
 
@@ -884,8 +884,17 @@ func (m *Manager) startCalculator(assignmentKV, heartbeatKV jetstream.KeyValue) 
 func (m *Manager) monitorCalculatorState() {
 	m.logger.Info("starting calculator state monitor")
 
-	// Subscribe to calculator state changes
-	stateCh, unsubscribe := m.calculator.SubscribeToStateChanges()
+	// Subscribe to calculator state changes with mutex protection
+	m.mu.RLock()
+	calc := m.calculator
+	m.mu.RUnlock()
+
+	if calc == nil {
+		m.logger.Warn("calculator is nil, cannot monitor state")
+		return
+	}
+
+	stateCh, unsubscribe := calc.SubscribeToStateChanges()
 	defer unsubscribe()
 
 	for {
@@ -1022,6 +1031,7 @@ func (m *Manager) stopCalculator() {
 	}
 
 	m.calculator = nil
+
 	m.logger.Info("assignment calculator stopped", "worker_id", m.WorkerID())
 }
 

@@ -34,12 +34,12 @@ go test -short ./...
 
 ### Run Only Integration Tests
 ```bash
-go test -tags=integration ./test/integration/... -v
+go test ./test/integration/... -v
 ```
 
 ### Run Specific Integration Test
 ```bash
-go test -tags=integration ./test/integration/... -run TestManager_StartStop -v
+go test ./test/integration/... -run TestManager_StartStop -v
 ```
 
 ## Test Categories
@@ -57,7 +57,7 @@ go test -tags=integration ./test/integration/... -run TestManager_StartStop -v
 - Use embedded NATS server
 - Slower execution (1-10 seconds per test)
 - Tagged with `//go:build integration`
-- Run with: `go test -tags=integration ./test/integration/...`
+- Run with: `go test ./test/integration/...`
 
 ## Writing Integration Tests
 
@@ -135,7 +135,7 @@ require.NoError(t, err)
 
 # Integration tests (slower, run on PR)
 - name: Run integration tests
-  run: go test -tags=integration ./test/integration/... -v -timeout=5m
+  run: go test ./test/integration/... -v -timeout=5m
 ```
 
 ### Makefile Targets
@@ -148,12 +148,12 @@ test-unit:
 
 # Integration tests
 test-integration:
-	go test -tags=integration ./test/integration/... -v -timeout=5m
+	go test ./test/integration/... -v -timeout=5m
 
 # All tests
 test:
 	go test ./... -v
-	go test -tags=integration ./test/integration/... -v
+	go test ./test/integration/... -v
 ```
 
 ## Current Test Coverage
@@ -185,12 +185,12 @@ cfg.Logger = logging.NewTest(t)
 
 ### Run with Verbose Output
 ```bash
-go test -tags=integration ./test/integration/... -v -count=1
+go test ./test/integration/... -v -count=1
 ```
 
 ### Run Specific Test with Logging
 ```bash
-go test -tags=integration ./test/integration/... -run TestManager_StartStop -v -count=1 2>&1 | tee test.log
+go test ./test/integration/... -run TestManager_StartStop -v -count=1 2>&1 | tee test.log
 ```
 
 ## Performance Considerations

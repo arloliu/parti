@@ -517,7 +517,7 @@ func TestCalculatorStateChanges(t *testing.T) {
 	})
 }
 
-func TestCalculator_Stop_CleansUpAssignments(t *testing.T) {
+func TestCalculator_Stop_PreserveAssignments(t *testing.T) {
 	_, nc := partitest.StartEmbeddedNATS(t)
 	assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-stop-cleanup-assignment")
 	heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-stop-cleanup-heartbeat")
@@ -573,17 +573,17 @@ func TestCalculator_Stop_CleansUpAssignments(t *testing.T) {
 
 	t.Log("Verified: Assignments exist before Stop()")
 
-	// Stop calculator - should clean up assignments
+	// Stop calculator - assignments should remain for new leader
 	err = calc.Stop(ctx)
 	require.NoError(t, err)
 
-	// Verify assignments are deleted from KV
-	// Note: Keys() returns error when KV is empty, so we check each key individually
+	// Verify assignments are PRESERVED in KV (for version continuity across leader changes)
 	for _, workerID := range []string{"w1", "w2", "w3"} {
 		key := fmt.Sprintf("assignment.%s", workerID)
-		_, err := assignmentKV.Get(ctx, key)
-		require.Error(t, err, "expected assignment for %s to be deleted", workerID)
+		entry, err := assignmentKV.Get(ctx, key)
+		require.NoError(t, err, "expected assignment for %s to be preserved", workerID)
+		require.NotNil(t, entry, "expected assignment for %s to exist", workerID)
 	}
 
-	t.Log("Verified: Calculator.Stop() cleaned up all assignments from KV")
+	t.Log("Verified: Calculator.Stop() preserves assignments for new leader (version continuity)")
 }

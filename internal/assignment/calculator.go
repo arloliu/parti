@@ -40,7 +40,8 @@ type Calculator struct {
 	currentAssignments map[string][]types.Partition
 
 	// Worker tracking for change detection
-	lastWorkers map[string]bool // Previous worker set for comparison
+	lastWorkers        map[string]bool // Previous worker set for comparison
+	disappearedWorkers []string        // Workers that disappeared in emergency (cleared after rebalance)
 
 	// Hybrid monitoring: watcher (primary) + polling (fallback)
 	watcher   jetstream.KeyWatcher
@@ -200,19 +201,12 @@ func (c *Calculator) Stop(ctx context.Context) error {
 	// 1. Signal stop to all components
 	close(c.stopCh)
 
-	// 2. Clean up assignments from KV (best-effort)
-	// This provides a clean slate for the new leader and prevents confusion
-	if err := c.publisher.CleanupAllAssignments(ctx); err != nil {
-		c.Logger.Warn("assignment cleanup failed during stop, new leader will inherit state", "error", err)
-		// Don't fail Stop() if cleanup fails - version monotonicity prevents issues
-	}
-
-	// 3. Stop worker monitor (stops watcher and monitoring goroutines)
+	// 2. Stop worker monitor (stops watcher and monitoring goroutines)
 	if err := c.monitor.Stop(); err != nil {
 		c.Logger.Error("failed to stop worker monitor", "error", err)
 	}
 
-	// 4. Wait for state machine shutdown
+	// 3. Wait for state machine shutdown
 	c.stateMach.WaitForShutdown()
 
 	return nil
@@ -334,6 +328,11 @@ func (c *Calculator) detectRebalanceType(lastWorkers, currentWorkers map[string]
 
 			// Record emergency rebalance metric
 			c.Metrics.RecordEmergencyRebalance(len(disappearedWorkers))
+
+			// Store disappeared workers for emergency rebalancing
+			c.mu.Lock()
+			c.disappearedWorkers = disappearedWorkers
+			c.mu.Unlock()
 
 			return "emergency", 0 // No stabilization - immediate action
 		}
@@ -694,6 +693,57 @@ func (c *Calculator) getActiveWorkers(ctx context.Context) ([]string, error) {
 	return c.monitor.GetActiveWorkers(ctx)
 }
 
+// getActiveWorkersFiltered retrieves workers, excluding those confirmed disappeared in emergency.
+//
+// During emergency rebalancing, there's a timing gap where:
+//   - EmergencyDetector confirms worker disappeared (grace period expired)
+//   - Worker's heartbeat key still exists in KV (TTL not expired yet)
+//
+// This method acts as a circuit breaker to prevent assigning partitions to confirmed-dead workers.
+//
+// Parameters:
+//   - ctx: Context for KV operations
+//   - disappearedWorkers: Workers confirmed disappeared by EmergencyDetector (nil = no filtering)
+//
+// Returns:
+//   - []string: Active workers excluding disappeared ones
+//   - error: KV operation error
+func (c *Calculator) getActiveWorkersFiltered(ctx context.Context, disappearedWorkers []string) ([]string, error) {
+	workers, err := c.getActiveWorkers(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Fast path: no filtering needed
+	if len(disappearedWorkers) == 0 {
+		return workers, nil
+	}
+
+	// Build disappeared set for O(1) lookups
+	disappearedSet := make(map[string]bool, len(disappearedWorkers))
+	for _, w := range disappearedWorkers {
+		disappearedSet[w] = true
+	}
+
+	// Filter out disappeared workers
+	filtered := make([]string, 0, len(workers))
+	for _, w := range workers {
+		if !disappearedSet[w] {
+			filtered = append(filtered, w)
+		}
+	}
+
+	if len(filtered) < len(workers) {
+		c.Logger.Info("filtered out disappeared workers during emergency",
+			"total_workers_from_heartbeat", len(workers),
+			"disappeared_workers", disappearedWorkers,
+			"active_workers_after_filter", len(filtered),
+		)
+	}
+
+	return filtered, nil
+}
+
 // handleRebalance is the callback invoked by StateMachine when rebalancing should occur.
 //
 // This method bridges the StateMachine component to the Calculator's rebalancing logic.
@@ -733,10 +783,12 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 	start := time.Now()
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	disappearedWorkers := c.disappearedWorkers
+	c.disappearedWorkers = nil // Clear after reading
+	c.mu.Unlock()
 
-	// Get current workers and partitions
-	workers, err := c.getActiveWorkers(ctx)
+	// Get active workers, filtering out disappeared ones during emergency
+	workers, err := c.getActiveWorkersFiltered(ctx, disappearedWorkers)
 	if err != nil {
 		c.Metrics.RecordRebalanceAttempt(lifecycle, false)
 		return fmt.Errorf("failed to get active workers: %w", err)
@@ -783,11 +835,13 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 	c.Metrics.RecordRebalanceAttempt(lifecycle, true)
 
 	// Update tracking state
+	c.mu.Lock()
 	clear(c.currentWorkers)
 	for _, w := range workers {
 		c.currentWorkers[w] = true
 	}
 	c.currentAssignments = assignments
+	c.mu.Unlock()
 
 	c.Logger.Info("rebalance complete",
 		"version", c.publisher.CurrentVersion(),

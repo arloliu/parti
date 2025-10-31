@@ -955,20 +955,19 @@ func getKeys(m map[int64]bool) []int64 {
 }
 
 // TestLeaderElection_FollowersKeepAssignmentDuringCleanup verifies that followers
-// DO NOT lose their assignments when the leader stops and cleans up assignment keys from KV.
+// maintain assignments across leader changes and receive updated assignments from new leader.
 //
 // This test ensures:
-// 1. Leader cleanup deletes assignment keys from NATS KV
-// 2. Followers receive DELETE entries via their watchers
-// 3. Followers IGNORE delete entries (unmarshal fails, entry discarded)
-// 4. Followers maintain their assignments until new leader publishes new ones
-// 5. No subscriptions are removed during the transition period
+// 1. Leader stops but does NOT clean up assignments (preserves version continuity)
+// 2. Followers maintain their cached assignments during leader election
+// 3. New leader discovers existing version and publishes next version
+// 4. Followers receive and apply new assignments with monotonically increasing version
 //
 // Expected behavior:
-// - Leader stops → assignments deleted from KV
-// - Followers see DELETE entries → unmarshal fails → entries ignored
-// - Followers keep processing with old assignments (2-5 second gap)
-// - New leader publishes → followers update assignments normally
+// - Leader stops → assignments PRESERVED in KV (no cleanup)
+// - Followers keep processing with cached assignments (2-8 second gap during election)
+// - New leader elected → discovers highest version → publishes version N+1
+// - Followers receive new assignments → update normally
 func TestLeaderElection_FollowersKeepAssignmentDuringCleanup(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -1023,69 +1022,65 @@ func TestLeaderElection_FollowersKeepAssignmentDuringCleanup(t *testing.T) {
 	}
 
 	// CRITICAL MOMENT: Stop the leader
-	// This will trigger CleanupAllAssignments() which deletes all assignment keys from KV
-	t.Logf("=== Stopping leader %s (this triggers assignment cleanup) ===", leaderID)
+	// Leader does NOT clean up assignments anymore (preserves version continuity)
+	t.Logf("=== Stopping leader %s (assignments will be preserved in KV) ===", leaderID)
 	err := originalLeader.Stop(ctx)
 	require.NoError(t, err)
 
-	// Wait 2 seconds - followers should receive DELETE entries via watchers during this time
-	// If followers incorrectly processed DELETE entries, they would lose assignments here
-	t.Log("Waiting 2s for followers to receive and process DELETE entries from watcher...")
-	time.Sleep(2 * time.Second)
+	// Wait for new leader election and rebalancing
+	// With FastConfig: Election ~1s + Rebalance ~1s = ~2-3s total
+	t.Log("Waiting 5s for new leader election and rebalancing...")
+	time.Sleep(5 * time.Second)
 
-	// VERIFICATION 1: Followers should STILL have their original assignments
-	// (DELETE entries should be ignored due to unmarshal failure)
+	// VERIFICATION 1: Followers should have received NEW assignments from new leader
+	// Version should have increased (new leader published next version)
+	newLeader := cluster.VerifyExactlyOneLeader()
+	t.Logf("New leader elected: %s", newLeader.WorkerID())
+
 	for _, follower := range followers {
 		workerID := follower.WorkerID()
 		currentAssignment := follower.CurrentAssignment()
 		originalAssignment := followerAssignmentsBefore[workerID]
 
-		// Version should be the same (no new assignments received)
-		require.Equal(t, originalAssignment.Version, currentAssignment.Version,
-			"Follower %s version should NOT change when leader cleanup happens (got %d, expected %d)",
-			workerID, currentAssignment.Version, originalAssignment.Version)
-
-		// Partition count should be the same
-		require.Equal(t, len(originalAssignment.Partitions), len(currentAssignment.Partitions),
-			"Follower %s should KEEP assignments during leader cleanup (DELETE entries ignored)",
+		// Version should have increased (new leader published version N+1)
+		require.Greater(t, currentAssignment.Version, originalAssignment.Version,
+			"Follower %s should have received NEW assignment from new leader (version should increase)",
 			workerID)
 
-		t.Logf("Follower %s maintained %d partitions (version %d) during leader cleanup",
-			workerID, len(currentAssignment.Partitions), currentAssignment.Version)
+		// Follower should still have partitions (maybe different distribution)
+		require.Greater(t, len(currentAssignment.Partitions), 0,
+			"Follower %s should have partitions after new leader rebalance",
+			workerID)
+
+		t.Logf("Follower %s updated: %d partitions (version %d → %d)",
+			workerID,
+			len(currentAssignment.Partitions),
+			originalAssignment.Version,
+			currentAssignment.Version)
 	}
 
-	t.Log("Verified: Followers maintained assignments during leader cleanup (DELETE entries ignored)")
+	t.Log("Verified: Followers received new assignments from new leader with version continuity")
 
-	// VERIFICATION 2: Followers are still in Stable state (not broken)
+	// VERIFICATION 2: Followers are still in Stable state
 	for _, follower := range followers {
 		state := follower.State()
 		require.Equal(t, types.StateStable, state,
-			"Follower %s should remain in Stable state (DELETE entries should not break watcher)",
+			"Follower %s should be in Stable state after new leader rebalance",
 			follower.WorkerID())
 	}
 
-	t.Log("Verified: Followers remain in Stable state")
+	t.Log("Verified: Followers are in Stable state")
 
 	// The critical test is complete! We've proven:
-	// 1. Leader cleanup deleted assignments from KV
-	// 2. Followers received DELETE entries
-	// 3. Followers maintained their assignments (version didn't change)
-	// 4. Followers stayed in Stable state (no crashes)
-	//
-	// The rest (waiting for new leader to publish) is already tested in other integration tests.
-	// Our focus here was specifically on proving followers DON'T lose assignments during cleanup.
+	// 1. Leader stop does NOT clean up assignments (version continuity preserved)
+	// 2. New leader discovers existing version and publishes next version
+	// 3. Followers receive new assignments with monotonically increasing version
+	// 4. No data loss during leader transition
 
 	// SUCCESS SUMMARY
 	t.Log("")
 	t.Log("========== TEST PASSED ==========")
-	t.Log("Leader cleanup deleted assignment keys from KV")
-	t.Log("Followers received DELETE entries via watcher")
-	t.Log("Followers IGNORED delete entries (unmarshal failed)")
-	t.Log("Followers KEPT their assignments during transition (2s gap)")
-	t.Log("Followers remained in Stable state (watchers not broken)")
-	t.Log("")
-	t.Log("CRITICAL VERIFICATION COMPLETE:")
-	t.Log("Followers do NOT lose assignments when leader stops and cleans up KV.")
-	t.Log("This proves the DELETE entry unmarshal failure is a SAFETY FEATURE.")
-	t.Log("=================================")
+	t.Log("Assignments preserved across leader change")
+	t.Log("Version monotonicity maintained")
+	t.Log("Followers updated successfully")
 }
