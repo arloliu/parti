@@ -31,7 +31,7 @@ func TestSubscriptionHelper_Creation(t *testing.T) {
 	defer srv.Shutdown()
 	defer conn.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
 	// Create subscription helper
@@ -90,7 +90,7 @@ func TestSubscriptionHelper_UpdateOnRebalance(t *testing.T) {
 	defer srv.Shutdown()
 	defer conn.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 	defer cancel()
 
 	debugLogger := logging.NewNop()
@@ -140,7 +140,7 @@ func TestSubscriptionHelper_UpdateOnRebalance(t *testing.T) {
 	cleanupManagers := func() {
 		for i, manager := range managers {
 			if manager != nil {
-				stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				stopCtx, stopCancel := context.WithTimeout(t.Context(), 5*time.Second)
 				defer stopCancel() //nolint:revive
 				if err := manager.Stop(stopCtx); err != nil {
 					t.Logf("Failed to stop manager %d: %v", i, err)
@@ -206,7 +206,7 @@ func TestSubscriptionHelper_UpdateOnRebalance(t *testing.T) {
 	}
 	require.NotNil(t, leader, "No leader found")
 
-	refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	refreshCtx, refreshCancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer refreshCancel()
 	err = leader.RefreshPartitions(refreshCtx)
 	require.NoError(t, err, "RefreshPartitions failed")
@@ -268,7 +268,7 @@ func TestSubscriptionHelper_Cleanup(t *testing.T) {
 	defer srv.Shutdown()
 	defer conn.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
 	// Create subscription helper
@@ -320,7 +320,7 @@ func TestSubscriptionHelper_ErrorHandling(t *testing.T) {
 	defer srv.Shutdown()
 	defer conn.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
 	// Test: Retry logic on subscription failures
@@ -348,7 +348,7 @@ func TestSubscriptionHelper_ErrorHandling(t *testing.T) {
 	// Test: Context cancellation
 	t.Log("Test 2: Verify context cancellation is respected")
 
-	cancelCtx, cancelFunc := context.WithCancel(context.Background())
+	cancelCtx, cancelFunc := context.WithCancel(t.Context())
 	cancelFunc() // Cancel immediately
 
 	morePartitions := []types.Partition{

@@ -52,7 +52,6 @@ type Calculator struct {
 	// Lifecycle
 	stopCh chan struct{}
 	doneCh chan struct{}
-	wg     sync.WaitGroup // Tracks all goroutines for clean shutdown
 }
 
 // NewCalculator creates a calculator with validated configuration.
@@ -262,9 +261,22 @@ func (c *Calculator) Start(ctx context.Context) error {
 
 // Stop stops the calculator and waits for background goroutines to finish.
 //
+// This method performs a clean shutdown sequence:
+//  1. Signals stop to all components
+//  2. Cleans up assignments from KV (provides clean slate for new leader)
+//  3. Stops worker monitor
+//  4. Waits for state machine shutdown
+//
+// The assignment cleanup is best-effort and won't fail the Stop() operation.
+// If cleanup fails, the new leader will discover existing versions and maintain
+// version monotonicity via DiscoverHighestVersion().
+//
+// Parameters:
+//   - ctx: Context for cleanup timeout control (typically 5s)
+//
 // Returns:
 //   - error: Stop error (e.g., not started)
-func (c *Calculator) Stop() error {
+func (c *Calculator) Stop(ctx context.Context) error {
 	// Atomically check and clear started flag
 	if !c.started.CompareAndSwap(true, false) {
 		return errors.New("calculator not started")
@@ -273,16 +285,20 @@ func (c *Calculator) Stop() error {
 	// 1. Signal stop to all components
 	close(c.stopCh)
 
-	// 2. Stop worker monitor (stops watcher and monitoring goroutines)
+	// 2. Clean up assignments from KV (best-effort)
+	// This provides a clean slate for the new leader and prevents confusion
+	if err := c.publisher.CleanupAllAssignments(ctx); err != nil {
+		c.Logger.Warn("assignment cleanup failed during stop, new leader will inherit state", "error", err)
+		// Don't fail Stop() if cleanup fails - version monotonicity prevents issues
+	}
+
+	// 3. Stop worker monitor (stops watcher and monitoring goroutines)
 	if err := c.monitor.Stop(); err != nil {
 		c.Logger.Error("failed to stop worker monitor", "error", err)
 	}
 
-	// 3. Wait for state machine goroutines (scaling timers)
+	// 4. Wait for state machine shutdown
 	c.stateMach.WaitForShutdown()
-
-	// 4. Wait for legacy goroutines (if any)
-	c.wg.Wait()
 
 	return nil
 }

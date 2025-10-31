@@ -172,6 +172,7 @@ func TestManager_LeadershipLoss_StateTransition(t *testing.T) {
 			transition == "Rebalancing → Stable" ||
 			transition == "Scaling → Stable" ||
 			transition == "Scaling → WaitingAssignment" ||
+			transition == "Scaling → Shutdown" ||
 			transition == "Rebalancing → Shutdown" ||
 			transition == "Stable → Rebalancing" {
 			foundValidExit = true

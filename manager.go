@@ -279,8 +279,9 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.transitionState(m.State(), StateStable)
 
 	// Start background workers
-	m.wg.Add(1)
-	go m.monitorAssignmentChanges(m.ctx, assignmentKV)
+	m.wg.Go(func() {
+		m.monitorAssignmentChanges(m.ctx, assignmentKV)
+	})
 
 	return nil
 }
@@ -710,11 +711,7 @@ func (m *Manager) participateElection(ctx context.Context, kv jetstream.KeyValue
 	}
 
 	// Start leadership monitoring
-	m.wg.Add(1)
-	go func() {
-		defer m.wg.Done()
-		m.monitorLeadership()
-	}()
+	m.wg.Go(m.monitorLeadership)
 
 	return nil
 }
@@ -857,8 +854,7 @@ func (m *Manager) startCalculator(assignmentKV, heartbeatKV jetstream.KeyValue) 
 
 	// Start monitoring calculator state BEFORE starting the calculator
 	// This ensures we don't miss any state transitions that happen during startup
-	m.wg.Add(1)
-	go m.monitorCalculatorState()
+	m.wg.Go(m.monitorCalculatorState)
 
 	// Give the monitor goroutine a moment to set up its subscription
 	// This prevents race conditions where calculator state changes before monitor is ready
@@ -887,8 +883,6 @@ func (m *Manager) startCalculator(assignmentKV, heartbeatKV jetstream.KeyValue) 
 //   - types.CalcStateEmergency → StateEmergency
 //   - types.CalcStateIdle (after rebalancing) → StateStable
 func (m *Manager) monitorCalculatorState() {
-	defer m.wg.Done()
-
 	m.logger.Info("starting calculator state monitor")
 
 	// Subscribe to calculator state changes
@@ -1020,7 +1014,11 @@ func (m *Manager) stopCalculator() {
 		// No state transition needed for non-leader states
 	}
 
-	if err := m.calculator.Stop(); err != nil {
+	// Stop calculator with timeout for cleanup
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stopCancel()
+
+	if err := m.calculator.Stop(stopCtx); err != nil {
 		m.logError("failed to stop calculator", "error", err)
 	}
 
@@ -1068,8 +1066,6 @@ func (m *Manager) fetchAssignment(ctx context.Context, kv jetstream.KeyValue) (*
 
 // monitorAssignmentChanges monitors for assignment changes.
 func (m *Manager) monitorAssignmentChanges(ctx context.Context, kv jetstream.KeyValue) {
-	defer m.wg.Done()
-
 	workerID := m.WorkerID()
 	key := fmt.Sprintf("assignment.%s", workerID) // Match calculator's key format
 
@@ -1097,6 +1093,11 @@ func (m *Manager) monitorAssignmentChanges(ctx context.Context, kv jetstream.Key
 			if entry == nil {
 				// Nil entry indicates end of initial values replay
 				// This is normal - continue watching for future updates
+				continue
+			}
+
+			if entry.Operation() == jetstream.KeyValueDelete {
+				m.logger.Debug("ignoring assignment deletion during leader transition")
 				continue
 			}
 

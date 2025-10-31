@@ -96,7 +96,7 @@ func TestCalculator_ScalingTransition_WithRealStart(t *testing.T) {
 	// Start calculator
 	err = calc.Start(ctx)
 	require.NoError(t, err)
-	defer func() { _ = calc.Stop() }()
+	defer func() { _ = calc.Stop(ctx) }()
 
 	// Wait for initial assignment
 	time.Sleep(200 * time.Millisecond)
@@ -212,7 +212,7 @@ func TestCalculator_ScalingTransition_StopBeforeWindow(t *testing.T) {
 
 	// Stop calculator before window elapses
 	time.Sleep(100 * time.Millisecond)
-	err = calc.Stop()
+	err = calc.Stop(ctx)
 	require.NoError(t, err)
 
 	// Wait longer than window would have been
@@ -259,7 +259,7 @@ func TestCalculator_ScalingTransition_RapidStateChanges(t *testing.T) {
 	// Start calculator
 	err = calc.Start(ctx)
 	require.NoError(t, err)
-	defer func() { _ = calc.Stop() }()
+	defer func() { _ = calc.Stop(ctx) }()
 
 	time.Sleep(200 * time.Millisecond)
 	t.Logf("Initial state: %s", calc.GetState())

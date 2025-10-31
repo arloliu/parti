@@ -235,6 +235,50 @@ Example:
 - Ensure examples are testable with expected output (testableexamples linter)
 - Test files are excluded from certain linters (bodyclose, dupl, gosec, noctx)
 
+**Testing Asynchronous State Transitions (CRITICAL):**
+
+When testing state machines or asynchronous systems, **NEVER use polling or hardcoded `time.Sleep()` to wait for intermediate states**. This causes flaky tests because fast transitions may complete before polling begins.
+
+**❌ BAD - Polling for intermediate states (FLAKY):**
+```go
+// DON'T DO THIS - Will fail intermittently on fast machines
+stateMachine.EnterScaling(ctx, "test", 10*time.Millisecond)
+time.Sleep(15 * time.Millisecond)  // Hope we catch the Rebalancing state
+require.Equal(t, StateRebalancing, stateMachine.GetState()) // FLAKY!
+```
+
+**✅ GOOD - Event-driven state collection (ROBUST):**
+```go
+// Use a state transition collector that subscribes to ALL state changes
+collector := newStateTransitionCollector(t, stateMachine)
+defer collector.Stop()
+
+// Trigger the state transitions
+stateMachine.EnterScaling(ctx, "test", 50*time.Millisecond)
+
+// Wait for final state
+require.True(t, collector.WaitForState(StateIdle, 2*time.Second))
+
+// Verify the complete transition sequence
+collector.RequireContains(StateScaling)
+collector.RequireContains(StateRebalancing)
+collector.RequireLastState(StateIdle)
+```
+
+**Why This Approach Works:**
+1. **Subscribe BEFORE triggering** - Captures all states from the start
+2. **Event-driven** - Never misses fast transitions regardless of timing
+3. **Complete history** - Can verify entire state sequence, not just current state
+4. **Deterministic** - No timing dependencies or race conditions
+5. **Debuggable** - Full state history available when assertions fail
+
+**Implementation Pattern:**
+Create a helper that:
+- Subscribes to state change notifications
+- Collects all states in a thread-safe slice
+- Provides assertion methods for common checks
+- See `internal/assignment/calculator_state_test.go` for reference implementation
+
 **Integration Test Guidelines:**
 - Place in `test/integration/` directory
 - Use `t.Context()` for context management in tests
@@ -244,6 +288,7 @@ Example:
 - Use embedded NATS via `testutil.StartEmbeddedNATS(t)`
 - Test cross-component scenarios (leader failover, scaling, etc.)
 - Clean up resources with `defer`
+- **Use state transition collectors for manager state changes** (same pattern as unit tests)
 
 **Running Tests:**
 ```bash

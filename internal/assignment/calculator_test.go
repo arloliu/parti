@@ -186,7 +186,7 @@ func TestCalculator_Start(t *testing.T) {
 
 		err = calc.Start(ctx)
 		require.NoError(t, err)
-		defer func() { _ = calc.Stop() }()
+		defer func() { _ = calc.Stop(ctx) }()
 
 		require.True(t, calc.IsStarted())
 		require.Greater(t, calc.CurrentVersion(), int64(0))
@@ -231,7 +231,7 @@ func TestCalculator_Start(t *testing.T) {
 
 		err = calc.Start(ctx)
 		require.NoError(t, err)
-		defer func() { _ = calc.Stop() }()
+		defer func() { _ = calc.Stop(ctx) }()
 
 		err = calc.Start(ctx)
 		require.Error(t, err)
@@ -270,12 +270,14 @@ func TestCalculator_Stop(t *testing.T) {
 		err = calc.Start(ctx)
 		require.NoError(t, err)
 
-		err = calc.Stop()
+		err = calc.Stop(ctx)
 		require.NoError(t, err)
 		require.False(t, calc.IsStarted())
 	})
 
 	t.Run("returns error if not started", func(t *testing.T) {
+		ctx := t.Context()
+
 		_, nc := partitest.StartEmbeddedNATS(t)
 		assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-not-started-assignment")
 		heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-not-started-heartbeat")
@@ -295,7 +297,7 @@ func TestCalculator_Stop(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		err = calc.Stop()
+		err = calc.Stop(ctx)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "not started")
 	})
@@ -338,7 +340,7 @@ func TestCalculator_WorkerMonitoring(t *testing.T) {
 
 		err = calc.Start(ctx)
 		require.NoError(t, err)
-		defer func() { _ = calc.Stop() }()
+		defer func() { _ = calc.Stop(ctx) }()
 
 		initialVersion := calc.CurrentVersion()
 
@@ -398,7 +400,7 @@ func TestCalculator_CooldownPreventsRebalancing(t *testing.T) {
 
 		err = calc.Start(ctx)
 		require.NoError(t, err)
-		defer func() { _ = calc.Stop() }()
+		defer func() { _ = calc.Stop(ctx) }()
 
 		initialVersion := calc.CurrentVersion()
 
@@ -649,4 +651,73 @@ func TestCalculatorStateChanges(t *testing.T) {
 		require.False(t, ok, "channel should be closed")
 		require.Equal(t, types.CalculatorState(0), finalState, "zero value should be received from closed channel")
 	})
+}
+
+func TestCalculator_Stop_CleansUpAssignments(t *testing.T) {
+	_, nc := partitest.StartEmbeddedNATS(t)
+	assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-stop-cleanup-assignment")
+	heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-stop-cleanup-heartbeat")
+
+	ctx := context.Background()
+
+	// Create 3 partitions
+	partitions := []types.Partition{
+		{Keys: []string{"p1"}},
+		{Keys: []string{"p2"}},
+		{Keys: []string{"p3"}},
+	}
+	source := &mockSource{partitions: partitions}
+	strategy := &mockStrategy{}
+
+	calc, err := NewCalculator(&Config{
+		AssignmentKV:         assignmentKV,
+		HeartbeatKV:          heartbeatKV,
+		AssignmentPrefix:     "assignment",
+		Source:               source,
+		Strategy:             strategy,
+		HeartbeatPrefix:      "worker",
+		HeartbeatTTL:         5 * time.Second,
+		EmergencyGracePeriod: 2 * time.Second,
+	})
+	require.NoError(t, err)
+
+	// Publish heartbeats for 3 workers
+	for _, workerID := range []string{"w1", "w2", "w3"} {
+		_, err := heartbeatKV.Put(ctx, fmt.Sprintf("worker.%s", workerID), []byte("heartbeat"))
+		require.NoError(t, err)
+	}
+
+	// Start calculator - it will perform initial assignment
+	err = calc.Start(ctx)
+	require.NoError(t, err)
+
+	// Wait a bit for initial assignment to complete
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify assignments exist in KV
+	keys, err := assignmentKV.Keys(ctx)
+	require.NoError(t, err)
+	assignmentKeysCount := 0
+	for _, key := range keys {
+		if key == "assignment.w1" || key == "assignment.w2" || key == "assignment.w3" {
+			assignmentKeysCount++
+		}
+	}
+	require.Equal(t, 3, assignmentKeysCount, "expected 3 workers to have assignments")
+
+	t.Log("Verified: Assignments exist before Stop()")
+
+	// Stop calculator - should clean up assignments
+	err = calc.Stop(ctx)
+	require.NoError(t, err)
+
+	// Verify assignments are deleted from KV
+	// Note: Keys() returns error when KV is empty, so we check each key individually
+	for _, workerID := range []string{"w1", "w2", "w3"} {
+		key := fmt.Sprintf("assignment.%s", workerID)
+		_, err := assignmentKV.Get(ctx, key)
+		require.Error(t, err, "expected assignment for %s to be deleted", workerID)
+	}
+
+	t.Log("Verified: Calculator.Stop() cleaned up all assignments from KV")
 }

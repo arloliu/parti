@@ -2,6 +2,7 @@ package assignment
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -9,6 +10,163 @@ import (
 	"github.com/arloliu/parti/types"
 	"github.com/stretchr/testify/require"
 )
+
+// stateTransitionCollector is a helper for collecting state transitions in tests.
+//
+// This helper solves the common problem of observing intermediate states in
+// asynchronous state machines. Instead of polling for a specific state (which
+// might miss fast transitions), it subscribes to ALL state changes and collects
+// them for verification.
+//
+// Usage:
+//
+//	collector := newStateTransitionCollector(t, stateMachine)
+//	defer collector.Stop()
+//
+//	// Trigger state transitions
+//	stateMachine.EnterScaling(ctx, "test", 50*time.Millisecond)
+//
+//	// Wait for expected final state
+//	collector.WaitForState(types.CalcStateIdle, 2*time.Second)
+//
+//	// Verify the complete transition sequence
+//	collector.RequireContains(types.CalcStateScaling)
+//	collector.RequireContains(types.CalcStateRebalancing)
+//	collector.RequireLastState(types.CalcStateIdle)
+type stateTransitionCollector struct {
+	t       *testing.T
+	states  []types.CalculatorState
+	mu      sync.Mutex
+	done    chan struct{}
+	stateCh <-chan types.CalculatorState
+	unsub   func()
+}
+
+// newStateTransitionCollector creates a new state transition collector.
+//
+// It subscribes to the state machine's notifications and starts collecting
+// all state changes in a background goroutine.
+//
+// Parameters:
+//   - t: Test instance
+//   - sm: StateMachine to observe
+//
+// Returns:
+//   - *stateTransitionCollector: Collector instance (call Stop() when done)
+func newStateTransitionCollector(t *testing.T, sm *StateMachine) *stateTransitionCollector {
+	t.Helper()
+
+	stateCh, unsub := sm.Subscribe()
+
+	collector := &stateTransitionCollector{
+		t:       t,
+		states:  make([]types.CalculatorState, 0, 8),
+		done:    make(chan struct{}),
+		stateCh: stateCh,
+		unsub:   unsub,
+	}
+
+	// Start collecting states in background
+	go collector.collect()
+
+	return collector
+}
+
+// collect runs in a goroutine to gather all state transitions.
+func (c *stateTransitionCollector) collect() {
+	for {
+		select {
+		case state, ok := <-c.stateCh:
+			if !ok {
+				return
+			}
+			c.mu.Lock()
+			c.states = append(c.states, state)
+			c.mu.Unlock()
+		case <-c.done:
+			return
+		}
+	}
+}
+
+// Stop stops the collector and unsubscribes from state changes.
+func (c *stateTransitionCollector) Stop() {
+	c.t.Helper()
+	close(c.done)
+	c.unsub()
+}
+
+// WaitForState waits for the state machine to reach a specific state.
+//
+// This is useful for waiting until a state transition sequence completes.
+//
+// Parameters:
+//   - targetState: State to wait for
+//   - timeout: Maximum time to wait
+//
+// Returns:
+//   - bool: true if state was reached, false if timeout
+func (c *stateTransitionCollector) WaitForState(targetState types.CalculatorState, timeout time.Duration) bool {
+	c.t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		c.mu.Lock()
+		if len(c.states) > 0 && c.states[len(c.states)-1] == targetState {
+			c.mu.Unlock()
+			return true
+		}
+		c.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	return false
+}
+
+// GetStates returns a copy of all collected states.
+func (c *stateTransitionCollector) GetStates() []types.CalculatorState {
+	c.t.Helper()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	result := make([]types.CalculatorState, len(c.states))
+	copy(result, c.states)
+
+	return result
+}
+
+// RequireContains asserts that the given state appears in the transition history.
+func (c *stateTransitionCollector) RequireContains(state types.CalculatorState) {
+	c.t.Helper()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	require.Contains(c.t, c.states, state,
+		"State %s not found in transition history: %v",
+		state, c.states)
+}
+
+// RequireLastState asserts that the last observed state matches the expected state.
+func (c *stateTransitionCollector) RequireLastState(expected types.CalculatorState) {
+	c.t.Helper()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	require.NotEmpty(c.t, c.states, "No states collected")
+	require.Equal(c.t, expected, c.states[len(c.states)-1],
+		"Last state mismatch. Full history: %v", c.states)
+}
+
+// RequireMinimumStates asserts that at least N states were observed.
+func (c *stateTransitionCollector) RequireMinimumStates(count int) {
+	c.t.Helper()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	require.GreaterOrEqual(c.t, len(c.states), count,
+		"Expected at least %d states, got %d: %v",
+		count, len(c.states), c.states)
+}
 
 func TestCalculator_detectRebalanceType_ColdStart(t *testing.T) {
 	_, nc := partitest.StartEmbeddedNATS(t)
@@ -265,16 +423,22 @@ func TestCalculator_StateTransitions_GetState(t *testing.T) {
 	// Initial state should be Idle
 	require.Equal(t, types.CalcStateIdle, calc.GetState())
 
+	// Use collector to observe all transitions
+	collector := newStateTransitionCollector(t, calc.stateMach)
+	defer collector.Stop()
+
 	// Transition to Scaling
 	ctx := context.Background()
-	calc.enterScalingState(ctx, "cold_start", 100*time.Millisecond)
-	require.Equal(t, types.CalcStateScaling, calc.GetState())
+	calc.enterScalingState(ctx, "cold_start", 50*time.Millisecond)
 
-	// Wait for automatic transition to Rebalancing
-	time.Sleep(150 * time.Millisecond)
-	// Note: State might be Idle if rebalancing completed quickly
-	state := calc.GetState()
-	require.Contains(t, []types.CalculatorState{types.CalcStateRebalancing, types.CalcStateIdle}, state)
+	// Wait for the state machine to complete transitions
+	require.True(t, collector.WaitForState(types.CalcStateIdle, 2*time.Second),
+		"Timeout waiting for return to Idle state")
+
+	// Verify all states were observed
+	collector.RequireContains(types.CalcStateScaling)
+	collector.RequireContains(types.CalcStateRebalancing)
+	collector.RequireLastState(types.CalcStateIdle)
 }
 
 func TestCalculator_StateTransitions_Scaling(t *testing.T) {
@@ -299,19 +463,25 @@ func TestCalculator_StateTransitions_Scaling(t *testing.T) {
 
 	ctx := context.Background()
 
+	// Use collector to observe all transitions
+	collector := newStateTransitionCollector(t, calc.stateMach)
+	defer collector.Stop()
+
 	// Enter scaling state
 	calc.enterScalingState(ctx, "cold_start", 50*time.Millisecond)
 
+	// Initial checks
 	require.Equal(t, types.CalcStateScaling, calc.GetState())
 	require.Equal(t, "cold_start", calc.GetScalingReason())
 
-	// Wait for window to expire and transition to rebalancing
-	time.Sleep(100 * time.Millisecond)
+	// Wait for complete transition back to Idle
+	require.True(t, collector.WaitForState(types.CalcStateIdle, 2*time.Second),
+		"Timeout waiting for return to Idle state")
 
-	// Should have transitioned to Idle after rebalancing
-	require.Eventually(t, func() bool {
-		return calc.GetState() == types.CalcStateIdle
-	}, 1*time.Second, 50*time.Millisecond)
+	// Verify all transitions occurred
+	collector.RequireContains(types.CalcStateScaling)
+	collector.RequireContains(types.CalcStateRebalancing)
+	collector.RequireLastState(types.CalcStateIdle)
 }
 
 func TestCalculator_StateTransitions_Emergency(t *testing.T) {
@@ -336,16 +506,26 @@ func TestCalculator_StateTransitions_Emergency(t *testing.T) {
 
 	ctx := context.Background()
 
+	// Use collector to observe all transitions
+	collector := newStateTransitionCollector(t, calc.stateMach)
+	defer collector.Stop()
+
 	// Enter emergency state
 	calc.enterEmergencyState(ctx)
 
-	// Emergency state should quickly transition through Rebalancing to Idle
-	require.Eventually(t, func() bool {
-		return calc.GetState() == types.CalcStateIdle
-	}, 1*time.Second, 50*time.Millisecond)
+	// Wait for complete transition back to Idle
+	require.True(t, collector.WaitForState(types.CalcStateIdle, 2*time.Second),
+		"Timeout waiting for return to Idle state")
+
+	// Verify emergency rebalancing happened
+	// Note: Emergency does NOT go through Rebalancing state - it performs
+	// rebalancing while IN Emergency state, then transitions directly to Idle
+	collector.RequireContains(types.CalcStateEmergency)
+	collector.RequireLastState(types.CalcStateIdle)
+	collector.RequireMinimumStates(3) // Idle (initial), Emergency, Idle (final)
 
 	// Verify scaling reason was cleared
-	require.Equal(t, "", calc.GetScalingReason()) // Should be cleared after returning to idle
+	require.Equal(t, "", calc.GetScalingReason())
 }
 
 func TestCalculator_StateTransitions_ReturnToIdle(t *testing.T) {
@@ -373,20 +553,54 @@ func TestCalculator_StateTransitions_ReturnToIdle(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	// Subscribe to state changes BEFORE triggering transition to avoid missing states
+	stateCh, unsubscribe := calc.stateMach.Subscribe()
+	defer unsubscribe()
+
+	// Collect all state transitions in a goroutine
+	var statesMu sync.Mutex
+	states := []types.CalculatorState{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for state := range stateCh {
+			statesMu.Lock()
+			states = append(states, state)
+			currentLen := len(states)
+			statesMu.Unlock()
+
+			// Exit after we've seen: Idle -> Scaling -> Rebalancing -> Idle
+			// (minimum 4 states including the initial Idle from subscription)
+			if state == types.CalcStateIdle && currentLen >= 4 {
+				return
+			}
+		}
+	}()
+
 	// Enter scaling state (this will transition through Scaling -> Rebalancing -> Idle)
-	calc.enterScalingState(ctx, "test_reason", 10*time.Millisecond)
+	// Use 50ms window to ensure we have time to observe states
+	calc.enterScalingState(ctx, "test_reason", 50*time.Millisecond)
 
-	// Wait for state to reach Rebalancing
-	require.Eventually(t, func() bool {
-		return calc.GetState() == types.CalcStateRebalancing
-	}, 1*time.Second, 10*time.Millisecond)
+	// Wait for the state machine to complete the full cycle
+	select {
+	case <-done:
+		// Transition complete
+	case <-time.After(2 * time.Second):
+		statesMu.Lock()
+		t.Fatalf("timeout waiting for state transitions, saw states: %v", states)
+		statesMu.Unlock()
+	}
 
-	// Wait for return to idle (happens after rebalance completes)
-	require.Eventually(t, func() bool {
-		return calc.GetState() == types.CalcStateIdle
-	}, 1*time.Second, 10*time.Millisecond)
+	// Verify we observed the complete transition sequence
+	statesMu.Lock()
+	defer statesMu.Unlock()
 
-	// Verify scaling reason was cleared
+	require.GreaterOrEqual(t, len(states), 4, "should have seen at least 4 states (Idle, Scaling, Rebalancing, Idle)")
+	require.Contains(t, states, types.CalcStateScaling, "should have entered Scaling state")
+	require.Contains(t, states, types.CalcStateRebalancing, "should have entered Rebalancing state")
+	require.Equal(t, types.CalcStateIdle, states[len(states)-1], "should have returned to Idle as final state")
+
+	// Verify scaling reason was cleared after returning to idle
 	require.Equal(t, "", calc.GetScalingReason())
 }
 
@@ -417,7 +631,7 @@ func TestCalculator_StateTransitions_PreventsConcurrentRebalance(t *testing.T) {
 	// Start calculator to set up KV buckets
 	err = calc.Start(ctx)
 	require.NoError(t, err)
-	defer func() { _ = calc.Stop() }()
+	defer func() { _ = calc.Stop(ctx) }()
 
 	// Publish some heartbeats
 	hbKV := partitest.CreateJetStreamKV(t, nc, "test-hb")

@@ -80,10 +80,6 @@ func TestCalculatorCooldown(t *testing.T) {
 		t.Logf("Successfully set custom cooldown to %v", customCooldown)
 	})
 
-	t.Run("cooldown blocks rapid rebalances", func(t *testing.T) {
-		// This test verifies that the cooldown actually prevents
-		// rapid successive rebalances
-
-		t.Skip("Integration test needed - requires actual rebalance scenarios")
-	})
+	// Note: Cooldown blocking behavior is tested in integration tests
+	// (test/integration/) which simulate actual rebalance scenarios
 }
