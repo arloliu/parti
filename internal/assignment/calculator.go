@@ -2,7 +2,6 @@ package assignment
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -128,69 +127,9 @@ func NewCalculator(cfg *Config) (*Calculator, error) {
 	return c, nil
 }
 
-// SetCooldown sets the rebalance cooldown duration.
-//
-// The cooldown prevents excessive rebalancing by enforcing a minimum time
-// between consecutive rebalance operations.
-//
-// Parameters:
-//   - cooldown: Minimum time between rebalances (default: 10s)
-func (c *Calculator) SetCooldown(cooldown time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.Cooldown = cooldown
-}
-
-// SetMinThreshold sets the minimum rebalance threshold.
-//
-// Rebalancing only occurs if the partition imbalance exceeds this threshold.
-//
-// Parameters:
-//   - threshold: Minimum partition distribution imbalance (default: 0.2 = 20%)
-func (c *Calculator) SetMinThreshold(threshold float64) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.MinThreshold = threshold
-}
-
-// SetRestartDetectionRatio sets the restart detection ratio.
-//
-// Used to distinguish between cold starts (many workers) and planned scaling
-// (few workers). Affects stabilization window selection.
-//
-// Parameters:
-//   - ratio: Fraction of workers that indicates cold start (default: 0.5)
-func (c *Calculator) SetRestartDetectionRatio(ratio float64) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.RestartRatio = ratio
-}
-
-// SetStabilizationWindows sets the cold start and planned scale windows.
-//
-// These windows determine how long to wait before initial assignment:
-//   - Cold start: Longer window (30s) to wait for most workers
-//   - Planned scale: Shorter window (10s) for quick response
-//
-// Parameters:
-//   - coldStart: Wait time for cold start scenarios (default: 30s)
-//   - plannedScale: Wait time for planned scaling (default: 10s)
-func (c *Calculator) SetStabilizationWindows(coldStart, plannedScale time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.ColdStartWindow = coldStart
-	c.PlannedScaleWindow = plannedScale
-}
-
 // SubscribeToStateChanges returns a channel for state updates and a function to unsubscribe.
 func (c *Calculator) SubscribeToStateChanges() (<-chan types.CalculatorState, func()) {
 	return c.stateMach.Subscribe()
-}
-
-// discoverHighestVersion scans existing assignments in KV to find the highest version.
-// This ensures version monotonicity across leader changes.
-func (c *Calculator) discoverHighestVersion(ctx context.Context) error {
-	return c.publisher.DiscoverHighestVersion(ctx)
 }
 
 // Start begins monitoring workers and calculating assignments.
@@ -210,7 +149,7 @@ func (c *Calculator) Start(ctx context.Context) error {
 
 	// Atomically check and set started flag
 	if !c.started.CompareAndSwap(false, true) {
-		return errors.New("calculator already started")
+		return types.ErrCalculatorAlreadyStarted
 	}
 
 	// Discover highest version from existing assignments to ensure monotonicity across leader changes
@@ -255,7 +194,7 @@ func (c *Calculator) Start(ctx context.Context) error {
 func (c *Calculator) Stop(ctx context.Context) error {
 	// Atomically check and clear started flag
 	if !c.started.CompareAndSwap(true, false) {
-		return errors.New("calculator not started")
+		return types.ErrCalculatorNotStarted
 	}
 
 	// 1. Signal stop to all components
@@ -317,7 +256,7 @@ func (c *Calculator) CurrentVersion() int64 {
 //   - error: Rebalance error
 func (c *Calculator) TriggerRebalance(ctx context.Context) error {
 	if !c.IsStarted() {
-		return errors.New("calculator not started")
+		return types.ErrCalculatorNotStarted
 	}
 
 	c.Logger.Info("manual rebalance triggered")
@@ -340,7 +279,7 @@ func (c *Calculator) initialAssignment(ctx context.Context) error {
 
 	// Calculate and publish initial assignment
 	if err := c.rebalance(ctx, "initial"); err != nil {
-		return err
+		return fmt.Errorf("failed to rebalance for initial assignment: %w", err)
 	}
 
 	// Initialize lastWorkers with the workers from initial assignment
@@ -356,6 +295,12 @@ func (c *Calculator) initialAssignment(ctx context.Context) error {
 	c.Logger.Info("initial assignment complete", "workers", workerCount)
 
 	return nil
+}
+
+// discoverHighestVersion scans existing assignments in KV to find the highest version.
+// This ensures version monotonicity across leader changes.
+func (c *Calculator) discoverHighestVersion(ctx context.Context) error {
+	return c.publisher.DiscoverHighestVersion(ctx)
 }
 
 // detectRebalanceType determines the type of rebalance needed based on worker topology changes.
@@ -567,7 +512,7 @@ func (c *Calculator) processWatcherEvents(ctx context.Context) {
 func (c *Calculator) pollForChanges(ctx context.Context) error {
 	workers, err := c.getActiveWorkers(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get active workers: %w", err)
 	}
 
 	// Convert workers slice to map for comparison
@@ -622,7 +567,7 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 		// Fetch active workers from KV
 		workerList, err := c.getActiveWorkers(ctx)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to get active workers: %w", err)
 		}
 
 		workers = make(map[string]bool)
@@ -763,7 +708,7 @@ func (c *Calculator) getActiveWorkers(ctx context.Context) ([]string, error) {
 func (c *Calculator) handleRebalance(ctx context.Context, reason string) error {
 	// Perform the rebalance
 	if err := c.rebalance(ctx, reason); err != nil {
-		return err
+		return fmt.Errorf("rebalance failed for %s: %w", reason, err)
 	}
 
 	// After successful rebalance, update lastWorkers to match currentWorkers
@@ -794,7 +739,7 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 	workers, err := c.getActiveWorkers(ctx)
 	if err != nil {
 		c.Metrics.RecordRebalanceAttempt(lifecycle, false)
-		return err
+		return fmt.Errorf("failed to get active workers: %w", err)
 	}
 
 	c.Logger.Debug("rebalance started", "lifecycle", lifecycle, "worker_count", len(workers), "workers", workers)
@@ -802,7 +747,7 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 	partitions, err := c.Source.ListPartitions(ctx)
 	if err != nil {
 		c.Metrics.RecordRebalanceAttempt(lifecycle, false)
-		return err
+		return fmt.Errorf("failed to list partitions: %w", err)
 	}
 
 	c.Logger.Debug("partitions retrieved", "partition_count", len(partitions))
@@ -830,7 +775,7 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 	// Publish assignments via publisher component
 	if err := c.publisher.Publish(ctx, workers, assignments, lifecycle); err != nil {
 		c.Metrics.RecordRebalanceAttempt(lifecycle, false)
-		return err
+		return fmt.Errorf("failed to publish assignments: %w", err)
 	}
 
 	// Record successful rebalance

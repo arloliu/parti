@@ -3,7 +3,6 @@ package assignment
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -89,10 +88,10 @@ func (m *WorkerMonitor) Start(ctx context.Context) error {
 
 	// Check stopped first - once stopped, cannot restart
 	if m.stopped {
-		return errors.New("worker monitor already stopped")
+		return types.ErrWorkerMonitorAlreadyStopped
 	}
 	if m.started {
-		return errors.New("worker monitor already started")
+		return types.ErrWorkerMonitorAlreadyStarted
 	}
 
 	m.started = true
@@ -112,7 +111,7 @@ func (m *WorkerMonitor) Stop() error {
 	m.mu.Lock()
 	if !m.started {
 		m.mu.Unlock()
-		return errors.New("worker monitor not started")
+		return types.ErrWorkerMonitorNotStarted
 	}
 	if m.stopped {
 		m.mu.Unlock()
@@ -149,7 +148,7 @@ func (m *WorkerMonitor) GetActiveWorkers(ctx context.Context) ([]string, error) 
 	keys, err := m.heartbeatKV.Keys(ctx)
 	if err != nil {
 		// Handle "no keys found" as empty list
-		if err.Error() == "nats: no keys found" {
+		if types.IsNoKeysFoundError(err) {
 			m.logger.Debug("no heartbeat keys found")
 			return []string{}, nil
 		}

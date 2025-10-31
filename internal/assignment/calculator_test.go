@@ -12,144 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// mockSource implements PartitionSource for testing
-type mockSource struct {
-	partitions []types.Partition
-	err        error
-}
-
-func (m *mockSource) ListPartitions(ctx context.Context) ([]types.Partition, error) {
-	if m.err != nil {
-		return nil, m.err
-	}
-
-	return m.partitions, nil
-}
-
-// mockStrategy implements AssignmentStrategy for testing
-type mockStrategy struct {
-	assignments map[string][]types.Partition
-	err         error
-}
-
-func (m *mockStrategy) Assign(workers []string, partitions []types.Partition) (map[string][]types.Partition, error) {
-	if m.err != nil {
-		return nil, m.err
-	}
-	if m.assignments != nil {
-		return m.assignments, nil
-	}
-
-	// Simple round-robin assignment
-	result := make(map[string][]types.Partition)
-	for i, part := range partitions {
-		workerIdx := i % len(workers)
-		worker := workers[workerIdx]
-		result[worker] = append(result[worker], part)
-	}
-
-	return result, nil
-}
-
-func TestCalculator_SetMethods(t *testing.T) {
-	t.Run("sets cooldown successfully", func(t *testing.T) {
-		_, nc := partitest.StartEmbeddedNATS(t)
-		assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-cooldown-assignment")
-		heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-cooldown-heartbeat")
-
-		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
-		strategy := &mockStrategy{}
-
-		calc, err := NewCalculator(&Config{
-			AssignmentKV:         assignmentKV,
-			HeartbeatKV:          heartbeatKV,
-			AssignmentPrefix:     "assignment",
-			Source:               source,
-			Strategy:             strategy,
-			HeartbeatPrefix:      "worker-hb",
-			HeartbeatTTL:         6 * time.Second,
-			EmergencyGracePeriod: 3 * time.Second,
-		})
-		require.NoError(t, err)
-		calc.SetCooldown(5 * time.Second)
-
-		require.Equal(t, 5*time.Second, calc.Cooldown)
-	})
-
-	t.Run("sets min threshold successfully", func(t *testing.T) {
-		_, nc := partitest.StartEmbeddedNATS(t)
-		assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-threshold-assignment")
-		heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-threshold-heartbeat")
-
-		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
-		strategy := &mockStrategy{}
-
-		calc, err := NewCalculator(&Config{
-			AssignmentKV:         assignmentKV,
-			HeartbeatKV:          heartbeatKV,
-			AssignmentPrefix:     "assignment",
-			Source:               source,
-			Strategy:             strategy,
-			HeartbeatPrefix:      "worker-hb",
-			HeartbeatTTL:         6 * time.Second,
-			EmergencyGracePeriod: 3 * time.Second,
-		})
-		require.NoError(t, err)
-		calc.SetMinThreshold(0.3)
-
-		require.Equal(t, 0.3, calc.MinThreshold)
-	})
-
-	t.Run("sets restart detection ratio successfully", func(t *testing.T) {
-		_, nc := partitest.StartEmbeddedNATS(t)
-		assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-ratio-assignment")
-		heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-ratio-heartbeat")
-
-		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
-		strategy := &mockStrategy{}
-
-		calc, err := NewCalculator(&Config{
-			AssignmentKV:         assignmentKV,
-			HeartbeatKV:          heartbeatKV,
-			AssignmentPrefix:     "assignment",
-			Source:               source,
-			Strategy:             strategy,
-			HeartbeatPrefix:      "worker-hb",
-			HeartbeatTTL:         6 * time.Second,
-			EmergencyGracePeriod: 3 * time.Second,
-		})
-		require.NoError(t, err)
-		calc.SetRestartDetectionRatio(0.7)
-
-		require.Equal(t, 0.7, calc.RestartRatio)
-	})
-
-	t.Run("sets stabilization windows successfully", func(t *testing.T) {
-		_, nc := partitest.StartEmbeddedNATS(t)
-		assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-windows-assignment")
-		heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-windows-heartbeat")
-
-		source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}}
-		strategy := &mockStrategy{}
-
-		calc, err := NewCalculator(&Config{
-			AssignmentKV:         assignmentKV,
-			HeartbeatKV:          heartbeatKV,
-			AssignmentPrefix:     "assignment",
-			Source:               source,
-			Strategy:             strategy,
-			HeartbeatPrefix:      "worker-hb",
-			HeartbeatTTL:         6 * time.Second,
-			EmergencyGracePeriod: 3 * time.Second,
-		})
-		require.NoError(t, err)
-		calc.SetStabilizationWindows(20*time.Second, 5*time.Second)
-
-		require.Equal(t, 20*time.Second, calc.ColdStartWindow)
-		require.Equal(t, 5*time.Second, calc.PlannedScaleWindow)
-	})
-}
-
 func TestCalculator_Start(t *testing.T) {
 	t.Run("starts successfully with initial assignment", func(t *testing.T) {
 		ctx := t.Context()
@@ -179,10 +41,10 @@ func TestCalculator_Start(t *testing.T) {
 			HeartbeatPrefix:      "worker-hb",
 			HeartbeatTTL:         6 * time.Second,
 			EmergencyGracePeriod: 3 * time.Second,
+			ColdStartWindow:      50 * time.Millisecond,
+			PlannedScaleWindow:   50 * time.Millisecond,
 		})
 		require.NoError(t, err)
-		// Use very short stabilization windows for testing
-		calc.SetStabilizationWindows(50*time.Millisecond, 50*time.Millisecond)
 
 		err = calc.Start(ctx)
 		require.NoError(t, err)
@@ -225,9 +87,10 @@ func TestCalculator_Start(t *testing.T) {
 			HeartbeatPrefix:      "worker-hb",
 			HeartbeatTTL:         6 * time.Second,
 			EmergencyGracePeriod: 3 * time.Second,
+			ColdStartWindow:      50 * time.Millisecond,
+			PlannedScaleWindow:   50 * time.Millisecond,
 		})
 		require.NoError(t, err)
-		calc.SetStabilizationWindows(50*time.Millisecond, 50*time.Millisecond)
 
 		err = calc.Start(ctx)
 		require.NoError(t, err)
@@ -235,7 +98,7 @@ func TestCalculator_Start(t *testing.T) {
 
 		err = calc.Start(ctx)
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "already started")
+		require.ErrorIs(t, err, types.ErrCalculatorAlreadyStarted)
 	})
 }
 
@@ -263,9 +126,10 @@ func TestCalculator_Stop(t *testing.T) {
 			HeartbeatPrefix:      "worker-hb",
 			HeartbeatTTL:         6 * time.Second,
 			EmergencyGracePeriod: 3 * time.Second,
+			ColdStartWindow:      50 * time.Millisecond,
+			PlannedScaleWindow:   50 * time.Millisecond,
 		})
 		require.NoError(t, err)
-		calc.SetStabilizationWindows(50*time.Millisecond, 50*time.Millisecond)
 
 		err = calc.Start(ctx)
 		require.NoError(t, err)
@@ -299,7 +163,7 @@ func TestCalculator_Stop(t *testing.T) {
 
 		err = calc.Stop(ctx)
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "not started")
+		require.ErrorIs(t, err, types.ErrCalculatorNotStarted)
 	})
 }
 
@@ -333,10 +197,11 @@ func TestCalculator_WorkerMonitoring(t *testing.T) {
 			HeartbeatPrefix:      "worker-hb",
 			HeartbeatTTL:         2 * time.Second,
 			EmergencyGracePeriod: 1 * time.Second,
+			ColdStartWindow:      50 * time.Millisecond,
+			PlannedScaleWindow:   50 * time.Millisecond,
+			Cooldown:             100 * time.Millisecond,
 		})
 		require.NoError(t, err)
-		calc.SetStabilizationWindows(50*time.Millisecond, 50*time.Millisecond)
-		calc.SetCooldown(100 * time.Millisecond) // Short cooldown for testing
 
 		err = calc.Start(ctx)
 		require.NoError(t, err)
@@ -393,10 +258,11 @@ func TestCalculator_CooldownPreventsRebalancing(t *testing.T) {
 			HeartbeatPrefix:      "worker-hb",
 			HeartbeatTTL:         2 * time.Second,
 			EmergencyGracePeriod: 1 * time.Second,
+			ColdStartWindow:      50 * time.Millisecond,
+			PlannedScaleWindow:   50 * time.Millisecond,
+			Cooldown:             2 * time.Second,
 		})
 		require.NoError(t, err)
-		calc.SetStabilizationWindows(50*time.Millisecond, 50*time.Millisecond)
-		calc.SetCooldown(2 * time.Second) // Reduced from 5s to 2s
 
 		err = calc.Start(ctx)
 		require.NoError(t, err)
@@ -448,9 +314,9 @@ func TestCalculator_StabilizationWindow(t *testing.T) {
 			HeartbeatPrefix:      "worker-hb",
 			HeartbeatTTL:         6 * time.Second,
 			EmergencyGracePeriod: 3 * time.Second,
+			RestartRatio:         0.5,
 		})
 		require.NoError(t, err)
-		calc.SetRestartDetectionRatio(0.5) // 5 workers / 2 expected = 2.5 ratio > 0.5
 
 		window := calc.selectStabilizationWindow(ctx)
 		require.Equal(t, calc.ColdStartWindow, window)
@@ -485,9 +351,9 @@ func TestCalculator_StabilizationWindow(t *testing.T) {
 			HeartbeatPrefix:      "worker-hb",
 			HeartbeatTTL:         6 * time.Second,
 			EmergencyGracePeriod: 3 * time.Second,
+			RestartRatio:         0.5,
 		})
 		require.NoError(t, err)
-		calc.SetRestartDetectionRatio(0.5) // 1 worker / 5 expected = 0.2 ratio < 0.5
 
 		window := calc.selectStabilizationWindow(ctx)
 		require.Equal(t, calc.PlannedScaleWindow, window)
@@ -656,7 +522,7 @@ func TestCalculator_Stop_CleansUpAssignments(t *testing.T) {
 	assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-stop-cleanup-assignment")
 	heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-stop-cleanup-heartbeat")
 
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Create 3 partitions
 	partitions := []types.Partition{
@@ -676,6 +542,8 @@ func TestCalculator_Stop_CleansUpAssignments(t *testing.T) {
 		HeartbeatPrefix:      "worker",
 		HeartbeatTTL:         5 * time.Second,
 		EmergencyGracePeriod: 2 * time.Second,
+		ColdStartWindow:      50 * time.Millisecond,
+		PlannedScaleWindow:   50 * time.Millisecond,
 	})
 	require.NoError(t, err)
 

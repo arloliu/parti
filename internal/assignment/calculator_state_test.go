@@ -310,9 +310,9 @@ func TestCalculator_detectRebalanceType_Restart(t *testing.T) {
 		HeartbeatPrefix:      "test-hb",
 		HeartbeatTTL:         10 * time.Second,
 		EmergencyGracePeriod: 5 * time.Second,
+		RestartRatio:         0.5,
 	})
 	require.NoError(t, err)
-	calc.SetRestartDetectionRatio(0.5) // 50% threshold (not used anymore - removed restart detection)
 
 	// Set up previous workers (10 workers)
 	lastWorkers := map[string]bool{
@@ -621,10 +621,11 @@ func TestCalculator_StateTransitions_PreventsConcurrentRebalance(t *testing.T) {
 		HeartbeatPrefix:      "test-hb",
 		HeartbeatTTL:         1 * time.Second,
 		EmergencyGracePeriod: 500 * time.Millisecond,
+		Cooldown:             100 * time.Millisecond,
+		ColdStartWindow:      500 * time.Millisecond,
+		PlannedScaleWindow:   300 * time.Millisecond,
 	})
 	require.NoError(t, err)
-	calc.SetCooldown(100 * time.Millisecond)
-	calc.SetStabilizationWindows(500*time.Millisecond, 300*time.Millisecond) // Fast windows for test
 
 	ctx := context.Background()
 

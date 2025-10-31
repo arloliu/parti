@@ -9,6 +9,7 @@ import (
 
 	"github.com/arloliu/parti/internal/logging"
 	partitest "github.com/arloliu/parti/testing"
+	"github.com/arloliu/parti/types"
 	"github.com/stretchr/testify/require"
 )
 
@@ -228,7 +229,7 @@ func TestWorkerMonitor_StopBeforeStart(t *testing.T) {
 	// Stop without starting should return error
 	err := monitor.Stop()
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "not started")
+	require.ErrorIs(t, err, types.ErrWorkerMonitorNotStarted)
 }
 
 func TestWorkerMonitor_DoubleStart(t *testing.T) {
@@ -252,7 +253,7 @@ func TestWorkerMonitor_DoubleStart(t *testing.T) {
 	// Second start should fail
 	err = monitor.Start(ctx)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "already started")
+	require.ErrorIs(t, err, types.ErrWorkerMonitorAlreadyStarted)
 
 	// Cleanup
 	err = monitor.Stop()
@@ -311,7 +312,7 @@ func TestWorkerMonitor_StartAfterStop(t *testing.T) {
 	// Try to start again - should fail (monitor cannot be reused)
 	err = monitor.Start(ctx)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "already stopped")
+	require.ErrorIs(t, err, types.ErrWorkerMonitorAlreadyStopped)
 }
 
 func TestWorkerMonitor_MultipleWorkerChanges(t *testing.T) {

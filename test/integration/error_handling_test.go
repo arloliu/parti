@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arloliu/parti"
 	"github.com/arloliu/parti/test/testutil"
 	"github.com/arloliu/parti/types"
 	"github.com/stretchr/testify/require"
@@ -56,7 +55,7 @@ func TestErrorHandling_ConcurrentStart(t *testing.T) {
 		switch {
 		case err == nil:
 			successCount++
-		case errors.Is(err, parti.ErrAlreadyStarted):
+		case errors.Is(err, types.ErrAlreadyStarted):
 			alreadyStartedCount++
 		default:
 			t.Errorf("Unexpected error from Start(): %v", err)
@@ -132,7 +131,7 @@ func TestErrorHandling_ConcurrentStop(t *testing.T) {
 		switch {
 		case err == nil:
 			successCount++
-		case errors.Is(err, parti.ErrNotStarted):
+		case errors.Is(err, types.ErrNotStarted):
 			notStartedCount++
 		default:
 			t.Errorf("Unexpected error from Stop(): %v", err)

@@ -34,9 +34,10 @@ func TestCalculator_ScalingTransition_TimerFires(t *testing.T) {
 		HeartbeatPrefix:      "heartbeat",
 		HeartbeatTTL:         5 * time.Second,
 		EmergencyGracePeriod: 1 * time.Second,
+		ColdStartWindow:      100 * time.Millisecond,
+		PlannedScaleWindow:   50 * time.Millisecond,
 	})
 	require.NoError(t, err)
-	calc.SetStabilizationWindows(100*time.Millisecond, 50*time.Millisecond) // Very short windows for testing
 
 	ctx := context.Background()
 
@@ -81,10 +82,11 @@ func TestCalculator_ScalingTransition_WithRealStart(t *testing.T) {
 		HeartbeatPrefix:      "heartbeat",
 		HeartbeatTTL:         1 * time.Second,
 		EmergencyGracePeriod: 500 * time.Millisecond,
+		ColdStartWindow:      500 * time.Millisecond,
+		PlannedScaleWindow:   250 * time.Millisecond,
+		Cooldown:             0,
 	})
 	require.NoError(t, err)
-	calc.SetStabilizationWindows(500*time.Millisecond, 250*time.Millisecond) // Short windows for testing
-	calc.SetCooldown(0)                                                      // No cooldown for this test
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -150,9 +152,10 @@ func TestCalculator_ScalingTransition_ContextCancellation(t *testing.T) {
 		HeartbeatPrefix:      "heartbeat",
 		HeartbeatTTL:         5 * time.Second,
 		EmergencyGracePeriod: 1 * time.Second,
+		ColdStartWindow:      2 * time.Second,
+		PlannedScaleWindow:   1 * time.Second,
 	})
 	require.NoError(t, err)
-	calc.SetStabilizationWindows(2*time.Second, 1*time.Second) // Long window
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -194,10 +197,11 @@ func TestCalculator_ScalingTransition_StopBeforeWindow(t *testing.T) {
 		HeartbeatPrefix:      "heartbeat",
 		HeartbeatTTL:         5 * time.Second,
 		EmergencyGracePeriod: 1 * time.Second,
+		ColdStartWindow:      500 * time.Millisecond,
+		PlannedScaleWindow:   1 * time.Second,
+		Cooldown:             0,
 	})
 	require.NoError(t, err)
-	calc.SetStabilizationWindows(500*time.Millisecond, 1*time.Second) // Shorter window for faster test
-	calc.SetCooldown(0)
 
 	ctx := context.Background()
 
@@ -244,10 +248,11 @@ func TestCalculator_ScalingTransition_RapidStateChanges(t *testing.T) {
 		HeartbeatPrefix:      "heartbeat",
 		HeartbeatTTL:         500 * time.Millisecond,
 		EmergencyGracePeriod: 300 * time.Millisecond,
+		ColdStartWindow:      300 * time.Millisecond,
+		PlannedScaleWindow:   150 * time.Millisecond,
+		Cooldown:             0,
 	})
 	require.NoError(t, err)
-	calc.SetStabilizationWindows(300*time.Millisecond, 150*time.Millisecond)
-	calc.SetCooldown(0)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

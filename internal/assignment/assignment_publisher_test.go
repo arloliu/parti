@@ -29,7 +29,7 @@ func TestAssignmentPublisher_DiscoverHighestVersion(t *testing.T) {
 	// Initially should be 0 - DiscoverHighestVersion handles empty KV gracefully
 	err := publisher.DiscoverHighestVersion(ctx)
 	// Empty KV may return "no keys found" error - this is acceptable
-	if err != nil && err.Error() != "failed to list KV keys: nats: no keys found" {
+	if err != nil && !types.IsNoKeysFoundError(err) {
 		require.NoError(t, err)
 	}
 	require.Equal(t, int64(0), publisher.CurrentVersion())

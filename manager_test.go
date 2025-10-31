@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/arloliu/parti/types"
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/require"
 )
@@ -77,7 +78,7 @@ func TestNewManager_RequiredParameters(t *testing.T) {
 		mgr, err := NewManager(nil, conn, src, strategy)
 
 		require.Error(t, err)
-		require.ErrorIs(t, err, ErrInvalidConfig)
+		require.ErrorIs(t, err, types.ErrInvalidConfig)
 		require.Nil(t, mgr)
 	})
 
@@ -85,7 +86,7 @@ func TestNewManager_RequiredParameters(t *testing.T) {
 		mgr, err := NewManager(cfg, nil, src, strategy)
 
 		require.Error(t, err)
-		require.ErrorIs(t, err, ErrNATSConnectionRequired)
+		require.ErrorIs(t, err, types.ErrNATSConnectionRequired)
 		require.Nil(t, mgr)
 	})
 
@@ -93,7 +94,7 @@ func TestNewManager_RequiredParameters(t *testing.T) {
 		mgr, err := NewManager(cfg, conn, nil, strategy)
 
 		require.Error(t, err)
-		require.ErrorIs(t, err, ErrPartitionSourceRequired)
+		require.ErrorIs(t, err, types.ErrPartitionSourceRequired)
 		require.Nil(t, mgr)
 	})
 
@@ -101,7 +102,7 @@ func TestNewManager_RequiredParameters(t *testing.T) {
 		mgr, err := NewManager(cfg, conn, src, nil)
 
 		require.Error(t, err)
-		require.ErrorIs(t, err, ErrAssignmentStrategyRequired)
+		require.ErrorIs(t, err, types.ErrAssignmentStrategyRequired)
 		require.Nil(t, mgr)
 	})
 }

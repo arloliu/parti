@@ -24,34 +24,38 @@
 //
 // The Calculator should only be started on the leader worker:
 //
-//  1. Create calculator with New(kv, prefix, source, strategy, ...)
-//  2. Configure settings: SetCooldown(), SetMinThreshold(), etc.
-//  3. Start calculator with Start(ctx) (performs initial assignment)
-//  4. Calculator monitors workers in background
-//  5. Stop calculator with Stop() when stepping down from leadership
+//  1. Create calculator with NewCalculator(&Config{...})
+//  2. Start calculator with Start(ctx) (performs initial assignment)
+//  3. Calculator monitors workers in background
+//  4. Stop calculator with Stop() when stepping down from leadership
 //
 // Example:
 //
 //	// Leader worker creates and starts calculator
-//	calc := assignment.New(
-//	    kv,
-//	    "assignment",
-//	    partitionSource,
-//	    assignmentStrategy,
-//	    "worker-hb",
-//	    6*time.Second,
-//	)
-//
-//	// Configure rebalancing behavior
-//	calc.SetCooldown(10 * time.Second)
-//	calc.SetMinThreshold(0.2)
-//
-//	// Start assignment calculation
-//	err := calc.Start(ctx)
+//	calc, err := assignment.NewCalculator(&assignment.Config{
+//	    AssignmentKV:         assignmentKV,
+//	    HeartbeatKV:          heartbeatKV,
+//	    AssignmentPrefix:     "assignment",
+//	    Source:               partitionSource,
+//	    Strategy:             assignmentStrategy,
+//	    HeartbeatPrefix:      "worker-hb",
+//	    HeartbeatTTL:         6 * time.Second,
+//	    EmergencyGracePeriod: 3 * time.Second,
+//	    Cooldown:             10 * time.Second,
+//	    MinThreshold:         0.2,
+//	    ColdStartWindow:      30 * time.Second,
+//	    PlannedScaleWindow:   10 * time.Second,
+//	})
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
-//	defer calc.Stop()
+//
+//	// Start assignment calculation
+//	err = calc.Start(ctx)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	defer calc.Stop(ctx)
 //
 //	// Calculator now monitors workers and triggers rebalancing
 //

@@ -114,16 +114,16 @@ type Manager struct {
 //	mgr, err := parti.NewManager(&cfg, natsConn, src, curStrategy)
 func NewManager(cfg *Config, conn *nats.Conn, source PartitionSource, strategy AssignmentStrategy, opts ...Option) (*Manager, error) {
 	if cfg == nil {
-		return nil, ErrInvalidConfig
+		return nil, types.ErrInvalidConfig
 	}
 	if conn == nil {
-		return nil, ErrNATSConnectionRequired
+		return nil, types.ErrNATSConnectionRequired
 	}
 	if source == nil {
-		return nil, ErrPartitionSourceRequired
+		return nil, types.ErrPartitionSourceRequired
 	}
 	if strategy == nil {
-		return nil, ErrAssignmentStrategyRequired
+		return nil, types.ErrAssignmentStrategyRequired
 	}
 
 	// Fill in missing configuration values with defaults
@@ -193,7 +193,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	if m.ctx != nil {
 		m.mu.Unlock()
 
-		return ErrAlreadyStarted
+		return types.ErrAlreadyStarted
 	}
 
 	// Create manager context with parent
@@ -302,7 +302,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 	if m.ctx == nil {
 		m.mu.Unlock()
 
-		return ErrNotStarted
+		return types.ErrNotStarted
 	}
 
 	// Check if already in shutdown state (concurrent Stop() call)
@@ -310,7 +310,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 	if currentState == StateShutdown {
 		m.mu.Unlock()
 
-		return ErrNotStarted
+		return types.ErrNotStarted
 	}
 
 	// Transition to shutdown state
@@ -533,7 +533,7 @@ func (m *Manager) RefreshPartitions(ctx context.Context) error {
 	// Check if manager is started
 	currentState := m.State()
 	if currentState == StateInit || currentState == StateShutdown {
-		return ErrNotStarted
+		return types.ErrNotStarted
 	}
 
 	// Only leaders can trigger rebalancing
