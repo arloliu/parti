@@ -365,9 +365,9 @@ func setupCalculatorForWatcherTest(t *testing.T) (*Calculator, jetstream.KeyValu
 		HeartbeatPrefix:      "heartbeat",
 		HeartbeatTTL:         5 * time.Second,
 		EmergencyGracePeriod: 2 * time.Second, // Emergency grace period,
+		Logger:               logging.NewTest(t),
 	})
 	require.NoError(t, err)
-	calc.SetLogger(logging.NewTest(t))
 
 	cleanup := func() {
 		calc.stopWatcher()

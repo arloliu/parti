@@ -9,6 +9,8 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/arloliu/parti/internal/logging"
+	imetrics "github.com/arloliu/parti/internal/metrics"
 	"github.com/arloliu/parti/types"
 )
 
@@ -19,29 +21,27 @@ var (
 	ErrNoWorkerID     = errors.New("worker ID not set")
 )
 
-// Publisher publishes periodic heartbeats to NATS KV store.
+// Publisher publishes periodic heartbeats to NATS KV.
 //
-// Heartbeats are used by the leader to detect worker crashes and trigger
-// reassignment. Each worker publishes heartbeats at a regular interval,
-// and the leader monitors for missed heartbeats.
-//
-// The heartbeat key contains the worker's last heartbeat timestamp and
-// is automatically deleted when the TTL expires, indicating a crash.
+// Each worker maintains a heartbeat key in a KV bucket with a TTL.
+// If the worker crashes or stops publishing, the key expires and other
+// workers detect its absence.
 type Publisher struct {
 	kv       jetstream.KeyValue
 	prefix   string
 	workerID string
 	interval time.Duration
-	metrics  types.MetricsCollector
 
 	mu      sync.Mutex
 	started bool
 	stopCh  chan struct{}
 	doneCh  chan struct{}
 	ticker  *time.Ticker
+	logger  types.Logger
+	metrics types.WorkerMetrics
 }
 
-// New creates a new heartbeat publisher.
+// New creates a new heartbeat publisher with dependency injection.
 //
 // The KV bucket should be configured with a TTL of ~3x the heartbeat interval
 // to detect crashes after 3 missed heartbeats.
@@ -49,7 +49,10 @@ type Publisher struct {
 // Parameters:
 //   - kv: JetStream KV bucket for heartbeat storage
 //   - prefix: Key prefix for heartbeat keys (e.g., "worker-hb")
+//   - workerID: Worker ID for heartbeat publishing
 //   - interval: Heartbeat interval (typically 2s)
+//   - metrics: Worker metrics collector (nil creates no-op metrics)
+//   - logger: Logger instance (nil creates no-op logger)
 //
 // Returns:
 //   - *Publisher: New heartbeat publisher instance
@@ -61,41 +64,33 @@ type Publisher struct {
 //	    TTL:     6 * time.Second,  // 3x interval
 //	    Storage: jetstream.FileStorage,
 //	})
-//	publisher := heartbeat.New(kv, "worker-hb", 2*time.Second)
-func New(kv jetstream.KeyValue, prefix string, interval time.Duration) *Publisher {
+//	publisher := heartbeat.New(kv, "worker-hb", "worker-1", 2*time.Second, metrics, logger)
+func New(
+	kv jetstream.KeyValue,
+	prefix string,
+	workerID string,
+	interval time.Duration,
+	metrics types.WorkerMetrics,
+	logger types.Logger,
+) *Publisher {
+	// Provide no-op implementations if nil
+	if metrics == nil {
+		metrics = imetrics.NewNop()
+	}
+	if logger == nil {
+		logger = logging.NewNop()
+	}
+
 	return &Publisher{
 		kv:       kv,
 		prefix:   prefix,
+		workerID: workerID,
 		interval: interval,
+		logger:   logger,
+		metrics:  metrics,
 		stopCh:   make(chan struct{}),
 		doneCh:   make(chan struct{}),
 	}
-}
-
-// SetWorkerID sets the worker ID for heartbeat publishing.
-//
-// Must be called before Start().
-//
-// Parameters:
-//   - workerID: Worker ID to use in heartbeat key
-func (p *Publisher) SetWorkerID(workerID string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	p.workerID = workerID
-}
-
-// SetMetrics sets the metrics collector for heartbeat events.
-//
-// Optional. If not set, metrics are not recorded.
-//
-// Parameters:
-//   - metrics: Metrics collector instance
-func (p *Publisher) SetMetrics(metrics types.MetricsCollector) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	p.metrics = metrics
 }
 
 // Start begins publishing heartbeats in the background.

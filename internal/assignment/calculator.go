@@ -8,8 +8,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/arloliu/parti/internal/logging"
-	"github.com/arloliu/parti/internal/metrics"
 	"github.com/arloliu/parti/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -182,28 +180,6 @@ func (c *Calculator) SetStabilizationWindows(coldStart, plannedScale time.Durati
 	defer c.mu.Unlock()
 	c.ColdStartWindow = coldStart
 	c.PlannedScaleWindow = plannedScale
-}
-
-// SetMetrics sets the metrics collector.
-func (c *Calculator) SetMetrics(m types.MetricsCollector) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if m == nil {
-		c.Metrics = metrics.NewNop()
-	} else {
-		c.Metrics = m
-	}
-}
-
-// SetLogger sets the logger.
-func (c *Calculator) SetLogger(l types.Logger) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if l == nil {
-		c.Logger = logging.NewNop()
-	} else {
-		c.Logger = l
-	}
 }
 
 // SubscribeToStateChanges returns a channel for state updates and a function to unsubscribe.
@@ -410,6 +386,9 @@ func (c *Calculator) detectRebalanceType(lastWorkers, currentWorkers map[string]
 				"prev_count", prevCount,
 				"curr_count", currCount,
 			)
+
+			// Record emergency rebalance metric
+			c.Metrics.RecordEmergencyRebalance(len(disappearedWorkers))
 
 			return "emergency", 0 // No stabilization - immediate action
 		}
@@ -702,6 +681,24 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 
 	c.Logger.Info("worker change detected", "workers", len(workers))
 
+	// Calculate worker changes for metrics
+	added := 0
+	removed := 0
+	for w := range workers {
+		if !lastWorkersCopy[w] {
+			added++
+		}
+	}
+	for w := range lastWorkersCopy {
+		if !workers[w] {
+			removed++
+		}
+	}
+
+	// Record worker topology change
+	c.Metrics.RecordWorkerChange(added, removed)
+	c.Metrics.RecordActiveWorkers(len(workers))
+
 	// TIER 2: Determine rebalance type and stabilization window
 	reason, window := c.detectRebalanceType(lastWorkersCopy, workers)
 
@@ -788,12 +785,15 @@ func (c *Calculator) handleRebalance(ctx context.Context, reason string) error {
 
 // rebalance calculates and publishes new assignments.
 func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
+	start := time.Now()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	// Get current workers and partitions
 	workers, err := c.getActiveWorkers(ctx)
 	if err != nil {
+		c.Metrics.RecordRebalanceAttempt(lifecycle, false)
 		return err
 	}
 
@@ -801,19 +801,27 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 
 	partitions, err := c.Source.ListPartitions(ctx)
 	if err != nil {
+		c.Metrics.RecordRebalanceAttempt(lifecycle, false)
 		return err
 	}
 
 	c.Logger.Debug("partitions retrieved", "partition_count", len(partitions))
 
+	// Record partition count
+	c.Metrics.RecordPartitionCount(len(partitions))
+
 	if len(workers) == 0 {
 		c.Logger.Info("no active workers for assignment")
+		c.Metrics.RecordRebalanceDuration(time.Since(start).Seconds(), lifecycle)
+		c.Metrics.RecordRebalanceAttempt(lifecycle, true)
+
 		return nil
 	}
 
 	// Calculate new assignments using strategy
 	assignments, err := c.Strategy.Assign(workers, partitions)
 	if err != nil {
+		c.Metrics.RecordRebalanceAttempt(lifecycle, false)
 		return fmt.Errorf("assignment calculation failed: %w", err)
 	}
 
@@ -821,8 +829,13 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 
 	// Publish assignments via publisher component
 	if err := c.publisher.Publish(ctx, workers, assignments, lifecycle); err != nil {
+		c.Metrics.RecordRebalanceAttempt(lifecycle, false)
 		return err
 	}
+
+	// Record successful rebalance
+	c.Metrics.RecordRebalanceDuration(time.Since(start).Seconds(), lifecycle)
+	c.Metrics.RecordRebalanceAttempt(lifecycle, true)
 
 	// Update tracking state
 	clear(c.currentWorkers)

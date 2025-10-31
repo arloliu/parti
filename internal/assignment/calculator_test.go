@@ -586,11 +586,9 @@ func TestCalculatorStateChanges(t *testing.T) {
 			HeartbeatPrefix:      "worker-hb",
 			HeartbeatTTL:         6 * time.Second,
 			EmergencyGracePeriod: 3 * time.Second,
+			Logger:               partitest.NewTestLogger(t),
 		})
-		require.NoError(t, err)
-		calc.SetLogger(partitest.NewTestLogger(t))
-
-		// Subscribe and defer unsubscribe.
+		require.NoError(t, err) // Subscribe and defer unsubscribe.
 		ch, unsubscribe := calc.SubscribeToStateChanges()
 		defer unsubscribe()
 

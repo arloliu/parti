@@ -16,8 +16,7 @@ func TestPublisher_SetWorkerID(t *testing.T) {
 		_, nc := partitest.StartEmbeddedNATS(t)
 		kv := partitest.CreateJetStreamKV(t, nc, "test-hb-set-id")
 
-		publisher := New(kv, "worker-hb", 2*time.Second)
-		publisher.SetWorkerID("worker-1")
+		publisher := New(kv, "worker-hb", "worker-1", 2*time.Second, nil, nil)
 
 		require.Equal(t, "worker-1", publisher.WorkerID())
 	})
@@ -30,8 +29,7 @@ func TestPublisher_Start(t *testing.T) {
 		_, nc := partitest.StartEmbeddedNATS(t)
 		kv := partitest.CreateJetStreamKV(t, nc, "test-hb-start-1")
 
-		publisher := New(kv, "worker-hb", 100*time.Millisecond)
-		publisher.SetWorkerID("worker-1")
+		publisher := New(kv, "worker-hb", "worker-1", 100*time.Millisecond, nil, nil)
 
 		err := publisher.Start(ctx)
 		require.NoError(t, err)
@@ -53,7 +51,7 @@ func TestPublisher_Start(t *testing.T) {
 		_, nc := partitest.StartEmbeddedNATS(t)
 		kv := partitest.CreateJetStreamKV(t, nc, "test-hb-start-2")
 
-		publisher := New(kv, "worker-hb", 2*time.Second)
+		publisher := New(kv, "worker-hb", "", 2*time.Second, nil, nil)
 
 		err := publisher.Start(ctx)
 		require.ErrorIs(t, err, ErrNoWorkerID)
@@ -66,8 +64,7 @@ func TestPublisher_Start(t *testing.T) {
 		_, nc := partitest.StartEmbeddedNATS(t)
 		kv := partitest.CreateJetStreamKV(t, nc, "test-hb-start-3")
 
-		publisher := New(kv, "worker-hb", 2*time.Second)
-		publisher.SetWorkerID("worker-1")
+		publisher := New(kv, "worker-hb", "worker-1", 2*time.Second, nil, nil)
 
 		err := publisher.Start(ctx)
 		require.NoError(t, err)
@@ -89,8 +86,7 @@ func TestPublisher_Stop(t *testing.T) {
 		_, nc := partitest.StartEmbeddedNATS(t)
 		kv := partitest.CreateJetStreamKV(t, nc, "test-hb-stop-1")
 
-		publisher := New(kv, "worker-hb", 2*time.Second)
-		publisher.SetWorkerID("worker-1")
+		publisher := New(kv, "worker-hb", "worker-1", 2*time.Second, nil, nil)
 
 		err := publisher.Start(ctx)
 		require.NoError(t, err)
@@ -104,7 +100,7 @@ func TestPublisher_Stop(t *testing.T) {
 		_, nc := partitest.StartEmbeddedNATS(t)
 		kv := partitest.CreateJetStreamKV(t, nc, "test-hb-stop-2")
 
-		publisher := New(kv, "worker-hb", 2*time.Second)
+		publisher := New(kv, "worker-hb", "worker-1", 2*time.Second, nil, nil)
 
 		err := publisher.Stop()
 		require.ErrorIs(t, err, ErrNotStarted)
@@ -119,8 +115,7 @@ func TestPublisher_PeriodicHeartbeats(t *testing.T) {
 		kv := partitest.CreateJetStreamKV(t, nc, "test-hb-periodic")
 
 		// Use short interval for testing
-		publisher := New(kv, "worker-hb", 100*time.Millisecond)
-		publisher.SetWorkerID("worker-1")
+		publisher := New(kv, "worker-hb", "worker-1", 100*time.Millisecond, nil, nil)
 
 		err := publisher.Start(ctx)
 		require.NoError(t, err)
@@ -170,8 +165,7 @@ func TestPublisher_TTLExpiry(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		publisher := New(kv, "worker-hb", 2*time.Second) // Longer than TTL
-		publisher.SetWorkerID("worker-1")
+		publisher := New(kv, "worker-hb", "worker-1", 2*time.Second, nil, nil) // Longer than TTL
 
 		err = publisher.Start(ctx)
 		require.NoError(t, err)
@@ -205,8 +199,8 @@ func TestPublisher_MultipleWorkers(t *testing.T) {
 		// Create three publishers
 		publishers := make([]*Publisher, 3)
 		for i := range publishers {
-			publishers[i] = New(kv, "worker-hb", 100*time.Millisecond)
-			publishers[i].SetWorkerID(fmt.Sprintf("worker-%d", i+1))
+			workerID := fmt.Sprintf("worker-%d", i+1)
+			publishers[i] = New(kv, "worker-hb", workerID, 100*time.Millisecond, nil, nil)
 
 			err := publishers[i].Start(ctx)
 			require.NoError(t, err)
@@ -238,8 +232,7 @@ func TestPublisher_KeyFormat(t *testing.T) {
 		_, nc := partitest.StartEmbeddedNATS(t)
 		kv := partitest.CreateJetStreamKV(t, nc, "test-hb-keyformat")
 
-		publisher := New(kv, "worker-hb", 2*time.Second)
-		publisher.SetWorkerID("worker-123")
+		publisher := New(kv, "worker-hb", "worker-123", 2*time.Second, nil, nil)
 
 		err := publisher.Start(ctx)
 		require.NoError(t, err)

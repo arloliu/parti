@@ -24,22 +24,70 @@ func NewNop() *NopMetrics {
 	return &NopMetrics{}
 }
 
+// ManagerMetrics implementation
+
 // RecordStateTransition discards the state transition metric.
 func (n *NopMetrics) RecordStateTransition(_ /* from */, _ /* to */ types.State, _ /* duration */ float64) {
 	// No-op
 }
 
-// RecordAssignmentChange discards the assignment change metric.
-func (n *NopMetrics) RecordAssignmentChange(_ /* added */, _ /* removed */ int, _ /* version */ int64) {
+// RecordLeadershipChange discards the leadership change metric.
+func (n *NopMetrics) RecordLeadershipChange(_ /* newLeader */ string) {
 	// No-op
 }
+
+// CalculatorMetrics implementation
+
+// RecordRebalanceDuration discards the rebalance duration metric.
+func (n *NopMetrics) RecordRebalanceDuration(_ /* duration */ float64, _ /* reason */ string) {
+	// No-op
+}
+
+// RecordRebalanceAttempt discards the rebalance attempt metric.
+func (n *NopMetrics) RecordRebalanceAttempt(_ /* reason */ string, _ /* success */ bool) {
+	// No-op
+}
+
+// RecordPartitionCount discards the partition count metric.
+func (n *NopMetrics) RecordPartitionCount(_ /* count */ int) {
+	// No-op
+}
+
+// RecordKVOperationDuration discards the KV operation duration metric.
+func (n *NopMetrics) RecordKVOperationDuration(_ /* operation */ string, _ /* duration */ float64) {
+	// No-op
+}
+
+// RecordStateChangeDropped discards the state change dropped metric.
+func (n *NopMetrics) RecordStateChangeDropped() {
+	// No-op
+}
+
+// RecordEmergencyRebalance discards the emergency rebalance metric.
+func (n *NopMetrics) RecordEmergencyRebalance(_ /* disappearedWorkers */ int) {
+	// No-op
+}
+
+// RecordWorkerChange discards the worker topology change metric.
+func (n *NopMetrics) RecordWorkerChange(_ /* added */, _ /* removed */ int) {
+	// No-op
+}
+
+// RecordActiveWorkers discards the active workers metric.
+func (n *NopMetrics) RecordActiveWorkers(_ /* count */ int) {
+	// No-op
+}
+
+// WorkerMetrics implementation
 
 // RecordHeartbeat discards the heartbeat metric.
 func (n *NopMetrics) RecordHeartbeat(_ /* workerID */ string, _ /* success */ bool) {
 	// No-op
 }
 
-// RecordLeadershipChange discards the leadership change metric.
-func (n *NopMetrics) RecordLeadershipChange(_ /* newLeader */ string) {
+// AssignmentMetrics implementation
+
+// RecordAssignmentChange discards the assignment change metric.
+func (n *NopMetrics) RecordAssignmentChange(_ /* added */, _ /* removed */ int, _ /* version */ int64) {
 	// No-op
 }

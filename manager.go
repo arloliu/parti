@@ -771,8 +771,7 @@ func (m *Manager) monitorLeadership() {
 // startHeartbeat starts publishing heartbeats.
 func (m *Manager) startHeartbeat(kv jetstream.KeyValue) error {
 	workerID := m.WorkerID()
-	publisher := heartbeat.New(kv, "heartbeat", m.cfg.HeartbeatInterval)
-	publisher.SetWorkerID(workerID)
+	publisher := heartbeat.New(kv, "heartbeat", workerID, m.cfg.HeartbeatInterval, m.metrics, m.logger)
 	m.heartbeat = publisher
 
 	// Start heartbeat in background
