@@ -99,7 +99,7 @@ func New(
 // Continues until Stop() is called.
 //
 // Parameters:
-//   - ctx: Context for cancellation
+//   - ctx: Context for initial heartbeat publish
 //
 // Returns:
 //   - error: ErrAlreadyStarted if already running, ErrNoWorkerID if worker ID not set
@@ -118,7 +118,7 @@ func (p *Publisher) Start(ctx context.Context) error {
 	p.started = true
 	p.ticker = time.NewTicker(p.interval)
 
-	// Publish first heartbeat immediately
+	// Publish first heartbeat immediately with provided context (prevents startup hang)
 	if err := p.publish(ctx); err != nil {
 		p.started = false
 		return fmt.Errorf("failed to publish initial heartbeat: %w", err)

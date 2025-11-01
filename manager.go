@@ -196,7 +196,8 @@ func (m *Manager) Start(ctx context.Context) error {
 		return types.ErrAlreadyStarted
 	}
 
-	// Create manager context with parent
+	// Create manager context with independent lifecycle (not tied to startup context)
+	// The startup ctx parameter controls startup timeout, not manager lifetime
 	m.ctx, m.cancel = context.WithCancel(context.Background())
 	m.mu.Unlock()
 
@@ -1022,8 +1023,13 @@ func (m *Manager) stopCalculator() {
 		// No state transition needed for non-leader states
 	}
 
-	// Stop calculator with timeout for cleanup
-	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Stop calculator with timeout derived from manager context
+	// Use manager's context if available, otherwise background (for safety during shutdown)
+	baseCtx := context.Background()
+	if m.ctx != nil {
+		baseCtx = m.ctx
+	}
+	stopCtx, stopCancel := context.WithTimeout(baseCtx, 5*time.Second)
 	defer stopCancel()
 
 	if err := m.calculator.Stop(stopCtx); err != nil {
