@@ -102,7 +102,7 @@ func WithHashSeed(seed uint64) ConsistentHashOption {
 //	)
 func (ch *ConsistentHash) Assign(workers []string, partitions []types.Partition) (map[string][]types.Partition, error) {
 	if len(workers) == 0 {
-		return nil, errors.New("no workers available for assignment")
+		return nil, ErrNoWorkers
 	}
 
 	// Create hash ring with all workers

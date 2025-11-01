@@ -1,10 +1,6 @@
 package strategy
 
-import (
-	"errors"
-
-	"github.com/arloliu/parti/types"
-)
+import "github.com/arloliu/parti/types"
 
 // RoundRobin implements simple round-robin partition assignment.
 type RoundRobin struct{}
@@ -50,7 +46,7 @@ func NewRoundRobin() *RoundRobin {
 //	)
 func (rr *RoundRobin) Assign(workers []string, partitions []types.Partition) (map[string][]types.Partition, error) {
 	if len(workers) == 0 {
-		return nil, errors.New("no workers available for assignment")
+		return nil, ErrNoWorkers
 	}
 
 	// Initialize assignments map
