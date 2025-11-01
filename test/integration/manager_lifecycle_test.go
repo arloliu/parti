@@ -22,6 +22,8 @@ func TestManager_StartStop(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
+	t.Parallel()
+
 	// Start NATS server
 	srv, conn := partitest.StartEmbeddedNATS(t)
 	defer srv.Shutdown()
@@ -75,6 +77,8 @@ func TestManager_MultipleWorkers(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
+
+	t.Parallel()
 
 	// Start NATS server
 	srv, conn := partitest.StartEmbeddedNATS(t)

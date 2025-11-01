@@ -19,6 +19,8 @@ func TestLeaderElection_BasicFailover(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
+	t.Parallel()
+
 	// Start NATS
 	nc, cleanup := testutil.StartEmbeddedNATS(t)
 	defer cleanup()
@@ -109,6 +111,8 @@ func TestLeaderElection_ColdStart(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
+	t.Parallel()
+
 	// Start NATS
 	nc, cleanup := testutil.StartEmbeddedNATS(t)
 	defer cleanup()
@@ -148,6 +152,8 @@ func TestLeaderElection_OnlyLeaderRunsCalculator(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
+
+	t.Parallel()
 
 	// Start NATS
 	nc, cleanup := testutil.StartEmbeddedNATS(t)
@@ -200,6 +206,8 @@ func TestLeaderElection_LeaderRenewal(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
+	t.Parallel()
+
 	// Start NATS
 	nc, cleanup := testutil.StartEmbeddedNATS(t)
 	defer cleanup()
@@ -248,6 +256,8 @@ func TestLeaderElection_AssignmentPreservation(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
+
+	t.Parallel()
 
 	// Start NATS
 	nc, cleanup := testutil.StartEmbeddedNATS(t)
@@ -423,6 +433,8 @@ func TestLeaderElection_AssignmentVersioning(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
+	t.Parallel()
+
 	// Start NATS
 	nc, cleanup := testutil.StartEmbeddedNATS(t)
 	defer cleanup()
@@ -549,6 +561,8 @@ func TestLeaderElection_NoOrphansOnFailover(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
+
+	t.Parallel()
 
 	// Start NATS
 	nc, cleanup := testutil.StartEmbeddedNATS(t)
@@ -972,6 +986,8 @@ func TestLeaderElection_FollowersKeepAssignmentDuringCleanup(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
+
+	t.Parallel()
 
 	// Start NATS
 	nc, cleanup := testutil.StartEmbeddedNATS(t)

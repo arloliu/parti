@@ -20,6 +20,8 @@ func TestIntegration_Emergency_WorkerCrash_ReassignsPartitions(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
+	t.Parallel()
+
 	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 
@@ -100,6 +102,8 @@ func TestIntegration_Emergency_CascadingFailures_HandlesGracefully(t *testing.T)
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+
+	t.Parallel()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 	defer cancel()
@@ -186,6 +190,8 @@ func TestIntegration_Emergency_K8sRollingUpdate_NoDataLoss(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
+	t.Parallel()
+
 	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 	defer cancel()
 
@@ -270,6 +276,8 @@ func TestIntegration_Emergency_SlowWorker_DoesNotBlockSystem(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+
+	t.Parallel()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()

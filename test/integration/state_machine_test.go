@@ -29,6 +29,8 @@ func TestStateMachine_ColdStart(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
+	t.Parallel()
+
 	// Use t.Context() for automatic cancellation
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
@@ -81,6 +83,8 @@ func TestStateMachine_PlannedScale(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+
+	t.Parallel()
 
 	// Use t.Context() for automatic cancellation
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
@@ -173,6 +177,8 @@ func TestStateMachine_Emergency(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+
+	t.Parallel()
 
 	// Use t.Context() for automatic cancellation
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
@@ -325,6 +331,8 @@ func TestStateMachine_Restart(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
+	t.Parallel()
+
 	// Use t.Context() which auto-cancels on test completion
 	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
@@ -397,6 +405,8 @@ func TestStateMachine_StateTransitionValidation(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+
+	t.Parallel()
 
 	// Use t.Context() for automatic cancellation
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
