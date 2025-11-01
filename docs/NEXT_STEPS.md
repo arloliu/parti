@@ -159,10 +159,10 @@ Total Reduction: 460 lines deleted + 51 lines from calculator.go = 511 lines (13
 - ✅ Phase 2.1: State Machine Concurrency - 6 tests (383 lines)
 - ✅ Phase 3: Worker Monitoring - Assessment complete (existing coverage sufficient)
 - ✅ Phase 4: Assignment Calculation Edge Cases - 10 tests (381 lines)
-- 📋 Phase 5: Cooldown & Stabilization Timing - Ready to start
+- ✅ Phase 5: Cooldown & Stabilization Timing - 8 tests (439 lines)
 - 📋 Phase 6: Production Scenario Testing - Scenario-based approach (replaces property-based)
-- **Total Time So Far:** ~7.5 hours (Phase 1: 4h, Phase 2.1: 2h, Phase 3: 0.5h, Phase 4: 1h)
-- **Time Remaining:** ~12.5 hours (Phase 5: 2h, Phase 6: 4h, Integration: 4h+)
+- **Total Time So Far:** ~9.5 hours (Phase 1: 4h, Phase 2.1: 2h, Phase 3: 0.5h, Phase 4: 1h, Phase 5: 1h)
+- **Time Remaining:** ~10.5 hours (Phase 6: 4h, Integration: 4h+)
 
 ---
 
@@ -457,6 +457,55 @@ TestCalculator_StabilizationTimeout_TriggersRebalance
 TestCalculator_ColdStart_UsesLongerWindow
 TestCalculator_PlannedScale_UsesShorterWindow
 ```
+
+---
+
+#### Phase 5: Cooldown & Stabilization Timing ✅ COMPLETE (2 hours planned, ~1h actual)
+**Priority**: MEDIUM - Timing bugs cause performance issues
+**Status**: ✅ Complete - Comprehensive cooldown behavior tests
+**Actual Time**: ~1 hour
+**Coverage Impact**: Stable (behavior-focused testing)
+
+**Implementation Summary:**
+Created `internal/assignment/calculator_cooldown_test.go` (439 lines) with **8 comprehensive test functions** (1 skipped):
+
+**5.1 Cooldown Enforcement** ✅
+```go
+✅ TestCalculator_RebalanceAttemptDuringCooldown_Blocked (2.84s)
+   - Verifies cooldown prevents rebalancing during active period
+
+✅ TestCalculator_RebalanceAfterCooldown_Allowed (4.16s)
+   - Verifies rebalance proceeds after cooldown expires
+
+✅ TestCalculator_CooldownBoundary_ExactTiming (3.20s)
+   - Tests cooldown at exact boundary (just before/after expiry)
+
+✅ TestCalculator_MultipleCooldowns_Sequential (11.15s)
+   - Tests multiple cooldown cycles work correctly
+
+✅ TestCalculator_TriggerRebalance_BypassesCooldown (1.15s)
+   - Verifies TriggerRebalance() bypasses cooldown (by design)
+
+✅ TestCalculator_CooldownReset_AfterEachRebalance (7.40s)
+   - Verifies cooldown timer resets after each rebalance
+
+✅ TestCalculator_Cooldown_WithPartitionRefresh (1.26s)
+   - Tests cooldown with partition source changes
+
+⏭️ TestCalculator_EmergencyDuringCooldown_BypassesCooldown (SKIPPED)
+   - Better tested in integration tests (emergency_scenarios_test.go)
+```
+
+**5.2 Stabilization Window Behavior** ⏭️ DEFERRED
+```go
+// Reason: Existing tests already cover stabilization windows
+// Covered by:
+//   - TestCalculator_StabilizationWindow (calculator_test.go)
+//   - TestCalculator_RapidScaling_BatchesChanges (calculator_scaling_test.go)
+//   - Integration tests for K8s rolling updates
+```
+
+**New Test File:** `calculator_cooldown_test.go` (439 lines, ~32s execution)
 
 ---
 
