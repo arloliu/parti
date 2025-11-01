@@ -182,9 +182,27 @@ func NewManager(cfg *Config, conn *nats.Conn, source PartitionSource, strategy A
 // Start initializes and runs the manager.
 //
 // Blocks until worker ID claimed and initial assignment received.
+// The manager lifecycle runs independently from the startup context - ctx is only
+// used to control the startup timeout, not the manager's operational lifetime.
+//
+// IMPORTANT: On error, caller MUST call Stop(ctx) to clean up resources:
+//   - Stops ID renewal goroutine
+//   - Releases claimed stable worker ID
+//   - Cancels background operations
+//   - Prevents goroutine and resource leaks
+//
+// Example usage:
+//
+//	mgr := parti.NewManager(cfg, conn)
+//	if err := mgr.Start(ctx); err != nil {
+//	    // Cleanup on startup failure
+//	    _ = mgr.Stop(context.Background())
+//	    return err
+//	}
+//	defer mgr.Stop(context.Background())
 //
 // Parameters:
-//   - ctx: Context for cancellation and timeout
+//   - ctx: Context for startup timeout control (not manager lifetime)
 //
 // Returns:
 //   - error: Startup error or context cancellation
@@ -1023,13 +1041,10 @@ func (m *Manager) stopCalculator() {
 		// No state transition needed for non-leader states
 	}
 
-	// Stop calculator with timeout derived from manager context
-	// Use manager's context if available, otherwise background (for safety during shutdown)
-	baseCtx := context.Background()
-	if m.ctx != nil {
-		baseCtx = m.ctx
-	}
-	stopCtx, stopCancel := context.WithTimeout(baseCtx, 5*time.Second)
+	// Stop calculator with fresh context for cleanup
+	// IMPORTANT: Cannot use m.ctx here because it's already cancelled during Stop()
+	// Creating a timeout from cancelled context would result in immediate cancellation
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer stopCancel()
 
 	if err := m.calculator.Stop(stopCtx); err != nil {
