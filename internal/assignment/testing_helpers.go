@@ -24,6 +24,7 @@ func (m *mockSource) ListPartitions(_ context.Context) ([]types.Partition, error
 	if m.err != nil {
 		return nil, m.err
 	}
+
 	return m.partitions, nil
 }
 
@@ -60,6 +61,8 @@ func (m *mockStrategy) Assign(workers []string, partitions []types.Partition) (m
 //
 // This helper eliminates duplicate NATS/KV setup code across test files
 // and provides standardized test fixtures.
+//
+//nolint:unused // Reserved for future test refactoring
 type testSetup struct {
 	AssignmentKV jetstream.KeyValue
 	HeartbeatKV  jetstream.KeyValue
@@ -84,6 +87,8 @@ type testSetup struct {
 //	setup := newTestSetup(t, "test-calculator-start")
 //	calc := setup.newCalculator(t)
 //	defer calc.Stop()
+//
+//nolint:unused // Reserved for future test refactoring
 func newTestSetup(t *testing.T, testName string) *testSetup {
 	t.Helper()
 	_, nc := partitest.StartEmbeddedNATS(t)
@@ -114,6 +119,8 @@ func newTestSetup(t *testing.T, testName string) *testSetup {
 //	calc := setup.newCalculator(t, func(cfg *Config) {
 //	    cfg.HeartbeatTTL = 10 * time.Second
 //	})
+//
+//nolint:unused // Reserved for future test refactoring
 func (s *testSetup) newCalculator(t *testing.T, opts ...func(*Config)) *Calculator {
 	t.Helper()
 
@@ -134,7 +141,9 @@ func (s *testSetup) newCalculator(t *testing.T, opts ...func(*Config)) *Calculat
 	}
 
 	calc, err := NewCalculator(cfg)
+
 	require.NoError(t, err)
+
 	return calc
 }
 
@@ -147,6 +156,8 @@ func (s *testSetup) newCalculator(t *testing.T, opts ...func(*Config)) *Calculat
 //   - kv: Heartbeat KV bucket
 //   - prefix: Heartbeat key prefix
 //   - workerID: Worker identifier
+//
+//nolint:unused // Reserved for future test refactoring
 func publishTestHeartbeat(t *testing.T, kv jetstream.KeyValue, prefix, workerID string) {
 	t.Helper()
 	key := prefix + "." + workerID
@@ -163,6 +174,8 @@ func publishTestHeartbeat(t *testing.T, kv jetstream.KeyValue, prefix, workerID 
 //   - kv: Heartbeat KV bucket
 //   - prefix: Heartbeat key prefix
 //   - workerID: Worker identifier
+//
+//nolint:unused // Reserved for future test refactoring
 func deleteTestHeartbeat(t *testing.T, kv jetstream.KeyValue, prefix, workerID string) {
 	t.Helper()
 	key := prefix + "." + workerID

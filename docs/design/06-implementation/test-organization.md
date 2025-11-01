@@ -478,7 +478,7 @@ cfg.Logger = logger.NewStdLogger(logger.LevelDebug)
    - Multi-node scenarios
    - Production-like configurations
 
-2. **Load Tests** (`test/load/`):
+2. **Load Tests** (`test/stress/`):
    - Performance under load
    - Stress testing
    - Resource usage

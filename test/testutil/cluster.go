@@ -35,15 +35,15 @@ func IntegrationTestConfig() parti.Config {
 	cfg := parti.Config{
 		WorkerIDPrefix:        "worker",
 		WorkerIDMin:           0,
-		WorkerIDMax:           10,
+		WorkerIDMax:           100,                    // Support up to 100 workers for load tests
 		WorkerIDTTL:           5 * time.Second,        // Reduced from 10s
 		HeartbeatInterval:     500 * time.Millisecond, // Reduced from 1s
 		HeartbeatTTL:          2 * time.Second,        // Reduced from 3s
 		ElectionTimeout:       2 * time.Second,        // Reduced from 5s - faster leader election
 		StartupTimeout:        10 * time.Second,       // Reduced from 25s
 		ShutdownTimeout:       3 * time.Second,        // Reduced from 5s
-		ColdStartWindow:       1 * time.Second,        // Reduced from 2s - faster cold start detection
-		PlannedScaleWindow:    500 * time.Millisecond, // Reduced from 1s
+		ColdStartWindow:       3 * time.Second,        // Increased from 1s to exceed MinRebalanceInterval
+		PlannedScaleWindow:    2 * time.Second,        // Increased from 500ms to match MinRebalanceInterval
 		RestartDetectionRatio: 0.5,
 		Assignment: parti.AssignmentConfig{
 			MinRebalanceInterval: 2 * time.Second, // Reduced from default 10s - faster rebalancing in tests

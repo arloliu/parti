@@ -1,17 +1,18 @@
 # Test Directory
 
-This directory contains integration and end-to-end tests for the `parti` library.
+This directory contains all tests for the `parti` library, organized by test type and execution characteristics.
 
 ## Structure
 
 ```
 test/
-├── integration/                        # Integration tests (58 tests, ~1m 45s)
+├── integration/                        # Integration tests (functional correctness)
 │   ├── assignment_correctness_test.go # All partitions assigned, no duplicates
 │   ├── claimer_context_test.go        # Context lifecycle for stable IDs
 │   ├── emergency_hysteresis_test.go   # Emergency detection with grace period
 │   ├── emergency_scenarios_test.go    # Worker crash, cascading failures, K8s updates
 │   ├── error_handling_test.go         # Concurrent start/stop, error conditions
+│   ├── graceful_shutdown_test.go      # Shutdown behavior and cleanup
 │   ├── leader_election_test.go        # Election, failover, assignment preservation
 │   ├── manager_lifecycle_test.go      # Basic start/stop, multiple workers
 │   ├── nats_failure_test.go          # NATS disconnection and reconnection
@@ -20,9 +21,19 @@ test/
 │   ├── state_machine_test.go          # State transitions (cold start, scaling, emergency)
 │   ├── strategy_test.go               # Assignment strategy verification
 │   ├── subscription_helper_test.go    # Subscription helpers
+│   ├── timing_scenarios_test.go       # Timing and coordination scenarios
 │   └── watcher_test.go                # KV watcher behavior
-└── testutil/                           # Shared test utilities
-    └── nats.go                         # Embedded NATS server utilities
+├── stress/                             # Stress & performance tests
+│   ├── memory_benchmark_test.go       # Isolated memory consumption measurements
+│   ├── scale_workers_test.go          # Worker scaling (1-50+ workers)
+│   └── README.md                      # Stress test documentation
+├── testutil/                           # Shared test utilities
+│   ├── external_nats.go               # External NATS server (process isolation)
+│   ├── external_nats_test.go          # External NATS infrastructure tests
+│   └── nats.go                        # Embedded NATS server utilities
+└── cmd/
+    └── nats-server/                    # Standalone NATS server binary
+        └── main.go                     # For memory isolation benchmarks
 ```
 
 ## Running Tests
@@ -33,36 +44,48 @@ test/
 # Fast unit tests (~30s)
 make test-unit
 
-# Comprehensive integration tests (~1m 45s with parallelism)
+# Integration tests (~1m 45s, functional correctness)
 make test-integration
 
-# All tests with race detector
+# Stress tests (~15-20 minutes, performance/memory benchmarks)
+make test-stress
+
+# All tests (unit + integration + stress)
 make test-all
 
-# Specific test file
+# Specific integration test
 go test -tags=integration ./test/integration -run TestLeaderElection
 
-# Specific test function
-go test -tags=integration ./test/integration -run TestLeaderElection_BasicFailover -v
+# Specific stress test
+go test -tags=integration ./test/stress -run TestMemoryBenchmark_IsolatedParti/1w-100p
 ```
 
-### Run All Tests (including integration)
-```bash
-go test -tags=integration ./...
-```
-
-### Run Only Unit Tests (fast, <30s)
+### Run Unit Tests (fast, <30s)
 ```bash
 make test-unit
 # OR
 go test ./... -short
 ```
 
-### Run Only Integration Tests (~1m 45s)
+### Run Integration Tests (~1m 45s)
 ```bash
 make test-integration
 # OR
 go test -tags=integration ./test/integration
+```
+
+### Run Stress Tests (~15-20 minutes)
+```bash
+make test-stress
+# OR
+go test -tags=integration -timeout=20m ./test/stress
+```
+
+### Run All Tests (complete suite)
+```bash
+make test-all
+# OR
+go test -tags=integration ./...
 ```
 
 ### Run With Race Detector
@@ -77,19 +100,43 @@ go test -race -tags=integration ./test/integration
 ## Test Categories
 
 ### Unit Tests
-- Located alongside implementation files (`*_test.go`)
-- Fast execution (<30 seconds total)
-- Use standard Go testing patterns
-- Run without build tags: `go test ./...`
+- **Location:** Alongside implementation files (`*_test.go`)
+- **Execution:** Fast (<30 seconds total)
+- **Purpose:** Test individual functions and components in isolation
+- **Run:** `go test ./...` (no build tags required)
+- **Coverage:** All public functions and edge cases
 
-### Integration Tests
-- Located in `test/integration/` directory
-- Require build tag: `-tags=integration`
-- Use embedded NATS server (no external dependencies)
-- Run in parallel with `t.Parallel()` for optimal performance
-- Execution time: ~1m 45s (58 tests)
-- Each test creates isolated NATS server and workers
-- Test real distributed system behavior (TTL, election, rebalancing)
+### Integration Tests (`test/integration/`)
+- **Location:** `test/integration/` directory
+- **Build Tag:** Requires `-tags=integration`
+- **Duration:** ~1m 45s with parallel execution
+- **Purpose:** Validate distributed system behavior and cross-component interactions
+- **Infrastructure:** Uses embedded NATS server (no external dependencies)
+- **Key Features:**
+  - Real distributed coordination (leader election, rebalancing)
+  - TTL-based stable ID claiming
+  - State machine transitions (cold start, scaling, emergency)
+  - NATS failure scenarios (disconnection/reconnection)
+  - Partition refresh and assignment strategies
+- **Run:** `make test-integration` or `go test -tags=integration ./test/integration`
+
+### Stress Tests (`test/stress/`)
+- **Location:** `test/stress/` directory
+- **Build Tag:** Requires `-tags=integration`
+- **Duration:** ~15-20 minutes (long-running performance tests)
+- **Purpose:** Performance benchmarking, memory profiling, scalability validation
+- **Infrastructure:** Uses external NATS server in separate process for memory isolation
+- **Key Features:**
+  - **Memory benchmarks:** Accurate measurements without NATS overhead
+  - **Scalability tests:** 1-50+ workers with various partition counts
+  - **Performance baselines:** Reference metrics for regression detection
+  - **Binary caching:** 250,000x speedup (first compile: 628ms, cached: 2.51µs)
+- **Key Results:**
+  - Memory plateaus at ~5.5 MB for 10+ workers (excellent horizontal scaling)
+  - Embedded NATS adds ~2.4 MB overhead (~38% contamination)
+  - Startup time: ~4s per worker (linear scaling)
+- **Run:** `make test-stress` or `go test -tags=integration -timeout=20m ./test/stress`
+- **Documentation:** See `test/stress/README.md` for complete details
 
 ### Performance Optimization
 - All integration tests use `t.Parallel()` for concurrent execution

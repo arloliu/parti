@@ -285,8 +285,6 @@ TestIntegration_Emergency_RollingUpdate_NoFalseEmergencies
 - ✅ Core concurrency behavior thoroughly tested
 - ✅ Race conditions prevented and verified
 - ✅ Graceful handling of stop-during-transition
-- ⏭️ Property-based tests deferred to Phase 6 (systematic approach)
-- ⏭️ Additional notification tests deferred (existing coverage sufficient)
 
 ---
 

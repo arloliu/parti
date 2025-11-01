@@ -88,7 +88,6 @@ func TestEmergency_BasicScenarios(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt // Capture range variable
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -145,12 +144,12 @@ func TestEmergency_SingleWorkerDisappears_ThresholdCalculation(t *testing.T) {
 	}
 
 	// Initial check
-	emergency, workers := detector.CheckEmergency(prev, curr)
+	emergency, _ := detector.CheckEmergency(prev, curr)
 	require.False(t, emergency)
 
 	// After grace period - should still be emergency even though only 10% lost
 	time.Sleep(110 * time.Millisecond)
-	emergency, workers = detector.CheckEmergency(prev, curr)
+	emergency, workers := detector.CheckEmergency(prev, curr)
 	require.True(t, emergency, "Even 1 worker disappearing (10%) should be emergency")
 	require.Len(t, workers, 1)
 	require.Contains(t, workers, "worker-10")
@@ -323,7 +322,6 @@ func TestEmergency_WorkerFlapping(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			detector := NewEmergencyDetector(100 * time.Millisecond)

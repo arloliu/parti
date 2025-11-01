@@ -10,8 +10,9 @@ COVERAGE_HTML   := $(COVERAGE_DIR)/coverage.html
 
 # Source files
 ALL_GO_FILES    := $(shell find . -name "*.go" -not -path "./vendor/*")
-TEST_DIRS       := $(sort $(dir $(shell find . -name "*_test.go" -not -path "./vendor/*" -not -path "./test/integration/*")))
+TEST_DIRS       := $(sort $(dir $(shell find . -name "*_test.go" -not -path "./vendor/*" -not -path "./test/integration/*" -not -path "./test/stress/*")))
 INTEGRATION_DIR := ./test/integration/...
+STRESS_DIR      := ./test/stress/...
 LATEST_GIT_TAG  := $(shell git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
 
 # Linter configuration
@@ -21,7 +22,7 @@ GOLANGCI_LINT_VERSION := 2.5.0
 # Default target
 .DEFAULT_GOAL := help
 
-.PHONY: test test-race test-short coverage coverage-html lint fmt vet bench clean gomod-tidy update-pkg-cache ci test-unit test-integration test-all
+.PHONY: test test-race test-short coverage coverage-html lint fmt vet bench clean gomod-tidy update-pkg-cache ci test-unit test-integration test-stress test-all
 
 ## test: Run unit tests with race detector and CGO disabled
 test: clean-test-results
@@ -41,13 +42,20 @@ test-integration: clean-test-results
 	@echo "Running integration tests..."
 	@CGO_ENABLED=1 go test $(INTEGRATION_DIR) -v -timeout=$(TEST_TIMEOUT) -race
 
-## test-all: Run both unit and integration tests
+## test-stress: Run stress and performance tests
+test-stress: clean-test-results
+	@echo "Running stress tests (this may take 15-20 minutes)..."
+	@CGO_ENABLED=1 go test $(STRESS_DIR) -v -timeout=20m
+
+## test-all: Run unit, integration, and stress tests
 test-all: clean-test-results
-	@echo "Running all tests (unit + integration)..."
+	@echo "Running all tests (unit + integration + stress)..."
 	@echo "==> Running unit tests..."
 	@CGO_ENABLED=1 go test $(TEST_DIRS) -timeout=$(TEST_TIMEOUT) -race
 	@echo "==> Running integration tests..."
 	@CGO_ENABLED=1 go test $(INTEGRATION_DIR) -v -timeout=$(TEST_TIMEOUT) -race
+	@echo "==> Running stress tests..."
+	@CGO_ENABLED=1 go test $(STRESS_DIR) -v -timeout=20m
 	@echo "All tests passed!"
 
 

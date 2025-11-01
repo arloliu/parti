@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/arloliu/parti/types"
-	"github.com/nats-io/nats.go/jetstream"
 )
 
 // Calculator manages partition assignment calculation and distribution.
@@ -42,10 +41,6 @@ type Calculator struct {
 	// Worker tracking for change detection
 	lastWorkers        map[string]bool // Previous worker set for comparison
 	disappearedWorkers []string        // Workers that disappeared in emergency (cleared after rebalance)
-
-	// Hybrid monitoring: watcher (primary) + polling (fallback)
-	watcher   jetstream.KeyWatcher
-	watcherMu sync.Mutex // Protects watcher lifecycle
 
 	// Lifecycle
 	stopCh chan struct{}
@@ -410,102 +405,6 @@ func (c *Calculator) selectStabilizationWindow(ctx context.Context) time.Duratio
 	c.Logger.Info("detected planned scale", "workers", len(workers), "ratio", ratio)
 
 	return c.PlannedScaleWindow
-}
-
-// startWatcher starts the NATS KV watcher for fast worker change detection.
-func (c *Calculator) startWatcher(ctx context.Context) error {
-	c.watcherMu.Lock()
-	defer c.watcherMu.Unlock()
-
-	if c.watcher != nil {
-		return nil // Already started
-	}
-
-	// Watch all heartbeat keys with prefix pattern
-	watcher, err := c.HeartbeatKV.Watch(ctx, c.hbWatchPattern)
-	if err != nil {
-		return fmt.Errorf("failed to start watcher: %w", err)
-	}
-
-	c.watcher = watcher
-	c.Logger.Info("watcher started for fast worker detection",
-		"pattern", c.hbWatchPattern,
-		"hbPrefix", c.HeartbeatPrefix,
-	)
-
-	// Start goroutine to process watcher events
-	go c.processWatcherEvents(ctx)
-
-	return nil
-}
-
-// stopWatcher stops the NATS KV watcher.
-func (c *Calculator) stopWatcher() {
-	c.watcherMu.Lock()
-	defer c.watcherMu.Unlock()
-
-	if c.watcher != nil {
-		if err := c.watcher.Stop(); err != nil {
-			c.Logger.Warn("failed to stop watcher", "error", err)
-		}
-		c.watcher = nil
-		c.Logger.Debug("watcher stopped")
-	}
-}
-
-// processWatcherEvents processes events from the NATS KV watcher.
-func (c *Calculator) processWatcherEvents(ctx context.Context) {
-	c.Logger.Debug("watcher event processor goroutine started")
-	defer c.Logger.Debug("watcher event processor goroutine stopped")
-
-	c.watcherMu.Lock()
-	watcher := c.watcher
-	c.watcherMu.Unlock()
-
-	if watcher == nil {
-		c.Logger.Warn("watcher is nil, cannot process events")
-		return
-	}
-
-	// Debounce rapid events
-	debounceTimer := time.NewTimer(100 * time.Millisecond)
-	debounceTimer.Stop() // Stop initially
-	var pendingCheck bool
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-c.stopCh:
-			return
-		case entry := <-watcher.Updates():
-			if entry == nil {
-				// Watcher stopped or initial replay done
-				c.Logger.Debug("watcher: nil entry (replay done or stopped)")
-				continue
-			}
-
-			// Heartbeat key changed (worker added or updated)
-			c.Logger.Debug("watcher: received entry", "key", entry.Key(), "operation", entry.Operation())
-
-			// Schedule a debounced check
-			if !pendingCheck {
-				pendingCheck = true
-				debounceTimer.Reset(100 * time.Millisecond)
-			}
-
-		case <-debounceTimer.C:
-			if pendingCheck {
-				pendingCheck = false
-				c.Logger.Debug("watcher detected change, triggering check")
-
-				// Check for worker changes
-				if err := c.pollForChanges(ctx); err != nil {
-					c.Logger.Error("watcher-triggered check failed", "error", err)
-				}
-			}
-		}
-	}
 }
 
 func (c *Calculator) pollForChanges(ctx context.Context) error {

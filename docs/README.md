@@ -28,6 +28,13 @@
   - Success criteria for each phase
   - Appendix with technical implementation details
 
+### Performance & Benchmarking
+- **[MEMORY_BENCHMARK_QUICKSTART.md](MEMORY_BENCHMARK_QUICKSTART.md)** - Quick reference guide
+  - 5-minute comparison test
+  - How external NATS isolation works
+  - When to use each approach
+  - Troubleshooting and FAQ
+
 ### Library Specification
 - **[library-specification.md](library-specification.md)** - Complete API specification
   - Core interfaces and types
