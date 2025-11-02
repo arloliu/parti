@@ -59,14 +59,15 @@ func TestStateMachine_ConcurrentTransitions_OnlyOneSucceeds(t *testing.T) {
 	for i := 0; i < numGoroutines; i++ {
 		wg.Go(func() {
 			// All trying to transition from Idle -> Scaling
-			sm.EnterScaling(context.Background(), "concurrent_test", 200*time.Millisecond)
+			// Use 1 second window to ensure all goroutines start before first completes
+			sm.EnterScaling(context.Background(), "concurrent_test", 1*time.Second)
 		})
 	}
 
 	wg.Wait()
 
-	// Wait for state machine to settle
-	time.Sleep(500 * time.Millisecond)
+	// Wait for state machine to settle (scaling window + buffer)
+	time.Sleep(1500 * time.Millisecond)
 
 	// Only ONE scaling transition should have occurred (others rejected)
 	stateMu.Lock()

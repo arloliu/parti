@@ -38,6 +38,10 @@ const (
 	// StateEmergency indicates an error condition requiring intervention.
 	StateEmergency
 
+	// StateDegraded indicates operating with cached data due to NATS connectivity issues.
+	// The system continues processing with last known good assignments while NATS is unavailable.
+	StateDegraded
+
 	// StateShutdown indicates graceful shutdown is in progress.
 	StateShutdown
 )
@@ -61,6 +65,8 @@ func (s State) String() string {
 		return "Rebalancing"
 	case StateEmergency:
 		return "Emergency"
+	case StateDegraded:
+		return "Degraded"
 	case StateShutdown:
 		return "Shutdown"
 	default:

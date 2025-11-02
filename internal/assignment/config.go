@@ -38,8 +38,9 @@ type Config struct {
 	PlannedScaleWindow   time.Duration // Stabilization window for planned scale (default: 10s)
 
 	// Optional dependencies
-	Metrics types.MetricsCollector // Metrics collector (default: no-op)
-	Logger  types.Logger           // Logger (default: no-op)
+	Metrics       types.MetricsCollector // Metrics collector (default: no-op)
+	Logger        types.Logger           // Logger (default: no-op)
+	StateProvider types.StateProvider    // Manager state provider for degraded mode checks (default: nil)
 }
 
 // Validate checks configuration validity.

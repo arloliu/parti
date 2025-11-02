@@ -7,8 +7,19 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/arloliu/parti/internal/natsutil"
 	"github.com/arloliu/parti/types"
 )
+
+// cachedWorkerList bundles worker data with its timestamp for atomic operations.
+//
+// This ensures that the worker list and its freshness timestamp are always
+// consistent when read together, preventing race conditions between updates
+// and emergency detection checks.
+type cachedWorkerList struct {
+	workers   []string
+	timestamp time.Time
+}
 
 // Calculator manages partition assignment calculation and distribution.
 //
@@ -41,6 +52,13 @@ type Calculator struct {
 	// Worker tracking for change detection
 	lastWorkers        map[string]bool // Previous worker set for comparison
 	disappearedWorkers []string        // Workers that disappeared in emergency (cleared after rebalance)
+
+	// Worker list cache for degraded mode with atomic freshness tracking
+	cachedWorkers cachedWorkerList
+	cacheMu       sync.RWMutex
+
+	// Manager state provider for degraded mode checks
+	stateProvider types.StateProvider
 
 	// Lifecycle
 	stopCh chan struct{}
@@ -90,6 +108,7 @@ func NewCalculator(cfg *Config) (*Calculator, error) {
 		currentWorkers:      make(map[string]bool),
 		currentAssignments:  make(map[string][]types.Partition),
 		lastWorkers:         make(map[string]bool),
+		stateProvider:       cfg.StateProvider, // Optional state provider for degraded mode checks
 		stopCh:              stopCh,
 		doneCh:              make(chan struct{}),
 	}
@@ -588,8 +607,50 @@ func (c *Calculator) hasWorkersChangedMap(workers map[string]bool) bool {
 }
 
 // getActiveWorkers retrieves the list of workers with active heartbeats.
+//
+// This method implements cache fallback for degraded mode:
+//  1. Try to fetch workers from NATS KV (monitor.GetActiveWorkers)
+//  2. On connectivity error, fall back to cached worker list
+//  3. Update cache on successful fetches
+//  4. Return ErrDegraded if no cache available during connectivity issues
+//
+// Parameters:
+//   - ctx: Context for KV operations
+//
+// Returns:
+//   - []string: List of active worker IDs
+//   - error: Error if fetch fails and no cache available
 func (c *Calculator) getActiveWorkers(ctx context.Context) ([]string, error) {
-	return c.monitor.GetActiveWorkers(ctx)
+	// Try to fetch from NATS KV
+	workers, err := c.monitor.GetActiveWorkers(ctx)
+	if err != nil {
+		// Check if this is a connectivity error
+		if natsutil.IsConnectivityError(err) {
+			// Try to use cached worker list
+			if cached, age, ok := c.getCachedWorkers(); ok {
+				c.Logger.Warn("using cached worker list due to connectivity error",
+					"workers", len(cached),
+					"cache_age", age,
+					"error", err)
+				// Record cache usage metrics
+				c.Metrics.RecordCacheUsage("workers", age.Seconds())
+				c.Metrics.IncrementCacheFallback("connectivity_error")
+
+				return cached, nil
+			}
+			// No cache available - return degraded error
+			c.Metrics.IncrementCacheFallback("no_cache")
+
+			return nil, fmt.Errorf("%w: no cached workers available: %w", types.ErrDegraded, err)
+		}
+		// Non-connectivity error - return as-is
+		return nil, err
+	}
+
+	// Success - update cache for future use
+	c.updateCachedWorkers(workers)
+
+	return workers, nil
 }
 
 // getActiveWorkersFiltered retrieves workers, excluding those confirmed disappeared in emergency.
@@ -749,4 +810,61 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 		"lifecycle", lifecycle)
 
 	return nil
+}
+
+// ============================================================================
+// Degraded Mode - Worker Cache Management
+// ============================================================================
+
+// getCachedWorkers returns cached worker list with freshness timestamp.
+//
+// Returns defensive copy to prevent external mutations.
+// Returns the timestamp atomically with the data to ensure consistency.
+//
+// Returns:
+//   - []string: Copy of cached worker list
+//   - time.Duration: Age of the cached data (time since last fresh read)
+//   - bool: true if cache is available, false otherwise
+func (c *Calculator) getCachedWorkers() ([]string, time.Duration, bool) {
+	c.cacheMu.RLock()
+	defer c.cacheMu.RUnlock()
+
+	if c.cachedWorkers.workers == nil {
+		return nil, 0, false
+	}
+
+	// Return a copy to prevent external modification
+	cached := make([]string, len(c.cachedWorkers.workers))
+	copy(cached, c.cachedWorkers.workers)
+
+	// Calculate age based on timestamp
+	age := time.Since(c.cachedWorkers.timestamp)
+
+	return cached, age, true
+}
+
+// updateCachedWorkers updates the cached worker list atomically with timestamp.
+//
+// Creates defensive copy to prevent external mutations.
+// Bundles worker list and timestamp together for atomic freshness tracking.
+//
+// Parameters:
+//   - workers: Fresh worker list from KV
+func (c *Calculator) updateCachedWorkers(workers []string) {
+	c.cacheMu.Lock()
+	defer c.cacheMu.Unlock()
+
+	// Create defensive copy
+	cached := make([]string, len(workers))
+	copy(cached, workers)
+
+	// Update atomically
+	c.cachedWorkers = cachedWorkerList{
+		workers:   cached,
+		timestamp: time.Now(),
+	}
+
+	c.Logger.Debug("updated worker cache",
+		"workers", len(workers),
+	)
 }

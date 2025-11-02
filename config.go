@@ -45,6 +45,163 @@ type KVBucketConfig struct {
 	AssignmentTTL time.Duration `yaml:"assignmentTtl"`
 }
 
+// AlertLevel represents the severity level of degraded mode alerts.
+type AlertLevel int
+
+const (
+	// AlertLevelInfo indicates informational alerts (least severe).
+	AlertLevelInfo AlertLevel = iota
+	// AlertLevelWarn indicates warning alerts.
+	AlertLevelWarn
+	// AlertLevelError indicates error alerts.
+	AlertLevelError
+	// AlertLevelCritical indicates critical alerts (most severe).
+	AlertLevelCritical
+)
+
+// String returns the string representation of the alert level.
+//
+// Returns:
+//   - string: Alert level name ("Info", "Warn", "Error", "Critical", or "Unknown")
+func (l AlertLevel) String() string {
+	switch l {
+	case AlertLevelInfo:
+		return "Info"
+	case AlertLevelWarn:
+		return "Warn"
+	case AlertLevelError:
+		return "Error"
+	case AlertLevelCritical:
+		return "Critical"
+	default:
+		return "Unknown"
+	}
+}
+
+// DegradedAlertConfig controls alert emission during degraded mode operation.
+type DegradedAlertConfig struct {
+	// InfoThreshold is the duration in degraded mode before emitting Info-level alerts.
+	// Default: 30 seconds.
+	InfoThreshold time.Duration `yaml:"infoThreshold"`
+
+	// WarnThreshold is the duration in degraded mode before emitting Warn-level alerts.
+	// Default: 2 minutes.
+	WarnThreshold time.Duration `yaml:"warnThreshold"`
+
+	// ErrorThreshold is the duration in degraded mode before emitting Error-level alerts.
+	// Default: 5 minutes.
+	ErrorThreshold time.Duration `yaml:"errorThreshold"`
+
+	// CriticalThreshold is the duration in degraded mode before emitting Critical-level alerts.
+	// Default: 10 minutes.
+	CriticalThreshold time.Duration `yaml:"criticalThreshold"`
+
+	// AlertInterval is the time between repeated alerts at the same severity level.
+	// Default: 1 minute.
+	AlertInterval time.Duration `yaml:"alertInterval"`
+}
+
+// DefaultDegradedAlertConfig returns default alert configuration for degraded mode.
+//
+// Returns:
+//   - DegradedAlertConfig: Configuration with production defaults
+func DefaultDegradedAlertConfig() DegradedAlertConfig {
+	return DegradedAlertConfig{
+		InfoThreshold:     30 * time.Second,
+		WarnThreshold:     2 * time.Minute,
+		ErrorThreshold:    5 * time.Minute,
+		CriticalThreshold: 10 * time.Minute,
+		AlertInterval:     1 * time.Minute,
+	}
+}
+
+// DegradedBehaviorConfig controls when the manager enters and exits degraded mode.
+type DegradedBehaviorConfig struct {
+	// EnterThreshold is how long NATS connectivity errors must persist before entering degraded mode.
+	// Provides hysteresis to prevent flapping during transient issues.
+	// Default: 10 seconds.
+	EnterThreshold time.Duration `yaml:"enterThreshold"`
+
+	// ExitThreshold is how long NATS connectivity must be stable before exiting degraded mode.
+	// Should be shorter than EnterThreshold to recover quickly.
+	// Default: 5 seconds.
+	ExitThreshold time.Duration `yaml:"exitThreshold"`
+
+	// KVErrorThreshold is the number of consecutive KV operation errors that trigger degraded mode.
+	// Default: 5 errors.
+	KVErrorThreshold int `yaml:"kvErrorThreshold"`
+
+	// KVErrorWindow is the time window for counting consecutive KV errors.
+	// Errors outside this window are not counted.
+	// Default: 30 seconds.
+	KVErrorWindow time.Duration `yaml:"kvErrorWindow"`
+
+	// RecoveryGracePeriod is the minimum time the leader must wait after recovering from
+	// degraded mode before declaring missing workers as failed (emergency rebalance).
+	// Prevents false emergencies when workers recover slightly slower than the leader.
+	// Default: 15 seconds.
+	RecoveryGracePeriod time.Duration `yaml:"recoveryGracePeriod"`
+}
+
+// DefaultDegradedBehaviorConfig returns default behavior configuration for degraded mode.
+//
+// Returns:
+//   - DegradedBehaviorConfig: Configuration with balanced production defaults
+func DefaultDegradedBehaviorConfig() DegradedBehaviorConfig {
+	return DegradedBehaviorConfig{
+		EnterThreshold:      10 * time.Second,
+		ExitThreshold:       5 * time.Second,
+		KVErrorThreshold:    5,
+		KVErrorWindow:       30 * time.Second,
+		RecoveryGracePeriod: 15 * time.Second,
+	}
+}
+
+// DegradedBehaviorPreset returns a preconfigured DegradedBehaviorConfig based on the preset name.
+//
+// Supported presets:
+//   - "conservative": Slower to enter degraded, safer for production (30s enter, 10s exit, 10 errors)
+//   - "balanced": Default behavior, good for most use cases (10s enter, 5s exit, 5 errors)
+//   - "aggressive": Faster to enter degraded, better for development (5s enter, 3s exit, 3 errors)
+//
+// Parameters:
+//   - preset: Preset name ("conservative", "balanced", or "aggressive")
+//
+// Returns:
+//   - DegradedBehaviorConfig: Preconfigured behavior settings
+//   - error: ErrInvalidPreset if preset name is not recognized
+//
+// Example:
+//
+//	cfg, err := DegradedBehaviorPreset("conservative")
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+func DegradedBehaviorPreset(preset string) (DegradedBehaviorConfig, error) {
+	switch preset {
+	case "conservative":
+		return DegradedBehaviorConfig{
+			EnterThreshold:      30 * time.Second,
+			ExitThreshold:       10 * time.Second,
+			KVErrorThreshold:    10,
+			KVErrorWindow:       30 * time.Second,
+			RecoveryGracePeriod: 20 * time.Second,
+		}, nil
+	case "balanced":
+		return DefaultDegradedBehaviorConfig(), nil
+	case "aggressive":
+		return DegradedBehaviorConfig{
+			EnterThreshold:      5 * time.Second,
+			ExitThreshold:       3 * time.Second,
+			KVErrorThreshold:    3,
+			KVErrorWindow:       15 * time.Second,
+			RecoveryGracePeriod: 10 * time.Second,
+		}, nil
+	default:
+		return DegradedBehaviorConfig{}, fmt.Errorf("invalid degraded behavior preset %q: must be one of [conservative, balanced, aggressive]", preset)
+	}
+}
+
 // ============================================================================
 // Timing Configuration Model (Three-Tier System)
 // ============================================================================
@@ -189,6 +346,12 @@ type Config struct {
 
 	// KVBuckets controls NATS JetStream KV bucket configuration.
 	KVBuckets KVBucketConfig `yaml:"kvBuckets"`
+
+	// DegradedAlert controls alert emission during degraded mode operation.
+	DegradedAlert DegradedAlertConfig `yaml:"degradedAlert"`
+
+	// DegradedBehavior controls when the manager enters and exits degraded mode.
+	DegradedBehavior DegradedBehaviorConfig `yaml:"degradedBehavior"`
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -221,13 +384,15 @@ func DefaultConfig() Config {
 			AssignmentBucket: "parti-assignment",
 			AssignmentTTL:    0, // No TTL - assignments persist for version continuity
 		},
+		DegradedAlert:    DefaultDegradedAlertConfig(),
+		DegradedBehavior: DefaultDegradedBehaviorConfig(),
 	}
 }
 
-// SetDefaults fills in missing configuration values with production defaults.
+// SetDefaults applies default values to zero-valued configuration fields.
+// If a field is zero-valued, it will be set to the corresponding default value.
 //
-// Parameters:
-//   - cfg: Config to apply defaults to (modified in place)
+//nolint:cyclop
 func SetDefaults(cfg *Config) {
 	defaults := DefaultConfig()
 
@@ -290,6 +455,40 @@ func SetDefaults(cfg *Config) {
 		cfg.KVBuckets.AssignmentBucket = defaults.KVBuckets.AssignmentBucket
 	}
 	// Note: AssignmentTTL of 0 is valid (no expiration), so we don't apply default
+
+	// Apply degraded mode alert defaults
+	if cfg.DegradedAlert.InfoThreshold == 0 {
+		cfg.DegradedAlert.InfoThreshold = defaults.DegradedAlert.InfoThreshold
+	}
+	if cfg.DegradedAlert.WarnThreshold == 0 {
+		cfg.DegradedAlert.WarnThreshold = defaults.DegradedAlert.WarnThreshold
+	}
+	if cfg.DegradedAlert.ErrorThreshold == 0 {
+		cfg.DegradedAlert.ErrorThreshold = defaults.DegradedAlert.ErrorThreshold
+	}
+	if cfg.DegradedAlert.CriticalThreshold == 0 {
+		cfg.DegradedAlert.CriticalThreshold = defaults.DegradedAlert.CriticalThreshold
+	}
+	if cfg.DegradedAlert.AlertInterval == 0 {
+		cfg.DegradedAlert.AlertInterval = defaults.DegradedAlert.AlertInterval
+	}
+
+	// Apply degraded mode behavior defaults
+	if cfg.DegradedBehavior.EnterThreshold == 0 {
+		cfg.DegradedBehavior.EnterThreshold = defaults.DegradedBehavior.EnterThreshold
+	}
+	if cfg.DegradedBehavior.ExitThreshold == 0 {
+		cfg.DegradedBehavior.ExitThreshold = defaults.DegradedBehavior.ExitThreshold
+	}
+	if cfg.DegradedBehavior.KVErrorThreshold == 0 {
+		cfg.DegradedBehavior.KVErrorThreshold = defaults.DegradedBehavior.KVErrorThreshold
+	}
+	if cfg.DegradedBehavior.KVErrorWindow == 0 {
+		cfg.DegradedBehavior.KVErrorWindow = defaults.DegradedBehavior.KVErrorWindow
+	}
+	if cfg.DegradedBehavior.RecoveryGracePeriod == 0 {
+		cfg.DegradedBehavior.RecoveryGracePeriod = defaults.DegradedBehavior.RecoveryGracePeriod
+	}
 }
 
 // TTL Configuration Guide
@@ -404,6 +603,63 @@ func (cfg *Config) Validate() error {
 		)
 	}
 
+	// Rule 8: Validate degraded alert configuration
+	if err := cfg.validateDegradedAlerts(); err != nil {
+		return fmt.Errorf("invalid degraded alerts config: %w", err)
+	}
+
+	// Rule 9: Validate degraded behavior configuration
+	if err := cfg.validateDegradedBehavior(); err != nil {
+		return fmt.Errorf("invalid degraded behavior config: %w", err)
+	}
+
+	return nil
+}
+
+// validateDegradedAlerts ensures alert thresholds are sensible.
+func (cfg *Config) validateDegradedAlerts() error {
+	da := &cfg.DegradedAlert
+
+	// Ensure thresholds are in ascending order
+	if da.WarnThreshold > 0 && da.WarnThreshold < da.InfoThreshold {
+		return fmt.Errorf("warn threshold (%v) must be >= info threshold (%v)", da.WarnThreshold, da.InfoThreshold)
+	}
+	if da.ErrorThreshold > 0 && da.ErrorThreshold < da.WarnThreshold {
+		return fmt.Errorf("error threshold (%v) must be >= warn threshold (%v)", da.ErrorThreshold, da.WarnThreshold)
+	}
+	if da.CriticalThreshold > 0 && da.CriticalThreshold < da.ErrorThreshold {
+		return fmt.Errorf("critical threshold (%v) must be >= error threshold (%v)", da.CriticalThreshold, da.ErrorThreshold)
+	}
+
+	// Ensure alert interval is positive
+	if da.AlertInterval <= 0 {
+		return fmt.Errorf("alert interval must be > 0, got %v", da.AlertInterval)
+	}
+
+	return nil
+}
+
+// validateDegradedBehavior ensures behavior config values are sensible.
+func (cfg *Config) validateDegradedBehavior() error {
+	db := &cfg.DegradedBehavior
+
+	// Validate thresholds are positive
+	if db.EnterThreshold < 0 {
+		return fmt.Errorf("enter threshold must be >= 0, got %v", db.EnterThreshold)
+	}
+	if db.ExitThreshold < 0 {
+		return fmt.Errorf("exit threshold must be >= 0, got %v", db.ExitThreshold)
+	}
+	if db.RecoveryGracePeriod < 0 {
+		return fmt.Errorf("recovery grace period must be >= 0, got %v", db.RecoveryGracePeriod)
+	}
+	if db.KVErrorThreshold < 0 {
+		return fmt.Errorf("KV error threshold must be >= 0, got %d", db.KVErrorThreshold)
+	}
+	if db.KVErrorWindow < 0 {
+		return fmt.Errorf("KV error window must be >= 0, got %v", db.KVErrorWindow)
+	}
+
 	return nil
 }
 
@@ -430,6 +686,25 @@ func (cfg *Config) ValidateWithWarnings(logger Logger) {
 			"MinRebalanceInterval is very short, may cause frequent rebalancing",
 			"cooldown", cfg.Assignment.MinRebalanceInterval,
 			"recommended", "10s or higher",
+		)
+	}
+
+	// Warn if exit threshold is larger than enter threshold (unusual)
+	if cfg.DegradedBehavior.ExitThreshold > cfg.DegradedBehavior.EnterThreshold {
+		logger.Warn(
+			"degraded exit threshold is greater than enter threshold (unusual configuration)",
+			"exit_threshold", cfg.DegradedBehavior.ExitThreshold,
+			"enter_threshold", cfg.DegradedBehavior.EnterThreshold,
+			"note", "typically exit threshold should be shorter for faster recovery",
+		)
+	}
+
+	// Warn if recovery grace period is very short
+	if cfg.DegradedBehavior.RecoveryGracePeriod < 5*time.Second {
+		logger.Warn(
+			"recovery grace period is very short, may trigger false emergencies after recovery",
+			"recovery_grace_period", cfg.DegradedBehavior.RecoveryGracePeriod,
+			"recommended", "15s or higher",
 		)
 	}
 }

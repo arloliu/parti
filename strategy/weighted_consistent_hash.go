@@ -2,7 +2,6 @@ package strategy
 
 import (
 	"slices"
-	"sort"
 	"strings"
 
 	"github.com/arloliu/parti/internal/hash"
@@ -215,7 +214,7 @@ func (wch *WeightedConsistentHash) Assign(workers []string, partitions []types.P
 
 func (wch *WeightedConsistentHash) prepareWorkers(workers []string) ([]string, map[string][]types.Partition, map[string]int64) {
 	sortedWorkers := append([]string(nil), workers...)
-	sort.Strings(sortedWorkers)
+	slices.Sort(sortedWorkers)
 
 	assignments := make(map[string][]types.Partition, len(sortedWorkers))
 	workerLoad := make(map[string]int64, len(sortedWorkers))

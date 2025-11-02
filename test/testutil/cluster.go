@@ -156,6 +156,7 @@ type WorkerCluster struct {
 	Strategy      types.AssignmentStrategy
 	NC            *nats.Conn
 	T             *testing.T
+	mu            sync.RWMutex // Protects Workers and StateTrackers
 }
 
 // NewWorkerCluster creates a new worker cluster for testing.
@@ -211,6 +212,9 @@ func NewFastWorkerCluster(t *testing.T, nc *nats.Conn, numPartitions int) *Worke
 // Returns:
 //   - *parti.Manager: The created worker manager
 func (wc *WorkerCluster) AddWorker(ctx context.Context, opts ...types.Logger) *parti.Manager {
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+
 	workerIdx := len(wc.Workers)
 	tracker := CreateStateTracker(wc.T, workerIdx)
 	wc.StateTrackers = append(wc.StateTrackers, tracker)
@@ -240,6 +244,9 @@ func (wc *WorkerCluster) AddWorker(ctx context.Context, opts ...types.Logger) *p
 
 // AddWorkerWithoutTracking adds a worker without state tracking.
 func (wc *WorkerCluster) AddWorkerWithoutTracking(ctx context.Context) *parti.Manager {
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+
 	mgr, err := parti.NewManager(&wc.Config, wc.NC, wc.Source, wc.Strategy)
 	require.NoError(wc.T, err, "failed to create worker")
 
@@ -250,7 +257,12 @@ func (wc *WorkerCluster) AddWorkerWithoutTracking(ctx context.Context) *parti.Ma
 
 // StartWorkers starts all workers in the cluster.
 func (wc *WorkerCluster) StartWorkers(ctx context.Context) {
-	for i, mgr := range wc.Workers {
+	wc.mu.RLock()
+	workers := make([]*parti.Manager, len(wc.Workers))
+	copy(workers, wc.Workers)
+	wc.mu.RUnlock()
+
+	for i, mgr := range workers {
 		err := mgr.Start(ctx)
 		require.NoError(wc.T, err, "worker %d failed to start", i)
 	}
@@ -259,7 +271,12 @@ func (wc *WorkerCluster) StartWorkers(ctx context.Context) {
 // StopWorkers stops all workers gracefully.
 // Skips workers that are already in Shutdown state.
 func (wc *WorkerCluster) StopWorkers() {
-	for i, mgr := range wc.Workers {
+	wc.mu.RLock()
+	workers := make([]*parti.Manager, len(wc.Workers))
+	copy(workers, wc.Workers)
+	wc.mu.RUnlock()
+
+	for i, mgr := range workers {
 		// Skip if already shutdown
 		if mgr.State() == types.StateShutdown {
 			wc.T.Logf("Worker %d already shutdown, skipping", i)
@@ -414,21 +431,34 @@ func (wc *WorkerCluster) GetLeader() *parti.Manager {
 // RemoveWorker stops and removes a worker from the cluster (simulates crash).
 // It calls Stop() but doesn't remove from the Workers slice to avoid index issues.
 // Tests should account for stopped workers when counting leaders/stable workers.
+// RemoveWorker stops and removes a worker from the cluster.
 func (wc *WorkerCluster) RemoveWorker(index int) {
+	wc.mu.Lock()
 	require.Less(wc.T, index, len(wc.Workers), "invalid worker index")
 
 	mgr := wc.Workers[index]
-	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	wc.mu.Unlock()
 
+	// Stop the worker (outside the lock to avoid deadlock)
+	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	err := mgr.Stop(stopCtx)
+	cancel()
 	require.NoError(wc.T, err, "failed to stop worker %d", index)
 
-	wc.T.Logf("Removed worker %d (%s)", index, mgr.WorkerID())
+	// Remove from slice
+	wc.mu.Lock()
+	wc.Workers = append(wc.Workers[:index], wc.Workers[index+1:]...)
+	wc.StateTrackers = append(wc.StateTrackers[:index], wc.StateTrackers[index+1:]...)
+	wc.mu.Unlock()
+
+	wc.T.Logf("Removed worker %d (%s) from cluster", index, mgr.WorkerID())
 }
 
 // GetActiveWorkers returns only the workers that are not in Shutdown state.
 func (wc *WorkerCluster) GetActiveWorkers() []*parti.Manager {
+	wc.mu.RLock()
+	defer wc.mu.RUnlock()
+
 	active := make([]*parti.Manager, 0, len(wc.Workers))
 	for _, mgr := range wc.Workers {
 		if mgr.State() != types.StateShutdown {
@@ -437,4 +467,24 @@ func (wc *WorkerCluster) GetActiveWorkers() []*parti.Manager {
 	}
 
 	return active
+}
+
+// GetWorkers returns a snapshot of all workers (including stopped ones).
+// This is safe for concurrent access.
+func (wc *WorkerCluster) GetWorkers() []*parti.Manager {
+	wc.mu.RLock()
+	defer wc.mu.RUnlock()
+
+	workers := make([]*parti.Manager, len(wc.Workers))
+	copy(workers, wc.Workers)
+
+	return workers
+}
+
+// WorkerCount returns the current number of workers in the cluster.
+func (wc *WorkerCluster) WorkerCount() int {
+	wc.mu.RLock()
+	defer wc.mu.RUnlock()
+
+	return len(wc.Workers)
 }

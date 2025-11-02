@@ -5,7 +5,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
-	"sort"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -320,7 +320,9 @@ func (lm *LoadMetrics) LatencyPercentile(p float64) time.Duration {
 
 	sorted := make([]time.Duration, len(lm.RebalanceLatency))
 	copy(sorted, lm.RebalanceLatency)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	slices.SortFunc(sorted, func(a, b time.Duration) int {
+		return int(a - b)
+	})
 
 	index := int(float64(len(sorted)) * p)
 	if index >= len(sorted) {

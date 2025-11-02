@@ -15,6 +15,7 @@ func TestStateString(t *testing.T) {
 		{StateScaling, "Scaling"},
 		{StateRebalancing, "Rebalancing"},
 		{StateEmergency, "Emergency"},
+		{StateDegraded, "Degraded"},
 		{StateShutdown, "Shutdown"},
 		{State(999), "Unknown"},
 	}

@@ -50,9 +50,10 @@ func TestLeaderElection_BasicFailover(t *testing.T) {
 	originalLeaderID := originalLeader.WorkerID()
 	t.Logf("Original leader: %s", originalLeaderID)
 
-	// Find the leader's index
+	// Find the leader's index using thread-safe GetWorkers()
 	leaderIndex := -1
-	for i, mgr := range cluster.Workers {
+	workers := cluster.GetWorkers()
+	for i, mgr := range workers {
 		if mgr.WorkerID() == originalLeaderID {
 			leaderIndex = i
 			break

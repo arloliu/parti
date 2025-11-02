@@ -20,6 +20,36 @@ type ManagerMetrics interface {
 
 	// RecordLeadershipChange records a leadership change.
 	RecordLeadershipChange(newLeader string)
+
+	// RecordDegradedDuration records the duration spent in degraded mode.
+	//
+	// Parameters:
+	//   - duration: Time spent in degraded mode
+	RecordDegradedDuration(duration float64)
+
+	// SetDegradedMode sets the current degraded mode status (0 or 1).
+	//
+	// Parameters:
+	//   - degraded: 1.0 if in degraded mode, 0.0 otherwise
+	SetDegradedMode(degraded float64)
+
+	// SetCacheAge sets the age of cached assignment data in seconds.
+	//
+	// Parameters:
+	//   - age: Age of cached data (0 if no cache)
+	SetCacheAge(age float64)
+
+	// SetAlertLevel sets the current degraded mode alert level (0-3).
+	//
+	// Parameters:
+	//   - level: Alert level (0=none, 1=info, 2=warn, 3=error, 4=critical)
+	SetAlertLevel(level int)
+
+	// IncrementAlertEmitted tracks alert emission by level for spam detection.
+	//
+	// Parameters:
+	//   - level: Alert level name ("info", "warn", "error", "critical")
+	IncrementAlertEmitted(level string)
 }
 
 // CalculatorMetrics defines metrics for calculator operations.
@@ -72,6 +102,19 @@ type CalculatorMetrics interface {
 	// Parameters:
 	//   - count: Current number of active workers
 	RecordActiveWorkers(count int)
+
+	// RecordCacheUsage records when cached data is used instead of fresh KV data.
+	//
+	// Parameters:
+	//   - cacheType: Type of cache used ("workers", "assignments")
+	//   - age: Age of cached data in seconds
+	RecordCacheUsage(cacheType string, age float64)
+
+	// IncrementCacheFallback increments the counter for cache fallback events.
+	//
+	// Parameters:
+	//   - reason: Reason for fallback ("connectivity_error", "timeout", "unknown")
+	IncrementCacheFallback(reason string)
 }
 
 // WorkerMetrics defines metrics for individual worker heartbeat operations.

@@ -2,7 +2,7 @@ package hash
 
 import (
 	"encoding/binary"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/arloliu/parti/types"
@@ -57,8 +57,8 @@ func NewRing(workers []string, virtualNodesPerWorker int, seed uint64) *Ring {
 	}
 
 	// Sort nodes by hash for binary search
-	sort.Slice(ring.nodes, func(i, j int) bool {
-		return ring.nodes[i].hash < ring.nodes[j].hash
+	slices.SortFunc(ring.nodes, func(a, b virtualNode) int {
+		return int(a.hash - b.hash) //nolint:gosec
 	})
 
 	return ring
@@ -82,12 +82,13 @@ func (r *Ring) GetNode(key string) string {
 	hash := r.hash(key)
 
 	// Binary search for first node >= hash
-	idx := sort.Search(len(r.nodes), func(i int) bool {
-		return r.nodes[i].hash >= hash
+	idx, found := slices.BinarySearchFunc(r.nodes, hash, func(node virtualNode, target uint64) int {
+		return int(node.hash - target) //nolint:gosec
 	})
 
-	// Wrap around if we've gone past the end
-	if idx >= len(r.nodes) {
+	// If exact match found or idx points to valid position, use it
+	// If idx >= len(nodes), wrap around to first node
+	if !found && idx >= len(r.nodes) {
 		idx = 0
 	}
 

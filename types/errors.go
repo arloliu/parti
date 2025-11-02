@@ -48,6 +48,15 @@ var (
 	// ErrElectionFailed is returned when leader election fails.
 	ErrElectionFailed = errors.New("leader election failed")
 
+	// ErrConnectivity indicates a NATS/KV connectivity issue.
+	// This is used to distinguish network failures from application errors
+	// and triggers degraded mode operation with cached data.
+	ErrConnectivity = errors.New("connectivity issue")
+
+	// ErrDegraded indicates the system is operating in degraded mode.
+	// Operations may use cached data due to unavailable NATS connection.
+	ErrDegraded = errors.New("degraded operation: using cached data")
+
 	// ErrIDClaimFailed is returned when stable ID claiming fails.
 	ErrIDClaimFailed = errors.New("failed to claim stable worker ID")
 

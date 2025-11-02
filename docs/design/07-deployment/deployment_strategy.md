@@ -593,20 +593,6 @@ graph TB
 
 ### Cost Analysis
 
-#### Infrastructure Costs (Annual Estimate)
-
-**Dual NATS (Permanent):**
-- 6 NATS nodes (m5.xlarge) × $0.192/hr × 8760 hrs = **$10,074/year**
-- Storage: 6 nodes × 100GB × $0.10/GB = **$60/month = $720/year**
-- **Total: ~$10,800/year**
-
-**Single NATS:**
-- 3 NATS nodes (m5.xlarge) × $0.192/hr × 8760 hrs = **$5,037/year**
-- Storage: 3 nodes × 100GB × $0.10/GB = **$30/month = $360/year**
-- **Total: ~$5,400/year**
-
-**Delta: ~$5,400/year additional for dual NATS**
-
 #### Operational Costs
 
 | Cost Factor | Dual NATS | Single NATS |
@@ -724,18 +710,18 @@ With Single NATS, you can build real-time comparison dashboards:
 
 ```
 ┌─────────────────────────────────────────────────┐
-│         Shadow Traffic Comparison                │
+│         Shadow Traffic Comparison               │
 ├─────────────────────────────────────────────────┤
-│ Tool: tool_123                                   │
+│ Tool: tool_123                                  │
 │ Timeframe: Last 1 hour                          │
 ├─────────────┬─────────────┬─────────────────────┤
-│ Metric      │ Stable (v1) │ Canary (v2)        │
+│ Metric      │ Stable (v1) │ Canary (v2)         │
 ├─────────────┼─────────────┼─────────────────────┤
-│ Messages    │ 1,234       │ 1,234              │
-│ Avg Latency │ 45ms        │ 38ms (-15%) ✓      │
-│ P95 Latency │ 120ms       │ 95ms (-21%) ✓      │
-│ Errors      │ 2 (0.16%)   │ 1 (0.08%) ✓        │
-│ Alerts Gen. │ 156         │ 162 (+3.8%)        │
+│ Messages    │ 1,234       │ 1,234               │
+│ Avg Latency │ 45ms        │ 38ms (-15%) ✓       │
+│ P95 Latency │ 120ms       │ 95ms (-21%) ✓       │
+│ Errors      │ 2 (0.16%)   │ 1 (0.08%) ✓         │
+│ Alerts Gen. │ 156         │ 162 (+3.8%)         │
 ├─────────────┴─────────────┴─────────────────────┤
 │ Result Diff: 6 messages had different outcomes  │
 │ [View Details] [Export Report]                  │
@@ -782,7 +768,7 @@ The **Permanent Dual NATS** architecture was chosen for tFDC because:
 5. **Operational Maturity**: Two well-tested permanent clusters reduce deployment risk
 6. **Future Flexibility**: Can test new NATS features in one cluster while stable runs on the other
 
-The additional ~$5,400/year cost is acceptable given:
+The additional cost is acceptable given:
 - Reduced operational risk
 - Simplified service code
 - Faster deployment cycles

@@ -284,6 +284,9 @@ func TestConfigValidate(t *testing.T) {
 			},
 		}
 
+		// Apply defaults for degraded mode settings
+		SetDefaults(&cfg)
+
 		err := cfg.Validate()
 		require.NoError(t, err)
 	})
@@ -316,6 +319,9 @@ func TestConfigValidate(t *testing.T) {
 			},
 		}
 
+		// Apply defaults for degraded mode settings
+		SetDefaults(&cfg)
+
 		err := cfg.Validate()
 		require.NoError(t, err)
 	})
@@ -340,4 +346,181 @@ func TestTestConfig(t *testing.T) {
 	require.Equal(t, "worker", cfg.WorkerIDPrefix)
 	require.Equal(t, 0, cfg.WorkerIDMin)
 	require.Equal(t, 99, cfg.WorkerIDMax)
+}
+
+func TestConfig_ValidateDegradedAlerts(t *testing.T) {
+	t.Run("valid alert thresholds in ascending order", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.DegradedAlert = DegradedAlertConfig{
+			InfoThreshold:     30 * time.Second,
+			WarnThreshold:     2 * time.Minute,
+			ErrorThreshold:    5 * time.Minute,
+			CriticalThreshold: 10 * time.Minute,
+			AlertInterval:     1 * time.Minute,
+		}
+
+		err := cfg.Validate()
+		require.NoError(t, err)
+	})
+
+	t.Run("error when warn < info", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.DegradedAlert.InfoThreshold = 2 * time.Minute
+		cfg.DegradedAlert.WarnThreshold = 1 * time.Minute // Less than info
+
+		err := cfg.Validate()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "warn threshold")
+		require.Contains(t, err.Error(), "info threshold")
+	})
+
+	t.Run("error when error < warn", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.DegradedAlert.WarnThreshold = 3 * time.Minute
+		cfg.DegradedAlert.ErrorThreshold = 2 * time.Minute // Less than warn
+
+		err := cfg.Validate()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "error threshold")
+		require.Contains(t, err.Error(), "warn threshold")
+	})
+
+	t.Run("error when critical < error", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.DegradedAlert.ErrorThreshold = 6 * time.Minute
+		cfg.DegradedAlert.CriticalThreshold = 5 * time.Minute // Less than error
+
+		err := cfg.Validate()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "critical threshold")
+		require.Contains(t, err.Error(), "error threshold")
+	})
+
+	t.Run("error when alert interval is zero", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.DegradedAlert.AlertInterval = 0
+
+		err := cfg.Validate()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "alert interval")
+	})
+
+	t.Run("error when alert interval is negative", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.DegradedAlert.AlertInterval = -1 * time.Second
+
+		err := cfg.Validate()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "alert interval")
+	})
+}
+
+func TestConfig_ValidateDegradedBehavior(t *testing.T) {
+	t.Run("valid behavior configuration", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.DegradedBehavior = DegradedBehaviorConfig{
+			EnterThreshold:      10 * time.Second,
+			ExitThreshold:       5 * time.Second,
+			KVErrorThreshold:    5,
+			KVErrorWindow:       30 * time.Second,
+			RecoveryGracePeriod: 15 * time.Second,
+		}
+
+		err := cfg.Validate()
+		require.NoError(t, err)
+	})
+
+	t.Run("error when enter threshold is negative", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.DegradedBehavior.EnterThreshold = -1 * time.Second
+
+		err := cfg.Validate()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "enter threshold")
+	})
+
+	t.Run("error when exit threshold is negative", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.DegradedBehavior.ExitThreshold = -1 * time.Second
+
+		err := cfg.Validate()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "exit threshold")
+	})
+
+	t.Run("error when recovery grace period is negative", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.DegradedBehavior.RecoveryGracePeriod = -1 * time.Second
+
+		err := cfg.Validate()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "recovery grace period")
+	})
+
+	t.Run("error when KV error threshold is negative", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.DegradedBehavior.KVErrorThreshold = -1
+
+		err := cfg.Validate()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "KV error threshold")
+	})
+
+	t.Run("error when KV error window is negative", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.DegradedBehavior.KVErrorWindow = -1 * time.Second
+
+		err := cfg.Validate()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "KV error window")
+	})
+
+	t.Run("zero values are valid", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.DegradedBehavior = DegradedBehaviorConfig{
+			EnterThreshold:      0,
+			ExitThreshold:       0,
+			KVErrorThreshold:    0,
+			KVErrorWindow:       0,
+			RecoveryGracePeriod: 0,
+		}
+
+		err := cfg.Validate()
+		require.NoError(t, err)
+	})
+}
+
+func TestDegradedBehaviorPreset(t *testing.T) {
+	t.Run("conservative preset", func(t *testing.T) {
+		cfg, err := DegradedBehaviorPreset("conservative")
+		require.NoError(t, err)
+		require.Equal(t, 30*time.Second, cfg.EnterThreshold)
+		require.Equal(t, 10*time.Second, cfg.ExitThreshold)
+		require.Equal(t, 10, cfg.KVErrorThreshold)
+		require.Equal(t, 20*time.Second, cfg.RecoveryGracePeriod)
+	})
+
+	t.Run("balanced preset", func(t *testing.T) {
+		cfg, err := DegradedBehaviorPreset("balanced")
+		require.NoError(t, err)
+		require.Equal(t, 10*time.Second, cfg.EnterThreshold)
+		require.Equal(t, 5*time.Second, cfg.ExitThreshold)
+		require.Equal(t, 5, cfg.KVErrorThreshold)
+		require.Equal(t, 15*time.Second, cfg.RecoveryGracePeriod)
+	})
+
+	t.Run("aggressive preset", func(t *testing.T) {
+		cfg, err := DegradedBehaviorPreset("aggressive")
+		require.NoError(t, err)
+		require.Equal(t, 5*time.Second, cfg.EnterThreshold)
+		require.Equal(t, 3*time.Second, cfg.ExitThreshold)
+		require.Equal(t, 3, cfg.KVErrorThreshold)
+		require.Equal(t, 10*time.Second, cfg.RecoveryGracePeriod)
+	})
+
+	t.Run("invalid preset returns error", func(t *testing.T) {
+		_, err := DegradedBehaviorPreset("invalid")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "invalid degraded behavior preset")
+	})
 }

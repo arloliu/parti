@@ -30,7 +30,7 @@ func TestExternalNATS_Basic(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, info)
 
-	t.Logf("External NATS server connected successfully")
+	t.Log("External NATS server connected successfully")
 }
 
 // TestExternalNATS_BinaryCaching tests that binary caching works correctly.
@@ -80,15 +80,14 @@ func TestExternalNATS_BinaryCaching(t *testing.T) {
 
 // TestExternalNATS_ParallelExecution tests concurrent external NATS servers.
 func TestExternalNATS_ParallelExecution(t *testing.T) {
+	t.Parallel()
+
 	if testing.Short() {
 		t.Skip("Skipping parallel test in short mode")
 	}
 
-	t.Parallel()
-
 	// Run multiple servers concurrently
 	for i := 0; i < 5; i++ {
-		i := i
 		t.Run(string(rune('A'+i)), func(t *testing.T) {
 			t.Parallel()
 

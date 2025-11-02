@@ -36,6 +36,31 @@ func (n *NopMetrics) RecordLeadershipChange(_ /* newLeader */ string) {
 	// No-op
 }
 
+// RecordDegradedDuration discards the degraded mode duration metric.
+func (n *NopMetrics) RecordDegradedDuration(_ /* duration */ float64) {
+	// No-op
+}
+
+// SetDegradedMode discards the degraded mode status metric.
+func (n *NopMetrics) SetDegradedMode(_ /* degraded */ float64) {
+	// No-op
+}
+
+// SetCacheAge discards the cache age metric.
+func (n *NopMetrics) SetCacheAge(_ /* age */ float64) {
+	// No-op
+}
+
+// SetAlertLevel discards the alert level metric.
+func (n *NopMetrics) SetAlertLevel(_ /* level */ int) {
+	// No-op
+}
+
+// IncrementAlertEmitted discards the alert emission counter.
+func (n *NopMetrics) IncrementAlertEmitted(_ /* level */ string) {
+	// No-op
+}
+
 // CalculatorMetrics implementation
 
 // RecordRebalanceDuration discards the rebalance duration metric.
@@ -75,6 +100,16 @@ func (n *NopMetrics) RecordWorkerChange(_ /* added */, _ /* removed */ int) {
 
 // RecordActiveWorkers discards the active workers metric.
 func (n *NopMetrics) RecordActiveWorkers(_ /* count */ int) {
+	// No-op
+}
+
+// RecordCacheUsage discards the cache usage metric.
+func (n *NopMetrics) RecordCacheUsage(_ /* cacheType */ string, _ /* age */ float64) {
+	// No-op
+}
+
+// IncrementCacheFallback discards the cache fallback counter.
+func (n *NopMetrics) IncrementCacheFallback(_ /* reason */ string) {
 	// No-op
 }
 

@@ -16,6 +16,7 @@ import (
 	"github.com/arloliu/parti/internal/kvutil"
 	"github.com/arloliu/parti/internal/logging"
 	"github.com/arloliu/parti/internal/metrics"
+	"github.com/arloliu/parti/internal/natsutil"
 	"github.com/arloliu/parti/internal/stableid"
 	"github.com/arloliu/parti/types"
 	"github.com/nats-io/nats.go"
@@ -77,12 +78,28 @@ type Manager struct {
 	isLeader   atomic.Bool
 	assignment atomic.Value // Assignment
 
+	// Degraded mode tracking
+	degradedSince      atomic.Value // *time.Time - when degraded mode entered
+	lastAssignmentAt   atomic.Value // *time.Time - last successful assignment fetch
+	lastAssignment     atomic.Value // []Partition - cached assignment during degraded
+	connMonitorOnce    sync.Once    // ensures single connection monitor goroutine
+	connMonitorStop    chan struct{}
+	connDownSince      atomic.Value // *time.Time - when connectivity lost
+	connUpSince        atomic.Value // *time.Time - when connectivity restored
+	kvErrorCount       atomic.Int32 // consecutive KV error count
+	kvErrorWindow      []time.Time  // timestamps of recent KV errors (protected by mu)
+	recoveryGraceStart atomic.Value // *time.Time - when recovery grace period started
+	inRecoveryGrace    atomic.Bool  // true during recovery grace period
+
 	// Lifecycle management
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 	mu     sync.RWMutex
 }
+
+// Compile-time assertion that Manager implements StateProvider.
+var _ types.StateProvider = (*Manager)(nil)
 
 // NewManager creates a new Manager instance with the provided configuration.
 //
@@ -161,14 +178,16 @@ func NewManager(cfg *Config, conn *nats.Conn, source PartitionSource, strategy A
 	}
 
 	m := &Manager{
-		cfg:           *cfg,
-		conn:          conn,
-		source:        source,
-		strategy:      strategy,
-		electionAgent: options.electionAgent,
-		hooks:         hooksInstance,
-		metrics:       metricsCollector,
-		logger:        loggerInstance,
+		cfg:             *cfg,
+		conn:            conn,
+		source:          source,
+		strategy:        strategy,
+		electionAgent:   options.electionAgent,
+		hooks:           hooksInstance,
+		metrics:         metricsCollector,
+		logger:          loggerInstance,
+		connMonitorStop: make(chan struct{}),
+		kvErrorWindow:   make([]time.Time, 0, cfg.DegradedBehavior.KVErrorThreshold),
 	}
 
 	// Initialize state
@@ -302,6 +321,9 @@ func (m *Manager) Start(ctx context.Context) error {
 		m.monitorAssignmentChanges(m.ctx, assignmentKV)
 	})
 
+	// Start degraded mode connection monitoring
+	m.monitorNATSConnection()
+
 	return nil
 }
 
@@ -351,6 +373,13 @@ func (m *Manager) Stop(ctx context.Context) error {
 		m.logger.Info("stopping calculator", "worker_id", m.WorkerID())
 		m.stopCalculator()
 		m.logger.Info("calculator stopped", "worker_id", m.WorkerID())
+	}
+
+	// Step 1.5: Stop degraded mode connection monitor
+	select {
+	case m.connMonitorStop <- struct{}{}:
+	default:
+		// Channel already closed or monitor not running
 	}
 
 	// Step 2: Stop heartbeat publisher (ignore ErrNotStarted)
@@ -863,6 +892,7 @@ func (m *Manager) startCalculator(assignmentKV, heartbeatKV jetstream.KeyValue) 
 		PlannedScaleWindow:   m.cfg.PlannedScaleWindow,
 		Metrics:              m.metrics,
 		Logger:               m.logger,
+		StateProvider:        m, // Pass manager as state provider for degraded mode checks
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create calculator: %w", err)
@@ -1177,4 +1207,420 @@ func (m *Manager) monitorAssignmentChanges(ctx context.Context, kv jetstream.Key
 			m.metrics.RecordAssignmentChange(added, removed, newAssignment.Version)
 		}
 	}
+}
+
+// ============================================================================
+// Degraded Mode - Connection Monitoring
+// ============================================================================
+
+// monitorNATSConnection starts a goroutine that monitors NATS connectivity.
+// Uses connMonitorOnce to ensure only one monitor runs per Manager instance.
+func (m *Manager) monitorNATSConnection() {
+	m.connMonitorOnce.Do(func() {
+		m.wg.Go(func() {
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-m.ctx.Done():
+					return
+				case <-m.connMonitorStop:
+					return
+				case <-ticker.C:
+					m.checkConnectionHealth()
+				}
+			}
+		})
+	})
+}
+
+// checkConnectionHealth checks NATS connection status and updates degraded state.
+func (m *Manager) checkConnectionHealth() {
+	isConnected := m.conn.Status() == nats.CONNECTED
+
+	now := time.Now()
+
+	if !isConnected {
+		// Connection is down
+		if val := m.connDownSince.Load(); val == nil {
+			// First detection of disconnection
+			m.connDownSince.Store(&now)
+			m.connUpSince.Store((*time.Time)(nil))
+			m.logger.Warn("NATS connection lost", "time", now)
+		} else {
+			// Check if we should enter degraded mode
+			downSince, _ := val.(*time.Time)
+			if downSince != nil && time.Since(*downSince) >= m.cfg.DegradedBehavior.EnterThreshold {
+				m.enterDegraded("NATS connection down")
+			}
+		}
+
+		return
+	}
+
+	// Connection is up
+	if val := m.connUpSince.Load(); val == nil {
+		// First detection of reconnection
+		m.connUpSince.Store(&now)
+		m.connDownSince.Store((*time.Time)(nil))
+		m.logger.Info("NATS connection restored", "time", now)
+	} else {
+		// Check if we should exit degraded mode
+		upSince, _ := val.(*time.Time)
+		if upSince != nil && time.Since(*upSince) >= m.cfg.DegradedBehavior.ExitThreshold {
+			m.attemptRecoveryFromDegraded()
+		}
+	}
+}
+
+// recordKVError records a KV operation error and may trigger degraded mode.
+func (m *Manager) recordKVError(err error) {
+	if err == nil || !natsutil.IsConnectivityError(err) {
+		return
+	}
+
+	now := time.Now()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Add error timestamp
+	m.kvErrorWindow = append(m.kvErrorWindow, now)
+
+	// Remove errors outside the window
+	windowStart := now.Add(-m.cfg.DegradedBehavior.KVErrorWindow)
+	validIdx := 0
+	for i, t := range m.kvErrorWindow {
+		if t.After(windowStart) {
+			validIdx = i
+			break
+		}
+	}
+	m.kvErrorWindow = m.kvErrorWindow[validIdx:]
+
+	// Update error count (safe conversion with bounds check)
+	// Extremely unlikely, but handle overflow case
+	windowLen := min(len(m.kvErrorWindow), 0x7FFFFFFF)
+
+	count := int32(windowLen) // #nosec G115 - bounded above
+	m.kvErrorCount.Store(count)
+
+	// Check threshold
+	if int(count) >= m.cfg.DegradedBehavior.KVErrorThreshold {
+		m.logger.Warn("KV error threshold exceeded",
+			"count", count,
+			"threshold", m.cfg.DegradedBehavior.KVErrorThreshold,
+			"window", m.cfg.DegradedBehavior.KVErrorWindow,
+		)
+		m.enterDegraded("KV error threshold exceeded")
+	}
+}
+
+// recordKVSuccess records a successful KV operation and resets error count.
+func (m *Manager) recordKVSuccess() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.kvErrorWindow = m.kvErrorWindow[:0]
+	m.kvErrorCount.Store(0)
+}
+
+// ============================================================================
+// Degraded Mode - State Management
+// ============================================================================
+
+// enterDegraded transitions the manager to degraded mode.
+func (m *Manager) enterDegraded(reason string) {
+	// Check if already in degraded mode
+	if val := m.degradedSince.Load(); val != nil {
+		return
+	}
+
+	now := time.Now()
+	m.degradedSince.Store(&now)
+
+	// Update state
+	oldState := State(m.state.Swap(int32(types.StateDegraded)))
+
+	m.logger.Warn("entering degraded mode",
+		"reason", reason,
+		"previous_state", oldState,
+		"time", now,
+	)
+
+	// Trigger state change hook
+	if m.hooks.OnStateChanged != nil {
+		go func() {
+			if err := m.hooks.OnStateChanged(m.ctx, oldState, types.StateDegraded); err != nil {
+				m.logError("state change hook error", "error", err)
+			}
+		}()
+	}
+
+	// Record metrics
+	m.metrics.RecordStateTransition(oldState, types.StateDegraded, 0)
+	m.metrics.SetDegradedMode(1.0)
+
+	// Start alert monitoring
+	m.wg.Go(m.monitorDegradedAlerts)
+}
+
+// exitDegraded transitions the manager out of degraded mode.
+func (m *Manager) exitDegraded() {
+	// Check if in degraded mode
+	val := m.degradedSince.Load()
+	if val == nil {
+		return
+	}
+
+	tVal, _ := val.(*time.Time)
+	duration := time.Since(*tVal)
+	m.degradedSince.Store((*time.Time)(nil))
+
+	// Restore previous state (typically Stable or WaitingAssignment)
+	oldState := State(m.state.Swap(int32(StateStable)))
+
+	m.logger.Info("exiting degraded mode",
+		"duration", duration,
+		"next_state", StateStable,
+	)
+
+	// Trigger state change hook
+	if m.hooks.OnStateChanged != nil {
+		go func() {
+			if err := m.hooks.OnStateChanged(m.ctx, oldState, StateStable); err != nil {
+				m.logError("state change hook error", "error", err)
+			}
+		}()
+	}
+
+	// Record metrics
+	m.metrics.RecordStateTransition(oldState, StateStable, duration.Seconds())
+	m.metrics.RecordDegradedDuration(duration.Seconds())
+	m.metrics.SetDegradedMode(0.0)
+	m.metrics.SetCacheAge(0.0)
+	m.metrics.SetAlertLevel(0)
+
+	// Start recovery grace period if leader
+	if m.isLeader.Load() {
+		m.enterRecoveryGracePeriod()
+	}
+}
+
+// attemptRecoveryFromDegraded checks if recovery conditions are met and exits degraded mode.
+func (m *Manager) attemptRecoveryFromDegraded() {
+	// Check if in degraded mode
+	if val := m.degradedSince.Load(); val == nil {
+		return
+	}
+
+	// Try to refresh assignment from NATS
+	if err := m.refreshAssignmentFromNATS(); err != nil {
+		m.logger.Warn("failed to refresh assignment during recovery", "error", err)
+		m.recordKVError(err)
+		return
+	}
+
+	// Success - exit degraded mode
+	m.recordKVSuccess()
+	m.exitDegraded()
+}
+
+// ============================================================================
+// Degraded Mode - Recovery Grace Period
+// ============================================================================
+
+// enterRecoveryGracePeriod starts the recovery grace period for the leader.
+func (m *Manager) enterRecoveryGracePeriod() {
+	now := time.Now()
+	m.recoveryGraceStart.Store(&now)
+	m.inRecoveryGrace.Store(true)
+
+	m.logger.Info("entering recovery grace period",
+		"duration", m.cfg.DegradedBehavior.RecoveryGracePeriod,
+	)
+
+	m.wg.Go(func() {
+		timer := time.NewTimer(m.cfg.DegradedBehavior.RecoveryGracePeriod)
+		defer timer.Stop()
+
+		select {
+		case <-m.ctx.Done():
+			return
+		case <-timer.C:
+			m.exitRecoveryGracePeriod()
+		}
+	})
+}
+
+// exitRecoveryGracePeriod ends the recovery grace period.
+func (m *Manager) exitRecoveryGracePeriod() {
+	if !m.inRecoveryGrace.Load() {
+		return
+	}
+
+	duration := time.Duration(0)
+	if val := m.recoveryGraceStart.Load(); val != nil {
+		if timePtr, ok := val.(*time.Time); ok {
+			duration = time.Since(*timePtr)
+		}
+	}
+
+	m.recoveryGraceStart.Store((*time.Time)(nil))
+	m.inRecoveryGrace.Store(false)
+
+	m.logger.Info("exiting recovery grace period", "duration", duration)
+}
+
+// IsInRecoveryGrace returns true if currently in recovery grace period.
+//
+// This is part of the StateProvider interface and allows components like
+// Calculator to check recovery grace status without circular dependencies.
+//
+// Returns:
+//   - bool: true if in recovery grace period
+func (m *Manager) IsInRecoveryGrace() bool {
+	return m.inRecoveryGrace.Load()
+}
+
+// ============================================================================
+// Degraded Mode - Assignment Caching
+// ============================================================================
+
+// refreshAssignmentFromNATS attempts to fetch the current assignment from NATS KV.
+func (m *Manager) refreshAssignmentFromNATS() error {
+	workerID := m.WorkerID()
+	if workerID == "" {
+		return errors.New("worker ID not set")
+	}
+
+	key := fmt.Sprintf("assignment.%s", workerID)
+	entry, err := m.assignmentKV.Get(m.ctx, key)
+	if err != nil {
+		return fmt.Errorf("failed to get assignment from KV: %w", err)
+	}
+
+	var curAssignment Assignment
+	if err := json.Unmarshal(entry.Value(), &curAssignment); err != nil {
+		return fmt.Errorf("failed to unmarshal assignment: %w", err)
+	}
+
+	now := time.Now()
+	m.assignment.Store(curAssignment)
+	m.lastAssignmentAt.Store(&now)
+	m.lastAssignment.Store(m.clonePartitions(curAssignment.Partitions))
+
+	m.logger.Info("assignment refreshed from NATS",
+		"version", curAssignment.Version,
+		"partitions", len(curAssignment.Partitions),
+	)
+
+	return nil
+}
+
+// clonePartitions creates a deep copy of partition slice.
+func (m *Manager) clonePartitions(partitions []Partition) []Partition {
+	if partitions == nil {
+		return nil
+	}
+
+	cloned := make([]Partition, len(partitions))
+	for i, p := range partitions {
+		cloned[i] = Partition{
+			Keys:   append([]string(nil), p.Keys...),
+			Weight: p.Weight,
+		}
+	}
+
+	return cloned
+}
+
+// ============================================================================
+// Degraded Mode - Alert Monitoring
+// ============================================================================
+
+// monitorDegradedAlerts monitors degraded mode duration and emits alerts.
+func (m *Manager) monitorDegradedAlerts() {
+	ticker := time.NewTicker(m.cfg.DegradedAlert.AlertInterval)
+	defer ticker.Stop()
+
+	lastAlertLevel := AlertLevelInfo - 1 // Start below Info to trigger first alert
+
+	for {
+		select {
+		case <-m.ctx.Done():
+			return
+		case <-ticker.C:
+			// Check if still in degraded mode
+			val := m.degradedSince.Load()
+			if val == nil {
+				return // Exited degraded mode
+			}
+
+			degradedSince, _ := val.(*time.Time)
+			duration := time.Since(*degradedSince)
+			level := m.calculateAlertLevel(*degradedSince)
+
+			// Update cache age metric
+			m.metrics.SetCacheAge(duration.Seconds())
+
+			// Only emit if level increased
+			if level > lastAlertLevel {
+				m.emitDegradedAlert(level, *degradedSince)
+				lastAlertLevel = level
+			}
+		}
+	}
+}
+
+// emitDegradedAlert emits a degraded mode alert at the specified level.
+func (m *Manager) emitDegradedAlert(level AlertLevel, degradedSince time.Time) {
+	duration := time.Since(degradedSince)
+
+	var levelName string
+	switch level {
+	case AlertLevelInfo:
+		levelName = "info"
+	case AlertLevelWarn:
+		levelName = "warn"
+	case AlertLevelError:
+		levelName = "error"
+	case AlertLevelCritical:
+		levelName = "critical"
+	default:
+		levelName = "unknown"
+	}
+
+	m.logger.Warn("degraded mode alert",
+		"level", levelName,
+		"duration", duration,
+		"degraded_since", degradedSince,
+	)
+
+	// Record metrics
+	m.metrics.SetAlertLevel(int(level))
+	m.metrics.IncrementAlertEmitted(levelName)
+
+	// TODO: Add hook for degraded alerts when implementing Phase 2.5
+}
+
+// calculateAlertLevel determines the alert level based on degraded duration.
+func (m *Manager) calculateAlertLevel(degradedSince time.Time) AlertLevel {
+	duration := time.Since(degradedSince)
+
+	if duration >= m.cfg.DegradedAlert.CriticalThreshold {
+		return AlertLevelCritical
+	}
+	if duration >= m.cfg.DegradedAlert.ErrorThreshold {
+		return AlertLevelError
+	}
+	if duration >= m.cfg.DegradedAlert.WarnThreshold {
+		return AlertLevelWarn
+	}
+	if duration >= m.cfg.DegradedAlert.InfoThreshold {
+		return AlertLevelInfo
+	}
+
+	return AlertLevelInfo - 1 // Below Info level
 }
