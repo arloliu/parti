@@ -248,7 +248,6 @@ Create a helper that:
 **Integration Test Guidelines:**
 - Place in `test/integration/` directory
 - Use `t.Context()` for context management in tests
-- Use build tags: `//go:build integration`
 - Package name: `integration_test`
 - Always include `testing.Short()` guard
 - Use embedded NATS via `testutil.StartEmbeddedNATS(t)`

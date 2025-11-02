@@ -223,13 +223,12 @@ diff baseline.log current.log
 When adding new stress tests:
 
 1. **Use `stress_test` package:** Maintain consistency with existing tests
-2. **Require integration build tag:** `//go:build integration`
-3. **Use external NATS:** Call `testutil.StartExternalNATS(t)` for memory tests
-4. **Document baselines:** Include expected memory/duration in comments
-5. **Add to README:** Update test list and baselines table
-6. **Timeout appropriately:** Use `-timeout` values 2-3x expected duration
-7. **Measure accurately:** Use `testutil.LoadGenerator` for consistent metrics
-8. **Clean up resources:** Always use `t.Cleanup()` or `defer` for teardown
+2. **Use external NATS:** Call `testutil.StartExternalNATS(t)` for memory tests
+3. **Document baselines:** Include expected memory/duration in comments
+4. **Add to README:** Update test list and baselines table
+5. **Timeout appropriately:** Use `-timeout` values 2-3x expected duration
+6. **Measure accurately:** Use `testutil.LoadGenerator` for consistent metrics
+7. **Clean up resources:** Always use `t.Cleanup()` or `defer` for teardown
 
 ---
 

@@ -43,7 +43,7 @@ The tFDC system is designed to collect, process, and analyze time-series data fr
 - Function: An external administrative self-service system that orchestrates canary deployments and traffic routing decisions.
 - Traffic Control: Provides HTTP API endpoints that return lists of tool IDs to be routed to specific deployment versions.
 - Integration: Consumed by APISIX Gateway to dynamically update routing rules based on management decisions.
-- API Endpoints:
+- API Endpoints Example:
     - `GET /api/v1/routing/canary` - Returns list of tool IDs that should route to canary version
     - `GET /api/v1/routing/stable` - Returns list of tool IDs that should remain on stable version
     - `POST /api/v1/routing/update` - Triggers routing configuration refresh
@@ -60,7 +60,7 @@ The tFDC system is designed to collect, process, and analyze time-series data fr
 
 # Deployment Strategy
 
-The **Blue/Green with Tool-by-Tool Canary** strategy using **Argo Rollouts + APISIX Gateway + Permanent Dual NATS Clusters** provides enterprise-grade progressive delivery with complete isolation between versions.
+The **Blue/Green with Tool-by-Tool Canary** strategy using **Argo Rollouts + APISIX Gateway + Permanent Dual NATS Clusters** provides progressive delivery with complete isolation between versions.
 
 ## Goals
 
@@ -84,10 +84,15 @@ The deployment strategy leverages permanent dual NATS clusters (Blue and Green) 
 ### Architecture Diagram
 
 ```mermaid
+---
+config:
+    layout: elk
+---
 graph TB
     subgraph "External Systems"
         Tools[External Tools<br/>1000-1500]
-        Management[tFDC Management<br/>System]
+        Management[tFDC Mgmt]
+        Argo[Argo Rollouts]
     end
 
     subgraph "API Gateway Layer"
@@ -96,22 +101,18 @@ graph TB
 
     subgraph "Blue Stack"
         DC_Blue[Data Collector<br/>Blue]
-        NATS_Blue[NATS Cluster<br/>Blue<br/>Permanent]
+        NATS_Blue[NATS Cluster<br/>Blue]
         Defender_Blue[Defender<br/>Blue]
     end
 
     subgraph "Green Stack"
         DC_Green[Data Collector<br/>Green]
-        NATS_Green[NATS Cluster<br/>Green<br/>Permanent]
+        NATS_Green[NATS Cluster<br/>Green]
         Defender_Green[Defender<br/>Green]
     end
 
     subgraph "Shared Resources"
         Cassandra[(Cassandra<br/>Database)]
-    end
-
-    subgraph "Control Plane"
-        Argo[Argo Rollouts<br/>• Orchestrates deployment<br/>• Controls routing<br/>• Runs analysis<br/>• Manages rollback]
     end
 
     Tools -->|gRPC + tool-id header| APISIX
@@ -177,8 +178,8 @@ stateDiagram-v2
 ### 1. Traffic Flow Relationships
 
 ```mermaid
-flowchart LR
-    subgraph "Normal Operation - Blue is Stable"
+flowchart TB
+    subgraph "Normal Operatio - Blue is Stable"
         T1[Tools] --> A1[APISIX]
         A1 --> DC1[DC Blue]
         DC1 --> N1[NATS Blue]
@@ -339,15 +340,55 @@ Full Migration (100%):
 
 ## State Management During Deployment
 
-### Permanent Cluster State Isolation
+### Permanent Cluster State Isolation (Dual NATS)
 - **Blue NATS KV**: Maintains state for services using Blue cluster
 - **Green NATS KV**: Maintains state for services using Green cluster
 - **No Migration Needed**: State remains in respective clusters
+- **Standard Bucket Names**: Each cluster uses same bucket names (e.g., `parti-leader`, `parti-assignments`)
+
+### Versioned KV Buckets (Single NATS Alternative)
+If using Single NATS with versioned subjects, versioned KV buckets are **required** to maintain state isolation:
+
+**Required Versioned Buckets:**
+```yaml
+# Stable version buckets
+parti-leader-stable          # Leader election for stable Defenders
+parti-assignments-stable     # Subject assignments for stable version
+parti-heartbeats-stable      # Heartbeat tracking for stable version
+
+# Canary version buckets
+parti-leader-canary          # Leader election for canary Defenders
+parti-assignments-canary     # Subject assignments for canary version
+parti-heartbeats-canary      # Heartbeat tracking for canary version
+```
+
+**Why Versioned Buckets are Necessary:**
+1. **Leader Election Conflict**: Without separate buckets, stable and canary Defenders would compete for the same leader key
+2. **Assignment Confusion**: Separate buckets prevent stable and canary from overwriting each other's assignments
+3. **Heartbeat Isolation**: Each version needs independent heartbeat tracking
+4. **State Corruption Prevention**: Shared buckets could lead to cross-version state corruption
+
+**Configuration Example:**
+```go
+// Defender configuration with versioned buckets
+type DefenderConfig struct {
+    NATSUrl       string
+    DeploymentVersion string  // "stable" or "canary"
+}
+
+func (c *DefenderConfig) GetBucketName(baseName string) string {
+    return fmt.Sprintf("%s-%s", baseName, c.DeploymentVersion)
+}
+
+// Usage
+leaderBucket := config.GetBucketName("parti-leader")  // "parti-leader-stable"
+assignmentBucket := config.GetBucketName("parti-assignments")  // "parti-assignments-stable"
+```
 
 ### Defender Assignment Stability
-- Each cluster maintains its own consistent hashing ring
-- No rebalancing when traffic shifts between clusters
-- Defenders handle full tool assignment within their cluster
+- Each cluster/version maintains its own consistent hashing ring
+- No rebalancing when traffic shifts between versions
+- Defenders handle full tool assignment within their cluster/version
 
 ### Data Consistency
 - Both versions write to same Cassandra cluster
@@ -392,7 +433,7 @@ endpoints:
 flowchart TD
     Request[Incoming gRPC Request] --> Extract[Extract tool-id header]
     Extract --> Cache{Check local<br/>routing cache}
-    Cache -->|Cache miss or expired| Fetch[Fetch from tFDC Management]
+    Cache -->|Cache miss or expired| Fetch[Fetch from tFDC Mgmt]
     Cache -->|Cache hit| Route{Determine route}
     Fetch --> Update[Update local cache]
     Update --> Route
@@ -437,6 +478,330 @@ Argo Rollouts evaluates metrics with tFDC Management input:
 5. **Complete Isolation**: No shared failure modes between versions
 6. **Management Control**: External system drives routing decisions
 7. **Instant Rollback**: Traffic routing without infrastructure changes
+
+## Architectural Comparison: Dual NATS vs Single NATS
+
+This section compares the chosen **Permanent Dual NATS** architecture with the alternative **Single NATS with Versioned Subjects** approach.
+
+### Architecture Overview
+
+```mermaid
+graph TB
+    subgraph "Dual NATS Architecture"
+        DC1[Data Collector<br/>Stable]
+        DC2[Data Collector<br/>Canary]
+        NATS1[NATS Blue<br/>Cluster]
+        NATS2[NATS Green<br/>Cluster]
+        DEF1[Defender<br/>Stable]
+        DEF2[Defender<br/>Canary]
+
+        DC1 -->|dc.tool_X.complete| NATS1
+        DC2 -->|dc.tool_X.complete| NATS2
+        NATS1 --> DEF1
+        NATS2 --> DEF2
+    end
+
+    subgraph "Single NATS Architecture "
+        DC3[Data Collector<br/>Stable]
+        DC4[Data Collector<br/>Canary]
+        NATS3[Shared NATS<br/>Cluster]
+        DEF3[Defender<br/>Stable]
+        DEF4[Defender<br/>Canary]
+
+        DC3 -->|dc.tool_X.complete.<version1>| NATS3
+        DC4 -->|dc.tool_X.complete.<version2>| NATS3
+        NATS3 -->|.stable subjects| DEF3
+        NATS3 -->|.canary subjects| DEF4
+    end
+```
+
+### Detailed Comparison
+
+| Aspect | Dual NATS (Permanent) | Single NATS (Versioned Subjects) |
+|--------|----------------------|----------------------------------|
+| **Infrastructure** | Two permanent 3-node clusters (6 nodes total) | One 3-node cluster |
+| **Resource Cost** | ~200% NATS infrastructure | ~100% baseline |
+| **Storage Requirements** | Doubled stream storage | Single storage with versioned subjects |
+| **Network Overhead** | Two replication groups | Single replication group |
+
+### Isolation and Failure Modes
+
+| Aspect | Dual NATS (Permanent) | Single NATS (Versioned Subjects) |
+|--------|----------------------|----------------------------------|
+| **NATS Node Failure** | Affects only one version | Affects both stable and canary |
+| **Network Partition** | Isolated per cluster | Both versions impacted |
+| **Storage Corruption** | Completely isolated | Potential cross-version impact |
+| **NATS Upgrade** | Can upgrade clusters independently | Affects both versions simultaneously |
+| **Blast Radius** | Small - isolated to one version | Large - shared infrastructure risk |
+| **Failure Independence** | ✅ Complete isolation | ❌ Shared failure domain |
+
+### Operational Complexity
+
+| Aspect | Dual NATS (Permanent) | Single NATS (Versioned Subjects) |
+|--------|----------------------|----------------------------------|
+| **Cluster Management** | Two clusters to manage | One cluster to manage |
+| **Monitoring Setup** | Dual dashboards recommended | Single monitoring dashboard |
+| **Alert Configuration** | Separate alerts per cluster | Shared alert configuration |
+| **Backup/Restore** | Two backup streams | Single backup stream |
+| **Deployment Speed** | Fast - no provisioning | Faster - just deploy services |
+| **Subject Management** | Standard subjects per cluster | Versioned subject naming convention |
+
+### Code Changes Required
+
+| Component | Dual NATS (Permanent) | Single NATS (Versioned Subjects) |
+|-----------|----------------------|----------------------------------|
+| **Data Collector** | ✅ No code changes - standard subjects | ❌ Must append version suffix to subjects |
+| **Defender** | ✅ No code changes - standard subjects | ❌ Must subscribe to versioned subjects |
+| **Defender KV Access** | ✅ No code changes - standard bucket names | ❌ **Must use versioned bucket names** |
+| **Subject Pattern** | `dc.{tool_id}.complete` (both clusters) | `dc.{tool_id}.complete.{version}` |
+| **KV Bucket Pattern** | `parti-leader`, `parti-assignments` | `parti-leader-{version}`, `parti-assignments-{version}` |
+| **Configuration** | Different NATS URLs per version | Same NATS URL, version-aware naming |
+
+### Traffic Management
+
+| Aspect | Dual NATS (Permanent) | Single NATS (Versioned Subjects) |
+|--------|----------------------|----------------------------------|
+| **Routing Control** | APISIX routes to different DCs | APISIX routes to different DCs |
+| **Message Isolation** | ✅ Cluster-level isolation | ✅ Subject-level isolation |
+| **Shadow Traffic** | ❌ Requires request duplication at gateway | ✅ **Easy - DC publishes to both subjects** |
+| **Parallel Testing** | ❌ Complex - needs gateway-level duplication | ✅ **Both versions process same messages** |
+| **A/B Result Comparison** | ❌ Difficult - requires data reconciliation | ✅ **Direct comparison possible** |
+| **Message Duplication Risk** | ✅ None - separate clusters | ✅ None - separate subjects |
+
+### State Management
+
+| Aspect | Dual NATS (Permanent) | Single NATS (Versioned Subjects) |
+|--------|----------------------|----------------------------------|
+| **Leader Election** | Separate KV stores per cluster | **Versioned KV buckets required** (e.g., `parti-stable`, `parti-canary`) |
+| **Heartbeats** | Independent streams per cluster | **Versioned KV buckets required** for isolation |
+| **Subject Assignments** | Independent per cluster | **Versioned KV buckets required** to prevent conflicts |
+| **KV Bucket Setup** | Automatic - one per cluster | **Must create versioned buckets** (e.g., `assignments-stable`, `assignments-canary`) |
+| **State Visibility** | No cross-version visibility | Can observe both versions if needed |
+| **State Migration** | Not needed - permanent clusters | Not needed - separate buckets |
+| **Configuration Complexity** | Simple - standard bucket names | Higher - services must use version-aware bucket names |
+
+### Deployment and Rollback
+
+| Aspect | Dual NATS (Permanent) | Single NATS (Versioned Subjects) |
+|--------|----------------------|----------------------------------|
+| **Initial Deployment** | Clusters already running | Services deploy to single cluster |
+| **Canary Start** | Deploy to idle cluster | Deploy services with version suffix |
+| **Traffic Migration** | Update APISIX routing | Update APISIX routing |
+| **Rollback Speed** | Instant - just routing | Instant - just routing |
+| **Cleanup** | Scale down services only | Scale down services, subjects remain |
+| **Next Deployment** | Reuse same clusters | Same process |
+
+### Cost Analysis
+
+#### Infrastructure Costs (Annual Estimate)
+
+**Dual NATS (Permanent):**
+- 6 NATS nodes (m5.xlarge) × $0.192/hr × 8760 hrs = **$10,074/year**
+- Storage: 6 nodes × 100GB × $0.10/GB = **$60/month = $720/year**
+- **Total: ~$10,800/year**
+
+**Single NATS:**
+- 3 NATS nodes (m5.xlarge) × $0.192/hr × 8760 hrs = **$5,037/year**
+- Storage: 3 nodes × 100GB × $0.10/GB = **$30/month = $360/year**
+- **Total: ~$5,400/year**
+
+**Delta: ~$5,400/year additional for dual NATS**
+
+#### Operational Costs
+
+| Cost Factor | Dual NATS | Single NATS |
+|-------------|-----------|-------------|
+| **Setup Time** | 2-3 weeks (one-time) | 1-2 weeks (one-time) |
+| **Deployment Time** | 45-60 min (per release) | 40-50 min (per release) |
+| **Monitoring Overhead** | Higher (2 clusters) | Lower (1 cluster) |
+| **On-call Complexity** | Higher (more components) | Lower (fewer components) |
+
+### Performance Considerations
+
+| Aspect | Dual NATS (Permanent) | Single NATS (Versioned Subjects) |
+|--------|----------------------|----------------------------------|
+| **Message Throughput** | Higher - isolated clusters | Potential contention between versions |
+| **Latency** | Better - no cross-version interference | Possible impact during high load |
+| **Resource Contention** | None between versions | Possible CPU/memory contention |
+| **Network Bandwidth** | Isolated per cluster | Shared bandwidth |
+
+### Shadow Traffic and Parallel Testing
+
+One of the most significant advantages of **Single NATS with Versioned Subjects** is the ability to easily implement shadow traffic and parallel testing:
+
+#### Shadow Traffic Pattern
+
+```mermaid
+sequenceDiagram
+    participant Tool as External Tool
+    participant APISIX as APISIX Gateway
+    participant DC as Data Collector
+    participant NATS as Single NATS Cluster
+    participant Stable as Defender Stable
+    participant Canary as Defender Canary
+
+    Tool->>APISIX: gRPC Request (tool_123)
+    APISIX->>DC: Route to DC (any version)
+    DC->>NATS: Publish to dc.tool_123.complete.stable
+    DC->>NATS: Publish to dc.tool_123.complete.canary
+    Note over DC,NATS: Same message sent to both subjects
+    NATS->>Stable: Deliver to Stable Defender
+    NATS->>Canary: Deliver to Canary Defender
+    Stable->>Stable: Process & store results (v1 logic)
+    Canary->>Canary: Process & store results (v2 logic)
+```
+
+#### Benefits of Shadow/Parallel Testing
+
+**1. Risk-Free Validation**
+- Canary version processes real production data
+- No impact on stable version's results
+- Issues in canary don't affect production
+
+**2. Direct Result Comparison**
+- Both versions process identical inputs
+- Output differences can be analyzed
+- Performance metrics directly comparable
+
+**3. Algorithm/Logic Validation**
+- Test new detection algorithms
+- Validate improved data processing logic
+- Compare alert generation accuracy
+
+**4. Performance Benchmarking**
+- Real-world load testing
+- Latency comparison under production conditions
+- Resource usage patterns
+
+#### Implementation Example
+
+```go
+// Data Collector with shadow traffic support
+func (dc *DataCollector) publishCompletion(toolID string, data []byte) error {
+    baseSubject := fmt.Sprintf("dc.%s.complete", toolID)
+
+    // Always publish to stable
+    if err := dc.natsConn.Publish(baseSubject + ".stable", data); err != nil {
+        return fmt.Errorf("failed to publish to stable: %w", err)
+    }
+
+    // Check if shadow mode is enabled for this tool
+    if dc.shouldShadow(toolID) {
+        // Also publish to canary (shadow traffic)
+        if err := dc.natsConn.Publish(baseSubject + ".canary", data); err != nil {
+            // Log error but don't fail the request
+            dc.logger.Warn("Failed to publish shadow traffic",
+                "tool_id", toolID,
+                "error", err)
+        }
+    }
+
+    return nil
+}
+```
+
+#### Shadow Traffic Control
+
+```yaml
+# ConfigMap for shadow traffic configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shadow-traffic-config
+data:
+  shadow-mode: "enabled"
+  shadow-tools: |
+    tool_001: true   # Enable shadow for specific tool
+    tool_002: true
+    tool_050: false
+  shadow-percentage: "10"  # Shadow 10% of all tools
+  shadow-pattern: "tool_0.*"  # Shadow tools matching pattern
+```
+
+#### Comparison Dashboard
+
+With Single NATS, you can build real-time comparison dashboards:
+
+```
+┌─────────────────────────────────────────────────┐
+│         Shadow Traffic Comparison                │
+├─────────────────────────────────────────────────┤
+│ Tool: tool_123                                   │
+│ Timeframe: Last 1 hour                          │
+├─────────────┬─────────────┬─────────────────────┤
+│ Metric      │ Stable (v1) │ Canary (v2)        │
+├─────────────┼─────────────┼─────────────────────┤
+│ Messages    │ 1,234       │ 1,234              │
+│ Avg Latency │ 45ms        │ 38ms (-15%) ✓      │
+│ P95 Latency │ 120ms       │ 95ms (-21%) ✓      │
+│ Errors      │ 2 (0.16%)   │ 1 (0.08%) ✓        │
+│ Alerts Gen. │ 156         │ 162 (+3.8%)        │
+├─────────────┴─────────────┴─────────────────────┤
+│ Result Diff: 6 messages had different outcomes  │
+│ [View Details] [Export Report]                  │
+└─────────────────────────────────────────────────┘
+```
+
+#### Limitations with Dual NATS
+
+With Dual NATS clusters, shadow traffic requires:
+1. **Gateway-level duplication** - APISIX must duplicate gRPC requests
+2. **Increased load** - Tools receive 2x traffic (once to each DC)
+3. **Complex correlation** - Must track request IDs across systems
+4. **Data reconciliation** - Results stored separately, harder to compare
+
+This makes shadow testing significantly more complex and resource-intensive.
+
+### Use Case Recommendations
+
+**Choose Dual NATS (Permanent) when:**
+- ✅ Complete failure isolation is critical
+- ✅ Infrastructure budget allows 2x NATS cost
+- ✅ Regular bi-weekly deployments justify permanent setup
+- ✅ Zero code changes to DC/Defender is required
+- ✅ Independent NATS version testing is needed
+- ✅ Risk mitigation is more important than cost
+
+**Choose Single NATS (Versioned Subjects) when:**
+- ✅ Infrastructure cost optimization is priority
+- ✅ Operational simplicity (one cluster) is preferred
+- ✅ Code changes for subject versioning are acceptable
+- ✅ **Shadow traffic and parallel run testing are critical requirements**
+- ✅ **Direct A/B comparison of processing results is needed**
+- ✅ Unified state visibility is beneficial
+- ✅ Smaller deployment footprint is desired
+
+### Decision Rationale for tFDC
+
+The **Permanent Dual NATS** architecture was chosen for tFDC because:
+
+1. **Mission-Critical System**: Complete isolation justifies the additional cost
+2. **Bi-Weekly Releases**: Permanent clusters eliminate repeated provisioning overhead
+3. **Zero Code Changes**: Services use standard subject patterns without versioning logic
+4. **Failure Independence**: NATS issues in canary don't impact stable production traffic
+5. **Operational Maturity**: Two well-tested permanent clusters reduce deployment risk
+6. **Future Flexibility**: Can test new NATS features in one cluster while stable runs on the other
+
+The additional ~$5,400/year cost is acceptable given:
+- Reduced operational risk
+- Simplified service code
+- Faster deployment cycles
+- Better failure isolation
+- Predictable infrastructure costs
+
+### Migration Path
+
+If cost reduction becomes necessary, the architecture can migrate from Dual to Single NATS:
+
+```mermaid
+graph LR
+    A[Dual NATS<br/>Running] --> B[Deploy versioned<br/>DC/Defender code]
+    B --> C[Migrate to<br/>Single NATS]
+    C --> D[Decommission<br/>one cluster]
+    D --> E[Single NATS<br/>Running]
+```
+
+This provides a safe fallback option while starting with maximum isolation.
 
 ## Implementation Considerations
 

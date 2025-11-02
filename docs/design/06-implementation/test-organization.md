@@ -94,7 +94,6 @@ func TestElection_CampaignForLeader(t *testing.T) {
 
 **Location**: `test/integration/` directory
 **Package**: `integration_test`
-**Build Tags**: `//go:build integration`
 **Characteristics**:
 - Slower execution (1-10 seconds)
 - Test multiple components working together
@@ -104,9 +103,6 @@ func TestElection_CampaignForLeader(t *testing.T) {
 
 **Example**:
 ```go
-//go:build integration
-// +build integration
-
 package integration_test
 
 import "testing"
@@ -217,15 +213,7 @@ make coverage-html  # Opens in browser
    test/integration/leader_failover_test.go
    ```
 
-2. **Always use build tags**:
-   ```go
-   //go:build integration
-   // +build integration
-
-   package integration_test
-   ```
-
-3. **Always use `testing.Short()` guard**:
+2. **Always use `testing.Short()` guard**:
    ```go
    func TestScenario(t *testing.T) {
        if testing.Short() {
@@ -235,21 +223,21 @@ make coverage-html  # Opens in browser
    }
    ```
 
-4. **Use embedded NATS**:
+3. **Use embedded NATS**:
    ```go
    srv, conn := testutil.StartEmbeddedNATS(t)
    defer srv.Shutdown()
    defer conn.Close()
    ```
 
-5. **Test realistic scenarios**:
+4. **Test realistic scenarios**:
    - Multiple workers
    - Leader failover
    - Network partitions
    - Concurrent operations
    - Rebalancing
 
-6. **Clean up resources**:
+5. **Clean up resources**:
    ```go
    defer mgr.Stop(context.Background())
    defer conn.Close()

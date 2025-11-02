@@ -153,20 +153,9 @@ go test -race -tags=integration ./test/integration
 - Test multiple components working together
 - Use embedded NATS server
 - Slower execution (1-10 seconds per test)
-- Tagged with `//go:build integration`
 - Run with: `go test ./test/integration/...`
 
 ## Writing Integration Tests
-
-### Build Tags
-All integration tests must include build tags at the top:
-
-```go
-//go:build integration
-// +build integration
-
-package integration_test
-```
 
 ### Test Naming Convention
 - `TestManager_*` - Tests for Manager lifecycle and coordination

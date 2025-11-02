@@ -45,13 +45,7 @@ parti/
 - `test/testutil/` - For shared test utilities and fixtures
 - `test/README.md` - Documentation for test directory
 
-### 2. Moved Integration Tests ✅
-- Moved: `manager_integration_test.go` → `test/integration/manager_lifecycle_test.go`
-- Added build tags: `//go:build integration`
-- Changed package: `parti_test` → `integration_test`
-- Tests still pass: ✅
-
-### 3. Updated Makefile ✅
+### 2. Updated Makefile ✅
 Added new test targets:
 - `make test-unit` - Fast unit tests only
 - `make test-integration` - Integration tests only
@@ -59,12 +53,12 @@ Added new test targets:
 - `make test` - Unit tests with race detector (unchanged)
 - `make ci` - Updated to run all tests
 
-### 4. Created Documentation ✅
+### 3. Created Documentation ✅
 - `test/README.md` - Quick reference for running tests
 - `docs/design/06-implementation/test-organization.md` - Comprehensive guide
 - Updated `.github/copilot-instructions.md` - Added test structure section
 
-### 5. Testing ✅
+### 4. Testing ✅
 All tests pass:
 ```bash
 $ make test-unit
@@ -122,22 +116,6 @@ Still use `testing.Short()` guard for selective running.
 | **Unit** | Next to code | Fast (< 1s) | Component verification |
 | **Integration** | `test/integration/` | Medium (1-10s) | Multi-component scenarios |
 | **Internal** | `internal/*/` | Fast-Medium | Component + NATS |
-
-## Build Tags
-
-Integration tests use build tags for explicit opt-in:
-
-```go
-//go:build integration
-// +build integration
-
-package integration_test
-```
-
-This allows:
-- Skip integration tests by default: `go test -short ./...`
-- Run integration tests explicitly: `go test ./test/integration/...`
-- Use in CI for separate pipelines
 
 ## Migration Checklist
 

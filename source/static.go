@@ -45,7 +45,7 @@ func NewStatic(partitions []types.Partition) *Static {
 // Returns:
 //   - []types.Partition: The fixed list of partitions
 //   - error: Always nil (never fails)
-func (s *Static) ListPartitions(_ /* ctx */ context.Context) ([]types.Partition, error) {
+func (s *Static) ListPartitions(_ context.Context) ([]types.Partition, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
