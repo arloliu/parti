@@ -1,0 +1,60 @@
+simulation:
+  duration: 2m
+  mode: all-in-one
+
+partitions:
+  count: 100
+  message_rate_per_partition: 2.0  # 200 msg/sec total
+  distribution: exponential
+  weights:
+    exponential:
+      extreme_percent: 0.05
+      extreme_weight: 50
+      normal_weight: 1
+
+producers:
+  count: 2
+  rate_variation:
+    enabled: true
+    pattern: global
+    min_multiplier: 0.8
+    max_multiplier: 1.2
+    ramp_interval: 30s
+
+workers:
+  count: 10
+  assignment_strategy: WeightedConsistentHash
+  strategy_config:
+    virtual_nodes: 150
+  processing_delay:
+    min: 10ms
+    max: 50ms
+
+coordinator:
+  validation_window: 1m
+
+chaos:
+  enabled: true
+  events:
+    - worker_crash
+    - worker_restart
+    - scale_up
+    - scale_down
+    - leader_failure
+  interval: 20s-40s  # Frequent chaos for testing
+
+nats:
+  mode: embedded
+  jetstream:
+    max_memory: 1GB
+    max_storage: 512MB
+
+metrics:
+  prometheus:
+    enabled: true
+    port: 9091
+
+checkpoint:
+  enabled: true
+  interval: 30s  # Frequent for verification
+  path: "./checkpoints"

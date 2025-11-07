@@ -51,7 +51,12 @@ func TestCalculator_Start(t *testing.T) {
 		defer func() { _ = calc.Stop(ctx) }()
 
 		require.True(t, calc.IsStarted())
-		require.Greater(t, calc.CurrentVersion(), int64(0))
+
+		// Wait for initial assignment to complete (happens in background goroutine)
+		// ColdStartWindow is 50ms, so wait up to 500ms for completion
+		require.Eventually(t, func() bool {
+			return calc.CurrentVersion() > 0
+		}, 500*time.Millisecond, 10*time.Millisecond, "initial assignment should complete")
 
 		// Verify assignment was published
 		entry, err := assignmentKV.Get(ctx, "assignment.worker-1")
@@ -268,7 +273,15 @@ func TestCalculator_CooldownPreventsRebalancing(t *testing.T) {
 		require.NoError(t, err)
 		defer func() { _ = calc.Stop(ctx) }()
 
+		// Wait for initial assignment to complete (happens in background goroutine)
+		// Two-phase assignment: immediate (v1) + final (v2)
+		// ColdStartWindow is 50ms, so wait up to 500ms for both phases
+		require.Eventually(t, func() bool {
+			return calc.CurrentVersion() >= 2 // Wait for final assignment (second phase)
+		}, 500*time.Millisecond, 10*time.Millisecond, "initial assignment should complete")
+
 		initialVersion := calc.CurrentVersion()
+		t.Logf("Initial two-phase assignment completed at version %d", initialVersion)
 
 		// Add worker-2 immediately (should be blocked by cooldown)
 		_, err = heartbeatKV.Put(ctx, "worker-hb.worker-2", []byte(time.Now().Format(time.RFC3339Nano)))

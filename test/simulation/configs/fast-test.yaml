@@ -1,0 +1,39 @@
+# Fast Test Configuration - for quick metrics verification
+# - Higher message rate (1 msg/sec per partition = 150 msg/sec total)
+# - Fewer partitions (150 instead of 1500)
+# - Shorter manager windows for faster stabilization
+# - Faster chaos events for testing
+
+nats:
+  url: "nats://localhost:4222"
+
+duration: 5m  # Short test duration
+
+partitions:
+  count: 150  # Reduced from 1500
+  distribution: "uniform"
+  message_rate_per_partition: 1.0  # 1 msg/sec per partition = 150 msg/sec total
+
+producers:
+  count: 3  # Reduced from 10
+
+workers:
+  count: 3  # Reduced from 10
+  assignment_strategy: "ConsistentHash"
+  processing_delay:
+    min: 1ms
+    max: 10ms
+
+chaos:
+  enabled: true
+  interval: "30s-2m"  # More frequent events for testing
+  events:
+    - worker_crash
+    - worker_restart
+    - scale_up
+    - scale_down
+
+metrics:
+  prometheus:
+    enabled: true
+    port: 9091

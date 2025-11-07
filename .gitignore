@@ -6,6 +6,8 @@
 .coverage
 .benchmarks/
 
+test/simulation/bin/
+
 /*.out
 /*.log
 /*.test

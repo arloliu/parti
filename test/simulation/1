@@ -1,0 +1,242 @@
+2025/11/06 22:22:22 Starting simulation in all-in-one mode
+2025/11/06 22:22:22 Simulation will run for 72h0m0s
+2025/11/06 22:22:23 Prometheus metrics server started on :9091
+2025/11/06 22:22:23 Access metrics at: http://localhost:9091/metrics
+2025/11/06 22:22:23 [Metrics] Starting Prometheus server on :9091
+2025/11/06 22:22:23 Chaos controller started (events: [worker_crash worker_restart scale_up scale_down leader_failure producer_crash], interval: 5m0s-15m0s)
+2025/11/06 22:22:23 [Coordinator] Starting
+2025/11/06 22:22:23 [producer-0] Starting producer for 150 partitions
+2025/11/06 22:22:23 [Chaos] Starting chaos controller with 6 event types, interval: 5m0s-15m0s
+2025/11/06 22:22:23 [producer-1] Starting producer for 150 partitions
+2025/11/06 22:22:23 [producer-2] Starting producer for 150 partitions
+2025/11/06 22:22:23 [producer-6] Starting producer for 150 partitions
+2025/11/06 22:22:23 [producer-3] Starting producer for 150 partitions
+2025/11/06 22:22:23 [producer-8] Starting producer for 150 partitions
+2025/11/06 22:22:23 [Chaos] Next event in 5m28.96902045s
+2025/11/06 22:22:23 [producer-5] Starting producer for 150 partitions
+2025/11/06 22:22:23 [producer-4] Starting producer for 150 partitions
+2025/11/06 22:22:23 [producer-7] Starting producer for 150 partitions
+2025/11/06 22:22:23 [producer-9] Starting producer for 150 partitions
+2025/11/06 22:22:23 [worker-0] Starting worker
+2025/11/06 22:22:23 [worker-1] Starting worker
+2025/11/06 22:22:23 [worker-2] Starting worker
+2025/11/06 22:22:23 [worker-3] Starting worker
+2025/11/06 22:22:23 [worker-4] Starting worker
+2025/11/06 22:22:23 [worker-5] Starting worker
+2025/11/06 22:22:23 [worker-6] Starting worker
+2025/11/06 22:22:23 [worker-7] Starting worker
+2025/11/06 22:22:23 [worker-8] Starting worker
+2025/11/06 22:22:23 [worker-9] Starting worker
+2025/11/06 22:22:23 [worker-10] Starting worker
+2025/11/06 22:22:23 [worker-11] Starting worker
+2025/11/06 22:22:23 [worker-12] Starting worker
+2025/11/06 22:22:23 [worker-13] Starting worker
+2025/11/06 22:22:23 [worker-14] Starting worker
+2025/11/06 22:22:23 [worker-15] Starting worker
+2025/11/06 22:22:23 [worker-16] Starting worker
+2025/11/06 22:22:23 [worker-17] Starting worker
+2025/11/06 22:22:23 [worker-18] Starting worker
+2025/11/06 22:22:23 [worker-19] Starting worker
+2025/11/06 22:22:23 [worker-20] Starting worker
+2025/11/06 22:22:23 [worker-21] Starting worker
+2025/11/06 22:22:23 [worker-22] Starting worker
+2025/11/06 22:22:23 [worker-23] Starting worker
+2025/11/06 22:22:23 [worker-24] Starting worker
+2025/11/06 22:22:23 [worker-25] Starting worker
+2025/11/06 22:22:23 [worker-26] Starting worker
+2025/11/06 22:22:23 [worker-27] Starting worker
+2025/11/06 22:22:23 [worker-28] Starting worker
+2025/11/06 22:22:23 [worker-29] Starting worker
+2025/11/06 22:22:23 [worker-30] Starting worker
+2025/11/06 22:22:23 [worker-31] Starting worker
+2025/11/06 22:22:23 [worker-32] Starting worker
+2025/11/06 22:22:23 [worker-33] Starting worker
+2025/11/06 22:22:23 [worker-34] Starting worker
+2025/11/06 22:22:23 [worker-35] Starting worker
+2025/11/06 22:22:23 [worker-36] Starting worker
+2025/11/06 22:22:23 [worker-37] Starting worker
+2025/11/06 22:22:23 [worker-38] Starting worker
+2025/11/06 22:22:23 [worker-39] Starting worker
+2025/11/06 22:22:23 [worker-40] Starting worker
+2025/11/06 22:22:23 [worker-41] Starting worker
+2025/11/06 22:22:23 [worker-42] Starting worker
+2025/11/06 22:22:23 [worker-43] Starting worker
+2025/11/06 22:22:23 [worker-44] Starting worker
+2025/11/06 22:22:23 [worker-45] Starting worker
+2025/11/06 22:22:23 [worker-46] Starting worker
+2025/11/06 22:22:23 [worker-47] Starting worker
+2025/11/06 22:22:23 [worker-48] Starting worker
+2025/11/06 22:22:23 [worker-49] Starting worker
+2025/11/06 22:22:23 [worker-50] Starting worker
+2025/11/06 22:22:23 [worker-51] Starting worker
+2025/11/06 22:22:23 [worker-52] Starting worker
+2025/11/06 22:22:23 [worker-53] Starting worker
+2025/11/06 22:22:23 [worker-54] Starting worker
+2025/11/06 22:22:23 [worker-55] Starting worker
+2025/11/06 22:22:23 [worker-56] Starting worker
+2025/11/06 22:22:23 [worker-57] Starting worker
+2025/11/06 22:22:23 [worker-58] Starting worker
+2025/11/06 22:22:23 [worker-59] Starting worker
+2025/11/06 22:22:23 [worker-60] Starting worker
+2025/11/06 22:22:23 [worker-62] Starting worker
+2025/11/06 22:22:23 [worker-61] Starting worker
+2025/11/06 22:22:23 [worker-63] Starting worker
+2025/11/06 22:22:23 [worker-64] Starting worker
+2025/11/06 22:22:23 [worker-65] Starting worker
+2025/11/06 22:22:23 [worker-66] Starting worker
+2025/11/06 22:22:23 [worker-67] Starting worker
+2025/11/06 22:22:23 [worker-68] Starting worker
+2025/11/06 22:22:23 [worker-69] Starting worker
+2025/11/06 22:22:23 [worker-70] Starting worker
+2025/11/06 22:22:23 [worker-71] Starting worker
+2025/11/06 22:22:23 [worker-72] Starting worker
+2025/11/06 22:22:23 [worker-73] Starting worker
+2025/11/06 22:22:23 [worker-74] Starting worker
+2025/11/06 22:22:23 [worker-75] Starting worker
+2025/11/06 22:22:23 [worker-76] Starting worker
+2025/11/06 22:22:23 [worker-77] Starting worker
+2025/11/06 22:22:23 [worker-78] Starting worker
+2025/11/06 22:22:23 [worker-79] Starting worker
+2025/11/06 22:22:23 [worker-80] Starting worker
+2025/11/06 22:22:23 [worker-81] Starting worker
+2025/11/06 22:22:23 [worker-82] Starting worker
+2025/11/06 22:22:23 [worker-83] Starting worker
+2025/11/06 22:22:23 [worker-84] Starting worker
+2025/11/06 22:22:23 [worker-85] Starting worker
+2025/11/06 22:22:23 [worker-86] Starting worker
+2025/11/06 22:22:23 [worker-87] Starting worker
+2025/11/06 22:22:23 [worker-88] Starting worker
+2025/11/06 22:22:23 [worker-89] Starting worker
+2025/11/06 22:22:23 [worker-90] Starting worker
+2025/11/06 22:22:23 [worker-91] Starting worker
+2025/11/06 22:22:23 [worker-92] Starting worker
+2025/11/06 22:22:23 [worker-94] Starting worker
+2025/11/06 22:22:23 [worker-93] Starting worker
+2025/11/06 22:22:23 [worker-95] Starting worker
+2025/11/06 22:22:23 [worker-96] Starting worker
+2025/11/06 22:22:23 [worker-97] Starting worker
+2025/11/06 22:22:23 Recorded initial worker count: 100
+2025/11/06 22:22:23 [worker-99] Starting worker
+2025/11/06 22:22:23 [worker-98] Starting worker
+2025/11/06 22:22:49 Received signal interrupt, shutting down...
+2025/11/06 22:22:49 [Chaos] Stopping chaos controller
+2025/11/06 22:22:49 [worker-20] Stopping worker
+2025/11/06 22:22:49 [producer-3] Error sending message to partition 458: failed to publish message: context canceled
+2025/11/06 22:22:49 [worker-33] Stopping worker
+2025/11/06 22:22:49 [worker-86] Stopping worker
+2025/11/06 22:22:49 [producer-2] Error sending message to partition 310: failed to publish message: context canceled
+2025/11/06 22:22:49 [worker-90] Stopping worker
+2025/11/06 22:22:49 [worker-46] Stopping worker
+2025/11/06 22:22:49 [worker-23] Stopping worker
+2025/11/06 22:22:49 [worker-36] Stopping worker
+2025/11/06 22:22:49 [worker-43] Stopping worker
+2025/11/06 22:22:49 [worker-72] Stopping worker
+2025/11/06 22:22:49 [worker-60] Stopping worker
+2025/11/06 22:22:49 [worker-75] Stopping worker
+2025/11/06 22:22:49 [worker-79] Stopping worker
+2025/11/06 22:22:49 [worker-97] Stopping worker
+2025/11/06 22:22:49 [worker-24] Stopping worker
+2025/11/06 22:22:49 [worker-89] Stopping worker
+2025/11/06 22:22:49 [worker-26] Stopping worker
+2025/11/06 22:22:49 [worker-87] Stopping worker
+2025/11/06 22:22:49 [worker-67] Stopping worker
+2025/11/06 22:22:49 [worker-84] Stopping worker
+2025/11/06 22:22:49 [worker-66] Stopping worker
+2025/11/06 22:22:49 [worker-80] Stopping worker
+2025/11/06 22:22:49 [worker-9] Stopping worker
+2025/11/06 22:22:49 [worker-18] Stopping worker
+2025/11/06 22:22:49 [worker-47] Stopping worker
+2025/11/06 22:22:49 [worker-35] Stopping worker
+2025/11/06 22:22:49 [worker-54] Stopping worker
+2025/11/06 22:22:49 [worker-50] Stopping worker
+2025/11/06 22:22:49 [producer-2] Stopping producer
+2025/11/06 22:22:49 [worker-88] Stopping worker
+2025/11/06 22:22:49 [Metrics] Shutting down Prometheus server
+2025/11/06 22:22:49 [worker-0] Stopping worker
+2025/11/06 22:22:49 [worker-7] Stopping worker
+2025/11/06 22:22:49 [producer-5] Error sending message to partition 759: failed to publish message: context canceled
+2025/11/06 22:22:49 [producer-5] Stopping producer
+2025/11/06 22:22:49 [worker-25] Stopping worker
+2025/11/06 22:22:49 [producer-4] Error sending message to partition 609: failed to publish message: context canceled
+2025/11/06 22:22:49 [producer-4] Stopping producer
+2025/11/06 22:22:49 [Coordinator] Stopping
+2025/11/06 22:22:49 [worker-21] Stopping worker
+2025/11/06 22:22:49 [producer-0] Stopping producer
+2025/11/06 22:22:49 [worker-29] Stopping worker
+2025/11/06 22:22:49 [producer-3] Stopping producer
+2025/11/06 22:22:49 [producer-9] Error sending message to partition 1359: failed to publish message: context canceled
+2025/11/06 22:22:49 [producer-9] Stopping producer
+2025/11/06 22:22:49 [producer-8] Error sending message to partition 1210: failed to publish message: context canceled
+2025/11/06 22:22:49 [producer-8] Stopping producer
+2025/11/06 22:22:49 [producer-1] Stopping producer
+2025/11/06 22:22:49 [producer-6] Error sending message to partition 910: failed to publish message: context canceled
+2025/11/06 22:22:49 [producer-6] Stopping producer
+2025/11/06 22:22:49 [producer-7] Error sending message to partition 1061: failed to publish message: context canceled
+2025/11/06 22:22:49 [producer-7] Stopping producer
+2025/11/06 22:22:49 [worker-68] Stopping worker
+2025/11/06 22:22:49 [worker-38] Stopping worker
+2025/11/06 22:22:49 [worker-32] Stopping worker
+2025/11/06 22:22:49 [worker-51] Stopping worker
+2025/11/06 22:22:49 [worker-57] Stopping worker
+2025/11/06 22:22:49 [worker-39] Stopping worker
+2025/11/06 22:22:49 [worker-37] Stopping worker
+2025/11/06 22:22:49 [worker-49] Stopping worker
+2025/11/06 22:22:49 [worker-44] Stopping worker
+2025/11/06 22:22:49 [worker-73] Stopping worker
+2025/11/06 22:22:49 [worker-78] Stopping worker
+2025/11/06 22:22:49 [worker-22] Stopping worker
+2025/11/06 22:22:49 [worker-95] Stopping worker
+2025/11/06 22:22:49 [worker-12] Stopping worker
+2025/11/06 22:22:49 [worker-5] Stopping worker
+2025/11/06 22:22:49 [worker-4] Stopping worker
+2025/11/06 22:22:49 [worker-30] Stopping worker
+2025/11/06 22:22:49 [worker-34] Stopping worker
+2025/11/06 22:22:49 [worker-40] Stopping worker
+2025/11/06 22:22:49 [worker-41] Stopping worker
+2025/11/06 22:22:49 [worker-42] Stopping worker
+2025/11/06 22:22:49 [worker-58] Stopping worker
+2025/11/06 22:22:49 [worker-52] Stopping worker
+2025/11/06 22:22:49 [worker-56] Stopping worker
+2025/11/06 22:22:49 [worker-59] Stopping worker
+2025/11/06 22:22:49 [worker-99] Stopping worker
+2025/11/06 22:22:49 [worker-65] Stopping worker
+2025/11/06 22:22:49 [worker-91] Stopping worker
+2025/11/06 22:22:49 [worker-63] Stopping worker
+2025/11/06 22:22:49 [worker-71] Stopping worker
+2025/11/06 22:22:49 [worker-11] Stopping worker
+2025/11/06 22:22:49 [worker-1] Stopping worker
+2025/11/06 22:22:49 [worker-64] Stopping worker
+2025/11/06 22:22:49 [worker-6] Stopping worker
+2025/11/06 22:22:49 [worker-13] Stopping worker
+2025/11/06 22:22:49 [worker-8] Stopping worker
+2025/11/06 22:22:49 [worker-70] Stopping worker
+2025/11/06 22:22:49 [worker-74] Stopping worker
+2025/11/06 22:22:49 [worker-14] Stopping worker
+2025/11/06 22:22:49 [worker-10] Stopping worker
+2025/11/06 22:22:49 [worker-61] Stopping worker
+2025/11/06 22:22:49 [worker-3] Stopping worker
+2025/11/06 22:22:49 [worker-69] Stopping worker
+2025/11/06 22:22:49 [worker-76] Stopping worker
+2025/11/06 22:22:49 [worker-83] Stopping worker
+2025/11/06 22:22:49 [worker-77] Stopping worker
+2025/11/06 22:22:49 [worker-85] Stopping worker
+2025/11/06 22:22:49 [worker-27] Stopping worker
+2025/11/06 22:22:49 [worker-92] Stopping worker
+2025/11/06 22:22:49 [worker-96] Stopping worker
+2025/11/06 22:22:49 [worker-15] Stopping worker
+2025/11/06 22:22:49 [worker-82] Stopping worker
+2025/11/06 22:22:49 [worker-81] Stopping worker
+2025/11/06 22:22:49 [worker-93] Stopping worker
+2025/11/06 22:22:49 [worker-19] Stopping worker
+2025/11/06 22:22:49 [worker-2] Stopping worker
+2025/11/06 22:22:49 [worker-45] Stopping worker
+2025/11/06 22:22:49 [worker-17] Stopping worker
+2025/11/06 22:22:49 [worker-53] Stopping worker
+2025/11/06 22:22:49 [worker-16] Stopping worker
+2025/11/06 22:22:49 [worker-28] Stopping worker
+2025/11/06 22:22:49 [worker-98] Stopping worker
+2025/11/06 22:22:49 [worker-31] Stopping worker
+2025/11/06 22:22:49 [worker-48] Stopping worker
+2025/11/06 22:22:49 [worker-55] Stopping worker
+2025/11/06 22:22:49 [worker-62] Stopping worker
+2025/11/06 22:22:49 [worker-94] Stopping worker

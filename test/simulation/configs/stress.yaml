@@ -1,0 +1,63 @@
+simulation:
+  duration: 72h
+  mode: all-in-one
+
+partitions:
+  count: 1500
+  # message_rate_per_partition: 0.067  # ~100 msg/sec total (1500 * 0.067)
+  message_rate_per_partition: 1  # ~1500 msg/sec total (1500 * 1)
+  distribution: exponential
+  weights:
+    exponential:
+      extreme_percent: 0.05    # 5% of partitions get extreme weight
+      extreme_weight: 100      # Extreme partitions get weight 100
+      normal_weight: 1         # Normal partitions get weight 1
+
+producers:
+  count: 10
+  rate_variation:
+    enabled: true
+    pattern: global
+    min_multiplier: 0.5  # Scale down to 50% of base rate
+    max_multiplier: 2.0  # Scale up to 200% of base rate
+    ramp_interval: 5m    # Change rate every 5 minutes
+
+workers:
+  count: 100
+  assignment_strategy: WeightedConsistentHash
+  strategy_config:
+    virtual_nodes: 150  # For consistent hashing
+  processing_delay:
+    min: 10ms
+    max: 100ms
+
+coordinator:
+  validation_window: 10m
+
+chaos:
+  enabled: true
+  events:
+    - worker_crash
+    - worker_restart
+    - scale_up
+    - scale_down
+    - leader_failure
+    - producer_crash
+  interval: 5m-15m   # More frequent chaos
+
+nats:
+  mode: embedded
+  url: "nats://localhost:4222"
+  jetstream:
+    max_memory: 4GB
+    max_storage: 2GB
+
+metrics:
+  prometheus:
+    enabled: true
+    port: 9091  # Use 9091 to avoid conflict with Prometheus container
+
+checkpoint:
+  enabled: true
+  interval: 15m  # More frequent checkpoints under stress
+  path: "./checkpoints"

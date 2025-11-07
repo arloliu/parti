@@ -150,15 +150,25 @@ func (c *Calculator) SubscribeToStateChanges() (<-chan types.CalculatorState, fu
 // Start begins monitoring workers and calculating assignments.
 //
 // This method should only be called on the leader worker. It:
-//  1. Performs initial assignment (with stabilization window)
+//  1. Discovers highest version from existing assignments
 //  2. Starts background monitoring for worker changes
-//  3. Triggers rebalancing when workers join/leave
+//  3. Performs initial assignment asynchronously (with stabilization window)
+//  4. Triggers rebalancing when workers join/leave
+//
+// The initial assignment runs in a background goroutine, allowing Start() to return
+// immediately without blocking on the stabilization window (10-30 seconds). This enables:
+//   - Fast manager startup (milliseconds instead of seconds)
+//   - Concurrent worker initialization across all instances
+//   - Leader calculates assignment with all workers visible from the start
 //
 // Parameters:
 //   - ctx: Context for cancellation and timeout
 //
 // Returns:
-//   - error: Start error (e.g., already started, KV operation failed)
+//   - error: Start error (e.g., already started, KV operation failed during setup)
+//
+// Note: Errors during background initial assignment are logged but not returned.
+// Callers should wait for assignment via Manager.waitForAssignment() or similar mechanism.
 func (c *Calculator) Start(ctx context.Context) error {
 	c.Logger.Info("calculator Start() called")
 
@@ -172,19 +182,24 @@ func (c *Calculator) Start(ctx context.Context) error {
 		c.Logger.Warn("failed to discover existing versions, starting from 0", "error", err)
 	}
 
-	c.Logger.Info("performing initial assignment")
-
-	// Perform initial assignment with stabilization window
-	if err := c.initialAssignment(ctx); err != nil {
-		c.started.Store(false)
-		return fmt.Errorf("initial assignment failed: %w", err)
-	}
-
-	// Start worker monitoring component
+	// Start worker monitoring component FIRST (before initial assignment)
+	// This ensures the monitor is ready to detect worker changes during stabilization window
 	if err := c.monitor.Start(ctx); err != nil {
 		c.started.Store(false)
 		return fmt.Errorf("failed to start worker monitor: %w", err)
 	}
+
+	// Perform initial assignment in background goroutine
+	// This allows Start() to return immediately while stabilization window runs
+	go func() {
+		c.Logger.Info("performing initial assignment in background")
+
+		if err := c.initialAssignment(ctx); err != nil {
+			c.Logger.Error("initial assignment failed", "error", err)
+			// Note: Don't set started=false here as monitor is already running
+			// Manager will handle this via timeout in waitForAssignment()
+		}
+	}()
 
 	return nil
 }
@@ -272,35 +287,62 @@ func (c *Calculator) TriggerRebalance(ctx context.Context) error {
 	return c.rebalance(ctx, "manual-refresh")
 }
 
-// initialAssignment performs the first assignment with stabilization window.
+// initialAssignment performs the first assignment with two-phase approach:
+//  1. Immediate assignment - Assign partitions to currently available workers immediately
+//     to ensure zero coverage gap (no 30-second blackout period)
+//  2. Stabilization wait - Wait for additional workers to join
+//  3. Final assignment - Rebalance with complete worker set for optimal distribution
+//
+// This ensures partitions are always covered while still allowing for optimal load distribution.
 func (c *Calculator) initialAssignment(ctx context.Context) error {
-	// Wait for stabilization window
+	// PHASE 1: Immediate assignment to whoever is available NOW
+	// This ensures zero-downtime - partitions are covered from T=0
+	c.Logger.Info("performing immediate initial assignment to current workers")
+
+	if err := c.rebalance(ctx, "cold_start_immediate"); err != nil {
+		return fmt.Errorf("immediate initial assignment failed: %w", err)
+	}
+
+	// Get worker count after immediate assignment
+	c.mu.RLock()
+	immediateWorkerCount := len(c.currentWorkers)
+	c.mu.RUnlock()
+
+	c.Logger.Info("immediate initial assignment complete - partitions now covered",
+		"workers", immediateWorkerCount)
+
+	// PHASE 2: Wait for stabilization window to let more workers join
 	window := c.selectStabilizationWindow(ctx)
-	c.Logger.Info("waiting for stabilization", "window", window)
+	c.Logger.Info("waiting for stabilization to detect additional workers", "window", window)
 
 	select {
 	case <-time.After(window):
-		// Proceed with assignment
+		// Proceed to final assignment
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 
-	// Calculate and publish initial assignment
-	if err := c.rebalance(ctx, "initial"); err != nil {
-		return fmt.Errorf("failed to rebalance for initial assignment: %w", err)
+	// PHASE 3: Final rebalance with complete worker set
+	c.Logger.Info("performing final initial assignment with all detected workers")
+
+	if err := c.rebalance(ctx, "cold_start_final"); err != nil {
+		return fmt.Errorf("final initial assignment failed: %w", err)
 	}
 
-	// Initialize lastWorkers with the workers from initial assignment
+	// Initialize lastWorkers with the workers from final assignment
 	// This prevents immediately re-entering scaling when monitorWorkers starts
 	c.mu.Lock()
 	clear(c.lastWorkers)
 	for w := range c.currentWorkers {
 		c.lastWorkers[w] = true
 	}
-	workerCount := len(c.lastWorkers)
+	finalWorkerCount := len(c.lastWorkers)
 	c.mu.Unlock()
 
-	c.Logger.Info("initial assignment complete", "workers", workerCount)
+	c.Logger.Info("initial assignment complete",
+		"immediate_workers", immediateWorkerCount,
+		"final_workers", finalWorkerCount,
+		"additional_workers_joined", finalWorkerCount-immediateWorkerCount)
 
 	return nil
 }

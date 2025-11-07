@@ -1,0 +1,55 @@
+# Development configuration for simulation
+# Scale: 100 partitions, 10 workers, light load for quick testing
+
+simulation:
+  duration: 1h              # Run for 1 hour by default
+  mode: all-in-one          # "all-in-one", "producer", "worker", "coordinator"
+
+nats:
+  mode: embedded            # Use embedded NATS server
+  url: ""                   # Not used in embedded mode
+
+partitions:
+  count: 100                      # Total partitions
+  message_rate_per_partition: 0.1 # 0.1 msg/sec per partition = 10 msg/sec total
+  distribution: uniform            # "uniform" or "exponential"
+  weights:
+    exponential:
+      extreme_percent: 0.05       # 5% of partitions are extreme
+      extreme_weight: 100         # Weight for extreme partitions
+      normal_weight: 1            # Weight for normal partitions
+
+producers:
+  count: 5                         # 5 producer processes
+  rate_variation:
+    enabled: false
+    pattern: global
+    min_multiplier: 0.5
+    max_multiplier: 2.0
+    ramp_interval: 5m
+
+workers:
+  count: 10                        # 10 worker processes
+  assignment_strategy: WeightedConsistentHash
+  strategy_config: {}
+  processing_delay:
+    min: 10ms
+    max: 50ms
+
+coordinator:
+  buffer_size: 10000
+
+chaos:
+  enabled: false
+  worker_events: {}
+  producer_events: {}
+
+metrics:
+  prometheus:
+    enabled: false
+    port: 9090
+
+checkpoint:
+  enabled: false
+  interval: 1h
+  path: ./checkpoints

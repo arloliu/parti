@@ -130,8 +130,26 @@ func (c *Claimer) Claim(ctx context.Context) (string, error) {
 			return "", fmt.Errorf("failed to claim ID %s: %w", workerID, err)
 		}
 
-		// ID already claimed, try next one
-		c.logger.Debug("stable ID already claimed, trying next", "worker_id", workerID, "next_id", id+1)
+		// Key exists - check if it's stale (expired but not yet purged)
+		// This can happen with file storage after NATS restart
+		entry, getErr := c.kv.Get(ctx, key)
+		if getErr != nil {
+			// Key was deleted/expired between Create and Get - try to claim it
+			c.logger.Debug("key disappeared after Create failed, attempting Put", "worker_id", workerID)
+			revision, putErr := c.kv.Put(ctx, key, []byte(value))
+			if putErr == nil {
+				c.workerID = workerID
+				c.logger.Info("stable ID claimed via Put after expiry", "worker_id", workerID, "key", key, "revision", revision)
+
+				return workerID, nil
+			}
+			// Put failed, someone else got it - try next ID
+			c.logger.Debug("Put failed, trying next ID", "worker_id", workerID, "error", putErr, "next_id", id+1)
+		} else {
+			// Key exists and is valid - skip to next ID
+			c.logger.Debug("stable ID actively claimed by another worker", "worker_id", workerID, "revision", entry.Revision(), "next_id", id+1)
+		}
+
 	}
 
 	c.logger.Error("no available stable IDs in pool", "prefix", c.prefix, "min", c.minID, "max", c.maxID, "pool_size", c.maxID-c.minID+1)

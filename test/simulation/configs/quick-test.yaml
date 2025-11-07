@@ -1,0 +1,42 @@
+simulation:
+  duration: 2m  # Just 2 minutes for quick test
+  mode: all-in-one
+
+partitions:
+  count: 10  # Minimal partitions
+  message_rate_per_partition: 1.0  # 10 msg/sec total
+  distribution: uniform
+
+producers:
+  count: 2
+  rate_variation:
+    enabled: false
+
+workers:
+  count: 3
+  assignment_strategy: ConsistentHash
+  processing_delay:
+    min: 5ms
+    max: 20ms
+
+coordinator:
+  validation_window: 10s
+
+chaos:
+  enabled: true
+  events:
+    - worker_crash
+    - worker_restart
+  interval: 30s-45s  # Chaos events every 30-45 seconds
+
+nats:
+  mode: embedded
+  url: "nats://localhost:4222"
+
+metrics:
+  prometheus:
+    enabled: false
+    port: 9090
+
+checkpoint:
+  enabled: false
