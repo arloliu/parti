@@ -25,13 +25,12 @@ func TestEmergencyHysteresis_TransientDisappearance(t *testing.T) {
 	nc, cleanup := testutil.StartEmbeddedNATS(t)
 	defer cleanup()
 
-	cfg := testutil.IntegrationTestConfig()
-	cfg.HeartbeatInterval = 500 * time.Millisecond
-	cfg.HeartbeatTTL = 2 * time.Second
-	cfg.EmergencyGracePeriod = 1500 * time.Millisecond
-	cfg.Assignment.MinRebalanceInterval = 500 * time.Millisecond
+	// Use centralized emergency fast timing profile.
+	cfg := testutil.NewConfigFromProfile(testutil.MakeEmergencyFast())
+	// Override grace slightly higher for transient disappearance scenario.
+	cfg.EmergencyGracePeriod = 700 * time.Millisecond
 
-	cluster := testutil.NewWorkerCluster(t, nc, 9)
+	cluster := testutil.NewFastWorkerCluster(t, nc, 9)
 	cluster.Config = cfg
 	defer cluster.StopWorkers()
 
@@ -39,7 +38,7 @@ func TestEmergencyHysteresis_TransientDisappearance(t *testing.T) {
 		cluster.AddWorker(ctx)
 	}
 	cluster.StartWorkers(ctx)
-	cluster.WaitForStableState(10 * time.Second)
+	cluster.WaitForStableState(6 * time.Second)
 
 	t.Log("Initial cluster stable with 3 workers")
 
@@ -50,8 +49,8 @@ func TestEmergencyHysteresis_TransientDisappearance(t *testing.T) {
 	stopCancel()
 	require.NoError(t, err)
 
-	t.Log("Waiting 1 second (less than 1.5s grace period)")
-	time.Sleep(1 * time.Second)
+	t.Log("Waiting 450ms (< grace period 700ms)")
+	time.Sleep(450 * time.Millisecond)
 
 	// Restart worker
 	t.Log("Restarting worker - simulating recovery")
@@ -61,7 +60,7 @@ func TestEmergencyHysteresis_TransientDisappearance(t *testing.T) {
 	err = newWorker.Start(ctx)
 	require.NoError(t, err)
 
-	time.Sleep(3 * time.Second)
+	time.Sleep(1 * time.Second)
 
 	// Verify all workers are still active
 	activeCount := 0
@@ -89,13 +88,11 @@ func TestEmergencyHysteresis_ConfirmedDisappearance(t *testing.T) {
 	nc, cleanup := testutil.StartEmbeddedNATS(t)
 	defer cleanup()
 
-	cfg := testutil.IntegrationTestConfig()
-	cfg.HeartbeatInterval = 500 * time.Millisecond
-	cfg.HeartbeatTTL = 2 * time.Second
-	cfg.EmergencyGracePeriod = 1 * time.Second
-	cfg.Assignment.MinRebalanceInterval = 500 * time.Millisecond
+	cfg := testutil.NewConfigFromProfile(testutil.MakeEmergencyFast())
+	// Grace lower than transient test to force confirmed disappearance.
+	cfg.EmergencyGracePeriod = 500 * time.Millisecond
 
-	cluster := testutil.NewWorkerCluster(t, nc, 9)
+	cluster := testutil.NewFastWorkerCluster(t, nc, 9)
 	cluster.Config = cfg
 	defer cluster.StopWorkers()
 
@@ -103,7 +100,7 @@ func TestEmergencyHysteresis_ConfirmedDisappearance(t *testing.T) {
 		cluster.AddWorker(ctx)
 	}
 	cluster.StartWorkers(ctx)
-	cluster.WaitForStableState(10 * time.Second)
+	cluster.WaitForStableState(6 * time.Second)
 
 	t.Log("Initial cluster stable with 3 workers")
 	cluster.VerifyTotalPartitionCount(9)
@@ -115,11 +112,11 @@ func TestEmergencyHysteresis_ConfirmedDisappearance(t *testing.T) {
 	stopCancel()
 	require.NoError(t, err)
 
-	t.Log("Waiting for grace period and TTL to expire (4 seconds)")
-	time.Sleep(4 * time.Second)
-
-	t.Log("Waiting for emergency rebalance to complete")
-	time.Sleep(2 * time.Second)
+	// Wait for grace + TTL expiry (~1.4s) + small buffer for detection & rebalance
+	t.Log("Waiting for grace period + TTL expiry (~1.4s) plus buffer")
+	time.Sleep(1*time.Second + 400*time.Millisecond)
+	t.Log("Waiting briefly for emergency rebalance completion")
+	time.Sleep(600 * time.Millisecond)
 
 	// Verify emergency rebalance occurred
 	// Skip worker 0 since it's stopped - only check workers 1 and 2
@@ -153,13 +150,10 @@ func TestEmergencyHysteresis_MultipleWorkerFailures(t *testing.T) {
 	nc, cleanup := testutil.StartEmbeddedNATS(t)
 	defer cleanup()
 
-	cfg := testutil.IntegrationTestConfig()
-	cfg.HeartbeatInterval = 500 * time.Millisecond
-	cfg.HeartbeatTTL = 2 * time.Second
-	cfg.EmergencyGracePeriod = 1 * time.Second
-	cfg.Assignment.MinRebalanceInterval = 500 * time.Millisecond
+	cfg := testutil.NewConfigFromProfile(testutil.MakeEmergencyFast())
+	cfg.EmergencyGracePeriod = 500 * time.Millisecond
 
-	cluster := testutil.NewWorkerCluster(t, nc, 12)
+	cluster := testutil.NewFastWorkerCluster(t, nc, 12)
 	cluster.Config = cfg
 	defer cluster.StopWorkers()
 
@@ -167,7 +161,7 @@ func TestEmergencyHysteresis_MultipleWorkerFailures(t *testing.T) {
 		cluster.AddWorker(ctx)
 	}
 	cluster.StartWorkers(ctx)
-	cluster.WaitForStableState(10 * time.Second)
+	cluster.WaitForStableState(6 * time.Second)
 
 	t.Log("Initial cluster stable with 4 workers")
 	cluster.VerifyTotalPartitionCount(12)
@@ -182,9 +176,10 @@ func TestEmergencyHysteresis_MultipleWorkerFailures(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	t.Log("Waiting for grace period and TTL to expire")
-	time.Sleep(4 * time.Second)
-	time.Sleep(2 * time.Second)
+	t.Log("Waiting for grace + TTL expiry (~1.4s) plus buffer")
+	time.Sleep(1*time.Second + 400*time.Millisecond)
+	t.Log("Waiting briefly for emergency rebalance completion")
+	time.Sleep(600 * time.Millisecond)
 
 	// Verify only 2 workers remain active (skip stopped workers 0 and 1)
 	activeWorkers := 0

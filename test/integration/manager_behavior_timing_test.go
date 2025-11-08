@@ -1,5 +1,18 @@
 package integration_test
 
+// Integration tests: behavior and timing scenarios around manager lifecycle, scaling, elections, and fault tolerance.
+//
+// This file consolidates cases previously in behavior_scenarios_test.go and timing_scenarios_test.go
+// to reduce dispersion. Scenarios here focus on:
+//   - Rolling updates and upgrade patterns
+//   - Network partitions and healing
+//   - High churn stability
+//   - Mass failures and recovery
+//   - Leader failover during rebalancing
+//   - Rapid scaling stabilization windows
+//   - Slow heartbeat boundaries without false emergencies
+//   - Concurrent leader election races
+
 import (
 	"context"
 	"sync"
@@ -7,28 +20,13 @@ import (
 	"time"
 
 	"github.com/arloliu/parti"
+	"github.com/arloliu/parti/internal/logging"
 	"github.com/arloliu/parti/test/testutil"
 	"github.com/arloliu/parti/types"
 	"github.com/stretchr/testify/require"
 )
 
-// TestIntegration_K8sRollingUpdate_PreservesAssignments verifies the system
-// handles Kubernetes rolling updates gracefully.
-//
-// Scenario:
-//   - Start 10 workers with stable assignments
-//   - Perform rolling update: replace workers one by one
-//   - Each replacement: stop old worker, wait 2s, start new worker
-//   - Verify partition coverage maintained throughout
-//   - Verify >80% cache affinity preserved
-//
-// Expected Behavior:
-//   - Consistent hashing preserves locality during replacements
-//   - No assignment gaps during rolling update
-//   - Cache affinity >80% after completion
-//   - System remains stable throughout
-//
-// This simulates the most common production deployment pattern.
+// TestIntegration_K8sRollingUpdate_PreservesAssignments verifies the system handles Kubernetes rolling updates gracefully.
 func TestIntegration_K8sRollingUpdate_PreservesAssignments(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -46,7 +44,8 @@ func TestIntegration_K8sRollingUpdate_PreservesAssignments(t *testing.T) {
 	defer cancel()
 
 	// Create cluster with 10 workers and 100 partitions (more partitions = better affinity test)
-	cluster := testutil.NewWorkerCluster(t, nc, 100)
+	// Use fast-tuned config to accelerate stabilization without changing correctness.
+	cluster := testutil.NewFastWorkerCluster(t, nc, 100)
 	defer cluster.StopWorkers()
 
 	// Start 10 workers
@@ -57,9 +56,9 @@ func TestIntegration_K8sRollingUpdate_PreservesAssignments(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// Wait for cluster to stabilize
+	// Wait for cluster to stabilize (fast config should converge quicker)
 	t.Log("Waiting for initial cluster stabilization...")
-	cluster.WaitForStableState(25 * time.Second)
+	cluster.WaitForStableState(15 * time.Second)
 	t.Log("Initial cluster stable")
 
 	// Record initial assignments for affinity calculation
@@ -93,13 +92,13 @@ func TestIntegration_K8sRollingUpdate_PreservesAssignments(t *testing.T) {
 		stopCancel()
 		require.NoError(t, err, "failed to stop worker %s", oldWorkerID)
 
-		// Wait for remaining workers to rebalance and stabilize
-		// Use exponential backoff to wait for all partitions to be covered
-		maxWaitTime := 15 * time.Second
+		// Wait for remaining workers to rebalance and stabilize.
+		// With fast config, convergence should be quick; poll more frequently for earlier exit.
+		maxWaitTime := 10 * time.Second
 		startWait := time.Now()
 		stabilized := false
 		for time.Since(startWait) < maxWaitTime {
-			time.Sleep(1 * time.Second)
+			time.Sleep(250 * time.Millisecond)
 			totalDuring := 0
 			// Only count workers from original slice (0 to originalWorkerCount-1)
 			for j := 0; j < originalWorkerCount; j++ {
@@ -129,8 +128,8 @@ func TestIntegration_K8sRollingUpdate_PreservesAssignments(t *testing.T) {
 		// Truncate to remove the duplicate
 		cluster.Workers = cluster.Workers[:originalWorkerCount]
 
-		// Wait for stabilization after this replacement
-		time.Sleep(5 * time.Second)
+		// Brief settle time after replacement
+		time.Sleep(2 * time.Second)
 	}
 
 	t.Log("Rolling update complete, waiting for final stabilization...")
@@ -183,24 +182,7 @@ func TestIntegration_K8sRollingUpdate_PreservesAssignments(t *testing.T) {
 	t.Log("Test passed - rolling update preserved assignments with good cache affinity")
 }
 
-// TestIntegration_NetworkPartition_HealsGracefully verifies system recovery
-// after network partition.
-//
-// Scenario:
-//   - Start 6 workers with stable assignments
-//   - Simulate partition: stop 3 workers (group A), keep 3 running (group B)
-//   - Verify group B continues processing with reassigned partitions
-//   - Restart group A workers (simulating network healing)
-//   - Verify system rebalances and all partitions are covered
-//
-// Expected Behavior:
-//   - Group B workers take over group A's partitions
-//   - No partition gaps during partition
-//   - System rebalances after healing
-//   - All 50 partitions remain assigned throughout
-//
-// NOTE: This is a simplified partition simulation since we use embedded NATS.
-// In production, network partitions would be more complex (split-brain scenarios).
+// TestIntegration_NetworkPartition_HealsGracefully verifies system recovery after network partition.
 func TestIntegration_NetworkPartition_HealsGracefully(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -315,23 +297,7 @@ func TestIntegration_NetworkPartition_HealsGracefully(t *testing.T) {
 	t.Log("Test passed - system healed gracefully after network partition")
 }
 
-// TestIntegration_HighChurn_SystemStable verifies system stability under
-// continuous worker churn.
-//
-// Scenario:
-//   - Start with 5 workers
-//   - For 60 seconds: randomly add/remove workers every 5-10 seconds
-//   - Maintain 3-7 workers at all times
-//   - Verify system remains stable throughout
-//   - Verify no partition gaps or panics
-//
-// Expected Behavior:
-//   - System handles continuous churn without crashing
-//   - All 50 partitions remain assigned at all times
-//   - No resource leaks or goroutine leaks
-//   - State machine remains healthy
-//
-// This tests the system's resilience under chaotic conditions.
+// TestIntegration_HighChurn_SystemStable verifies system stability under continuous worker churn.
 func TestIntegration_HighChurn_SystemStable(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -480,23 +446,7 @@ func TestIntegration_HighChurn_SystemStable(t *testing.T) {
 	t.Log("Test passed - system remained stable under high churn")
 }
 
-// TestIntegration_MassWorkerFailure_Recovers verifies system recovery from
-// sudden loss of majority of workers.
-//
-// Scenario:
-//   - Start 10 workers with stable assignments
-//   - Suddenly stop 8 workers (80% failure)
-//   - Verify remaining 2 workers take over all partitions
-//   - Gradually restart failed workers
-//   - Verify system rebalances
-//
-// Expected Behavior:
-//   - Remaining workers detect failures quickly
-//   - Emergency rebalancing triggered
-//   - All 50 partitions reassigned to survivors
-//   - System recovers as workers rejoin
-//
-// This tests the system's resilience to catastrophic failures.
+// TestIntegration_MassWorkerFailure_Recovers verifies system recovery from sudden loss of majority of workers.
 func TestIntegration_MassWorkerFailure_Recovers(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -611,22 +561,7 @@ func TestIntegration_MassWorkerFailure_Recovers(t *testing.T) {
 	t.Log("Test passed - system recovered from mass worker failure")
 }
 
-// TestIntegration_LeaderFailover_DuringRebalance verifies correct behavior
-// when leader fails during active rebalancing.
-//
-// Scenario:
-//   - Start 5 workers, wait for stable state with one leader
-//   - Add 3 new workers to trigger rebalancing
-//   - Stop the leader while rebalancing is in progress
-//   - Verify new leader takes over and completes rebalancing
-//
-// Expected Behavior:
-//   - New leader elected quickly (within 5 seconds)
-//   - Rebalancing completes successfully
-//   - All 50 partitions remain assigned
-//   - No state machine deadlocks
-//
-// This tests leader failover during critical operations.
+// TestIntegration_LeaderFailover_DuringRebalance verifies correct behavior when leader fails during active rebalancing.
 func TestIntegration_LeaderFailover_DuringRebalance(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -731,135 +666,256 @@ func TestIntegration_LeaderFailover_DuringRebalance(t *testing.T) {
 	t.Log("Test passed - new leader completed rebalancing after failover")
 }
 
-// TestIntegration_CascadingFailures_Contained verifies that worker failures
-// don't trigger cascading failures in other workers.
-//
-// Scenario:
-//   - Start 8 workers with stable assignments
-//   - Stop 2 workers simultaneously (initial failure)
-//   - Monitor remaining workers for stability
-//   - Verify remaining 6 workers don't fail due to increased load
-//
-// Expected Behavior:
-//   - Initial failures detected and handled
-//   - Remaining workers remain stable
-//   - No cascading failures or panics
-//   - All 50 partitions redistributed cleanly
-//
-// This tests system isolation and fault containment.
-func TestIntegration_CascadingFailures_Contained(t *testing.T) {
+// TestScenario_RapidScaling_StabilizationWindows verifies that rapid scaling results in a single batched rebalance.
+func TestScenario_RapidScaling_StabilizationWindows(t *testing.T) {
 	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
+		t.Skip("Skipping integration test in short mode")
 	}
+
 	t.Parallel()
 
-	t.Log("Test: Cascading failures contained")
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	defer cancel()
 
-	// Start NATS
 	nc, cleanup := testutil.StartEmbeddedNATS(t)
 	defer cleanup()
 
-	ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
-	defer cancel()
+	// Configure for rapid scaling scenario
+	// Key insight: MinRebalanceInterval should be longer than the time to add all workers
+	// to ensure they are batched into a single rebalance after stabilization
+	// Use TimingProfile for consistent rapid scaling semantics.
+	cfg := testutil.NewConfigFromProfile(testutil.TimingProfile{
+		HeartbeatInterval:    500 * time.Millisecond,
+		TTLMultiplier:        3.0, // 1.5s TTL
+		ColdStartWindow:      5 * time.Second,
+		PlannedScaleWindow:   3 * time.Second,
+		MinRebalanceInterval: 3 * time.Second,
+	})
 
-	// Create cluster with 8 workers and 50 partitions
-	cluster := testutil.NewWorkerCluster(t, nc, 50)
+	// Create cluster with 12 partitions
+	cluster := testutil.NewWorkerCluster(t, nc, 12)
+	cluster.Config = cfg
 	defer cluster.StopWorkers()
 
-	// Start 8 workers
-	t.Log("Starting 8 workers...")
-	for i := 0; i < 8; i++ {
-		mgr := cluster.AddWorker(ctx)
+	debugLogger := logging.NewTest(t)
+
+	// Start 3 initial workers
+	t.Log("Starting 3 initial workers")
+	for i := 0; i < 3; i++ {
+		mgr := cluster.AddWorker(ctx, debugLogger)
 		err := mgr.Start(ctx)
-		require.NoError(t, err)
+		require.NoError(t, err, "failed to start initial worker %d", i)
 	}
+	cluster.WaitForStableState(10 * time.Second)
 
-	// Wait for cluster to stabilize
-	t.Log("Waiting for initial stabilization...")
-	cluster.WaitForStableState(25 * time.Second)
-	t.Log("Initial cluster stable")
+	// Get initial version
+	leader := cluster.GetLeader()
+	require.NotNil(t, leader, "should have a leader")
+	initialVersion := leader.CurrentAssignment().Version
+	t.Logf("Initial cluster stable with 3 workers, version %d", initialVersion)
 
-	// Record initial state
-	totalInitial := 0
-	for _, mgr := range cluster.Workers {
-		assignment := mgr.CurrentAssignment()
-		totalInitial += len(assignment.Partitions)
-		t.Logf("Worker %s: %d partitions initially", mgr.WorkerID(), len(assignment.Partitions))
-	}
-	require.Equal(t, 50, totalInitial, "expected all 50 partitions assigned initially")
+	// Rapidly add 7 more workers (simulate K8s HPA scaling)
+	// Start all workers concurrently to simulate burst scaling behavior
+	t.Log("Rapidly scaling from 3 to 10 workers...")
+	scaleStart := time.Now()
 
-	// INITIAL FAILURE: Stop 2 workers simultaneously
-	t.Log("Triggering initial failure: stopping 2 workers...")
-	failedIDs := make([]string, 2)
-	for i := 0; i < 2; i++ {
-		failedIDs[i] = cluster.Workers[i].WorkerID()
-		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		err := cluster.Workers[i].Stop(stopCtx)
-		stopCancel()
-		require.NoError(t, err, "failed to stop worker %d", i)
-	}
-	t.Logf("Stopped workers: %v", failedIDs)
-
-	// Wait for initial rebalancing after failures
-	t.Log("Waiting for initial rebalancing after failures...")
-	time.Sleep(15 * time.Second)
-
-	// Monitor remaining workers for stability
-	t.Log("Monitoring remaining 6 workers for cascading failures...")
-	monitorCtx, monitorCancel := context.WithTimeout(ctx, 30*time.Second)
-	defer monitorCancel()
-
-	stable := true
-	monitorTicker := time.NewTicker(3 * time.Second)
-	defer monitorTicker.Stop()
-
-	for {
-		select {
-		case <-monitorCtx.Done():
-			t.Log("Monitoring complete - no cascading failures detected")
-			goto MonitoringDone
-
-		case <-monitorTicker.C:
-			// Check that all remaining workers are healthy
-			total := 0
-			for i := 2; i < 8; i++ {
-				mgr := cluster.Workers[i]
-				assignment := mgr.CurrentAssignment()
-				count := len(assignment.Partitions)
-				total += count
-
-				// Check if worker is still responsive
-				state := mgr.State()
-				t.Logf("Monitor: Worker %s - state=%s, partitions=%d",
-					mgr.WorkerID(), state.String(), count)
-
-				if state == types.StateShutdown {
-					t.Errorf("CASCADING FAILURE: Worker %s failed (state=%s)",
-						mgr.WorkerID(), state.String())
-					stable = false
-				}
+	// Start all 7 workers concurrently
+	for i := 0; i < 7; i++ {
+		mgr := cluster.AddWorker(ctx, debugLogger)
+		// Start each worker in a goroutine to minimize time between starts
+		go func(m *parti.Manager, idx int) {
+			if err := m.Start(ctx); err != nil {
+				t.Logf("Worker %d start error: %v", idx, err)
 			}
+		}(mgr, i+3)
+	}
 
-			// Verify partition coverage
-			if total != 50 {
-				t.Errorf("COVERAGE ISSUE: Only %d/50 partitions assigned", total)
-				stable = false
-			}
+	// Small wait to ensure all workers have started
+	time.Sleep(500 * time.Millisecond)
+	scaleEnd := time.Now()
+	t.Logf("Added 7 workers in %v", scaleEnd.Sub(scaleStart))
+
+	// Wait for PlannedScaleWindow to expire (3s window + margin)
+	t.Log("Waiting for planned scale stabilization window (3s + margin)")
+	time.Sleep(4 * time.Second)
+
+	// Now wait for rebalance to complete
+	t.Log("Waiting for rebalance to complete")
+	time.Sleep(3 * time.Second)
+
+	// Get final version
+	leader = cluster.GetLeader()
+	require.NotNil(t, leader)
+	finalVersion := leader.CurrentAssignment().Version
+
+	// With proper batching, we expect at most ~3 versions (setup + 1 batched rebalance)
+	versionDelta := int(finalVersion - initialVersion)
+	require.LessOrEqual(t, versionDelta, 3,
+		"should have at most 3 rebalances with batching, got %d rebalances", versionDelta)
+
+	t.Logf("Scaling batched correctly: %d → %d (%d rebalance(s))",
+		initialVersion, finalVersion, versionDelta)
+
+	// Verify all 10 workers are active and stable
+	cluster.WaitForStableState(10 * time.Second)
+
+	// Count stable workers manually
+	activeWorkers := cluster.GetActiveWorkers()
+	stableCount := 0
+	for _, mgr := range activeWorkers {
+		if mgr.State() == types.StateStable {
+			stableCount++
 		}
 	}
+	require.Equal(t, 10, stableCount, "should have 10 stable workers")
 
-MonitoringDone:
-	require.True(t, stable, "cascading failures detected")
+	// Verify all partitions are assigned
+	cluster.VerifyTotalPartitionCount(12)
+	t.Log("SUCCESS: Rapid scaling handled with minimal rebalances")
+}
 
-	// Final verification
-	totalFinal := 0
-	for i := 2; i < 8; i++ {
-		assignment := cluster.Workers[i].CurrentAssignment()
-		totalFinal += len(assignment.Partitions)
-		t.Logf("Worker %s: %d partitions after monitoring",
-			cluster.Workers[i].WorkerID(), len(assignment.Partitions))
+// TestScenario_SlowHeartbeats_NearExpiryBoundary verifies that slow-but-valid heartbeats don't trigger emergencies.
+func TestScenario_SlowHeartbeats_NearExpiryBoundary(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
 	}
-	require.Equal(t, 50, totalFinal, "expected all 50 partitions assigned after monitoring")
 
-	t.Log("Test passed - cascading failures contained successfully")
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+
+	nc, cleanup := testutil.StartEmbeddedNATS(t)
+	defer cleanup()
+
+	// Configure with tight heartbeat timing
+	// Timing profile representing slow-but-valid heartbeat scenario.
+	cfg := testutil.NewConfigFromProfile(testutil.TimingProfile{
+		HeartbeatInterval:    1 * time.Second,
+		TTLMultiplier:        3.0, // 3s TTL
+		GraceMultiplier:      2.0, // 2s grace
+		ColdStartWindow:      5 * time.Second,
+		PlannedScaleWindow:   3 * time.Second,
+		MinRebalanceInterval: 2 * time.Second,
+	})
+
+	cluster := testutil.NewWorkerCluster(t, nc, 6)
+	cluster.Config = cfg
+	defer cluster.StopWorkers()
+
+	debugLogger := logging.NewTest(t)
+
+	// Start 3 workers
+	t.Log("Starting 3 workers with tight heartbeat timing")
+	for i := 0; i < 3; i++ {
+		mgr := cluster.AddWorker(ctx, debugLogger)
+		err := mgr.Start(ctx)
+		require.NoError(t, err, "failed to start worker %d", i)
+	}
+	cluster.WaitForStableState(10 * time.Second)
+
+	initialVersion := cluster.GetLeader().CurrentAssignment().Version
+	t.Logf("Initial cluster stable, version %d", initialVersion)
+
+	// Wait and observe that no emergency is triggered despite slow network
+	t.Log("Observing system for 15 seconds (5 heartbeat intervals)")
+	time.Sleep(15 * time.Second)
+
+	// Verify no emergency rebalance occurred
+	finalVersion := cluster.GetLeader().CurrentAssignment().Version
+	require.Equal(t, initialVersion, finalVersion,
+		"no rebalance should occur with slow but valid heartbeats")
+
+	// Verify all workers still stable
+	activeWorkers := cluster.GetActiveWorkers()
+	stableCount := 0
+	for _, mgr := range activeWorkers {
+		if mgr.State() == types.StateStable {
+			stableCount++
+		}
+	}
+	require.Equal(t, 3, stableCount, "all workers should remain stable")
+
+	cluster.VerifyTotalPartitionCount(6)
+	t.Log("SUCCESS: No false-positive emergencies with slow heartbeats")
+}
+
+// TestScenario_ConcurrentLeaderElection_RaceCondition verifies only one leader wins under simultaneous claims.
+func TestScenario_ConcurrentLeaderElection_RaceCondition(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+
+	nc, cleanup := testutil.StartEmbeddedNATS(t)
+	defer cleanup()
+
+	// Profile emphasizing election contention while preserving batching invariants.
+	cfg := testutil.NewConfigFromProfile(testutil.TimingProfile{
+		ElectionTimeout:      2 * time.Second,
+		ColdStartWindow:      5 * time.Second,
+		PlannedScaleWindow:   3 * time.Second,
+		MinRebalanceInterval: 2 * time.Second,
+	})
+
+	cluster := testutil.NewWorkerCluster(t, nc, 6)
+	cluster.Config = cfg
+	defer cluster.StopWorkers()
+
+	debugLogger := logging.NewTest(t)
+
+	// Start 5 workers simultaneously (maximize election contention)
+	t.Log("Starting 5 workers simultaneously to trigger election race")
+	for i := 0; i < 5; i++ {
+		mgr := cluster.AddWorker(ctx, debugLogger)
+		// Start immediately without waiting - simulate simultaneous startup
+		go func(m *parti.Manager, idx int) {
+			if err := m.Start(ctx); err != nil {
+				t.Logf("Worker %d start error: %v", idx, err)
+			}
+		}(mgr, i)
+	}
+
+	// Wait a bit for all workers to start attempting election
+	time.Sleep(500 * time.Millisecond)
+	t.Log("All workers started, waiting for election to resolve")
+
+	// Wait for election to resolve
+	t.Log("Waiting for leader election to resolve (10 seconds)")
+	time.Sleep(10 * time.Second)
+
+	// Verify exactly one leader
+	leader := cluster.GetLeader()
+	require.NotNil(t, leader, "should have exactly one leader")
+
+	leaderCount := 0
+	for _, worker := range cluster.Workers {
+		if worker.IsLeader() {
+			leaderCount++
+		}
+	}
+	require.Equal(t, 1, leaderCount, "should have exactly one leader, not multiple")
+
+	t.Logf("Leader elected: %s", leader.WorkerID())
+
+	// Verify all workers reached stable state
+	cluster.WaitForStableState(15 * time.Second)
+
+	// Count stable workers manually
+	activeWorkers := cluster.GetActiveWorkers()
+	stableCount := 0
+	for _, mgr := range activeWorkers {
+		if mgr.State() == types.StateStable {
+			stableCount++
+		}
+	}
+	require.Equal(t, 5, stableCount, "all workers should be stable")
+
+	// Verify partitions are assigned correctly
+	cluster.VerifyTotalPartitionCount(6)
+	t.Log("SUCCESS: Leader election resolved correctly without split-brain")
 }

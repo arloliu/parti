@@ -8,6 +8,7 @@ import (
 	"github.com/arloliu/parti"
 	"github.com/arloliu/parti/source"
 	"github.com/arloliu/parti/strategy"
+	"github.com/arloliu/parti/test/testutil"
 	partitest "github.com/arloliu/parti/testing"
 	"github.com/arloliu/parti/types"
 	"github.com/stretchr/testify/require"
@@ -26,8 +27,8 @@ func TestManager_GracefulShutdown(t *testing.T) {
 	defer srv.Shutdown()
 	defer nc.Close()
 
-	// Create config
-	cfg := parti.TestConfig()
+	// Create config (baseline timing profile for graceful behavior)
+	cfg := testutil.NewConfigFromProfile(testutil.MakeBaseline())
 
 	// Create partition source and strategy
 	partitions := []types.Partition{
@@ -86,8 +87,8 @@ func TestManager_StartFailureCleanup(t *testing.T) {
 	defer srv.Shutdown()
 	defer nc.Close()
 
-	// Create config with impossible startup timeout
-	cfg := parti.TestConfig()
+	// Create config with impossible startup timeout using baseline profile override
+	cfg := testutil.NewConfigFromProfile(testutil.MakeBaseline())
 	cfg.StartupTimeout = 1 * time.Nanosecond // Guaranteed to timeout
 
 	// Create partition source and strategy
@@ -133,7 +134,7 @@ func TestManager_CalculatorStopTimeout(t *testing.T) {
 	defer srv.Shutdown()
 	defer nc.Close()
 
-	cfg := parti.TestConfig()
+	cfg := testutil.NewConfigFromProfile(testutil.MakeBaseline())
 
 	// Create partition source and strategy
 	partitions := []types.Partition{{Keys: []string{"p1"}, Weight: 100}}

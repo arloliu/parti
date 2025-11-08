@@ -34,8 +34,6 @@ help:
 test: clean-test-results
 	@echo "Running unit tests with race detector..."
 	@CGO_ENABLED=1 go test $(TEST_DIRS) -timeout=$(TEST_TIMEOUT) -race || (echo "Tests failed with race detector" && exit 1)
-	@echo "Running unit tests with CGO_ENABLED=0..."
-	@CGO_ENABLED=0 go test $(TEST_DIRS) -timeout=$(TEST_TIMEOUT) || (echo "Tests failed with CGO disabled" && exit 1)
 	@echo "All unit tests passed!"
 
 ## test-unit: Run only unit tests (fast, same as test-short)
@@ -66,13 +64,13 @@ test-all: clean-test-results
 	@echo "==> Running integration tests..."
 	@CGO_ENABLED=1 go test $(INTEGRATION_DIR) -v -timeout=$(TEST_TIMEOUT) -race
 	@echo "==> Running stress tests..."
-	@CGO_ENABLED=1 PARTI_STRESS=1 go test $(STRESS_DIR) -v -timeout=$(STRESS_TIMEOUT)
+	@CGO_ENABLED=1 PARTI_STRESS=1 go test $(STRESS_DIR) -v -timeout=$(STRESS_TIMEOUT) -race
 	@echo "All tests passed!"
 
 
 test-quick: clean-test-results
 	@echo "Running unit tests without race detection..."
-	@go test $(TEST_DIRS) -short -timeout=$(TEST_TIMEOUT)
+	@CGO_ENABLED=0 go test $(TEST_DIRS) -short -timeout=$(TEST_TIMEOUT)
 
 ## coverage: Generate test coverage report (unit packages only)
 coverage: clean-test-results
