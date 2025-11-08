@@ -12,6 +12,7 @@ import (
 )
 
 func TestSlogLogger_ImplementsInterface(t *testing.T) {
+	t.Helper()
 	var _ types.Logger = (*SlogLogger)(nil)
 }
 

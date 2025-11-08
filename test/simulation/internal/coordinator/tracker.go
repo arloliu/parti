@@ -106,6 +106,11 @@ func (t *MessageTracker) RecordReceived(partitionID int, partitionSeq int64) err
 	if partitionSeq > expectedSeq {
 		t.gapCount++
 
+		// Update lastReceived even though there was a gap, so we can continue tracking
+		// from the new sequence number. Otherwise we'd report the same gap for every
+		// subsequent message.
+		t.lastReceivedPerPartition[partitionID] = partitionSeq
+
 		return &MessageGapError{
 			PartitionID: partitionID,
 			ExpectedSeq: expectedSeq,

@@ -337,13 +337,11 @@ func (pm *ProcessManager) StopAll(timeout time.Duration) error {
 	errCh := make(chan error, len(processes))
 
 	for _, info := range processes {
-		wg.Add(1)
-		go func(id string) {
-			defer wg.Done()
-			if err := pm.StopProcess(id, timeout); err != nil {
-				errCh <- fmt.Errorf("failed to stop %s: %w", id, err)
+		wg.Go(func() {
+			if err := pm.StopProcess(info.ID, timeout); err != nil {
+				errCh <- fmt.Errorf("failed to stop %s: %w", info.ID, err)
 			}
-		}(info.ID)
+		})
 	}
 
 	wg.Wait()

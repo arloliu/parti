@@ -3,6 +3,7 @@
 
 # Configuration
 TEST_TIMEOUT    := 6m
+STRESS_TIMEOUT  := 20m
 LINT_TIMEOUT    := 3m
 COVERAGE_DIR    := ./.coverage
 COVERAGE_OUT    := $(COVERAGE_DIR)/coverage.out
@@ -22,7 +23,12 @@ GOLANGCI_LINT_VERSION := 2.5.0
 # Default target
 .DEFAULT_GOAL := help
 
-.PHONY: test test-race test-short coverage coverage-html lint fmt vet bench clean gomod-tidy update-pkg-cache ci test-unit test-integration test-stress test-all
+.PHONY: help test test-race test-short coverage coverage-html lint fmt vet bench clean gomod-tidy update-pkg-cache ci test-unit test-integration test-stress test-all test-smoke clean-test-results test-quick
+
+## help: Show this help message
+help:
+	@echo "Available targets:" && \
+	grep -E '^## ' $(MAKEFILE_LIST) | sed 's/^## /  /'
 
 ## test: Run unit tests with race detector and CGO disabled
 test: clean-test-results
@@ -42,10 +48,15 @@ test-integration: clean-test-results
 	@echo "Running integration tests..."
 	@CGO_ENABLED=1 go test $(INTEGRATION_DIR) -v -timeout=$(TEST_TIMEOUT) -race
 
-## test-stress: Run stress and performance tests
+## test-stress: Run stress and performance tests (set PARTI_STRESS=1 to enable long tests)
 test-stress: clean-test-results
-	@echo "Running stress tests (this may take 15-20 minutes)..."
-	@CGO_ENABLED=1 go test $(STRESS_DIR) -v -timeout=20m
+	@echo "Running stress tests (opt-in long tests)..."
+	@CGO_ENABLED=1 PARTI_STRESS=1 go test $(STRESS_DIR) -v -timeout=$(STRESS_TIMEOUT)
+
+## test-smoke: Run a fast stress smoke test only
+test-smoke: clean-test-results
+	@echo "Running stress smoke test..."
+	@CGO_ENABLED=1 go test $(STRESS_DIR) -run TestStressSmoke -count=1 -timeout=2m
 
 ## test-all: Run unit, integration, and stress tests
 test-all: clean-test-results
@@ -55,7 +66,7 @@ test-all: clean-test-results
 	@echo "==> Running integration tests..."
 	@CGO_ENABLED=1 go test $(INTEGRATION_DIR) -v -timeout=$(TEST_TIMEOUT) -race
 	@echo "==> Running stress tests..."
-	@CGO_ENABLED=1 go test $(STRESS_DIR) -v -timeout=20m
+	@CGO_ENABLED=1 PARTI_STRESS=1 go test $(STRESS_DIR) -v -timeout=$(STRESS_TIMEOUT)
 	@echo "All tests passed!"
 
 
@@ -63,11 +74,11 @@ test-quick: clean-test-results
 	@echo "Running unit tests without race detection..."
 	@go test $(TEST_DIRS) -short -timeout=$(TEST_TIMEOUT)
 
-## coverage: Generate test coverage report
+## coverage: Generate test coverage report (unit packages only)
 coverage: clean-test-results
 	@mkdir -p $(COVERAGE_DIR)
 	@echo "Generating coverage report..."
-	@go test ./... -coverprofile=$(COVERAGE_OUT) -covermode=atomic -timeout=$(TEST_TIMEOUT)
+	@go test $(TEST_DIRS) -coverprofile=$(COVERAGE_OUT) -covermode=atomic -timeout=$(TEST_TIMEOUT)
 	@go tool cover -func=$(COVERAGE_OUT) | tail -1
 
 ## coverage-html: Generate HTML coverage report and open in browser

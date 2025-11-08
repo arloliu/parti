@@ -3,6 +3,7 @@ package assignment
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
@@ -62,6 +63,7 @@ func TestCalculator_InitialAssignment_TwoPhase(t *testing.T) {
 				return false
 			}
 			err = json.Unmarshal(entry.Value(), &immediateAssignment)
+
 			return err == nil && len(immediateAssignment.Partitions) > 0
 		}, 200*time.Millisecond, 10*time.Millisecond, "immediate assignment must happen within 200ms")
 
@@ -69,7 +71,7 @@ func TestCalculator_InitialAssignment_TwoPhase(t *testing.T) {
 		require.Len(t, immediateAssignment.Partitions, 4, "worker-0 should get all partitions immediately")
 		require.Equal(t, int64(1), immediateAssignment.Version, "first assignment should be version 1")
 
-		t.Logf("✅ IMMEDIATE ASSIGNMENT: worker-0 received %d partitions in <200ms (version %d)",
+		t.Logf("IMMEDIATE ASSIGNMENT: worker-0 received %d partitions in <200ms (version %d)",
 			len(immediateAssignment.Partitions), immediateAssignment.Version)
 
 		// Now add 2 more workers DURING the stabilization window
@@ -79,7 +81,7 @@ func TestCalculator_InitialAssignment_TwoPhase(t *testing.T) {
 		_, err = heartbeatKV.Put(ctx, "worker-hb.worker-2", []byte(time.Now().Format(time.RFC3339Nano)))
 		require.NoError(t, err)
 
-		t.Logf("Added worker-1 and worker-2 during stabilization window")
+		t.Log("Added worker-1 and worker-2 during stabilization window")
 
 		// Wait for stabilization window to complete + some margin
 		time.Sleep(600 * time.Millisecond)
@@ -299,7 +301,7 @@ func TestCalculator_InitialAssignment_TwoPhase(t *testing.T) {
 		}
 		require.Equal(t, 6, finalPartitionCount, "all partitions should remain assigned")
 
-		t.Logf("✅ All workers received immediate assignments, maintained coverage through final phase")
+		t.Log("All workers received immediate assignments, maintained coverage through final phase")
 	})
 }
 
@@ -361,9 +363,10 @@ func TestCalculator_InitialAssignment_ZeroCoverageGap(t *testing.T) {
 					elapsed := time.Since(startTime)
 					if elapsed > 200*time.Millisecond {
 						gapDetected = true
-						t.Errorf("❌ COVERAGE GAP DETECTED: No assignment after %v", elapsed)
+						t.Errorf("COVERAGE GAP DETECTED: No assignment after %v", elapsed)
 						return
 					}
+
 					continue
 				}
 
@@ -374,7 +377,7 @@ func TestCalculator_InitialAssignment_ZeroCoverageGap(t *testing.T) {
 
 				if len(assignment.Partitions) == 0 {
 					gapDetected = true
-					t.Errorf("❌ COVERAGE GAP DETECTED: Empty partition list in assignment")
+					t.Error("COVERAGE GAP DETECTED: Empty partition list in assignment")
 					return
 				}
 
@@ -450,25 +453,34 @@ func TestCalculator_InitialAssignment_Metrics(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// Verify two rebalance attempts recorded
-	require.GreaterOrEqual(t, metrics.rebalanceAttempts["cold_start_immediate"], 1,
+	require.GreaterOrEqual(t, metrics.GetRebalanceAttempt("cold_start_immediate"), 1,
 		"immediate assignment should be recorded")
-	require.GreaterOrEqual(t, metrics.rebalanceAttempts["cold_start_final"], 1,
+	require.GreaterOrEqual(t, metrics.GetRebalanceAttempt("cold_start_final"), 1,
 		"final assignment should be recorded")
 
 	t.Logf("✅ Metrics correctly recorded: immediate=%d, final=%d",
-		metrics.rebalanceAttempts["cold_start_immediate"],
-		metrics.rebalanceAttempts["cold_start_final"])
+		metrics.GetRebalanceAttempt("cold_start_immediate"),
+		metrics.GetRebalanceAttempt("cold_start_final"))
 }
 
 // mockMetricsCollector for testing
 type mockMetricsCollector struct {
+	mu                sync.RWMutex
 	rebalanceAttempts map[string]int
 }
 
 func (m *mockMetricsCollector) RecordRebalanceAttempt(lifecycle string, success bool) {
 	if success {
+		m.mu.Lock()
 		m.rebalanceAttempts[lifecycle]++
+		m.mu.Unlock()
 	}
+}
+
+func (m *mockMetricsCollector) GetRebalanceAttempt(key string) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.rebalanceAttempts[key]
 }
 
 func (m *mockMetricsCollector) RecordRebalanceDuration(duration float64, lifecycle string)   {}

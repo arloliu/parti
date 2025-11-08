@@ -1,0 +1,312 @@
+{
+  "timestamp": "2025-11-09T02:23:04.185688469+08:00",
+  "total_sent": 25604,
+  "total_received": 25602,
+  "gap_count": 0,
+  "duplicate_count": 0,
+  "partition_states": {
+    "0": {
+      "last_sent_sequence": 425,
+      "last_received_sequence": 425,
+      "producer_id": "",
+      "message_count": 425
+    },
+    "1": {
+      "last_sent_sequence": 425,
+      "last_received_sequence": 425,
+      "producer_id": "",
+      "message_count": 425
+    },
+    "10": {
+      "last_sent_sequence": 424,
+      "last_received_sequence": 424,
+      "producer_id": "",
+      "message_count": 424
+    },
+    "11": {
+      "last_sent_sequence": 424,
+      "last_received_sequence": 424,
+      "producer_id": "",
+      "message_count": 424
+    },
+    "12": {
+      "last_sent_sequence": 424,
+      "last_received_sequence": 424,
+      "producer_id": "",
+      "message_count": 424
+    },
+    "13": {
+      "last_sent_sequence": 424,
+      "last_received_sequence": 424,
+      "producer_id": "",
+      "message_count": 424
+    },
+    "14": {
+      "last_sent_sequence": 424,
+      "last_received_sequence": 424,
+      "producer_id": "",
+      "message_count": 424
+    },
+    "15": {
+      "last_sent_sequence": 424,
+      "last_received_sequence": 424,
+      "producer_id": "",
+      "message_count": 424
+    },
+    "16": {
+      "last_sent_sequence": 424,
+      "last_received_sequence": 424,
+      "producer_id": "",
+      "message_count": 424
+    },
+    "17": {
+      "last_sent_sequence": 424,
+      "last_received_sequence": 424,
+      "producer_id": "",
+      "message_count": 424
+    },
+    "18": {
+      "last_sent_sequence": 424,
+      "last_received_sequence": 424,
+      "producer_id": "",
+      "message_count": 424
+    },
+    "19": {
+      "last_sent_sequence": 424,
+      "last_received_sequence": 424,
+      "producer_id": "",
+      "message_count": 424
+    },
+    "2": {
+      "last_sent_sequence": 425,
+      "last_received_sequence": 425,
+      "producer_id": "",
+      "message_count": 425
+    },
+    "20": {
+      "last_sent_sequence": 424,
+      "last_received_sequence": 424,
+      "producer_id": "",
+      "message_count": 424
+    },
+    "21": {
+      "last_sent_sequence": 424,
+      "last_received_sequence": 424,
+      "producer_id": "",
+      "message_count": 424
+    },
+    "22": {
+      "last_sent_sequence": 424,
+      "last_received_sequence": 424,
+      "producer_id": "",
+      "message_count": 424
+    },
+    "23": {
+      "last_sent_sequence": 424,
+      "last_received_sequence": 424,
+      "producer_id": "",
+      "message_count": 424
+    },
+    "24": {
+      "last_sent_sequence": 424,
+      "last_received_sequence": 424,
+      "producer_id": "",
+      "message_count": 424
+    },
+    "25": {
+      "last_sent_sequence": 600,
+      "last_received_sequence": 600,
+      "producer_id": "",
+      "message_count": 600
+    },
+    "26": {
+      "last_sent_sequence": 600,
+      "last_received_sequence": 600,
+      "producer_id": "",
+      "message_count": 600
+    },
+    "27": {
+      "last_sent_sequence": 600,
+      "last_received_sequence": 600,
+      "producer_id": "",
+      "message_count": 600
+    },
+    "28": {
+      "last_sent_sequence": 600,
+      "last_received_sequence": 600,
+      "producer_id": "",
+      "message_count": 600
+    },
+    "29": {
+      "last_sent_sequence": 600,
+      "last_received_sequence": 600,
+      "producer_id": "",
+      "message_count": 600
+    },
+    "3": {
+      "last_sent_sequence": 425,
+      "last_received_sequence": 425,
+      "producer_id": "",
+      "message_count": 425
+    },
+    "30": {
+      "last_sent_sequence": 600,
+      "last_received_sequence": 600,
+      "producer_id": "",
+      "message_count": 600
+    },
+    "31": {
+      "last_sent_sequence": 600,
+      "last_received_sequence": 600,
+      "producer_id": "",
+      "message_count": 600
+    },
+    "32": {
+      "last_sent_sequence": 600,
+      "last_received_sequence": 600,
+      "producer_id": "",
+      "message_count": 600
+    },
+    "33": {
+      "last_sent_sequence": 600,
+      "last_received_sequence": 600,
+      "producer_id": "",
+      "message_count": 600
+    },
+    "34": {
+      "last_sent_sequence": 600,
+      "last_received_sequence": 600,
+      "producer_id": "",
+      "message_count": 600
+    },
+    "35": {
+      "last_sent_sequence": 600,
+      "last_received_sequence": 600,
+      "producer_id": "",
+      "message_count": 600
+    },
+    "36": {
+      "last_sent_sequence": 600,
+      "last_received_sequence": 600,
+      "producer_id": "",
+      "message_count": 600
+    },
+    "37": {
+      "last_sent_sequence": 600,
+      "last_received_sequence": 600,
+      "producer_id": "",
+      "message_count": 600
+    },
+    "38": {
+      "last_sent_sequence": 600,
+      "last_received_sequence": 600,
+      "producer_id": "",
+      "message_count": 600
+    },
+    "39": {
+      "last_sent_sequence": 600,
+      "last_received_sequence": 600,
+      "producer_id": "",
+      "message_count": 600
+    },
+    "4": {
+      "last_sent_sequence": 425,
+      "last_received_sequence": 425,
+      "producer_id": "",
+      "message_count": 425
+    },
+    "40": {
+      "last_sent_sequence": 600,
+      "last_received_sequence": 600,
+      "producer_id": "",
+      "message_count": 600
+    },
+    "41": {
+      "last_sent_sequence": 600,
+      "last_received_sequence": 600,
+      "producer_id": "",
+      "message_count": 600
+    },
+    "42": {
+      "last_sent_sequence": 600,
+      "last_received_sequence": 599,
+      "producer_id": "",
+      "message_count": 600
+    },
+    "43": {
+      "last_sent_sequence": 600,
+      "last_received_sequence": 599,
+      "producer_id": "",
+      "message_count": 600
+    },
+    "44": {
+      "last_sent_sequence": 599,
+      "last_received_sequence": 599,
+      "producer_id": "",
+      "message_count": 599
+    },
+    "45": {
+      "last_sent_sequence": 599,
+      "last_received_sequence": 599,
+      "producer_id": "",
+      "message_count": 599
+    },
+    "46": {
+      "last_sent_sequence": 599,
+      "last_received_sequence": 599,
+      "producer_id": "",
+      "message_count": 599
+    },
+    "47": {
+      "last_sent_sequence": 599,
+      "last_received_sequence": 599,
+      "producer_id": "",
+      "message_count": 599
+    },
+    "48": {
+      "last_sent_sequence": 599,
+      "last_received_sequence": 599,
+      "producer_id": "",
+      "message_count": 599
+    },
+    "49": {
+      "last_sent_sequence": 599,
+      "last_received_sequence": 599,
+      "producer_id": "",
+      "message_count": 599
+    },
+    "5": {
+      "last_sent_sequence": 425,
+      "last_received_sequence": 425,
+      "producer_id": "",
+      "message_count": 425
+    },
+    "6": {
+      "last_sent_sequence": 425,
+      "last_received_sequence": 425,
+      "producer_id": "",
+      "message_count": 425
+    },
+    "7": {
+      "last_sent_sequence": 425,
+      "last_received_sequence": 425,
+      "producer_id": "",
+      "message_count": 425
+    },
+    "8": {
+      "last_sent_sequence": 425,
+      "last_received_sequence": 425,
+      "producer_id": "",
+      "message_count": 425
+    },
+    "9": {
+      "last_sent_sequence": 425,
+      "last_received_sequence": 425,
+      "producer_id": "",
+      "message_count": 425
+    }
+  },
+  "active_workers": 1,
+  "active_producers": 2,
+  "simulation_runtime": 119965463627
+}

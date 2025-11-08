@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/arloliu/parti/test/simulation/internal/metrics"
 	"github.com/arloliu/parti/test/simulation/internal/producer"
@@ -83,12 +84,12 @@ func (c *Coordinator) Start(ctx context.Context) {
 				if c.metricsCollector != nil {
 					if errors.Is(err, ErrMessageGap) {
 						c.metricsCollector.RecordGap()
-					} else if errors.Is(err, ErrMessageDuplicate) {
+					}
+
+					if errors.Is(err, ErrMessageDuplicate) {
 						c.metricsCollector.RecordDuplicate()
 					}
 				}
-				// In Phase 1, we log errors but continue
-				// Phase 2 will add abort-on-critical-failure
 			}
 
 			// Record metrics
@@ -134,7 +135,7 @@ func (c *Coordinator) PrintReport() {
 		activeWorkers = c.metricsCollector.GetActiveWorkers()
 	}
 
-	fmt.Println("\n=== Simulation Report ===")
+	fmt.Printf("\n=== Simulation Report [%s] ===\n", time.Now().Format(time.RFC3339))
 	fmt.Printf("Total Partitions:     %d\n", stats.TotalPartitions)
 	fmt.Printf("Total Sent:           %d\n", stats.TotalSent)
 	fmt.Printf("Total Received:       %d\n", stats.TotalReceived)

@@ -3,7 +3,6 @@ package hash
 import (
 	"encoding/binary"
 	"slices"
-	"strings"
 
 	"github.com/arloliu/parti/types"
 	"github.com/zeebo/xxh3"
@@ -110,7 +109,7 @@ func (r *Ring) GetNodeForPartition(partition types.Partition) string {
 	}
 
 	// Concatenate keys with separator
-	key := strings.Join(partition.Keys, "/")
+	key := partition.ID()
 
 	return r.GetNode(key)
 }

@@ -119,23 +119,22 @@ The `durable_helper` will no longer manage consumers per partition. Instead, it 
 
 ### 5.4. `durable_helper.go` Refactoring Plan
 
--   **Deprecate/Remove**: The current `UpdateSubscriptions` logic that iterates through `added` and `removed` partitions to create/stop per-partition consumers will be removed. The internal tracking map `consumers` (mapping partition ID to consumer) will also be removed.
--   **Create**: A new primary method will be introduced, conceptually like this:
+-   **Removed**: Legacy `UpdateSubscriptions` (per-partition consumer management) and its associated tests are eliminated entirely—no deprecation layer or migration flag retained.
+-   **New Primary Method** (handler provided at construction, not per update):
     ```go
     func (dh *DurableHelper) UpdateWorkerConsumer(
         ctx context.Context,
-        workerID string, // The stable ID of this worker
+        workerID string,
         assignedPartitions []types.Partition,
-        handler MessageHandler,
     ) error
     ```
--   **Modify**: This new function will be responsible for:
-    1.  Generating a list of subjects from `assignedPartitions`.
-    2.  Constructing the durable consumer name from `workerID`.
-    3.  Creating a `jetstream.ConsumerConfig` with the `FilterSubjects` field populated.
-    4.  Calling `stream.CreateOrUpdateConsumer(ctx, cfg)`.
-    5.  Managing a single pull loop for the worker's consumer.
-    6.  Performing diff-based updates only when the subject set truly changes (idempotent behavior).
+-   **Responsibilities**:
+    1.  Generate deduped subject list from `assignedPartitions`.
+    2.  Derive durable consumer name from `workerID` (cached after first use).
+    3.  Build `jetstream.ConsumerConfig` (only `FilterSubjects` changes between updates; immutable fields preserved).
+    4.  Call `CreateOrUpdateConsumer` with retry/backoff.
+    5.  Maintain a single long-lived pull loop started once in helper constructor (not restarted on updates).
+    6.  Diff new subject list against cached set; skip no-op updates and emit metrics.
 
 #### Update Frequency & Stabilization
 To avoid thrashing consumers during rapid topology changes:
@@ -244,29 +243,9 @@ type MessageContext struct {
 
 Maintain idempotency in handlers to tolerate redeliveries.
 
-## 9. Migration Plan
+## 9. Migration Plan (Removed)
 
-Phased rollout from per-partition to per-worker consumer:
-1. **Flag Introduction**: Add config flag `UnifiedConsumerEnabled`.
-2. **Shadow Mode**: Create per-worker consumer; keep per-partition consumers but stop pulling from them (do not delete yet).
-3. **Validation**: Compare message counts & lag; ensure parity.
-4. **Drain & Cleanup**: Stop pull loops for partition consumers; delete them explicitly or let inactivity TTL reap them.
-5. **Full Switch**: Enable flag cluster-wide; remove legacy code paths.
-6. **Post-Monitoring**: Watch redelivery, backlog, update failure metrics for regression.
-
-Rollback Strategy: Re-enable legacy path if redelivery ratio or lag breaches SLO for N consecutive windows.
-
-Zero-Downtime Variant (Optional):
-1. Dual mode: run unified consumer alongside legacy per-partition consumers; deduplicate via message ID hash (subject + sequence).
-2. Compare delivery parity metrics for a burn-in window (e.g., 1–2 days).
-3. Disable legacy pull loops after confidence threshold met.
-4. Delete legacy consumers after 2 × InactiveThreshold.
-
-Network Partition Resilience:
-- Ensure `InactiveThreshold` > maximum expected transient network outage.
-- Worker heartbeats TTL shorter than consumer inactivity threshold to detect liveness sooner.
-- On reconnect, validate consumer existence via `Consumer.Info`; recreate if missing.
-- Partition claiming (manager) should re-verify ownership after reconnect; fence stale owners by comparing claim timestamps.
+No phased migration required—legacy per-partition path and `UpdateSubscriptions` are removed outright. Systems adopting this version use the single-consumer model exclusively. Rollback would require reverting to a previous library version; no in-place dual-mode is supported.
 
 ## 10. Testing Plan
 
@@ -322,21 +301,20 @@ Edge Cases:
 ## 13. API Contract Summary (`UpdateWorkerConsumer`)
 
 Inputs:
-- `workerID string`
+- `workerID string` (stable ID; must match durable naming convention)
 - `assigned []types.Partition`
-- `handler MessageHandler`
 
 Behavior:
 - Build deduped subject set.
-- Diff with previous set; if unchanged → no-op.
+- Diff with previous set; if unchanged → no-op (emit noop metric).
 - Create or update consumer (Name = Durable = `<prefix>-<workerID>`).
-- Ensure pull loop running; adjust batch size heuristics.
+- Pull loop is persistent (started at helper construction; not restarted here).
 
 Error Modes:
-- Context canceled; NATS connectivity error; subject cap exceeded.
+- Context canceled; NATS connectivity error; subject cap exceeded; consumer update failure after retries.
 
 Metrics Emitted:
-- Update success/failure, duration, subject count, no-op skipped updates.
+- Update success/failure, duration, subject count, no-op skipped updates, diff add/remove counts.
 
 ## 14. Open Questions & Next Steps
 
@@ -352,3 +330,323 @@ Next Steps:
 4. Run performance + failure injection tests.
 5. Finalize SLO thresholds; populate dashboards & alerts.
 6. Remove legacy per-partition code after successful validation.
+
+## 15. Manager Claim Flow (Draft)
+
+Purpose: Centralize ownership decisions in the Manager, perform two-phase handoff, and provide the helper with a pre-claimed assignment set per worker.
+
+Ownership record (stored in KV or similar):
+```json
+Key:  parti.claims.<subject>
+Value: {
+  "owner": "worker-5",
+  "fenceToken": "<uuid-or-inc-counter>",
+  "claimedAt": "RFC3339",
+  "ttlSeconds": 60
+}
+```
+
+High-level algorithm:
+1) Compute desired assignment from current topology.
+2) For each subject that changes owner:
+   - Attempt Claim(subject, newOwner, fenceToken).
+   - On success, stage subject in newOwner.added.
+   - On failure, keep subject with current owner; re-evaluate next cycle.
+3) Notify new owners to UpdateWorkerConsumer with staged added subjects (plus their unchanged subjects).
+4) Wait for health confirmation from new owners (e.g., pulling=true, subject visible metric) or bounded timeout.
+5) Notify old owners to UpdateWorkerConsumer to remove the transferred subjects.
+6) Release(subject, oldOwner, fenceToken) to clear claim.
+7) Publish final assignment snapshot/version.
+
+Sketch in Go (simplified):
+```go
+type ClaimStore interface {
+    Claim(ctx context.Context, subject, owner, fence string, ttl time.Duration) (bool, error)
+    Release(ctx context.Context, subject, owner, fence string) error
+}
+
+type WorkerPlan struct {
+    WorkerID   string
+    Add        []types.Partition
+    Keep       []types.Partition
+    Remove     []types.Partition
+}
+
+func (m *Manager) Reconcile(ctx context.Context, desired map[string][]types.Partition) error {
+    current := m.snapshotAssignments()           // workerID -> partitions (owned)
+    plans := make(map[string]*WorkerPlan)        // workerID -> plan
+
+    // 1) Claim new ownerships
+    for workerID, target := range desired {
+        for _, p := range target {
+            subj := toSubject(p)
+            oldOwner := m.lookupOwner(subj)
+            if oldOwner == workerID {
+                plans[workerID] = addKeep(plans[workerID], workerID, p)
+                continue
+            }
+            ok, err := m.claimStore.Claim(ctx, subj, workerID, m.fenceToken, m.claimTTL)
+            if err != nil || !ok {
+                // keep at old owner for now
+                if oldOwner != "" {
+                    plans[oldOwner] = addKeep(plans[oldOwner], oldOwner, p)
+                }
+                continue
+            }
+            plans[workerID] = addAdd(plans[workerID], workerID, p)
+        }
+    }
+
+    // 2) Notify new owners to add (two-phase handoff: add first)
+    for workerID, plan := range plans {
+        parts := append(plan.Keep, plan.Add...)
+        _ = m.helper.UpdateWorkerConsumer(ctx, workerID, parts, m.handler)
+    }
+
+    // 3) Wait for health/visibility signal (bounded)
+    m.waitForNewOwners(ctx, plans)
+
+    // 4) Compute removals for previous owners
+    for subj, oldOwner := range m.ownersBySubject() {
+        if newOwner := m.lookupDesiredOwner(subj, desired); newOwner != oldOwner && newOwner != "" {
+            p := toPartition(subj)
+            plans[oldOwner] = addRemove(plans[oldOwner], oldOwner, p)
+        }
+    }
+
+    // 5) Notify old owners to remove
+    for workerID, plan := range plans {
+        if len(plan.Remove) == 0 {
+            continue
+        }
+        parts := subtract(plans[workerID].Keep, plan.Remove)
+        parts = append(parts, plan.Add...) // ensure adds remain
+        _ = m.helper.UpdateWorkerConsumer(ctx, workerID, parts, m.handler)
+    }
+
+    // 6) Release claims for removed subjects
+    for workerID, plan := range plans {
+        for _, p := range plan.Remove {
+            _ = m.claimStore.Release(ctx, toSubject(p), workerID, m.fenceToken)
+        }
+    }
+
+    // 7) Publish final assignment (versioned)
+    return m.publishAssignmentSnapshot(ctx)
+}
+```
+
+Notes:
+- The Manager is the sole authority for claim/release and for two-phase timing.
+- Health confirmation can be a simple metric/heartbeat indicating the new worker is pulling for at least one message cycle.
+- Fencing (monotonic counter or UUID) prevents stale owners from overwriting fresh claims.
+
+## 16. Helper API: UpdateWorkerConsumer (Skeleton)
+
+Goal: Accept a pre-claimed set of partitions, compute subject set, perform diffed CreateOrUpdateConsumer, and maintain a single long-lived pull loop.
+
+Skeleton:
+```go
+// UpdateWorkerConsumer applies the full, pre-claimed assignment set for this worker.
+// It performs a diff against the last applied set and updates the single durable consumer
+// (Name == Durable == <prefix>-<workerID>) using FilterSubjects. No-op if unchanged.
+func (dh *DurableHelper) UpdateWorkerConsumer(
+    ctx context.Context,
+    workerID string,
+    partitions []types.Partition,
+) error {
+    // 1) Build deduped subject list from partitions
+    subjects := dh.buildSubjects(partitions)
+
+    // 2) Diff with previous (cached) subject set for worker
+    if dh.noChange(workerID, subjects) {
+        dh.metrics.IncNoop(workerID)
+        return nil
+    }
+
+    // 3) Build ConsumerConfig (immutable fields preserved)
+    cfg := jetstream.ConsumerConfig{
+        Name:              dh.consumerName(workerID),
+        Durable:           dh.consumerName(workerID),
+        FilterSubjects:    subjects,
+        AckPolicy:         dh.config.AckPolicy,
+        AckWait:           dh.config.AckWait,
+        MaxDeliver:        dh.config.MaxDeliver,
+        InactiveThreshold: dh.config.InactiveThreshold,
+        MaxWaiting:        dh.config.MaxWaiting,
+        MaxAckPending:     /* optional */ 0,
+    }
+
+    // 4) CreateOrUpdateConsumer with retry/backoff
+    if err := dh.applyConsumerUpdate(ctx, cfg); err != nil {
+        dh.metrics.IncUpdateFailure(workerID)
+        dh.logger.Error("consumer update failed", "worker", workerID, "error", err)
+        return err
+    }
+
+    // 5) Ensure single pull loop is running (idempotent start)
+    // Pull loop already running (started in constructor); ensure health but do not restart.
+    dh.ensurePullLoopHealth(workerID)
+
+    // 6) Cache applied subject set for future diffs
+    dh.cacheSubjects(workerID, subjects)
+
+    return nil
+}
+```
+
+Key points:
+- No claim operations in the helper—ownership is guaranteed by the manager.
+- Pull loop is not restarted on updates; only consumer config changes.
+- Diffing avoids unnecessary updates and thrash; emit metrics for skipped updates.
+
+## 17. Implementation Steps
+
+1) Manager
+- Implement ClaimStore (backed by NATS KV) with fencing and TTL.
+- Add reconciliation loop to compute desired vs current, claim, and two-phase handoff.
+- Emit health confirmation signals from workers (e.g., consumer-visible-subject metric) and wait bounded time.
+- Publish versioned assignment snapshots.
+
+2) Helper (subscription)
+- Add new `UpdateWorkerConsumer` entrypoint with subject building, diffing, and CreateOrUpdateConsumer application.
+- Ensure a single durable consumer per worker (Name == Durable == `<prefix>-<workerID>`).
+- Maintain a single long-lived pull loop with Messages() iterator and heartbeat.
+- Add metrics: update attempts/success/failure, noop diffs, subject count, pull loop health.
+
+3) Wiring & Migration
+- Gate new flow with a feature flag (UnifiedConsumerEnabled).
+- In shadow mode, call UpdateWorkerConsumer while keeping legacy per-partition path dormant.
+- Validate parity, then drain and remove legacy path; keep rollback toggle.
+
+4) Tests
+- Unit: diffing logic, immutable config preservation, backoff retries on update.
+- Integration: two-phase handoff end-to-end; rolling restart with stable ID; server restart mid-rebalance.
+- Performance: 25×80 subjects load, adaptive tuning validation, redelivery/loss checks.
+
+5) Dashboards/Alerts
+- Per-worker consumer health: lag, inflight, redelivery ratio, subject count.
+- Update failure rate, update duration, noop diff counts.
+- Claim failure rate and time-to-handoff.
+
+## 18. Manager ↔ Helper relationship & notification path
+
+Intent: Keep Manager decoupled from subscription details while allowing it to drive the helper updates immediately after reconciliation/claiming.
+
+Separation of concerns:
+- Manager (root package): authority for ID, election, assignment, and (new) partition claims; publishes per-worker assignment snapshots and exposes hooks.
+- Helper (subscription subpackage): owns JetStream consumer lifecycle for a worker; applies subject diffs via `UpdateWorkerConsumer`; maintains the pull loop.
+
+Why decouple: Root package must not depend on `subscription` to avoid import cycles. The clean boundary is an application-provided hook that bridges Manager events to Helper calls.
+
+Notification flow (per cycle):
+1) Leader Manager reconciles, claims subjects, and writes a new assignment snapshot for each worker (phase 1: new owners include additions; phase 2: old owners receive removals after health check).
+2) Each worker’s Manager instance watches its own `assignment.<worker>` key and triggers `OnAssignmentChanged(ctx, old, new)` when version increases.
+3) Application wiring calls `helper.UpdateWorkerConsumer(ctx, manager.WorkerID(), new, handler)` from inside the hook. No RPC is required; this is in-process.
+4) Helper diffs subjects and updates the single durable consumer in-place; pull loop continues without restart.
+
+Minimal wiring example:
+```go
+// At startup
+dh := subscription.NewDurableHelper(js, durableConfig, logger, metrics)
+msgHandler := subscription.MessageHandlerFunc(func(m *jetstream.Msg) error { /* ... */ return nil })
+
+hooks := parti.NewHooks()
+hooks.OnAssignmentChanged = func(ctx context.Context, old, new []parti.Partition) error {
+        // Single call with full, pre-claimed set for this worker
+        return dh.UpdateWorkerConsumer(ctx, mgr.WorkerID(), new, msgHandler)
+}
+
+mgr, err := parti.NewManager(cfg, conn, src, strat, parti.WithHooks(&hooks))
+```
+
+Contract surface:
+- Input: workerID from Manager, partitions from `OnAssignmentChanged` (already pre-claimed by the leader), and the worker’s message handler.
+- Behavior: Helper performs idempotent diffed update; does not claim; never restarts the pull loop on subject-only changes.
+- Error handling: Hook returns error; Manager logs via existing hook error path; retry is handled by the next assignment version or by operator (optional exponential backoff wrapper can be added in app code).
+
+Two-phase handoff with this wiring:
+- Phase 1 (add): Leader publishes assignments where new owners include the moved subjects. Hook on new owners calls `UpdateWorkerConsumer` to add subjects.
+- Health gate: Leader observes new owners’ health signals (pulling/lag OK) before proceeding.
+- Phase 2 (remove): Leader publishes assignments where old owners exclude the moved subjects. Hook on old owners calls `UpdateWorkerConsumer` to remove subjects. Leader then releases claims.
+
+Alternative (interface-based) wiring:
+- Define a narrow `WorkerConsumerUpdater` interface in root (no subpackage references):
+    ```go
+    type WorkerConsumerUpdater interface {
+            UpdateWorkerConsumer(ctx context.Context, workerID string, partitions []parti.Partition) error
+    }
+    ```
+- Provide an Option `WithConsumerUpdater(WorkerConsumerUpdater)` to register an internal hook that invokes it.
+- The `subscription.DurableHelper` can implement this interface without import cycles (dependency is from subscription → root only).
+
+### 18.1 Interface Option: WithConsumerUpdater (Detailed Design)
+
+Goal: Allow applications to supply any implementation (typically `subscription.DurableHelper`) that handles consumer updates, without manually wiring a hook every time. Keeps Manager ignorant of subscription details; avoids import cycles.
+
+Interface (in root package `parti`):
+```go
+// WorkerConsumerUpdater applies a new full assignment set for the given worker.
+// Implementation must be idempotent and SHOULD diff internally to avoid unnecessary JetStream updates.
+type WorkerConsumerUpdater interface {
+    UpdateWorkerConsumer(ctx context.Context, workerID string, partitions []parti.Partition) error
+}
+```
+
+Option helper:
+```go
+// WithConsumerUpdater registers a WorkerConsumerUpdater so Manager automatically
+// calls it when assignments change. If a custom OnAssignmentChanged hook already
+// exists, it will be composed (original runs first; errors are logged then updater invoked).
+func WithConsumerUpdater(updater WorkerConsumerUpdater) Option {
+    return func(mo *managerOptions) {
+        // Ensure hooks struct exists
+        if mo.hooks == nil {
+            h := hooks.NewNop()
+            mo.hooks = &h
+        }
+        prev := mo.hooks.OnAssignmentChanged
+        mo.hooks.OnAssignmentChanged = func(ctx context.Context, oldParts, newParts []parti.Partition) error {
+            // previous user hook
+            if prev != nil {
+                if err := prev(ctx, oldParts, newParts); err != nil {
+                    // Manager will log hook errors; continue to updater
+                }
+            }
+            // Obtain workerID via context injection OR (preferred) extend manager invocation
+            // so it sets a value in context: ctx = context.WithValue(ctx, parti.WorkerIDContextKey, mgr.WorkerID()).
+            // Interim design: Updater requires workerID to be part of context.
+            workerID, _ := ctx.Value(parti.WorkerIDContextKey).(string)
+            return updater.UpdateWorkerConsumer(ctx, workerID, newParts)
+        }
+    }
+}
+```
+
+Context propagation:
+- Introduce `WorkerIDContextKey` (unexported type + exported variable) to inject workerID when Manager invokes `OnAssignmentChanged`.
+- Alternative: Add a new hook `OnAssignmentChangedWithID(ctx, workerID, old, new)`; if present, Manager prefers it over the legacy one. (Backward-compatible upgrade path.)
+
+Backward compatibility strategy:
+1. Phase A: Add context workerID injection + Option; keep existing hook signature.
+2. Phase B: Introduce new hook variant; `WithConsumerUpdater` adapts to whichever is available.
+3. Phase C: Deprecate old hook once ecosystem updates.
+
+Error handling semantics:
+- Updater errors are surfaced via hook error logging already present in Manager (non-fatal, next assignment version retried automatically).
+- Applications wanting retries can wrap their updater in a decorator implementing exponential backoff before returning an error.
+
+Metrics integration:
+- Manager increments assignment change metrics; updater implementation (e.g., DurableHelper) records update attempt, success/failure, and noop diff metrics.
+
+Edge cases:
+- Empty partition set: Updater should update consumer with zero subjects (or optionally keep previous until remove phase completes if two-phase handoff is active).
+- Rapid consecutive versions: Updater MUST be safe to receive version N+2 before finishing N+1 (idempotent diff guarantees correctness).
+- WorkerID resolution failure (missing context value): Updater returns sentinel error; Manager logs; next version reattempt.
+
+Testing approach:
+- Unit test Option composition: existing hook + updater both invoked.
+- Inject fake context without workerID → expect error path and log.
+- Benchmark path with 0-change (noop) updates to ensure minimal overhead.
+
+Migration note: Initial implementation can bypass context key complexity by temporarily adding workerID as a parameter to the hook invocation; update design doc if that direction chosen.

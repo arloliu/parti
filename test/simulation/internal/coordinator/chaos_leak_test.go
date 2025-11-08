@@ -1,5 +1,4 @@
 package coordinator
-package coordinator
 
 import (
 	"context"
@@ -18,7 +17,7 @@ import (
 // 3. No goroutine leaks after stop
 func TestChaosController_GoroutineLeak(t *testing.T) {
 	// Get baseline goroutine count
-	runtime.GC()
+	runtime.GC() //nolint:revive
 	time.Sleep(100 * time.Millisecond)
 	baseline := runtime.NumGoroutine()
 
@@ -53,7 +52,7 @@ func TestChaosController_GoroutineLeak(t *testing.T) {
 
 	// Wait for goroutine to exit
 	time.Sleep(200 * time.Millisecond)
-	runtime.GC()
+	runtime.GC() //nolint:revive
 	time.Sleep(100 * time.Millisecond)
 
 	// Verify goroutine count returned to baseline
@@ -65,15 +64,15 @@ func TestChaosController_GoroutineLeak(t *testing.T) {
 // TestChaosController_MultipleStarts tests that starting chaos controller multiple times
 // doesn't create multiple goroutines.
 func TestChaosController_MultipleStarts(t *testing.T) {
-	runtime.GC()
+	runtime.GC() //nolint:revive
 	time.Sleep(100 * time.Millisecond)
 	baseline := runtime.NumGoroutine()
 
 	cfg := ChaosConfig{
-		Enabled:     true,
-		Events:      []string{"worker_crash"},
-		MinInterval: 10 * time.Second,
-		MaxInterval: 20 * time.Second,
+		Enabled:       true,
+		Events:        []string{"worker_crash"},
+		MinInterval:   10 * time.Second,
+		MaxInterval:   20 * time.Second,
 		EventCallback: func(ChaosEvent, map[string]any) {},
 	}
 
@@ -100,7 +99,7 @@ func TestChaosController_MultipleStarts(t *testing.T) {
 
 	cancel()
 	time.Sleep(200 * time.Millisecond)
-	runtime.GC()
+	runtime.GC() //nolint:revive
 	time.Sleep(100 * time.Millisecond)
 
 	afterStop := runtime.NumGoroutine()
@@ -110,15 +109,15 @@ func TestChaosController_MultipleStarts(t *testing.T) {
 // TestChaosController_DisabledNoGoroutine tests that disabled chaos controller
 // doesn't create any goroutines.
 func TestChaosController_DisabledNoGoroutine(t *testing.T) {
-	runtime.GC()
+	runtime.GC() //nolint:revive
 	time.Sleep(100 * time.Millisecond)
 	baseline := runtime.NumGoroutine()
 
 	cfg := ChaosConfig{
-		Enabled:     false, // Disabled
-		Events:      []string{"worker_crash"},
-		MinInterval: 10 * time.Second,
-		MaxInterval: 20 * time.Second,
+		Enabled:       false, // Disabled
+		Events:        []string{"worker_crash"},
+		MinInterval:   10 * time.Second,
+		MaxInterval:   20 * time.Second,
 		EventCallback: func(ChaosEvent, map[string]any) {},
 	}
 

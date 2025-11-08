@@ -286,18 +286,15 @@ func (c *Collector) GetActiveWorkers() int {
 //   - float64: Average processing latency in seconds
 //
 // Note: These are manually tracked averages, updated with each observation.
-func (c *Collector) GetAggregatedMetrics() (float64, float64, float64) {
-	avgPartitions := 0.0
+func (c *Collector) GetAggregatedMetrics() (avgPartitions float64, avgRebalance float64, avgLatency float64) {
 	if c.partitionsPerWorkerCount > 0 {
 		avgPartitions = c.partitionsPerWorkerSum / float64(c.partitionsPerWorkerCount)
 	}
 
-	avgRebalance := 0.0
 	if c.rebalanceDurationCount > 0 {
 		avgRebalance = c.rebalanceDurationSum / float64(c.rebalanceDurationCount)
 	}
 
-	avgLatency := 0.0
 	if c.processingDurationCount > 0 {
 		avgLatency = c.processingDurationSum / float64(c.processingDurationCount)
 	}

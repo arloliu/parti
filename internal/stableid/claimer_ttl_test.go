@@ -45,7 +45,7 @@ func TestClaimer_TTLExpiration(t *testing.T) {
 		// DON'T call Release() - simulating unclean shutdown
 
 		// Wait for TTL to expire (1s + margin)
-		t.Logf("Waiting for TTL expiration (1s + 500ms margin)...")
+		t.Log("Waiting for TTL expiration (1s + 500ms margin)...")
 		time.Sleep(1500 * time.Millisecond)
 
 		// Verify key is gone or can be reclaimed
@@ -203,7 +203,7 @@ func TestClaimer_TTLExpiration(t *testing.T) {
 		rev2, err := kv.Create(ctx, "test-key", []byte("value2"))
 		if err != nil {
 			t.Logf("ERROR: Create() failed after TTL expiry: %v", err)
-			t.Logf("This indicates the implementation has a bug!")
+			t.Log("This indicates the implementation has a bug!")
 
 			// Try Put instead
 			t.Log("Attempting Put() as workaround...")
@@ -253,7 +253,8 @@ func TestClaimer_ProductionScenarios(t *testing.T) {
 		startTime := time.Now()
 
 		for i := 0; i < 10; i++ {
-			go func(idx int) {
+			go func(i int) {
+				_ = i
 				claimer := NewClaimer(kv, "worker", 0, 19, 2*time.Second, nil)
 				_, err := claimer.Claim(ctx)
 				resultCh <- err

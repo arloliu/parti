@@ -233,3 +233,39 @@ When adding new stress tests:
 ---
 
 **Last Updated:** Phase 3 completion (test reorganization)
+
+## Updates After Phase 3
+
+The stress suite was enhanced with opt-in gating and a fast smoke test:
+
+- Added `requireStressEnabled(t)` helper to gate long-running tests behind `PARTI_STRESS=1`.
+- Introduced `TestStressSmoke` (fast <10s) that always runs unless `-short`.
+- New Makefile targets:
+  - `make test-smoke` – runs only the smoke test
+  - `make test-stress` – full stress suite (sets `PARTI_STRESS=1`)
+  - `make test-all` – unit + integration + stress (sets `PARTI_STRESS=1`)
+- Coverage target now excludes stress packages for speed and determinism.
+
+### Updated Invocation Examples
+
+```bash
+# Full stress suite (opt-in)
+make test-stress
+
+# Direct memory benchmarks
+PARTI_STRESS=1 go test -v -timeout 15m ./test/stress -run TestMemoryBenchmark
+
+# Smoke test only
+make test-smoke
+```
+
+### Adding New Long Tests
+Wrap new long-running tests with:
+```go
+if testing.Short() { t.Skip("skipping in short mode") }
+requireStressEnabled(t)
+```
+This ensures they run only when explicitly requested.
+
+**Next Potential Improvements:** optional build tag (`//go:build stress`), exporting structured JSON summaries for regression tooling.
+

@@ -2,7 +2,6 @@ package strategy
 
 import (
 	"slices"
-	"strings"
 
 	"github.com/arloliu/parti/internal/hash"
 	"github.com/arloliu/parti/internal/logging"
@@ -324,9 +323,8 @@ func (wch *WeightedConsistentHash) assignExtremePartitions(
 
 	slices.SortFunc(extremes, func(a, b partitionEntry) int {
 		if a.weight == b.weight {
-			return strings.Compare(joinKeys(a.partition), joinKeys(b.partition))
+			return a.partition.Compare(b.partition)
 		}
-
 		if a.weight > b.weight {
 			return -1
 		}
@@ -428,10 +426,4 @@ func (wch *WeightedConsistentHash) findLightestWorker(workers []string, workerLo
 	return lightest
 }
 
-func joinKeys(partition types.Partition) string {
-	if len(partition.Keys) == 0 {
-		return ""
-	}
-
-	return strings.Join(partition.Keys, "\x00")
-}
+// joinKeys deprecated: replaced by Partition.Compare for allocation-free ordering.

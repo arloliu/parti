@@ -27,6 +27,8 @@ func TestScale_SmallCluster(t *testing.T) {
 		t.Skip("Skipping scale test in short mode")
 	}
 
+	requireStressEnabled(t)
+
 	t.Parallel()
 
 	// Test different worker counts
@@ -98,6 +100,8 @@ func TestScale_MediumCluster(t *testing.T) {
 		t.Skip("Skipping scale test in short mode")
 	}
 
+	requireStressEnabled(t)
+
 	t.Parallel()
 
 	// Test different worker counts
@@ -164,6 +168,8 @@ func TestScale_ResourceStability(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping stability test in short mode")
 	}
+
+	requireStressEnabled(t)
 
 	ctx := context.Background()
 

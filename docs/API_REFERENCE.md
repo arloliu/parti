@@ -998,6 +998,18 @@ p := Partition{
 }
 ```
 
+**Helpers**:
+
+```go
+func (p Partition) SubjectKey() string // Keys joined with '.' (e.g., "orders.0")
+func (p Partition) ID() string         // Keys joined with '-' (e.g., "orders-0")
+func (p Partition) Compare(q Partition) int // Lexicographic key comparison: -1,0,+1
+```
+
+Use `SubjectKey()` for JetStream subject templating and `FilterSubjects` construction.
+Use `ID()` for durable names (e.g., `<ConsumerPrefix>-<ID()>`) and hashing contexts.
+Use `Compare()` as a stable, allocation-free tie-breaker (keys only, weight ignored) in ordering.
+
 ---
 
 ### Assignment
@@ -1113,55 +1125,84 @@ src := source.NewStatic(partitions)
 
 ## Subscription Package
 
-Package `github.com/arloliu/parti/subscription` provides subscription management helpers.
+Package `github.com/arloliu/parti/subscription` provides helpers for integrating JetStream message processing with partition assignments.
 
-### SubscriptionHelper
+### DurableHelper (Single-Consumer Mode)
 
-Manages NATS subscriptions with automatic reconciliation.
+Manages a single durable pull consumer per worker whose FilterSubjects set is updated on assignment changes. This minimizes consumer churn and supports hot-reload of subjects without restarting the pull loop.
 
 ```go
-func NewHelper(conn *nats.Conn, cfg SubscriptionConfig) *Helper
+func NewDurableHelper(conn *nats.Conn, cfg DurableConfig, handler MessageHandler) (*DurableHelper, error)
 ```
 
-**Configuration**:
+**DurableConfig**:
 ```go
-type SubscriptionConfig struct {
-    Stream            string
-    MaxRetries        int
-    RetryBackoff      time.Duration
-    ReconcileInterval time.Duration
+type DurableConfig struct {
+    StreamName       string        // Required: JetStream stream name
+    ConsumerPrefix   string        // Required: Durable name prefix, final name <prefix>-<workerID>
+    SubjectTemplate  string        // Required: Go template: .PartitionID => keys joined with "."
+    AckPolicy        jetstream.AckPolicy
+    AckWait          time.Duration
+    MaxDeliver       int
+    InactiveThreshold time.Duration
+    BatchSize        int
+    MaxWaiting       int
+    FetchTimeout     time.Duration
+    MaxRetries       int
+    RetryBackoff     time.Duration
+    Logger           parti.Logger
 }
 ```
 
-**Methods**:
-
-#### UpdateSubscriptions
-
-Updates subscriptions based on assignment changes.
+**Key Method**:
 
 ```go
-func (h *Helper) UpdateSubscriptions(
-    ctx context.Context,
-    added, removed []Partition,
-    handler MessageHandler,
-) error
+func (dh *DurableHelper) UpdateWorkerConsumer(ctx context.Context, workerID string, partitions []parti.Partition) error
 ```
+
+Updates (or creates) the durable consumer named `<ConsumerPrefix>-<workerID>` with a deduplicated, sorted set of subjects rendered from `SubjectTemplate` for each partition. Idempotent: re-applying the same partition set is a no-op. Starts a resilient pull loop on first invocation; subsequent updates hot-reload subjects without restarting the loop.
+
+```go
+func (dh *DurableHelper) WorkerConsumerInfo(ctx context.Context) (*jetstream.ConsumerInfo, error)
+```
+
+Returns the current JetStream ConsumerInfo for the worker-level durable consumer.
+Errors if UpdateWorkerConsumer has not yet initialized the consumer.
 
 **Example**:
 ```go
-helper := subscription.NewHelper(nc, subscription.SubscriptionConfig{
-    Stream:            "work",
-    MaxRetries:        3,
-    RetryBackoff:      time.Second,
-    ReconcileInterval: 30 * time.Second,
-})
+helper, err := subscription.NewDurableHelper(nc, subscription.DurableConfig{
+    StreamName:      "events",
+    ConsumerPrefix:  "worker",
+    SubjectTemplate: "events.{{.PartitionID}}",
+}, subscription.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+    // process message and ACK
+    return msg.Ack()
+}))
+if err != nil { log.Fatal(err) }
 
-hooks := &parti.Hooks{
-    OnAssignmentChanged: func(ctx context.Context, added, removed []parti.Partition) error {
-        return helper.UpdateSubscriptions(ctx, added, removed, messageHandler)
-    },
-}
+mgr, err := parti.NewManager(cfg, nc, src, strategy, parti.WithWorkerConsumerUpdater(helper))
+if err != nil { log.Fatal(err) }
+_ = mgr.Start(context.Background())
 ```
+
+### WorkerConsumerUpdater Option
+
+Functional option enabling Manager-driven consumer reconciliation.
+
+```go
+type WorkerConsumerUpdater interface {
+    UpdateWorkerConsumer(ctx context.Context, workerID string, partitions []parti.Partition) error
+}
+
+func WithWorkerConsumerUpdater(updater WorkerConsumerUpdater) Option
+```
+
+When provided, the Manager invokes `UpdateWorkerConsumer` after initial assignment and on every subsequent change prior to calling `Hooks.OnAssignmentChanged`, allowing hooks to focus on lightweight side effects (metrics, logging) instead of subscription plumbing.
+
+### Legacy Helper (Per-Partition Subscriptions)
+
+`Helper` and its `UpdateSubscriptions` method remain for scenarios requiring one NATS subscription per partition. New integrations SHOULD prefer `DurableHelper` for better scalability.
 
 ---
 

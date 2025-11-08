@@ -35,5 +35,5 @@ func (l *stdLogger) Error(msg string, keysAndValues ...any) {
 }
 
 func (l *stdLogger) Fatal(msg string, keysAndValues ...any) {
-	log.Fatalf("[%s] FATAL: %s %v", l.prefix, msg, keysAndValues)
+	log.Fatalf("[%s] FATAL: %s %v", l.prefix, msg, keysAndValues) //nolint:revive
 }

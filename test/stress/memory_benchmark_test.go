@@ -21,6 +21,8 @@ func TestMemoryBenchmark_IsolatedParti(t *testing.T) {
 		t.Skip("Skipping memory benchmark in short mode")
 	}
 
+	requireStressEnabled(t)
+
 	t.Parallel()
 
 	// Test configurations
@@ -121,6 +123,8 @@ func TestMemoryBenchmark_CompareWithEmbedded(t *testing.T) {
 		t.Skip("Skipping comparison benchmark in short mode")
 	}
 
+	requireStressEnabled(t)
+
 	workers := 10
 	partitions := 100
 	duration := 30 * time.Second
@@ -198,6 +202,8 @@ func TestMemoryBenchmark_PerWorkerOverhead(t *testing.T) {
 		t.Skip("Skipping per-worker overhead test in short mode")
 	}
 
+	requireStressEnabled(t)
+
 	nc, cleanup := testutil.StartExternalNATS(t)
 	defer cleanup()
 
@@ -258,6 +264,8 @@ func TestMemoryBenchmark_PerPartitionOverhead(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping per-partition overhead test in short mode")
 	}
+
+	requireStressEnabled(t)
 
 	nc, cleanup := testutil.StartExternalNATS(t)
 	defer cleanup()

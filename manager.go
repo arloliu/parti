@@ -61,6 +61,8 @@ type Manager struct {
 	hooks         *Hooks
 	metrics       MetricsCollector
 	logger        Logger
+	// Optional worker consumer updater
+	consumerUpdater WorkerConsumerUpdater
 
 	// Internal components
 	idClaimer  *stableid.Claimer
@@ -75,21 +77,21 @@ type Manager struct {
 	// State management
 	state      atomic.Int32 // State
 	workerID   atomic.Value // string
-	isLeader   atomic.Bool
+	isLeader   atomic.Bool  // leadership status
 	assignment atomic.Value // Assignment
 
 	// Degraded mode tracking
-	degradedSince      atomic.Value // *time.Time - when degraded mode entered
-	lastAssignmentAt   atomic.Value // *time.Time - last successful assignment fetch
-	lastAssignment     atomic.Value // []Partition - cached assignment during degraded
-	connMonitorOnce    sync.Once    // ensures single connection monitor goroutine
-	connMonitorStop    chan struct{}
-	connDownSince      atomic.Value // *time.Time - when connectivity lost
-	connUpSince        atomic.Value // *time.Time - when connectivity restored
-	kvErrorCount       atomic.Int32 // consecutive KV error count
-	kvErrorWindow      []time.Time  // timestamps of recent KV errors (protected by mu)
-	recoveryGraceStart atomic.Value // *time.Time - when recovery grace period started
-	inRecoveryGrace    atomic.Bool  // true during recovery grace period
+	degradedSince      atomic.Value  // *time.Time - when degraded mode entered
+	lastAssignmentAt   atomic.Value  // *time.Time - last successful assignment fetch
+	lastAssignment     atomic.Value  // []Partition - cached assignment during degraded
+	connMonitorOnce    sync.Once     // ensures single connection monitor goroutine
+	connMonitorStop    chan struct{} // channel to stop connection monitor
+	connDownSince      atomic.Value  // *time.Time - when connectivity lost
+	connUpSince        atomic.Value  // *time.Time - when connectivity restored
+	kvErrorCount       atomic.Int32  // consecutive KV error count
+	kvErrorWindow      []time.Time   // timestamps of recent KV errors (protected by mu)
+	recoveryGraceStart atomic.Value  // *time.Time - when recovery grace period started
+	inRecoveryGrace    atomic.Bool   // true during recovery grace period
 
 	// Lifecycle management
 	ctx    context.Context
@@ -186,6 +188,7 @@ func NewManager(cfg *Config, conn *nats.Conn, source PartitionSource, strategy A
 		hooks:           hooksInstance,
 		metrics:         metricsCollector,
 		logger:          loggerInstance,
+		consumerUpdater: options.consumerUpdater,
 		connMonitorStop: make(chan struct{}),
 		kvErrorWindow:   make([]time.Time, 0, cfg.DegradedBehavior.KVErrorThreshold),
 	}
@@ -200,9 +203,15 @@ func NewManager(cfg *Config, conn *nats.Conn, source PartitionSource, strategy A
 
 // Start initializes and runs the manager.
 //
-// Blocks until worker ID claimed and initial assignment received.
+// Blocks until worker ID is claimed and the initial assignment is received.
 // The manager lifecycle runs independently from the startup context - ctx is only
 // used to control the startup timeout, not the manager's operational lifetime.
+//
+// If a WorkerConsumerUpdater was provided via WithWorkerConsumerUpdater, the
+// initial assignment is applied (best-effort, asynchronously) to the worker's
+// durable JetStream consumer immediately after it is fetched. Subsequent
+// assignment changes will also trigger UpdateWorkerConsumer before Hooks.OnAssignmentChanged
+// is invoked, enabling hot-reload of FilterSubjects without restarting pull loops.
 //
 // IMPORTANT: On error, caller MUST call Stop(ctx) to clean up resources:
 //   - Stops ID renewal goroutine
@@ -311,6 +320,19 @@ func (m *Manager) Start(ctx context.Context) error {
 	defer waitCancel()
 	if err := m.waitForAssignment(waitCtx, assignmentKV, heartbeatKV); err != nil {
 		return fmt.Errorf("failed to get assignment: %w", err)
+	}
+
+	// Apply initial assignment to worker consumer (best-effort, async)
+	if m.consumerUpdater != nil {
+		initial := m.CurrentAssignment()
+		if len(initial.Partitions) > 0 {
+			wid := m.WorkerID()
+			m.wg.Go(func() {
+				if err := m.consumerUpdater.UpdateWorkerConsumer(m.ctx, wid, initial.Partitions); err != nil {
+					m.logError("initial consumer update error", "error", err)
+				}
+			})
+		}
 	}
 
 	// Step 6: Transition to stable state
@@ -1188,14 +1210,26 @@ func (m *Manager) monitorAssignmentChanges(ctx context.Context, kv jetstream.Key
 			)
 
 			// Trigger assignment change hook
-			if m.hooks.OnAssignmentChanged != nil {
-				// Run hook in background to avoid blocking
-				go func() {
-					if err := m.hooks.OnAssignmentChanged(m.ctx, oldAssignment.Partitions, newAssignment.Partitions); err != nil {
-						m.logError("assignment change hook error", "error", err)
+			if m.hooks.OnAssignmentChanged != nil || m.consumerUpdater != nil {
+				// Run callbacks in background to avoid blocking
+				m.wg.Go(func() {
+					// 1) Invoke consumer updater if provided
+					if m.consumerUpdater != nil {
+						if err := m.consumerUpdater.UpdateWorkerConsumer(m.ctx, workerID, newAssignment.Partitions); err != nil {
+							m.logError("consumer updater error", "error", err)
+						}
 					}
-				}()
-			} // Record metrics
+
+					// 2) Invoke OnAssignmentChanged hook if provided
+					if m.hooks.OnAssignmentChanged != nil {
+						if err := m.hooks.OnAssignmentChanged(m.ctx, oldAssignment.Partitions, newAssignment.Partitions); err != nil {
+							m.logError("assignment change hook error", "error", err)
+						}
+					}
+				})
+			}
+
+			// Record metrics
 			added := len(newAssignment.Partitions) - len(oldAssignment.Partitions)
 			if added < 0 {
 				added = 0

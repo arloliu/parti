@@ -583,25 +583,12 @@ type Hooks struct {
 
 ### Assignment Change Hook
 
-React to partition additions/removals:
+React to partition additions/removals. When using the single-consumer JetStream pattern via `WithWorkerConsumerUpdater`, keep this hook lightweight (metrics, logging) because the Manager will already have reconciled the durable consumer subjects before invoking it.
 
 ```go
 hooks := &parti.Hooks{
     OnAssignmentChanged: func(ctx context.Context, added, removed []parti.Partition) error {
-        // Unsubscribe from removed partitions first
-        for _, p := range removed {
-            if err := unsubscribe(p); err != nil {
-                log.Printf("Failed to unsubscribe: %v", err)
-            }
-        }
-
-        // Subscribe to added partitions
-        for _, p := range added {
-            if err := subscribe(p); err != nil {
-                return fmt.Errorf("failed to subscribe to %v: %w", p.Keys, err)
-            }
-        }
-
+        metrics.RecordAssignmentDelta(added, removed) // example metrics side effect
         return nil
     },
 }
@@ -1058,37 +1045,32 @@ cfg := &parti.Config{
 }
 ```
 
-### Pattern 2: NATS JetStream Subscription
+### Pattern 2: NATS JetStream (Single Durable Consumer)
 
 ```go
-hooks := &parti.Hooks{
-    OnAssignmentChanged: func(ctx context.Context, added, removed []parti.Partition) error {
-        js, _ := jetstream.New(nc)
+// Preferred pattern: single durable pull consumer whose FilterSubjects are updated
+// automatically by the Manager via parti.WithWorkerConsumerUpdater.
+helper, err := subscription.NewDurableHelper(nc, subscription.DurableConfig{
+    StreamName:      "work-stream",
+    ConsumerPrefix:  "worker",
+    SubjectTemplate: "work.{{.PartitionID}}", // PartitionID = keys joined with '.'
+    BatchSize:       50,
+}, subscription.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+    // Process message
+    // Decode / handle business logic here
+    return msg.Ack()
+}))
+if err != nil { log.Fatalf("helper init: %v", err) }
 
-        // Unsubscribe from removed
-        for _, p := range removed {
-            if sub, ok := subscriptions[p.Keys[0]]; ok {
-                sub.Unsubscribe()
-                delete(subscriptions, p.Keys[0])
-            }
-        }
+mgr, err := parti.NewManager(cfg, nc, src, strategy, parti.WithWorkerConsumerUpdater(helper))
+if err != nil { log.Fatalf("manager init: %v", err) }
+if err := mgr.Start(context.Background()); err != nil { log.Fatalf("start: %v", err) }
 
-        // Subscribe to added
-        for _, p := range added {
-            subject := fmt.Sprintf("work.%s", p.Keys[0])
-            sub, err := js.Subscribe(subject, func(msg jetstream.Msg) {
-                // Process message
-                msg.Ack()
-            })
-            if err != nil {
-                return err
-            }
-            subscriptions[p.Keys[0]] = sub
-        }
-
-        return nil
-    },
-}
+// (Optional) lightweight hook for metrics
+hooks := &parti.Hooks{OnAssignmentChanged: func(ctx context.Context, added, removed []parti.Partition) error {
+    metrics.RecordAssignmentDelta(added, removed)
+    return nil
+}}
 ```
 
 ### Pattern 3: Database-Backed Partitions

@@ -362,10 +362,10 @@ func TestWeightedPartitions_LoadBalancing(t *testing.T) {
 		},
 	}
 
-	// Create managers with ConsistentHash (supports weights)
+	// Create managers with WeightedConsistentHash (supports weights)
 	managers := make([]*parti.Manager, numWorkers)
 	for i := range managers {
-		mgr, err := parti.NewManager(cfg, conn, source.NewStatic(partitions), strategy.NewConsistentHash())
+		mgr, err := parti.NewManager(cfg, conn, source.NewStatic(partitions), strategy.NewWeightedConsistentHash())
 		require.NoError(t, err)
 		managers[i] = mgr
 	}

@@ -98,9 +98,16 @@ func cleanupKVBuckets(js nats.JetStreamContext) error {
 		"parti-assignment",
 	}
 
+	errs := make([]error, 0)
 	for _, bucket := range buckets {
 		// Delete bucket (ignore error if it doesn't exist)
-		_ = js.DeleteKeyValue(bucket)
+		if err := js.DeleteKeyValue(bucket); err != nil {
+			errs = append(errs, fmt.Errorf("failed to delete KV bucket %q: %w", bucket, err))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("failed to cleanup KV buckets: %w", errors.Join(errs...))
 	}
 
 	return nil

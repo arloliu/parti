@@ -34,7 +34,6 @@ type Worker struct {
 	coordinatorReportCh chan<- coordinator.ReceivedMessage
 	metricsCollector    *metrics.Collector
 	logger              types.Logger
-	prevAssigned        []types.Partition
 	currentPartitions   int // Track current partition count for metrics
 	ctx                 context.Context
 	cancel              context.CancelFunc
@@ -118,34 +117,28 @@ func NewWorker(cfg Config) (*Worker, error) {
 		coordinatorReportCh: cfg.CoordinatorReportCh,
 		metricsCollector:    cfg.MetricsCollector,
 		logger:              logger,
-		prevAssigned:        []types.Partition{},
 		currentPartitions:   0,
 	}
 
-	// Set up hooks to record metrics
-	hooks := &types.Hooks{
-		OnAssignmentChanged: func(ctx context.Context, added, removed []types.Partition) error {
-			start := time.Now()
+	// Create durable helper early so manager can drive updates via option.
+	helperConfig := subscription.DurableConfig{
+		ConsumerPrefix:  "simulation",
+		SubjectTemplate: "simulation.partition.{{.PartitionID}}",
+		StreamName:      "SIMULATION",
+	}
+	helper, err := subscription.NewDurableHelper(cfg.NC, helperConfig, subscription.MessageHandlerFunc(worker.processMessage))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create durable helper: %w", err)
+	}
+	worker.helper = helper
 
-			// Update running partition count
-			worker.currentPartitions = worker.currentPartitions + len(added) - len(removed)
-
-			// Record metrics
-			if worker.metricsCollector != nil {
-				// Record partition distribution (histogram observes the distribution)
-				worker.metricsCollector.RecordPartitionsPerWorker(worker.currentPartitions)
-
-				// Record rebalancing duration
-				duration := time.Since(start)
-				worker.metricsCollector.RecordRebalanceDuration(duration)
-			}
-
-			return nil
-		},
-	} // Create manager with hooks
+	// Set up hooks to record metrics only (consumer updates handled by manager option)
+	hooks := &types.Hooks{OnAssignmentChanged: worker.handleAssignmentChanged}
+	// Create manager with hooks
 	manager, err := parti.NewManager(&partiCfg, cfg.NC, partitionSource, assignmentStrategy,
 		parti.WithLogger(logger),
-		parti.WithHooks(hooks))
+		parti.WithHooks(hooks),
+		parti.WithWorkerConsumerUpdater(helper))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create manager: %w", err)
 	}
@@ -173,7 +166,11 @@ func (w *Worker) Start(ctx context.Context) error {
 		return nil
 	}
 
-	w.ctx, w.cancel = context.WithCancel(ctx)
+	// Use the provided context directly (don't create child context)
+	// This ensures that when the parent context is cancelled (e.g., by chaos events),
+	// the manager and all its goroutines will properly shut down
+	w.ctx = ctx
+	w.cancel = nil // No cancel function needed; caller controls lifecycle via context
 
 	// Start manager
 	if err := w.manager.Start(w.ctx); err != nil {
@@ -181,82 +178,23 @@ func (w *Worker) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to start manager: %w", err)
 	}
 
-	// Create durable helper config
-	helperConfig := subscription.DurableConfig{
-		ConsumerPrefix:  "simulation",
-		SubjectTemplate: "simulation.partition.{{.PartitionID}}",
-		StreamName:      "SIMULATION",
-	}
-
-	// Create durable helper
-	helper, err := subscription.NewDurableHelper(w.nc, helperConfig)
-	if err != nil {
-		w.started.Store(false) // Reset on error
-		return fmt.Errorf("failed to create durable helper: %w", err)
-	}
-	w.helper = helper
-
-	// Run consume loop (blocks until context cancelled)
-	w.consumeLoop()
-
+	// Start is non-blocking; the manager runs in background goroutines.
+	// Lifecycle is controlled by the context passed from caller.
 	return nil
 }
 
-func (w *Worker) consumeLoop() {
-	defer w.started.Store(false) // Allow restart after stop
+// consumeLoop and diff-based updates removed; OnAssignmentChanged hook handles updates now.
 
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-w.ctx.Done():
-			log.Printf("[%s] Stopping worker", w.id)
-			return
-		case <-ticker.C:
-			// Get current assignment
-			assignment := w.manager.CurrentAssignment()
-			current := assignment.Partitions
-
-			// Calculate diff
-			added, removed := w.diffPartitions(w.prevAssigned, current)
-
-			if len(added) > 0 || len(removed) > 0 {
-				handler := subscription.MessageHandlerFunc(w.processMessage)
-				if err := w.helper.UpdateSubscriptions(w.ctx, added, removed, handler); err != nil {
-					log.Printf("[%s] Error updating subscriptions: %v", w.id, err)
-				} else {
-					w.prevAssigned = current
-				}
-			}
-		}
-	}
-}
-
-func (w *Worker) diffPartitions(old, newPartitions []types.Partition) (added, removed []types.Partition) {
-	oldMap := make(map[string]types.Partition)
-	for _, p := range old {
-		key := fmt.Sprintf("%v", p.Keys)
-		oldMap[key] = p
+// handleAssignmentChanged updates metrics on assignment changes.
+func (w *Worker) handleAssignmentChanged(ctx context.Context, _ []types.Partition, newSet []types.Partition) error {
+	start := time.Now()
+	w.currentPartitions = len(newSet)
+	if w.metricsCollector != nil {
+		w.metricsCollector.RecordPartitionsPerWorker(w.currentPartitions)
+		w.metricsCollector.RecordRebalanceDuration(time.Since(start))
 	}
 
-	newMap := make(map[string]types.Partition)
-	for _, p := range newPartitions {
-		key := fmt.Sprintf("%v", p.Keys)
-		newMap[key] = p
-		if _, exists := oldMap[key]; !exists {
-			added = append(added, p)
-		}
-	}
-
-	for _, p := range old {
-		key := fmt.Sprintf("%v", p.Keys)
-		if _, exists := newMap[key]; !exists {
-			removed = append(removed, p)
-		}
-	}
-
-	return added, removed
+	return nil
 }
 
 func (w *Worker) processMessage(_ context.Context, msg jetstream.Msg) error {
@@ -306,9 +244,8 @@ func (w *Worker) processMessage(_ context.Context, msg jetstream.Msg) error {
 
 // Stop gracefully stops the worker.
 func (w *Worker) Stop() {
-	if w.cancel != nil {
-		w.cancel()
-	}
+	// Note: We don't cancel context here because the worker uses the caller's context.
+	// The caller is responsible for cancelling the context.
 
 	// Give manager time to shutdown gracefully
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -317,4 +254,6 @@ func (w *Worker) Stop() {
 	if w.manager != nil {
 		_ = w.manager.Stop(ctx)
 	}
+
+	w.started.Store(false)
 }

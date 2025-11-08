@@ -1,4 +1,4 @@
-package config
+package config //nolint:cyclop
 
 import (
 	"errors"
@@ -6,9 +6,7 @@ import (
 )
 
 // validateConfig validates the configuration for logical consistency.
-//
-//nolint:gocyclo,cyclop // Complexity acceptable for comprehensive config validation
-func validateConfig(cfg *Config) error {
+func validateConfig(cfg *Config) error { //nolint:cyclop
 	// Validate simulation mode
 	validModes := map[string]bool{
 		"all-in-one":  true,

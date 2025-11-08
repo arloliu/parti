@@ -149,7 +149,6 @@ func (c *Claimer) Claim(ctx context.Context) (string, error) {
 			// Key exists and is valid - skip to next ID
 			c.logger.Debug("stable ID actively claimed by another worker", "worker_id", workerID, "revision", entry.Revision(), "next_id", id+1)
 		}
-
 	}
 
 	c.logger.Error("no available stable IDs in pool", "prefix", c.prefix, "min", c.minID, "max", c.maxID, "pool_size", c.maxID-c.minID+1)

@@ -101,7 +101,7 @@ func main() {
 	select {
 	case runErr := <-errCh:
 		if runErr != nil {
-			log.Fatalf("Simulation failed: %v", runErr)
+			log.Fatalf("Simulation failed: %v", runErr) //nolint:gocritic
 		}
 		log.Println("Simulation completed successfully")
 	case <-ctx.Done():
@@ -120,7 +120,7 @@ func main() {
 	log.Println("Shutdown complete")
 }
 
-func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string) error {
+func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string) error { //nolint:cyclop,revive
 	// Start embedded NATS if configured
 	var ns *nats.Conn
 	var err error
@@ -323,8 +323,17 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string) error 
 		go func(worker *worker.Worker, id string, workerCtx context.Context) {
 			if err := worker.Start(workerCtx); err != nil {
 				log.Printf("Failed to start worker %s: %v", id, err)
+				goroutineRegistry.MarkInactive(id)
+				return
 			}
-			// Worker stopped (context cancelled or error), mark as inactive
+
+			// Wait for context cancellation (from chaos events or shutdown)
+			<-workerCtx.Done()
+
+			// Give worker time to cleanup
+			worker.Stop()
+
+			// Worker stopped, mark as inactive
 			goroutineRegistry.MarkInactive(id)
 		}(w, workerID, workerCtx)
 	}
@@ -378,7 +387,9 @@ func runProducer(ctx context.Context, cfg *config.Config) error {
 	}
 
 	// Create producer
-	reportCh := make(chan producer.ReportMessage, 1000)
+	// Large buffer to prevent dropping reports during high load.
+	// With 1500 partitions and high message rates, coordinator might lag temporarily.
+	reportCh := make(chan producer.ReportMessage, 100000)
 	producerID := os.Getenv("PRODUCER_ID")
 	if producerID == "" {
 		producerID = "producer-0"
@@ -449,7 +460,9 @@ func runWorker(ctx context.Context, cfg *config.Config) error {
 	}
 
 	// Create worker
-	reportCh := make(chan coordinator.ReceivedMessage, 1000)
+	// Large buffer to prevent dropping reports during high load.
+	// With 100 workers processing messages from 1500 partitions, coordinator might lag.
+	reportCh := make(chan coordinator.ReceivedMessage, 100000)
 	workerID := os.Getenv("WORKER_ID")
 	if workerID == "" {
 		workerID = "worker-0"
@@ -562,7 +575,7 @@ func handleChaosEvent(
 
 // handleGoroutineChaos handles chaos events for goroutine-level (all-in-one mode).
 func handleGoroutineChaos(
-	ctx context.Context,
+	_ context.Context,
 	event coordinator.ChaosEvent,
 	params map[string]any,
 	registry *coordinator.GoroutineRegistry,
@@ -570,15 +583,11 @@ func handleGoroutineChaos(
 	checkpointMgr *coordinator.CheckpointManager,
 ) {
 	switch event {
-	case coordinator.WorkerCrashEvent:
+	case coordinator.WorkerCrashEvent, coordinator.WorkerRestartEvent, coordinator.LeaderFailureEvent:
 		handleWorkerGoroutineCrash(registry, metricsCollector, checkpointMgr)
 
 	case coordinator.ProducerCrashEvent:
 		handleProducerGoroutineCrash(registry)
-
-	case coordinator.WorkerRestartEvent:
-		// Restart is effectively the same as crash in goroutine mode (cancel context)
-		handleWorkerGoroutineCrash(registry, metricsCollector, checkpointMgr)
 
 	case coordinator.ScaleDownEvent:
 		count, ok := params["count"].(int)
@@ -587,10 +596,6 @@ func handleGoroutineChaos(
 			return
 		}
 		handleWorkerGoroutineScaleDown(count, registry, metricsCollector, checkpointMgr)
-
-	case coordinator.LeaderFailureEvent:
-		// Kill the first active worker (assume it's the leader)
-		handleWorkerGoroutineCrash(registry, metricsCollector, checkpointMgr)
 
 	case coordinator.ScaleUpEvent:
 		// Scale up not implemented for goroutine mode (requires creating new workers dynamically)

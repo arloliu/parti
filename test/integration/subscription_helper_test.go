@@ -3,7 +3,6 @@ package integration_test
 import (
 	"context"
 	"fmt"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,7 +14,7 @@ import (
 	"github.com/arloliu/parti/test/testutil"
 	partitest "github.com/arloliu/parti/testing"
 	"github.com/arloliu/parti/types"
-	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 )
 
@@ -34,14 +33,22 @@ func TestSubscriptionHelper_Creation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
-	// Create subscription helper
-	helper := subscription.NewHelper(conn, subscription.Config{
-		Stream:            "test-stream",
-		MaxRetries:        3,
-		RetryBackoff:      100 * time.Millisecond,
-		ReconcileInterval: 5 * time.Second,
-	})
-	defer helper.Close()
+	// Create stream for DurableHelper
+	js, err := jetstream.New(conn)
+	require.NoError(t, err)
+	_, err = js.CreateStream(ctx, jetstream.StreamConfig{Name: "test-stream", Subjects: []string{"test.sub.>"}})
+	require.NoError(t, err)
+
+	// Create durable helper (single-consumer)
+	helper, err := subscription.NewDurableHelper(conn, subscription.DurableConfig{
+		StreamName:      "test-stream",
+		ConsumerPrefix:  "worker",
+		SubjectTemplate: "test.sub.{{.PartitionID}}",
+		MaxRetries:      3,
+		RetryBackoff:    100 * time.Millisecond,
+	}, subscription.MessageHandlerFunc(func(c context.Context, m jetstream.Msg) error { return nil }))
+	require.NoError(t, err)
+	defer helper.Close(context.Background())
 
 	// Create test partitions
 	partitions := []types.Partition{
@@ -50,29 +57,21 @@ func TestSubscriptionHelper_Creation(t *testing.T) {
 		{Keys: []string{"partition-003"}, Weight: 100},
 	}
 
-	// Message counter
-	var msgCount atomic.Int32
-	handler := func(msg *nats.Msg) {
-		msgCount.Add(1)
+	// Test: Create subjects for all partitions via worker consumer
+	t.Log("Creating worker consumer subjects for 3 partitions...")
+	err = helper.UpdateWorkerConsumer(ctx, "worker-creation", partitions)
+	require.NoError(t, err, "Failed to update worker consumer")
+
+	// Verify all subjects are present
+	subjects := helper.WorkerSubjects()
+	require.Len(t, subjects, 3, "Expected 3 subjects")
+	expected := map[string]bool{
+		"test.sub.partition-001": true,
+		"test.sub.partition-002": true,
+		"test.sub.partition-003": true,
 	}
-
-	// Test: Create subscriptions for all partitions
-	t.Log("Creating subscriptions for 3 partitions...")
-	err := helper.UpdateSubscriptions(ctx, partitions, nil, handler)
-	require.NoError(t, err, "Failed to create subscriptions")
-
-	// Verify all partitions are active
-	activePartitions := helper.ActivePartitions()
-	require.Len(t, activePartitions, 3, "Expected 3 active subscriptions")
-
-	// Verify subscription IDs match
-	expectedIDs := map[string]bool{
-		"partition-001": true,
-		"partition-002": true,
-		"partition-003": true,
-	}
-	for _, partID := range activePartitions {
-		require.True(t, expectedIDs[partID], "Unexpected partition ID: %s", partID)
+	for _, s := range subjects {
+		require.True(t, expected[s], "Unexpected subject: %s", s)
 	}
 
 	t.Log("Test passed - all 3 subscriptions created successfully")
@@ -165,24 +164,30 @@ func TestSubscriptionHelper_UpdateOnRebalance(t *testing.T) {
 	err := testutil.WaitAllManagersState(ctx, managerWaiters, types.StateStable, 20*time.Second)
 	require.NoError(t, err, "Managers failed to reach Stable state")
 
-	// Create subscription helper for first manager
-	helper := subscription.NewHelper(conn, subscription.Config{
-		Stream:            "test-stream",
-		MaxRetries:        3,
-		RetryBackoff:      100 * time.Millisecond,
-		ReconcileInterval: 5 * time.Second,
-	})
-	defer helper.Close()
+	// Create stream and durable helper for first manager
+	js, err := jetstream.New(conn)
+	require.NoError(t, err)
+	_, err = js.CreateStream(ctx, jetstream.StreamConfig{Name: "test-stream", Subjects: []string{"rebalance.sub.>"}})
+	require.NoError(t, err)
+	helper, err := subscription.NewDurableHelper(conn, subscription.DurableConfig{
+		StreamName:      "test-stream",
+		ConsumerPrefix:  "worker",
+		SubjectTemplate: "rebalance.sub.{{.PartitionID}}",
+		MaxRetries:      3,
+		RetryBackoff:    100 * time.Millisecond,
+	}, subscription.MessageHandlerFunc(func(c context.Context, m jetstream.Msg) error { return nil }))
+	require.NoError(t, err)
+	defer helper.Close(context.Background())
 
-	// Get initial assignment and create subscriptions
-	t.Log("Creating subscriptions for initial assignment...")
+	// Get initial assignment and create worker subjects
+	t.Log("Creating worker subjects for initial assignment...")
 	initialAssignment := managers[0].CurrentAssignment()
-	err = helper.UpdateSubscriptions(ctx, initialAssignment.Partitions, nil, func(msg *nats.Msg) {})
-	require.NoError(t, err, "Failed to create initial subscriptions")
+	err = helper.UpdateWorkerConsumer(ctx, "worker-rebal", initialAssignment.Partitions)
+	require.NoError(t, err, "Failed to apply initial worker subjects")
 
-	initialActive := helper.ActivePartitions()
-	t.Logf("Initial active subscriptions: %d partitions", len(initialActive))
-	require.Equal(t, len(initialAssignment.Partitions), len(initialActive), "Subscription count mismatch")
+	initialSubjects := helper.WorkerSubjects()
+	t.Logf("Initial subjects: %d partitions", len(initialSubjects))
+	require.Equal(t, len(initialAssignment.Partitions), len(initialSubjects), "Subject count mismatch")
 
 	// Trigger rebalance by adding partitions
 	t.Log("Adding 10 partitions to trigger rebalance...")
@@ -216,8 +221,8 @@ func TestSubscriptionHelper_UpdateOnRebalance(t *testing.T) {
 	err = testutil.WaitAllManagersState(ctx, managerWaiters, types.StateStable, 10*time.Second)
 	require.NoError(t, err, "Failed to reach Stable after rebalance")
 
-	// Get new assignment and update subscriptions
-	t.Log("Updating subscriptions based on new assignment...")
+	// Get new assignment and update worker consumer subjects
+	t.Log("Updating worker subjects based on new assignment...")
 	newAssignment := managers[0].CurrentAssignment()
 
 	// Calculate added and removed partitions
@@ -245,13 +250,13 @@ func TestSubscriptionHelper_UpdateOnRebalance(t *testing.T) {
 
 	t.Logf("Rebalance resulted in %d added, %d removed partitions", len(added), len(removed))
 
-	err = helper.UpdateSubscriptions(ctx, added, removed, func(msg *nats.Msg) {})
-	require.NoError(t, err, "Failed to update subscriptions")
+	err = helper.UpdateWorkerConsumer(ctx, "worker-rebal", newAssignment.Partitions)
+	require.NoError(t, err, "Failed to update worker subjects")
 
-	// Verify subscription count matches new assignment
-	newActive := helper.ActivePartitions()
-	t.Logf("New active subscriptions: %d partitions", len(newActive))
-	require.Equal(t, len(newAssignment.Partitions), len(newActive), "Subscription count mismatch after rebalance")
+	// Verify subject count matches new assignment
+	newSubjects := helper.WorkerSubjects()
+	t.Logf("New subjects: %d partitions", len(newSubjects))
+	require.Equal(t, len(newAssignment.Partitions), len(newSubjects), "Subject count mismatch after rebalance")
 
 	t.Log("Test passed - subscriptions updated correctly on rebalance")
 }
@@ -271,13 +276,19 @@ func TestSubscriptionHelper_Cleanup(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
-	// Create subscription helper
-	helper := subscription.NewHelper(conn, subscription.Config{
-		Stream:            "test-stream",
-		MaxRetries:        3,
-		RetryBackoff:      100 * time.Millisecond,
-		ReconcileInterval: 5 * time.Second,
-	})
+	// Create stream and durable helper
+	js, err := jetstream.New(conn)
+	require.NoError(t, err)
+	_, err = js.CreateStream(ctx, jetstream.StreamConfig{Name: "test-stream", Subjects: []string{"cleanup.sub.>"}})
+	require.NoError(t, err)
+	helper, err := subscription.NewDurableHelper(conn, subscription.DurableConfig{
+		StreamName:      "test-stream",
+		ConsumerPrefix:  "worker",
+		SubjectTemplate: "cleanup.sub.{{.PartitionID}}",
+		MaxRetries:      3,
+		RetryBackoff:    100 * time.Millisecond,
+	}, subscription.MessageHandlerFunc(func(c context.Context, m jetstream.Msg) error { return nil }))
+	require.NoError(t, err)
 
 	// Create test partitions
 	partitions := []types.Partition{
@@ -288,22 +299,22 @@ func TestSubscriptionHelper_Cleanup(t *testing.T) {
 		{Keys: []string{"partition-005"}, Weight: 100},
 	}
 
-	// Create subscriptions
-	t.Log("Creating subscriptions for 5 partitions...")
-	err := helper.UpdateSubscriptions(ctx, partitions, nil, func(msg *nats.Msg) {})
-	require.NoError(t, err, "Failed to create subscriptions")
+	// Create subjects
+	t.Log("Creating subjects for 5 partitions...")
+	err = helper.UpdateWorkerConsumer(ctx, "worker-clean", partitions)
+	require.NoError(t, err, "Failed to create subjects")
 
-	activePartitions := helper.ActivePartitions()
-	require.Len(t, activePartitions, 5, "Expected 5 active subscriptions")
+	subjects := helper.WorkerSubjects()
+	require.Len(t, subjects, 5, "Expected 5 subjects")
 
-	// Test: Close helper and verify all subscriptions are cleaned up
+	// Test: Close helper and verify internal state cleanup (does not delete consumers)
 	t.Log("Closing helper and verifying cleanup...")
-	err = helper.Close()
+	err = helper.Close(context.Background())
 	require.NoError(t, err, "Failed to close helper")
 
-	// Verify all subscriptions are removed
-	activePartitions = helper.ActivePartitions()
-	require.Len(t, activePartitions, 0, "Expected 0 active subscriptions after close")
+	// Verify internal subjects cleared
+	subjects = helper.WorkerSubjects()
+	require.Len(t, subjects, 0, "Expected 0 subjects after close")
 
 	t.Log("Test passed - all subscriptions cleaned up successfully")
 }
@@ -323,27 +334,31 @@ func TestSubscriptionHelper_ErrorHandling(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
-	// Test: Retry logic on subscription failures
-	t.Log("Test 1: Verify retry logic handles subscription creation")
-
-	helper := subscription.NewHelper(conn, subscription.Config{
-		Stream:            "test-stream",
-		MaxRetries:        3,
-		RetryBackoff:      50 * time.Millisecond,
-		ReconcileInterval: 5 * time.Second,
-	})
-	defer helper.Close()
+	// Create stream and helper
+	js, err := jetstream.New(conn)
+	require.NoError(t, err)
+	_, err = js.CreateStream(ctx, jetstream.StreamConfig{Name: "test-stream", Subjects: []string{"err.sub.>"}})
+	require.NoError(t, err)
+	helper, err := subscription.NewDurableHelper(conn, subscription.DurableConfig{
+		StreamName:      "test-stream",
+		ConsumerPrefix:  "worker",
+		SubjectTemplate: "err.sub.{{.PartitionID}}",
+		MaxRetries:      3,
+		RetryBackoff:    50 * time.Millisecond,
+	}, subscription.MessageHandlerFunc(func(c context.Context, m jetstream.Msg) error { return nil }))
+	require.NoError(t, err)
+	defer helper.Close(context.Background())
 
 	partitions := []types.Partition{
 		{Keys: []string{"partition-001"}, Weight: 100},
 	}
 
 	// Should succeed even with retries configured
-	err := helper.UpdateSubscriptions(ctx, partitions, nil, func(msg *nats.Msg) {})
-	require.NoError(t, err, "Subscription should succeed")
+	err = helper.UpdateWorkerConsumer(ctx, "worker-err", partitions)
+	require.NoError(t, err, "UpdateWorkerConsumer should succeed")
 
-	activePartitions := helper.ActivePartitions()
-	require.Len(t, activePartitions, 1, "Expected 1 active subscription")
+	subjects := helper.WorkerSubjects()
+	require.Len(t, subjects, 1, "Expected 1 subject")
 
 	// Test: Context cancellation
 	t.Log("Test 2: Verify context cancellation is respected")
@@ -355,13 +370,13 @@ func TestSubscriptionHelper_ErrorHandling(t *testing.T) {
 		{Keys: []string{"partition-002"}, Weight: 100},
 	}
 
-	err = helper.UpdateSubscriptions(cancelCtx, morePartitions, nil, func(msg *nats.Msg) {})
+	err = helper.UpdateWorkerConsumer(cancelCtx, "worker-err", morePartitions)
 	require.Error(t, err, "Should fail with cancelled context")
 	require.Equal(t, context.Canceled, err, "Error should be context.Canceled")
 
-	// Verify no new subscriptions were added
-	activePartitions = helper.ActivePartitions()
-	require.Len(t, activePartitions, 1, "Should still have 1 active subscription")
+	// Verify no new subjects were added
+	subjects = helper.WorkerSubjects()
+	require.Len(t, subjects, 1, "Should still have 1 subject")
 
 	// Test: Empty partition keys handling
 	t.Log("Test 3: Verify empty partition keys are handled gracefully")
@@ -371,12 +386,12 @@ func TestSubscriptionHelper_ErrorHandling(t *testing.T) {
 		{Keys: []string{"partition-003"}, Weight: 100},
 	}
 
-	err = helper.UpdateSubscriptions(ctx, emptyPartitions, nil, func(msg *nats.Msg) {})
-	require.NoError(t, err, "Should handle empty keys gracefully")
+	err = helper.UpdateWorkerConsumer(ctx, "worker-err", emptyPartitions)
+	require.Error(t, err, "Should error on empty keys")
 
-	// Should only have partition-001 and partition-003 (skipped empty keys)
-	activePartitions = helper.ActivePartitions()
-	require.Len(t, activePartitions, 2, "Expected 2 active subscriptions (skipped empty keys)")
+	// Should still have 1 subject from earlier
+	subjects = helper.WorkerSubjects()
+	require.Len(t, subjects, 1, "Expected 1 subject (invalid update rejected)")
 
 	// Test: Duplicate subscription attempts
 	t.Log("Test 4: Verify duplicate subscriptions are handled")
@@ -385,12 +400,12 @@ func TestSubscriptionHelper_ErrorHandling(t *testing.T) {
 		{Keys: []string{"partition-001"}, Weight: 100}, // Already exists
 	}
 
-	err = helper.UpdateSubscriptions(ctx, duplicatePartitions, nil, func(msg *nats.Msg) {})
+	err = helper.UpdateWorkerConsumer(ctx, "worker-err", duplicatePartitions)
 	require.NoError(t, err, "Should handle duplicates gracefully")
 
-	// Should still have 2 active subscriptions (no duplicates added)
-	activePartitions = helper.ActivePartitions()
-	require.Len(t, activePartitions, 2, "Should not create duplicate subscriptions")
+	// Should still have 1 subject (no duplicates added)
+	subjects = helper.WorkerSubjects()
+	require.Len(t, subjects, 1, "Should not create duplicate subjects")
 
 	t.Log("Test passed - error handling works correctly")
 }

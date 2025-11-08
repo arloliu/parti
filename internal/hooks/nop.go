@@ -12,7 +12,7 @@ import (
 // eliminating the need for nil checks throughout the codebase.
 type NopHooks struct{}
 
-// Compile-time assertion that NopHooks implements all hook callbacks.
+// Compile-time assertions that NopHooks implements hook callbacks.
 var (
 	_ func(context.Context, []types.Partition, []types.Partition) error = (*NopHooks)(nil).OnAssignmentChanged
 	_ func(context.Context, types.State, types.State) error             = (*NopHooks)(nil).OnStateChanged

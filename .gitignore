@@ -7,6 +7,7 @@
 .benchmarks/
 
 test/simulation/bin/
+test/simulation/checkpoints/
 
 /*.out
 /*.log
