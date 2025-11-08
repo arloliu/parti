@@ -2,7 +2,7 @@ package subscription
 
 import "time"
 
-// Default configuration values for DurableHelper.
+// Default configuration values for WorkerConsumer.
 const (
 	// DefaultBatchSize is the default number of messages to fetch per pull request.
 	DefaultBatchSize = 1

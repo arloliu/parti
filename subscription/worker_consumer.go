@@ -15,11 +15,11 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
-// DurableHelper manages JetStream durable pull consumers for partition-based work distribution.
-type DurableHelper struct {
+// WorkerConsumer manages a single JetStream durable pull consumer per worker for partition-based work distribution.
+type WorkerConsumer struct {
 	conn   *nats.Conn
 	js     jetstream.JetStream
-	config DurableConfig
+	config WorkerConsumerConfig
 	logger types.Logger
 
 	// Template for subject generation
@@ -41,7 +41,7 @@ type subjectContext struct {
 	PartitionID string
 }
 
-// NewDurableHelper creates a new durable consumer helper.
+// NewWorkerConsumer creates a new durable consumer manager for a single worker.
 //
 // This helper implements the single-consumer (per-worker) pattern. Instead of
 // creating one consumer per partition, it maintains a single durable pull
@@ -66,12 +66,12 @@ type subjectContext struct {
 //   - handler: Message handler invoked for each received JetStream message
 //
 // Returns:
-//   - *DurableHelper: Initialized helper with defaults applied
+//   - *WorkerConsumer: Initialized helper with defaults applied
 //   - error: Configuration, connection, template parsing, or handler error
 //
 // Example (minimal configuration with defaults):
 //
-//	helper, err := subscription.NewDurableHelper(natsConn, subscription.DurableConfig{
+//	helper, err := subscription.NewWorkerConsumer(natsConn, subscription.WorkerConsumerConfig{
 //	    StreamName:      "work-stream",
 //	    ConsumerPrefix:  "processor",
 //	    SubjectTemplate: "metrics.{{.PartitionID}}.collected",
@@ -82,7 +82,7 @@ type subjectContext struct {
 //
 // Example (with custom configuration):
 //
-//	helper, err := subscription.NewDurableHelper(natsConn, subscription.DurableConfig{
+//	helper, err := subscription.NewWorkerConsumer(natsConn, subscription.WorkerConsumerConfig{
 //	    StreamName:        "work-stream",
 //	    ConsumerPrefix:    "processor",
 //	    SubjectTemplate:   "metrics.{{.PartitionID}}.collected",
@@ -91,7 +91,7 @@ type subjectContext struct {
 //	    AckWait:           45 * time.Second, // Override default (30s)
 //	    Logger:            myLogger,         // Optional: omit for no-op logger
 //	}, subscription.MessageHandlerFunc(customHandler))
-func NewDurableHelper(conn *nats.Conn, cfg DurableConfig, handler MessageHandler) (*DurableHelper, error) {
+func NewWorkerConsumer(conn *nats.Conn, cfg WorkerConsumerConfig, handler MessageHandler) (*WorkerConsumer, error) {
 	if conn == nil {
 		return nil, errors.New("NATS connection is required")
 	}
@@ -127,7 +127,7 @@ func NewDurableHelper(conn *nats.Conn, cfg DurableConfig, handler MessageHandler
 		return nil, fmt.Errorf("failed to create JetStream context: %w", err)
 	}
 
-	return &DurableHelper{
+	return &WorkerConsumer{
 		conn:            conn,
 		js:              js,
 		config:          cfg,
@@ -162,7 +162,7 @@ func NewDurableHelper(conn *nats.Conn, cfg DurableConfig, handler MessageHandler
 //
 // Example:
 //
-//	helper, _ := subscription.NewDurableHelper(nc, subscription.DurableConfig{
+//	helper, _ := subscription.NewWorkerConsumer(nc, subscription.WorkerConsumerConfig{
 //	    StreamName:      "events",
 //	    ConsumerPrefix:  "worker",
 //	    SubjectTemplate: "events.{{.PartitionID}}",
@@ -174,7 +174,7 @@ func NewDurableHelper(conn *nats.Conn, cfg DurableConfig, handler MessageHandler
 //	_ = helper.UpdateWorkerConsumer(ctx, "worker-7", []types.Partition{{Keys: []string{"a","0"}}, {Keys: []string{"b","3"}}})
 //	// later, assignment shrinks
 //	_ = helper.UpdateWorkerConsumer(ctx, "worker-7", []types.Partition{{Keys: []string{"a","0"}}})
-func (dh *DurableHelper) UpdateWorkerConsumer(ctx context.Context, workerID string, partitions []types.Partition) error {
+func (dh *WorkerConsumer) UpdateWorkerConsumer(ctx context.Context, workerID string, partitions []types.Partition) error {
 	if workerID == "" {
 		return errors.New("workerID is required")
 	}
@@ -262,7 +262,7 @@ func (dh *DurableHelper) UpdateWorkerConsumer(ctx context.Context, workerID stri
 }
 
 // runWorkerPullLoop runs the single-consumer pull loop using the configured handler.
-func (dh *DurableHelper) runWorkerPullLoop(ctx context.Context) {
+func (dh *WorkerConsumer) runWorkerPullLoop(ctx context.Context) {
 	// Snapshot workerID under read lock to avoid races with Close()
 	dh.mu.RLock()
 	durableName := dh.sanitizeConsumerName(dh.config.ConsumerPrefix + "-" + dh.workerID)
@@ -371,7 +371,7 @@ func (dh *DurableHelper) runWorkerPullLoop(ctx context.Context) {
 // Example:
 //
 //	defer helper.Close(context.Background())
-func (dh *DurableHelper) Close(ctx context.Context) error {
+func (dh *WorkerConsumer) Close(ctx context.Context) error {
 	dh.mu.Lock()
 	defer dh.mu.Unlock()
 
@@ -416,7 +416,7 @@ func (dh *DurableHelper) Close(ctx context.Context) error {
 // Returns:
 //   - *jetstream.ConsumerInfo: Consumer metadata and current FilterSubjects
 //   - error: Non-nil if consumer is not initialized or Info() call fails
-func (dh *DurableHelper) WorkerConsumerInfo(ctx context.Context) (*jetstream.ConsumerInfo, error) {
+func (dh *WorkerConsumer) WorkerConsumerInfo(ctx context.Context) (*jetstream.ConsumerInfo, error) {
 	dh.mu.RLock()
 	cons := dh.workerConsumer
 	dh.mu.RUnlock()
@@ -441,7 +441,7 @@ func (dh *DurableHelper) WorkerConsumerInfo(ctx context.Context) (*jetstream.Con
 //
 //	subjects := helper.WorkerSubjects()
 //	for _, s := range subjects { log.Println("subject", s) }
-func (dh *DurableHelper) WorkerSubjects() []string {
+func (dh *WorkerConsumer) WorkerSubjects() []string {
 	dh.mu.RLock()
 	defer dh.mu.RUnlock()
 	if dh.workerSubjects == nil {
@@ -465,7 +465,7 @@ func (dh *DurableHelper) WorkerSubjects() []string {
 // - Cannot contain non-printable characters
 //
 // We replace invalid characters with underscore (_).
-func (dh *DurableHelper) sanitizeConsumerName(name string) string {
+func (dh *WorkerConsumer) sanitizeConsumerName(name string) string {
 	var result strings.Builder
 	result.Grow(len(name))
 
@@ -488,7 +488,7 @@ func (dh *DurableHelper) sanitizeConsumerName(name string) string {
 //
 // Template context contains PartitionID (keys joined with ".").
 // Example: ["source", "region", "us"] → "source.region.us"
-func (dh *DurableHelper) generateSubject(partition types.Partition) (string, error) {
+func (dh *WorkerConsumer) generateSubject(partition types.Partition) (string, error) {
 	if len(partition.Keys) == 0 {
 		return "", errors.New("partition has no keys")
 	}
@@ -505,7 +505,7 @@ func (dh *DurableHelper) generateSubject(partition types.Partition) (string, err
 }
 
 // buildSubjects generates a sorted, deduplicated list of subjects from partitions.
-func (dh *DurableHelper) buildSubjects(partitions []types.Partition) ([]string, error) {
+func (dh *WorkerConsumer) buildSubjects(partitions []types.Partition) ([]string, error) {
 	if len(partitions) == 0 {
 		return []string{}, nil
 	}

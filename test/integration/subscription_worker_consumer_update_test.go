@@ -53,7 +53,7 @@ func TestWorkerConsumerUpdate(t *testing.T) {
 	chStrat := strategy.NewConsistentHash()
 
 	// Durable helper for single consumer updates
-	helper, err := subscription.NewDurableHelper(nc, subscription.DurableConfig{
+	helper, err := subscription.NewWorkerConsumer(nc, subscription.WorkerConsumerConfig{
 		StreamName:      "WORKER_TEST",
 		ConsumerPrefix:  "worker",
 		SubjectTemplate: "work.{{.PartitionID}}",

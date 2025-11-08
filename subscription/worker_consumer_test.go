@@ -10,7 +10,7 @@ import (
 
 // TestSanitizeConsumerName verifies invalid characters are replaced with underscore.
 func TestSanitizeConsumerName(t *testing.T) {
-	dh := &DurableHelper{}
+	dh := &WorkerConsumer{}
 	cases := []struct{ in, want string }{
 		{"worker.tool*001>region/us", "worker_tool_001_region_us"},
 		{"worker\\001", "worker_001"},
@@ -26,15 +26,15 @@ func TestSanitizeConsumerName(t *testing.T) {
 	}
 }
 
-// helper constructs a DurableHelper with a parsed template (js fields unused in unit tests).
-func unitHelper(t *testing.T, tmpl string) *DurableHelper {
+// helper constructs a WorkerConsumer with a parsed template (js fields unused in unit tests).
+func unitHelper(t *testing.T, tmpl string) *WorkerConsumer {
 	t.Helper()
 	parsed, err := template.New("subject").Parse(tmpl)
 	if err != nil {
 		t.Fatalf("template parse failed: %v", err)
 	}
 
-	return &DurableHelper{subjectTemplate: parsed}
+	return &WorkerConsumer{subjectTemplate: parsed}
 }
 
 func TestGenerateSubject(t *testing.T) {
@@ -94,7 +94,7 @@ func TestEqualStringSlices(t *testing.T) {
 }
 
 func TestWorkerSubjects_CopyIsolation(t *testing.T) {
-	dh := &DurableHelper{}
+	dh := &WorkerConsumer{}
 	// Manually set workerSubjects (bypassing UpdateWorkerConsumer which needs JS)
 	dh.workerSubjects = []string{"x", "y"}
 	got := dh.WorkerSubjects()
@@ -133,7 +133,7 @@ func TestGenerateSubject_DifferentTemplates(t *testing.T) {
 
 // Ensure WorkerSubjects returns nil when unset
 func TestWorkerSubjects_Uninitialized(t *testing.T) {
-	dh := &DurableHelper{}
+	dh := &WorkerConsumer{}
 	if dh.WorkerSubjects() != nil {
 		t.Fatal("expected nil when workerSubjects unset")
 	}

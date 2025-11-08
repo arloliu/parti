@@ -15,7 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestDurableHelper_NewAndDefaults(t *testing.T) {
+func TestWorkerConsumer_NewAndDefaults(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
@@ -32,7 +32,7 @@ func TestDurableHelper_NewAndDefaults(t *testing.T) {
 	require.NoError(t, err)
 
 	// Valid config (explicit ack policy)
-	helper, err := subscription.NewDurableHelper(nc, subscription.DurableConfig{
+	helper, err := subscription.NewWorkerConsumer(nc, subscription.WorkerConsumerConfig{
 		StreamName:      "defaults-stream",
 		ConsumerPrefix:  "test",
 		SubjectTemplate: "work.{{.PartitionID}}",
@@ -42,7 +42,7 @@ func TestDurableHelper_NewAndDefaults(t *testing.T) {
 	require.NotNil(t, helper)
 
 	// Defaults applied when zero values provided (uses same stream)
-	helper2, err := subscription.NewDurableHelper(nc, subscription.DurableConfig{
+	helper2, err := subscription.NewWorkerConsumer(nc, subscription.WorkerConsumerConfig{
 		StreamName:      "defaults-stream",
 		ConsumerPrefix:  "test",
 		SubjectTemplate: "work.{{.PartitionID}}",
@@ -55,7 +55,7 @@ func TestDurableHelper_NewAndDefaults(t *testing.T) {
 	require.NoError(t, helper2.UpdateWorkerConsumer(ctx, "w1", []types.Partition{{Keys: []string{"p"}}}))
 }
 
-func TestDurableHelper_WorkerConsumer_Basic(t *testing.T) {
+func TestWorkerConsumer_Basic(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
@@ -70,7 +70,7 @@ func TestDurableHelper_WorkerConsumer_Basic(t *testing.T) {
 	require.NoError(t, err)
 
 	var msgCount atomic.Int32
-	helper, err := subscription.NewDurableHelper(nc, subscription.DurableConfig{
+	helper, err := subscription.NewWorkerConsumer(nc, subscription.WorkerConsumerConfig{
 		StreamName:        "work-stream",
 		ConsumerPrefix:    "worker",
 		SubjectTemplate:   "work.{{.PartitionID}}",
@@ -104,7 +104,7 @@ func TestDurableHelper_WorkerConsumer_Basic(t *testing.T) {
 	require.Eventually(t, func() bool { return msgCount.Load() >= 3 }, 5*time.Second, 100*time.Millisecond)
 }
 
-func TestDurableHelper_WorkerConsumer_MessageHandling(t *testing.T) {
+func TestWorkerConsumer_MessageHandling(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
@@ -132,7 +132,7 @@ func TestDurableHelper_WorkerConsumer_MessageHandling(t *testing.T) {
 		return nil
 	})
 
-	helper, err := subscription.NewDurableHelper(nc, subscription.DurableConfig{
+	helper, err := subscription.NewWorkerConsumer(nc, subscription.WorkerConsumerConfig{
 		StreamName:        "test-stream",
 		ConsumerPrefix:    "test",
 		SubjectTemplate:   "test.{{.PartitionID}}",
@@ -156,7 +156,7 @@ func TestDurableHelper_WorkerConsumer_MessageHandling(t *testing.T) {
 	require.Eventually(t, func() bool { mu.Lock(); v := processed["test-message"]; mu.Unlock(); return v == 2 }, 10*time.Second, 100*time.Millisecond)
 }
 
-func TestDurableHelper_WorkerConsumer_Info(t *testing.T) {
+func TestWorkerConsumer_Info(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
@@ -168,7 +168,7 @@ func TestDurableHelper_WorkerConsumer_Info(t *testing.T) {
 	_, err = js.CreateStream(ctx, jetstream.StreamConfig{Name: "info-stream", Subjects: []string{"info.>"}})
 	require.NoError(t, err)
 
-	helper, err := subscription.NewDurableHelper(nc, subscription.DurableConfig{
+	helper, err := subscription.NewWorkerConsumer(nc, subscription.WorkerConsumerConfig{
 		StreamName:        "info-stream",
 		ConsumerPrefix:    "info",
 		SubjectTemplate:   "info.{{.PartitionID}}",
@@ -193,7 +193,7 @@ func TestDurableHelper_WorkerConsumer_Info(t *testing.T) {
 	require.Equal(t, "info-worker-info", ci.Name)
 }
 
-func TestDurableHelper_WorkerConsumer_CloseAndLogger(t *testing.T) {
+func TestWorkerConsumer_CloseAndLogger(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
@@ -206,7 +206,7 @@ func TestDurableHelper_WorkerConsumer_CloseAndLogger(t *testing.T) {
 	require.NoError(t, err)
 
 	testLogger := partitesting.NewTestLogger(t)
-	helper, err := subscription.NewDurableHelper(nc, subscription.DurableConfig{
+	helper, err := subscription.NewWorkerConsumer(nc, subscription.WorkerConsumerConfig{
 		StreamName:        "close-stream",
 		ConsumerPrefix:    "close",
 		SubjectTemplate:   "close.{{.PartitionID}}",

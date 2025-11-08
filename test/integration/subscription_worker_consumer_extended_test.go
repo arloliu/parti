@@ -34,7 +34,7 @@ func TestWorkerConsumerLifecycleAndExpansion(t *testing.T) {
 		return msg.Ack()
 	})
 
-	helper, err := subscription.NewDurableHelper(nc, subscription.DurableConfig{
+	helper, err := subscription.NewWorkerConsumer(nc, subscription.WorkerConsumerConfig{
 		StreamName:      "lifecycle-stream",
 		ConsumerPrefix:  "wkr",
 		SubjectTemplate: "lifecycle.test.{{.PartitionID}}",
@@ -86,7 +86,7 @@ func TestWorkerConsumerConcurrentUpdatesConverges(t *testing.T) {
 	require.NoError(t, err)
 
 	mh := subscription.MessageHandlerFunc(func(c context.Context, msg jetstream.Msg) error { return msg.Ack() })
-	helper, err := subscription.NewDurableHelper(nc, subscription.DurableConfig{
+	helper, err := subscription.NewWorkerConsumer(nc, subscription.WorkerConsumerConfig{
 		StreamName:      "converge-int-stream",
 		ConsumerPrefix:  "wkr",
 		SubjectTemplate: "converge.int.{{.PartitionID}}",
@@ -142,7 +142,7 @@ func TestWorkerConsumerWorkerIDSwitch(t *testing.T) {
 	require.NoError(t, err)
 
 	mh := subscription.MessageHandlerFunc(func(c context.Context, msg jetstream.Msg) error { return msg.Ack() })
-	helper, err := subscription.NewDurableHelper(nc, subscription.DurableConfig{
+	helper, err := subscription.NewWorkerConsumer(nc, subscription.WorkerConsumerConfig{
 		StreamName:      "switch-int-stream",
 		ConsumerPrefix:  "wkr",
 		SubjectTemplate: "switch.int.{{.PartitionID}}",
@@ -185,7 +185,7 @@ func TestWorkerConsumerExternalDeletion(t *testing.T) {
 	require.NoError(t, err)
 
 	mh := subscription.MessageHandlerFunc(func(c context.Context, msg jetstream.Msg) error { return msg.Ack() })
-	helper, err := subscription.NewDurableHelper(nc, subscription.DurableConfig{
+	helper, err := subscription.NewWorkerConsumer(nc, subscription.WorkerConsumerConfig{
 		StreamName:      "extdel-stream",
 		ConsumerPrefix:  "wkr",
 		SubjectTemplate: "extdel.test.{{.PartitionID}}",

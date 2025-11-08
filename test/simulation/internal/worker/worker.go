@@ -28,7 +28,7 @@ type Worker struct {
 	js                  jetstream.JetStream
 	cfg                 *parti.Config
 	manager             *parti.Manager
-	helper              *subscription.DurableHelper
+	helper              *subscription.WorkerConsumer
 	processingDelayMin  time.Duration
 	processingDelayMax  time.Duration
 	coordinatorReportCh chan<- coordinator.ReceivedMessage
@@ -121,12 +121,12 @@ func NewWorker(cfg Config) (*Worker, error) {
 	}
 
 	// Create durable helper early so manager can drive updates via option.
-	helperConfig := subscription.DurableConfig{
+	helperConfig := subscription.WorkerConsumerConfig{
 		ConsumerPrefix:  "simulation",
 		SubjectTemplate: "simulation.partition.{{.PartitionID}}",
 		StreamName:      "SIMULATION",
 	}
-	helper, err := subscription.NewDurableHelper(cfg.NC, helperConfig, subscription.MessageHandlerFunc(worker.processMessage))
+	helper, err := subscription.NewWorkerConsumer(cfg.NC, helperConfig, subscription.MessageHandlerFunc(worker.processMessage))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create durable helper: %w", err)
 	}

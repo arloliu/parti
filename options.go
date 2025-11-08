@@ -133,7 +133,7 @@ type WorkerConsumerUpdater interface {
 //
 // Example:
 //
-//	helper, _ := subscription.NewDurableHelper(nc, subscription.DurableConfig{ /* ... */ }, handler)
+//	helper, _ := subscription.NewWorkerConsumer(nc, subscription.WorkerConsumerConfig{ /* ... */ }, handler)
 //	mgr, _ := parti.NewManager(cfg, nc, src, strategy, parti.WithWorkerConsumerUpdater(helper))
 func WithWorkerConsumerUpdater(updater WorkerConsumerUpdater) Option {
 	return func(o *managerOptions) {

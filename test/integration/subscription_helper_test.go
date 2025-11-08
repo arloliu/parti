@@ -33,14 +33,14 @@ func TestSubscriptionHelper_Creation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
-	// Create stream for DurableHelper
+	// Create stream for WorkerConsumer
 	js, err := jetstream.New(conn)
 	require.NoError(t, err)
 	_, err = js.CreateStream(ctx, jetstream.StreamConfig{Name: "test-stream", Subjects: []string{"test.sub.>"}})
 	require.NoError(t, err)
 
 	// Create durable helper (single-consumer)
-	helper, err := subscription.NewDurableHelper(conn, subscription.DurableConfig{
+	helper, err := subscription.NewWorkerConsumer(conn, subscription.WorkerConsumerConfig{
 		StreamName:      "test-stream",
 		ConsumerPrefix:  "worker",
 		SubjectTemplate: "test.sub.{{.PartitionID}}",
@@ -169,7 +169,7 @@ func TestSubscriptionHelper_UpdateOnRebalance(t *testing.T) {
 	require.NoError(t, err)
 	_, err = js.CreateStream(ctx, jetstream.StreamConfig{Name: "test-stream", Subjects: []string{"rebalance.sub.>"}})
 	require.NoError(t, err)
-	helper, err := subscription.NewDurableHelper(conn, subscription.DurableConfig{
+	helper, err := subscription.NewWorkerConsumer(conn, subscription.WorkerConsumerConfig{
 		StreamName:      "test-stream",
 		ConsumerPrefix:  "worker",
 		SubjectTemplate: "rebalance.sub.{{.PartitionID}}",
@@ -281,7 +281,7 @@ func TestSubscriptionHelper_Cleanup(t *testing.T) {
 	require.NoError(t, err)
 	_, err = js.CreateStream(ctx, jetstream.StreamConfig{Name: "test-stream", Subjects: []string{"cleanup.sub.>"}})
 	require.NoError(t, err)
-	helper, err := subscription.NewDurableHelper(conn, subscription.DurableConfig{
+	helper, err := subscription.NewWorkerConsumer(conn, subscription.WorkerConsumerConfig{
 		StreamName:      "test-stream",
 		ConsumerPrefix:  "worker",
 		SubjectTemplate: "cleanup.sub.{{.PartitionID}}",
@@ -339,7 +339,7 @@ func TestSubscriptionHelper_ErrorHandling(t *testing.T) {
 	require.NoError(t, err)
 	_, err = js.CreateStream(ctx, jetstream.StreamConfig{Name: "test-stream", Subjects: []string{"err.sub.>"}})
 	require.NoError(t, err)
-	helper, err := subscription.NewDurableHelper(conn, subscription.DurableConfig{
+	helper, err := subscription.NewWorkerConsumer(conn, subscription.WorkerConsumerConfig{
 		StreamName:      "test-stream",
 		ConsumerPrefix:  "worker",
 		SubjectTemplate: "err.sub.{{.PartitionID}}",

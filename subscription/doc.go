@@ -14,14 +14,14 @@
 // while preserving precise subject filtering for partition isolation.
 //
 // Key Types
-//   - DurableHelper: Manages the single durable consumer lifecycle, calculates
+//   - WorkerConsumer: Manages the single durable consumer lifecycle, calculates
 //     deterministic subject sets from partitions (template expansion, dedupe,
 //     sort), applies changes atomically via CreateOrUpdateConsumer, and runs a
 //     resilient pull loop with heartbeat tolerance.
 //   - MessageHandler / MessageHandlerFunc: Minimal interface for user message
 //     processing, enabling dependency injection and straightforward testing.
 //
-// DurableHelper Highlights
+// WorkerConsumer Highlights
 //   - Hot-reload semantics: Pull loop is started once and not restarted on
 //     subject changes, avoiding message processing gaps.
 //   - Deterministic subject ordering: Subjects are deduped and sorted to prevent
@@ -41,7 +41,7 @@
 //
 // Usage Pattern
 //
-//	helper, err := subscription.NewDurableHelper(nc, subscription.DurableConfig{
+//	helper, err := subscription.NewWorkerConsumer(nc, subscription.WorkerConsumerConfig{
 //	    StreamName:      "events-stream",
 //	    ConsumerPrefix:  "worker",
 //	    SubjectTemplate: "events.{{.PartitionID}}",
@@ -60,11 +60,11 @@
 //
 // Interface Assertions
 // Internal compile-time assertions live in internal packages; public packages
-// avoid importing root to prevent cycles. DurableHelper deliberately omits an
+// avoid importing root to prevent cycles. WorkerConsumer deliberately omits an
 // interface assertion; users can add one in their own test code if desired.
 //
 // Concurrency & Safety
-// All exported DurableHelper methods are safe for concurrent use. UpdateWorkerConsumer
+// All exported WorkerConsumer methods are safe for concurrent use. UpdateWorkerConsumer
 // employs fine-grained locking and performs diff checks before mutating state to
 // minimize unnecessary JetStream calls.
 //
