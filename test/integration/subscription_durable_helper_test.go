@@ -25,9 +25,15 @@ func TestDurableHelper_NewAndDefaults(t *testing.T) {
 	// No-op handler
 	noop := subscription.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error { return nil })
 
-	// Valid config
+	// Create a unique stream for this test to avoid collisions with other tests.
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+	_, err = js.CreateStream(context.Background(), jetstream.StreamConfig{Name: "defaults-stream", Subjects: []string{"work.>"}})
+	require.NoError(t, err)
+
+	// Valid config (explicit ack policy)
 	helper, err := subscription.NewDurableHelper(nc, subscription.DurableConfig{
-		StreamName:      "test-stream",
+		StreamName:      "defaults-stream",
 		ConsumerPrefix:  "test",
 		SubjectTemplate: "work.{{.PartitionID}}",
 		AckPolicy:       jetstream.AckExplicitPolicy,
@@ -35,9 +41,9 @@ func TestDurableHelper_NewAndDefaults(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, helper)
 
-	// Defaults applied when zero values provided
+	// Defaults applied when zero values provided (uses same stream)
 	helper2, err := subscription.NewDurableHelper(nc, subscription.DurableConfig{
-		StreamName:      "test-stream",
+		StreamName:      "defaults-stream",
 		ConsumerPrefix:  "test",
 		SubjectTemplate: "work.{{.PartitionID}}",
 	}, noop)
