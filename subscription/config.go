@@ -50,6 +50,10 @@ type WorkerConsumerConfig struct {
 	// MaxWaiting is the max outstanding pull requests allowed for the consumer.
 	// Default: DefaultMaxWaiting (512).
 	MaxWaiting int
+	// MaxAckPending limits the number of in-flight unacknowledged messages the server will allow
+	// for this consumer. If zero, the server default is used. This is most useful when using
+	// ManualAck and background processing to cap concurrent in-flight work at the server layer.
+	MaxAckPending int
 	// FetchTimeout is the max time to wait when pulling a batch.
 	// Default: DefaultFetchTimeout (5s).
 	FetchTimeout time.Duration
@@ -92,12 +96,33 @@ type WorkerConsumerConfig struct {
 	// Defaults to DefaultMaxControlRetries if zero.
 	MaxRecreationRetries int
 
+	// IteratorEscalationWindow defines the sliding time window used to aggregate
+	// iterator failures for escalation detection. If zero, defaults to
+	// DefaultIteratorEscalationWindow.
+	IteratorEscalationWindow time.Duration
+
+	// IteratorEscalationThreshold is the number of iterator failures within the
+	// escalation window that triggers a single escalation (consumer refresh).
+	// If zero, defaults to DefaultIteratorEscalationThreshold.
+	IteratorEscalationThreshold int
+
 	// Logger provides structured logging. Defaults to a no-op logger when nil.
 	Logger types.Logger
 
 	// Metrics is the global metrics collector used across the library.
 	// If nil, no metrics are emitted from the worker consumer helper.
 	Metrics types.MetricsCollector
+
+	// IteratorFactory optionally overrides the iterator creation logic for testing or
+	// advanced customization. When nil, a default factory is used that configures
+	// heartbeat and expiry based on BatchSize and FetchTimeout.
+	IteratorFactory func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error)
+
+	// ManualAck, when true, disables the helper's automatic Ack/Nak behavior.
+	// Handlers are responsible for calling msg.Ack/Nak/Term and optionally
+	// msg.InProgress() to extend AckWait. This enables handler-controlled
+	// backpressure via an internal work queue. Defaults to false.
+	ManualAck bool
 }
 
 // applyDefaults fills unset optional fields with project defaults.
@@ -120,6 +145,8 @@ func (cfg *WorkerConsumerConfig) applyDefaults() {
 		cfg.HealthFailureThreshold = DefaultHealthFailureThreshold
 	}
 	cfg.MaxRecreationRetries = defaultMaxControlRetries(cfg.MaxRecreationRetries, cfg.MaxControlRetries, DefaultMaxControlRetries)
+	cfg.IteratorEscalationWindow = defaultDuration(cfg.IteratorEscalationWindow, DefaultIteratorEscalationWindow)
+	cfg.IteratorEscalationThreshold = defaultInt(cfg.IteratorEscalationThreshold, DefaultIteratorEscalationThreshold)
 	if cfg.Logger == nil {
 		cfg.Logger = logging.NewNop()
 	}

@@ -46,4 +46,13 @@ const (
 	// DefaultHealthFailureThreshold is the default consecutive failure threshold
 	// before considering the worker consumer unhealthy.
 	DefaultHealthFailureThreshold = 3
+
+	// DefaultIteratorEscalationWindow is the sliding time window used to detect
+	// a burst of iterator failures warranting escalation (consumer refresh).
+	DefaultIteratorEscalationWindow = 60 * time.Second
+
+	// DefaultIteratorEscalationThreshold is the number of consecutive iterator
+	// failures within the escalation window required to trigger a single
+	// escalation event (refresh) per window.
+	DefaultIteratorEscalationThreshold = 3
 )

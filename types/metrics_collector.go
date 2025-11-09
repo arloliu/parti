@@ -174,6 +174,11 @@ type WorkerConsumerMetrics interface {
 	// IncrementWorkerConsumerIteratorRestart increments iterator restart counts by reason (transient|heartbeat).
 	IncrementWorkerConsumerIteratorRestart(reason string)
 
+	// IncrementWorkerConsumerIteratorEscalation increments the counter when iterator failures
+	// escalate to a consumer refresh action. This captures bursts of failures that
+	// warrant proactive intervention beyond simple iterator recreation.
+	IncrementWorkerConsumerIteratorEscalation()
+
 	// SetWorkerConsumerConsecutiveIteratorFailures sets the current consecutive iterator failures gauge.
 	SetWorkerConsumerConsecutiveIteratorFailures(count int)
 

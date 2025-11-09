@@ -29,6 +29,7 @@ type PrometheusCollector struct {
 	wcUpdateResults            *prometheus.CounterVec
 	wcUpdateLatency            prometheus.Histogram
 	wcIteratorRestarts         *prometheus.CounterVec
+	wcIteratorEscalations      prometheus.Counter
 	wcConsecutiveFailures      prometheus.Gauge
 	wcHealthStatus             prometheus.Gauge
 	wcRecreationAttempts       *prometheus.CounterVec
@@ -122,6 +123,13 @@ func (p *PrometheusCollector) ensureRegistered() {
 			Help:      "Total iterator restarts by reason (transient,heartbeat).",
 		}, []string{"reason"})
 
+		p.wcIteratorEscalations = prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: p.namespace,
+			Subsystem: "worker_consumer",
+			Name:      "iterator_escalations_total",
+			Help:      "Total iterator escalation events that triggered a consumer refresh.",
+		})
+
 		p.wcConsecutiveFailures = prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: p.namespace,
 			Subsystem: "worker_consumer",
@@ -167,6 +175,7 @@ func (p *PrometheusCollector) ensureRegistered() {
 		p.reg.MustRegister(p.wcUpdateResults)
 		p.reg.MustRegister(p.wcUpdateLatency)
 		p.reg.MustRegister(p.wcIteratorRestarts)
+		p.reg.MustRegister(p.wcIteratorEscalations)
 		p.reg.MustRegister(p.wcConsecutiveFailures)
 		p.reg.MustRegister(p.wcHealthStatus)
 		p.reg.MustRegister(p.wcRecreationAttempts)
@@ -229,6 +238,12 @@ func (p *PrometheusCollector) ObserveWorkerConsumerUpdateLatency(seconds float64
 func (p *PrometheusCollector) IncrementWorkerConsumerIteratorRestart(reason string) {
 	p.ensureRegistered()
 	p.wcIteratorRestarts.WithLabelValues(reason).Inc()
+}
+
+// IncrementWorkerConsumerIteratorEscalation increments the iterator escalation counter.
+func (p *PrometheusCollector) IncrementWorkerConsumerIteratorEscalation() {
+	p.ensureRegistered()
+	p.wcIteratorEscalations.Inc()
 }
 
 // SetWorkerConsumerConsecutiveIteratorFailures sets the consecutive failure gauge.

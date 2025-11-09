@@ -176,6 +176,11 @@ func (n *NopMetrics) IncrementWorkerConsumerIteratorRestart(_ /* reason */ strin
 	// No-op
 }
 
+// IncrementWorkerConsumerIteratorEscalation discards iterator escalation increments.
+func (n *NopMetrics) IncrementWorkerConsumerIteratorEscalation() {
+	// No-op
+}
+
 // SetWorkerConsumerConsecutiveIteratorFailures discards consecutive failure gauge updates.
 func (n *NopMetrics) SetWorkerConsumerConsecutiveIteratorFailures(_ /* count */ int) {
 	// No-op

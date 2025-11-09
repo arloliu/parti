@@ -31,7 +31,7 @@ These are the primary KPIs we will use to judge success across P0 scope. Individ
 
 ### SC-P0-1 Auto-Recovery for Missing/Invalid Consumer
 Implementation Tasks:
-1. Add error classifier in `subscription/durable_helper.go` mapping JetStream/NATS errors → categories (include code comment table):
+1. Add error classifier in `subscription/worker_comsumer.go` mapping JetStream/NATS errors → categories (include code comment table):
    - `ErrConsumerNotFound` → terminal_not_found
    - `ErrStreamNotFound`, permission/authorization errors → terminal_policy
    - Timeouts / temporary network / 5xx → transient
@@ -62,7 +62,7 @@ Acceptance Criteria:
 * No duplicate message IDs during recreation window (verified in integration test).
 
 Expected Files:
-- `subscription/durable_helper.go` (error classification, triggers, recreation path, health integration)
+- `subscription/worker_comsumer.go` (error classification, triggers, recreation path, health integration)
 - `subscription/config.go` (new tuning fields and defaults)
 - `internal/metrics/` and `types/metrics_collector.go` (metric definitions/integration)
 - `test/integration/` (external deletion + recovery tests)
@@ -92,7 +92,7 @@ Acceptance Criteria:
 
 Expected Files:
 - `subscription/backoff.go` (new helper)
-- `subscription/durable_helper.go` (replace retry logic)
+- `subscription/worker_comsumer.go` (replace retry logic)
 - `subscription/config.go` (defaults)
 - `subscription/doc.go` (package-level docs for behavior)
 - `subscription/*_test.go` (unit tests for sequences)
@@ -117,7 +117,7 @@ Acceptance Criteria:
 
 Expected Files:
 - `subscription/config.go` (new fields + defaults)
-- `subscription/durable_helper.go` (validation and metrics)
+- `subscription/worker_comsumer.go` (validation and metrics)
 - `subscription/errors.go` (typed guardrail errors)
 - `subscription/*_test.go` (unit tests)
 
@@ -155,7 +155,7 @@ Acceptance Criteria:
 * Update latency histogram shows population in ≥3 buckets under load test.
 
 Expected Files:
-- `subscription/durable_helper.go` (emit metrics, implement Health/IsHealthy)
+- `subscription/worker_comsumer.go` (emit metrics, implement Health/IsHealthy)
 - `types/metrics_collector.go` and `internal/metrics/` (wire counters/gauges/histograms)
 - `examples/basic/README.md` (scrape example)
 - `subscription/*_test.go`, `test/integration/` (tests for health transitions)
@@ -197,7 +197,7 @@ Acceptance Criteria:
 * No duplicate escalations for same failure window.
 
 Expected Files:
-- `subscription/durable_helper.go` (counters, escalation path)
+- `subscription/worker_comsumer.go` (counters, escalation path)
 - `subscription/config.go` (thresholds if configurable)
 - `subscription/*_test.go` (unit tests)
 - `test/integration/` (heartbeat stall scenario)
@@ -214,7 +214,7 @@ Acceptance Criteria:
 * Logs show required fields across major operations (spot-check integration test).
 
 Expected Files:
-- `subscription/durable_helper.go` (log enrichment)
+- `subscription/worker_comsumer.go` (log enrichment)
 - `internal/logging/` and `types/logger.go` (ensure structured fields)
 - `examples/basic/README.md` (optional log/sample references)
 
@@ -281,7 +281,7 @@ Acceptance Criteria:
 
 Expected Files:
 - `manager.go` (coalescing buffer)
-- `subscription/durable_helper.go` (flush signal handling)
+- `subscription/worker_comsumer.go` (flush signal handling)
 - `subscription/config.go` (window setting)
 - `test/stress/` (rapid updates collapse tests)
 
@@ -298,7 +298,7 @@ Acceptance Criteria:
 * Resuming from paused reinstates pulling within <1s.
 
 Expected Files:
-- `subscription/durable_helper.go` (pause/resume path)
+- `subscription/worker_comsumer.go` (pause/resume path)
 - `subscription/config.go` (toggle)
 - `subscription/*_test.go`, `test/integration/` (behavioral tests)
 
@@ -314,7 +314,7 @@ Acceptance Criteria:
 * No regressions: zero lost/duplicated messages in load test.
 
 Expected Files:
-- `subscription/durable_helper.go` (use new knobs)
+- `subscription/worker_comsumer.go` (use new knobs)
 - `subscription/config.go` (add knobs)
 - `subscription/*_test.go` (unit)
 - `test/performance/` or `test/stress/` (baseline + tuning validation)

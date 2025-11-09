@@ -510,6 +510,7 @@ func (m *mockMetricsCollector) IncrementWorkerConsumerSubjectThresholdWarning() 
 func (m *mockMetricsCollector) RecordWorkerConsumerUpdate(result string)                     {}
 func (m *mockMetricsCollector) ObserveWorkerConsumerUpdateLatency(seconds float64)           {}
 func (m *mockMetricsCollector) IncrementWorkerConsumerIteratorRestart(reason string)         {}
+func (m *mockMetricsCollector) IncrementWorkerConsumerIteratorEscalation()                   {}
 func (m *mockMetricsCollector) SetWorkerConsumerConsecutiveIteratorFailures(count int)       {}
 func (m *mockMetricsCollector) SetWorkerConsumerHealthStatus(healthy bool)                   {}
 func (m *mockMetricsCollector) IncrementWorkerConsumerRecreationAttempt(reason string)       {}

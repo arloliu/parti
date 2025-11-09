@@ -33,6 +33,11 @@ type WorkerConsumer struct {
 	// State tracking
 	mu sync.RWMutex
 
+	// Some JetStream Consumer methods (e.g., Info) mutate internal state and are not
+	// safe for concurrent access on the same consumer instance. We serialize Info()
+	// calls across the pull loop and external callers to avoid data races under -race.
+	consInfoMu sync.Mutex
+
 	// Single-consumer (per worker) mode state
 	workerID       string
 	workerConsumer jetstream.Consumer
@@ -47,6 +52,10 @@ type WorkerConsumer struct {
 	consecutiveRecreations int // consecutive recreation failures
 	lastError              error
 	lastUpdate             time.Time
+
+	// iterator escalation tracking
+	iterFailureTimes []time.Time
+	lastEscalation   time.Time
 }
 
 // loopCtrl guides the outer pull loop control flow.
@@ -112,7 +121,7 @@ func NewWorkerConsumer(js jetstream.JetStream, cfg WorkerConsumerConfig, handler
 		return nil, fmt.Errorf("invalid subject template: %w", err)
 	}
 
-	return &WorkerConsumer{
+	wc := &WorkerConsumer{
 		conn:            js.Conn(),
 		js:              js,
 		config:          cfg,
@@ -124,7 +133,13 @@ func NewWorkerConsumer(js jetstream.JetStream, cfg WorkerConsumerConfig, handler
 		createOrUpdateFn: func(ctx context.Context, stream string, c jetstream.ConsumerConfig) (jetstream.Consumer, error) {
 			return js.CreateOrUpdateConsumer(ctx, stream, c)
 		},
-	}, nil
+	}
+	// Allow config to inject custom iterator factory (used in integration tests for transient failures simulation)
+	if cfg.IteratorFactory != nil {
+		wc.iterFactory = cfg.IteratorFactory
+	}
+
+	return wc, nil
 }
 
 // defaultIterFactory provides the default messages iterator factory.
@@ -349,7 +364,11 @@ func (dh *WorkerConsumer) WorkerConsumerInfo(ctx context.Context) (*jetstream.Co
 		return nil, errors.New("worker consumer not initialized")
 	}
 
+	// Serialize Info() calls across goroutines; the underlying implementation
+	// is not safe for concurrent access and triggers race warnings.
+	dh.consInfoMu.Lock()
 	info, err := cons.Info(ctx)
+	dh.consInfoMu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get worker consumer info: %w", err)
 	}
@@ -450,6 +469,7 @@ func (dh *WorkerConsumer) buildConsumerConfig(durable string, subjects []string)
 		MaxDeliver:        dh.config.MaxDeliver,
 		InactiveThreshold: dh.config.InactiveThreshold,
 		MaxWaiting:        dh.config.MaxWaiting,
+		MaxAckPending:     dh.config.MaxAckPending,
 	}
 }
 
@@ -571,7 +591,11 @@ func (dh *WorkerConsumer) ensureConsumerExistsOrRecreate(ctx context.Context, co
 	if cons == nil {
 		return nil, ctrlContinue
 	}
-	if _, infoErr := cons.Info(ctx); infoErr != nil {
+	// Serialize Info() against external callers (WorkerConsumerInfo) to avoid data races
+	dh.consInfoMu.Lock()
+	_, infoErr := cons.Info(ctx)
+	dh.consInfoMu.Unlock()
+	if infoErr != nil {
 		reason := classifyConsumerError(infoErr)
 		switch reason {
 		case "not_found":
@@ -596,7 +620,7 @@ func (dh *WorkerConsumer) ensureConsumerExistsOrRecreate(ctx context.Context, co
 
 			return nil, ctrlExit
 		default:
-			// no-op
+			// no-op: treat as transient/unknown and continue
 		}
 	}
 
@@ -838,6 +862,12 @@ func (dh *WorkerConsumer) resolveCreateFn() func(context.Context, string, jetstr
 	if dh.createOrUpdateFn != nil {
 		return dh.createOrUpdateFn
 	}
+	// Defensive: if JetStream context is nil (tests constructing bare WorkerConsumer), return an error
+	if dh.js == nil {
+		return func(context.Context, string, jetstream.ConsumerConfig) (jetstream.Consumer, error) {
+			return nil, errors.New("jetstream context is nil")
+		}
+	}
 
 	return func(cctx context.Context, stream string, cc jetstream.ConsumerConfig) (jetstream.Consumer, error) {
 		return dh.js.CreateOrUpdateConsumer(cctx, stream, cc)
@@ -963,6 +993,8 @@ func (dh *WorkerConsumer) runPullCycle(ctx context.Context, durableName string, 
 		return false, true
 	case ctrlContinue:
 		// proceed
+	default: // defensive default per revive enforce-switch-style
+		return false, false
 	}
 	exit, recreate = dh.processMessages(ctx, iter, ci.handler, consecutiveFailures)
 	if exit {
@@ -1024,13 +1056,11 @@ func (dh *WorkerConsumer) resolveIterFactory(factory func(jetstream.Consumer, in
 // Returns (updatedCons, recreate, exit).
 func (dh *WorkerConsumer) ensureCycleConsumer(ctx context.Context, cons jetstream.Consumer, durableName string) (updated jetstream.Consumer, recreate bool, exit bool) {
 	updated, ctrl := dh.ensureConsumerExistsOrRecreate(ctx, cons, durableName)
-	switch ctrl {
-	case ctrlExit:
+	if ctrl == ctrlExit {
 		return nil, false, true
-	case ctrlRetry:
+	}
+	if ctrl == ctrlRetry {
 		return updated, true, false
-	case ctrlContinue:
-		return updated, false, false
 	}
 
 	return updated, false, false
@@ -1068,6 +1098,7 @@ func (dh *WorkerConsumer) handleIteratorError(ctx context.Context, iter jetstrea
 	}
 	*consecutiveFailures++
 	dh.setHealthMetrics(*consecutiveFailures)
+	dh.maybeEscalateIteratorFailures(ctx)
 	if dh.config.Metrics != nil {
 		dh.config.Metrics.IncrementWorkerConsumerIteratorRestart("transient")
 	}
@@ -1078,15 +1109,87 @@ func (dh *WorkerConsumer) handleIteratorError(ctx context.Context, iter jetstrea
 // handleMessage invokes the handler and updates failure counters & health metrics.
 func (dh *WorkerConsumer) handleMessage(ctx context.Context, msg jetstream.Msg, handler MessageHandler, consecutiveFailures *int) {
 	if err := handler.Handle(ctx, msg); err != nil {
-		_ = msg.Nak()
+		if !dh.config.ManualAck {
+			_ = msg.Nak()
+		}
 		*consecutiveFailures++
 		dh.setHealthMetrics(*consecutiveFailures)
 
 		return
 	}
-	_ = msg.Ack()
+	if !dh.config.ManualAck {
+		_ = msg.Ack()
+	}
 	if *consecutiveFailures > 0 {
 		*consecutiveFailures = 0
 		dh.setHealthMetrics(*consecutiveFailures)
 	}
+	// successful processing resets the iterator failure window
+	dh.resetIteratorFailureWindow()
+}
+
+// maybeEscalateIteratorFailures records an iterator failure timestamp and triggers a
+// consumer refresh when a burst occurs within the configured window. Only one
+// escalation is emitted per window to avoid flapping.
+func (dh *WorkerConsumer) maybeEscalateIteratorFailures(ctx context.Context) {
+	// Determine thresholds
+	window := dh.config.IteratorEscalationWindow
+	if window <= 0 {
+		window = DefaultIteratorEscalationWindow
+	}
+	threshold := dh.config.IteratorEscalationThreshold
+	if threshold <= 0 {
+		threshold = DefaultIteratorEscalationThreshold
+	}
+
+	now := time.Now()
+
+	dh.mu.Lock()
+	// Append current failure and prune old entries
+	dh.iterFailureTimes = append(dh.iterFailureTimes, now)
+	cutoff := now.Add(-window)
+	i := 0
+	for ; i < len(dh.iterFailureTimes); i++ {
+		if dh.iterFailureTimes[i].After(cutoff) {
+			break
+		}
+	}
+	if i > 0 && i <= len(dh.iterFailureTimes) {
+		dh.iterFailureTimes = append([]time.Time(nil), dh.iterFailureTimes[i:]...)
+	}
+	count := len(dh.iterFailureTimes)
+	lastEsc := dh.lastEscalation
+	canEscalate := count >= threshold && (lastEsc.IsZero() || now.Sub(lastEsc) >= window)
+	workerID := dh.workerID
+	dh.mu.Unlock()
+
+	if !canEscalate {
+		return
+	}
+
+	// Emit metric
+	if dh.config.Metrics != nil {
+		dh.config.Metrics.IncrementWorkerConsumerIteratorEscalation()
+	}
+
+	// Best-effort refresh: re-apply consumer config via CreateOrUpdateConsumer.
+	durable := dh.sanitizeConsumerName(dh.config.ConsumerPrefix + "-" + workerID)
+	subjects := dh.WorkerSubjects()
+
+	// Update last escalation timestamp
+	dh.mu.Lock()
+	dh.lastEscalation = now
+	dh.mu.Unlock()
+
+	go func() {
+		// use the same context; if cancelled, this becomes a no-op
+		_, _ = dh.recreateDurableConsumer(ctx, durable, subjects, "iterator_error")
+	}()
+}
+
+// resetIteratorFailureWindow clears the sliding window of iterator failure timestamps.
+func (dh *WorkerConsumer) resetIteratorFailureWindow() {
+	dh.mu.Lock()
+	dh.iterFailureTimes = nil
+	dh.mu.Unlock()
 }
