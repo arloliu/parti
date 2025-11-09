@@ -135,7 +135,11 @@ func NewWorker(cfg Config) (*Worker, error) {
 	// Set up hooks to record metrics only (consumer updates handled by manager option)
 	hooks := &types.Hooks{OnAssignmentChanged: worker.handleAssignmentChanged}
 	// Create manager with hooks
-	manager, err := parti.NewManager(&partiCfg, cfg.NC, partitionSource, assignmentStrategy,
+	js, err := jetstream.New(cfg.NC)
+	if err != nil {
+		return nil, fmt.Errorf("failed to init JetStream: %w", err)
+	}
+	manager, err := parti.NewManager(&partiCfg, js, partitionSource, assignmentStrategy,
 		parti.WithLogger(logger),
 		parti.WithHooks(hooks),
 		parti.WithWorkerConsumerUpdater(helper))

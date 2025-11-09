@@ -19,7 +19,9 @@ var _ types.MetricsCollector = (*NopMetrics)(nil)
 // Example:
 //
 //	metrics := metrics.NewNop()
-//	mgr := parti.NewManager(&cfg, conn, src, strategy, parti.WithMetrics(metrics))
+//	js, _ := jetstream.New(conn)
+//	mgr, err := parti.NewManager(&cfg, js, src, strategy, parti.WithMetrics(metrics))
+//	if err != nil { /* handle */ }
 func NewNop() *NopMetrics {
 	return &NopMetrics{}
 }

@@ -33,7 +33,9 @@ var _ types.PartitionSource = (*Static)(nil)
 //	    {Keys: []string{"tool001", "chamber2"}, Weight: 150},
 //	}
 //	src := source.NewStatic(partitions)
-//	mgr := parti.NewManager(&cfg, conn, src)
+//	js, _ := jetstream.New(conn)
+//	mgr, err := parti.NewManager(&cfg, js, src, strategy.NewConsistentHash())
+//	if err != nil { /* handle */ }
 func NewStatic(partitions []types.Partition) *Static {
 	return &Static{
 		partitions: partitions,

@@ -12,7 +12,9 @@ import "github.com/arloliu/parti/types"
 //
 // Example:
 //
-// mgr := parti.NewManager(&cfg, conn, src, parti.WithLogger(logger.NewNop()))
+// js, _ := jetstream.New(conn)
+// mgr, err := parti.NewManager(&cfg, js, src, strategy.NewRoundRobin(), parti.WithLogger(logging.NewNop()))
+// if err != nil { /* handle */ }
 type NopLogger struct{}
 
 // Compile-time assertion that NopLogger implements Logger.

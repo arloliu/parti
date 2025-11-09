@@ -29,7 +29,7 @@ Creates a new Manager instance with the provided configuration.
 ```go
 func NewManager(
     cfg *Config,
-    conn *nats.Conn,
+    js jetstream.JetStream,
     source PartitionSource,
     strategy AssignmentStrategy,
     opts ...Option,
@@ -57,8 +57,8 @@ parti.SetDefaults(cfg)
 
 src := source.NewStatic(partitions)
 strategy := strategy.NewConsistentHash()
-
-mgr, err := parti.NewManager(cfg, natsConn, src, strategy)
+js, _ := jetstream.New(natsConn)
+mgr, err := parti.NewManager(cfg, js, src, strategy)
 if err != nil {
     log.Fatal(err)
 }
@@ -583,7 +583,8 @@ type Logger interface {
 logger, _ := zap.NewProduction()
 sugar := logger.Sugar()
 
-mgr := parti.NewManager(cfg, nc, src, strategy,
+js, _ := jetstream.New(nc)
+mgr := parti.NewManager(cfg, js, src, strategy,
     parti.WithLogger(sugar),
 )
 ```
@@ -1171,7 +1172,8 @@ Errors if UpdateWorkerConsumer has not yet initialized the consumer.
 
 **Example**:
 ```go
-helper, err := subscription.NewDurableHelper(nc, subscription.DurableConfig{
+js, _ := jetstream.New(nc)
+helper, err := subscription.NewDurableHelperJS(js, subscription.DurableConfig{
     StreamName:      "events",
     ConsumerPrefix:  "worker",
     SubjectTemplate: "events.{{.PartitionID}}",
@@ -1181,7 +1183,7 @@ helper, err := subscription.NewDurableHelper(nc, subscription.DurableConfig{
 }))
 if err != nil { log.Fatal(err) }
 
-mgr, err := parti.NewManager(cfg, nc, src, strategy, parti.WithWorkerConsumerUpdater(helper))
+mgr, err := parti.NewManager(cfg, js, src, strategy, parti.WithWorkerConsumerUpdater(helper))
 if err != nil { log.Fatal(err) }
 _ = mgr.Start(context.Background())
 ```
@@ -1308,7 +1310,8 @@ func WithStrategy(strategy AssignmentStrategy) Option
 **Example**:
 ```go
 strategy := strategy.NewConsistentHash()
-mgr := parti.NewManager(cfg, nc, src, strategy)
+js, _ := jetstream.New(nc)
+mgr := parti.NewManager(cfg, js, src, strategy)
 ```
 
 ---
@@ -1324,7 +1327,8 @@ func WithElectionAgent(agent ElectionAgent) Option
 **Example**:
 ```go
 agent := NewConsulElectionAgent(consulClient)
-mgr := parti.NewManager(cfg, nc, src, strategy,
+js, _ := jetstream.New(nc)
+mgr := parti.NewManager(cfg, js, src, strategy,
     parti.WithElectionAgent(agent),
 )
 ```
@@ -1347,7 +1351,8 @@ hooks := &parti.Hooks{
         return nil
     },
 }
-mgr := parti.NewManager(cfg, nc, src, strategy,
+js, _ := jetstream.New(nc)
+mgr := parti.NewManager(cfg, js, src, strategy,
     parti.WithHooks(hooks),
 )
 ```
@@ -1365,7 +1370,8 @@ func WithMetrics(metrics MetricsCollector) Option
 **Example**:
 ```go
 collector := NewPrometheusCollector()
-mgr := parti.NewManager(cfg, nc, src, strategy,
+js, _ := jetstream.New(nc)
+mgr := parti.NewManager(cfg, js, src, strategy,
     parti.WithMetrics(collector),
 )
 ```
@@ -1383,7 +1389,8 @@ func WithLogger(logger Logger) Option
 **Example**:
 ```go
 logger, _ := zap.NewProduction()
-mgr := parti.NewManager(cfg, nc, src, strategy,
+js, _ := jetstream.New(nc)
+mgr := parti.NewManager(cfg, js, src, strategy,
     parti.WithLogger(logger.Sugar()),
 )
 ```

@@ -35,7 +35,9 @@ type ConsistentHashOption func(*ConsistentHash)
 //	strategy := strategy.NewConsistentHash(
 //	    strategy.WithVirtualNodes(300),
 //	)
-//	mgr := parti.NewManager(&cfg, conn, src, parti.WithStrategy(strategy))
+//	js, _ := jetstream.New(conn)
+//	mgr, err := parti.NewManager(&cfg, js, src, strategy)
+//	if err != nil { /* handle */ }
 func NewConsistentHash(opts ...ConsistentHashOption) *ConsistentHash {
 	ch := &ConsistentHash{
 		virtualNodes: 150, // default

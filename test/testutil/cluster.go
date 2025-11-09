@@ -13,6 +13,7 @@ import (
 	partitest "github.com/arloliu/parti/testing"
 	"github.com/arloliu/parti/types"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 )
 
@@ -155,6 +156,7 @@ type WorkerCluster struct {
 	Source        types.PartitionSource
 	Strategy      types.AssignmentStrategy
 	NC            *nats.Conn
+	JS            jetstream.JetStream
 	T             *testing.T
 	mu            sync.RWMutex // Protects Workers and StateTrackers
 }
@@ -165,6 +167,8 @@ func NewWorkerCluster(t *testing.T, nc *nats.Conn, numPartitions int) *WorkerClu
 	partitions := CreateTestPartitions(numPartitions)
 	src := source.NewStatic(partitions)
 	assignmentStrategy := strategy.NewConsistentHash()
+	js, err := jetstream.New(nc)
+	require.NoError(t, err, "failed to init jetstream context")
 
 	return &WorkerCluster{
 		Workers:       make([]*parti.Manager, 0),
@@ -173,6 +177,7 @@ func NewWorkerCluster(t *testing.T, nc *nats.Conn, numPartitions int) *WorkerClu
 		Source:        src,
 		Strategy:      assignmentStrategy,
 		NC:            nc,
+		JS:            js,
 		T:             t,
 	}
 }
@@ -184,6 +189,8 @@ func NewFastWorkerCluster(t *testing.T, nc *nats.Conn, numPartitions int) *Worke
 	partitions := CreateTestPartitions(numPartitions)
 	src := source.NewStatic(partitions)
 	assignmentStrategy := strategy.NewConsistentHash()
+	js, err := jetstream.New(nc)
+	require.NoError(t, err, "failed to init jetstream context")
 
 	return &WorkerCluster{
 		Workers:       make([]*parti.Manager, 0),
@@ -192,6 +199,7 @@ func NewFastWorkerCluster(t *testing.T, nc *nats.Conn, numPartitions int) *Worke
 		Source:        src,
 		Strategy:      assignmentStrategy,
 		NC:            nc,
+		JS:            js,
 		T:             t,
 	}
 }
@@ -232,7 +240,7 @@ func (wc *WorkerCluster) AddWorker(ctx context.Context, opts ...types.Logger) *p
 	}
 
 	mgr, err := parti.NewManager(
-		&wc.Config, wc.NC, wc.Source, wc.Strategy,
+		&wc.Config, wc.JS, wc.Source, wc.Strategy,
 		managerOpts...,
 	)
 	require.NoError(wc.T, err, "failed to create worker %d", workerIdx)
@@ -247,7 +255,7 @@ func (wc *WorkerCluster) AddWorkerWithoutTracking(ctx context.Context) *parti.Ma
 	wc.mu.Lock()
 	defer wc.mu.Unlock()
 
-	mgr, err := parti.NewManager(&wc.Config, wc.NC, wc.Source, wc.Strategy)
+	mgr, err := parti.NewManager(&wc.Config, wc.JS, wc.Source, wc.Strategy)
 	require.NoError(wc.T, err, "failed to create worker")
 
 	wc.Workers = append(wc.Workers, mgr)

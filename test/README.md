@@ -185,20 +185,20 @@ func TestMyScenario(t *testing.T) {
 #### Create Test Manager
 ```go
 cfg := parti.Config{
-    WorkerIDPrefix:     "test-worker",
-    WorkerIDMin:        0,
-    WorkerIDMax:        99,
-    HeartbeatInterval:  1 * time.Second,
-    // ... other config
+  WorkerIDPrefix:     "test-worker",
+  WorkerIDMin:        0,
+  WorkerIDMax:        99,
+  HeartbeatInterval:  1 * time.Second,
+  // ... other config
 }
 
 partitions := []types.Partition{
-    {Keys: []string{"partition-1"}, Weight: 100},
+  {Keys: []string{"partition-1"}, Weight: 100},
 }
 src := source.NewStatic(partitions)
 strategy := strategy.NewConsistentHash()
-
-mgr, err := parti.NewManager(&cfg, conn, src, strategy)
+js, _ := jetstream.New(conn)
+mgr, err := parti.NewManager(&cfg, js, src, strategy)
 require.NoError(t, err)
 ```
 

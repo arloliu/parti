@@ -8,6 +8,7 @@ import (
 	"github.com/arloliu/parti"
 	"github.com/arloliu/parti/internal/logging"
 	"github.com/arloliu/parti/test/testutil"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 )
 
@@ -234,7 +235,9 @@ func TestIntegration_Emergency_K8sRollingUpdate_NoDataLoss(t *testing.T) {
 		time.Sleep(1500 * time.Millisecond)
 
 		// Start new worker (simulates pod coming back up)
-		newWorker, err := parti.NewManager(&cluster.Config, cluster.NC, cluster.Source, cluster.Strategy)
+		js, err := jetstream.New(cluster.NC)
+		require.NoError(t, err)
+		newWorker, err := parti.NewManager(&cluster.Config, js, cluster.Source, cluster.Strategy)
 		require.NoError(t, err)
 		cluster.Workers[i] = newWorker
 		err = newWorker.Start(ctx)

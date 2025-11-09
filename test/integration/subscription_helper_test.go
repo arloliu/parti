@@ -129,8 +129,10 @@ func TestSubscriptionHelper_UpdateOnRebalance(t *testing.T) {
 	const numManagers = 2
 	managers := make([]*parti.Manager, numManagers)
 
+	js, err := jetstream.New(conn)
+	require.NoError(t, err)
 	for i := 0; i < numManagers; i++ {
-		manager, err := parti.NewManager(cfg, conn, partitionSource, strategy.NewRoundRobin(), parti.WithLogger(debugLogger))
+		manager, err := parti.NewManager(cfg, js, partitionSource, strategy.NewRoundRobin(), parti.WithLogger(debugLogger))
 		require.NoError(t, err, "Failed to create manager %d", i)
 		managers[i] = manager
 	}
@@ -161,12 +163,10 @@ func TestSubscriptionHelper_UpdateOnRebalance(t *testing.T) {
 	for i, m := range managers {
 		managerWaiters[i] = m
 	}
-	err := testutil.WaitAllManagersState(ctx, managerWaiters, types.StateStable, 20*time.Second)
+	err = testutil.WaitAllManagersState(ctx, managerWaiters, types.StateStable, 20*time.Second)
 	require.NoError(t, err, "Managers failed to reach Stable state")
 
-	// Create stream and durable helper for first manager
-	js, err := jetstream.New(conn)
-	require.NoError(t, err)
+	// Create stream and durable helper for first manager (reuse js)
 	_, err = js.CreateStream(ctx, jetstream.StreamConfig{Name: "test-stream", Subjects: []string{"rebalance.sub.>"}})
 	require.NoError(t, err)
 	helper, err := subscription.NewWorkerConsumer(conn, subscription.WorkerConsumerConfig{

@@ -112,23 +112,57 @@ func NewWorkerConsumer(conn *nats.Conn, cfg WorkerConsumerConfig, handler Messag
 		return nil, errors.New("message handler is required")
 	}
 
-	// Apply default values to zero-valued fields
-	cfg.applyDefaults()
-
-	// Parse subject template
-	tmpl, err := template.New("subject").Parse(cfg.SubjectTemplate)
-	if err != nil {
-		return nil, fmt.Errorf("invalid subject template: %w", err)
-	}
-
-	// Create JetStream context
+	// Create JetStream context and delegate to NewWorkerConsumerJS for construction
 	js, err := jetstream.New(conn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create JetStream context: %w", err)
 	}
 
+	return NewWorkerConsumerJS(js, cfg, handler)
+}
+
+// NewWorkerConsumerJS creates a new WorkerConsumer using a pre-initialized JetStream context.
+//
+// This overload enables looser coupling to the nats client by accepting the
+// jetstream.JetStream interface instead of a concrete *nats.Conn. The underlying
+// connection is captured via js.Conn() for internal status/logging when needed.
+//
+// Parameters:
+//   - js: Pre-configured JetStream context (must be non-nil)
+//   - cfg: Helper configuration with required fields
+//   - handler: Message handler invoked for each received JetStream message
+//
+// Returns:
+//   - *WorkerConsumer: Initialized helper
+//   - error: Configuration or template parsing error
+func NewWorkerConsumerJS(js jetstream.JetStream, cfg WorkerConsumerConfig, handler MessageHandler) (*WorkerConsumer, error) {
+	if js == nil {
+		return nil, errors.New("JetStream context is required")
+	}
+
+	// Validate essential cfg fields and handler (reuse same checks as NewWorkerConsumer)
+	if cfg.StreamName == "" {
+		return nil, errors.New("stream name is required")
+	}
+	if cfg.ConsumerPrefix == "" {
+		return nil, errors.New("consumer prefix is required")
+	}
+	if cfg.SubjectTemplate == "" {
+		return nil, errors.New("subject template is required")
+	}
+	if handler == nil {
+		return nil, errors.New("message handler is required")
+	}
+
+	// Apply defaults and parse template
+	cfg.applyDefaults()
+	tmpl, err := template.New("subject").Parse(cfg.SubjectTemplate)
+	if err != nil {
+		return nil, fmt.Errorf("invalid subject template: %w", err)
+	}
+
 	return &WorkerConsumer{
-		conn:            conn,
+		conn:            js.Conn(),
 		js:              js,
 		config:          cfg,
 		logger:          cfg.Logger,

@@ -188,7 +188,8 @@ cfg := parti.Config{
 
 // Factory functions hide subpackage details
 src := parti.StaticSource(partitions)
-mgr := parti.NewManager(&cfg, natsConn, src)
+js, _ := jetstream.New(natsConn)
+mgr := parti.NewManager(&cfg, js, src)
 
 if err := mgr.Start(ctx); err != nil {
     log.Fatal(err)
@@ -224,7 +225,8 @@ hooks := &parti.Hooks{
     },
 }
 
-mgr := parti.NewManager(&cfg, natsConn, src,
+js, _ := jetstream.New(natsConn)
+mgr := parti.NewManager(&cfg, js, src,
     parti.WithStrategy(strat),
     parti.WithHooks(hooks),
 )

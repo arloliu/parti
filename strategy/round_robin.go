@@ -19,7 +19,9 @@ var _ types.AssignmentStrategy = (*RoundRobin)(nil)
 // Example:
 //
 //	strategy := strategy.NewRoundRobin()
-//	mgr := parti.NewManager(&cfg, conn, src, parti.WithStrategy(strategy))
+//	js, _ := jetstream.New(conn)
+//	mgr, err := parti.NewManager(&cfg, js, src, strategy)
+//	if err != nil { /* handle */ }
 func NewRoundRobin() *RoundRobin {
 	return &RoundRobin{}
 }

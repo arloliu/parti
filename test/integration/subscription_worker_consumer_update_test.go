@@ -53,7 +53,7 @@ func TestWorkerConsumerUpdate(t *testing.T) {
 	chStrat := strategy.NewConsistentHash()
 
 	// Durable helper for single consumer updates
-	helper, err := subscription.NewWorkerConsumer(nc, subscription.WorkerConsumerConfig{
+	helper, err := subscription.NewWorkerConsumerJS(js, subscription.WorkerConsumerConfig{
 		StreamName:      "WORKER_TEST",
 		ConsumerPrefix:  "worker",
 		SubjectTemplate: "work.{{.PartitionID}}",
@@ -65,7 +65,7 @@ func TestWorkerConsumerUpdate(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = helper.Close(context.Background()) })
 
-	mgr, err := parti.NewManager(cfg, nc, src, chStrat, parti.WithWorkerConsumerUpdater(helper))
+	mgr, err := parti.NewManager(cfg, js, src, chStrat, parti.WithWorkerConsumerUpdater(helper))
 	require.NoError(t, err)
 
 	startCtx, cancel := context.WithTimeout(ctx, 15*time.Second)

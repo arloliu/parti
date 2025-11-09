@@ -44,11 +44,12 @@ This guide covers operational aspects of deploying and running Parti-based appli
 
 ### NATS Server Requirements
 
-**Minimum Version**: NATS Server 2.9.0+
-**Recommended Version**: NATS Server 2.10.0+
+**Minimum Version**: NATS Server 2.10.0+
+**Recommended Version**: NATS Server 2.12.0+
 
 **Required Features**:
 - JetStream enabled
+- Multiple Subscribe Topics supported
 - KV Store configured
 - Sufficient resources for bucket operations
 
@@ -526,7 +527,8 @@ func main() {
     sugar := logger.Sugar()
 
     // Configure manager with logger
-    mgr, _ := parti.NewManager(cfg, nc, src, strategy,
+  js, _ := jetstream.New(nc)
+  mgr, _ := parti.NewManager(cfg, js, src, strategy,
         parti.WithLogger(sugar),
     )
 

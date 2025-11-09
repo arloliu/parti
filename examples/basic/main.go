@@ -20,6 +20,7 @@ import (
 	"github.com/arloliu/parti/source"
 	"github.com/arloliu/parti/strategy"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 func main() {
@@ -77,8 +78,13 @@ func main() {
 		},
 	}
 
-	// Create Manager with consistent hash strategy
-	mgr, err := parti.NewManager(&cfg, nc, src, strat, parti.WithHooks(hooks))
+	// Create JetStream context then Manager with strategy
+	js, err := jetstream.New(nc)
+	if err != nil {
+		log.Fatalf("Failed to init JetStream: %v", err)
+	}
+
+	mgr, err := parti.NewManager(&cfg, js, src, strat, parti.WithHooks(hooks))
 	if err != nil {
 		log.Fatalf("Failed to create manager: %v", err)
 	}

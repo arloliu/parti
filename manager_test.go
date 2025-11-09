@@ -6,6 +6,7 @@ import (
 
 	"github.com/arloliu/parti/types"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 )
 
@@ -30,7 +31,9 @@ func TestNewManager_NilSafety(t *testing.T) {
 	}
 
 	// Mock NATS connection (would need real connection in integration tests)
-	conn := &nats.Conn{} // Placeholder - would be real connection in actual use
+	// Create a dummy NATS connection reference (nil JetStream will fail validation)
+	conn := &nats.Conn{}
+	js, _ := jetstream.New(conn) // js will be nil for placeholder conn; tests focus on constructor nil safety
 
 	// Create mock source and strategy
 	src := &mockSource{}
@@ -38,7 +41,7 @@ func TestNewManager_NilSafety(t *testing.T) {
 
 	t.Run("without optional dependencies", func(t *testing.T) {
 		// Create manager WITHOUT any optional dependencies
-		mgr, err := NewManager(cfg, conn, src, strategy)
+		mgr, err := NewManager(cfg, js, src, strategy)
 
 		require.NoError(t, err)
 		require.NotNil(t, mgr)
@@ -58,7 +61,7 @@ func TestNewManager_NilSafety(t *testing.T) {
 
 	t.Run("accepts optional hooks", func(t *testing.T) {
 		hooks := &Hooks{}
-		mgr, err := NewManager(cfg, conn, src, strategy, WithHooks(hooks))
+		mgr, err := NewManager(cfg, js, src, strategy, WithHooks(hooks))
 
 		require.NoError(t, err)
 		require.NotNil(t, mgr)
@@ -71,11 +74,12 @@ func TestNewManager_RequiredParameters(t *testing.T) {
 		WorkerIDMax:    9,
 	}
 	conn := &nats.Conn{}
+	js, _ := jetstream.New(conn)
 	src := &mockSource{}
 	strategy := &mockStrategy{}
 
 	t.Run("nil config", func(t *testing.T) {
-		mgr, err := NewManager(nil, conn, src, strategy)
+		mgr, err := NewManager(nil, js, src, strategy)
 
 		require.Error(t, err)
 		require.ErrorIs(t, err, types.ErrInvalidConfig)
@@ -91,7 +95,7 @@ func TestNewManager_RequiredParameters(t *testing.T) {
 	})
 
 	t.Run("nil source", func(t *testing.T) {
-		mgr, err := NewManager(cfg, conn, nil, strategy)
+		mgr, err := NewManager(cfg, js, nil, strategy)
 
 		require.Error(t, err)
 		require.ErrorIs(t, err, types.ErrPartitionSourceRequired)
@@ -99,7 +103,7 @@ func TestNewManager_RequiredParameters(t *testing.T) {
 	})
 
 	t.Run("nil strategy", func(t *testing.T) {
-		mgr, err := NewManager(cfg, conn, src, nil)
+		mgr, err := NewManager(cfg, js, src, nil)
 
 		require.Error(t, err)
 		require.ErrorIs(t, err, types.ErrAssignmentStrategyRequired)

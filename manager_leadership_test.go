@@ -11,6 +11,7 @@ import (
 	"github.com/arloliu/parti/strategy"
 	partitest "github.com/arloliu/parti/testing"
 	"github.com/arloliu/parti/types"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 )
 
@@ -74,8 +75,11 @@ func TestManager_LeadershipLoss_StateTransition(t *testing.T) {
 		},
 	}
 
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
 	// Create first worker
-	mgr1, err := NewManager(&cfg, nc, src, strategy, WithHooks(hooks), WithLogger(logger))
+	mgr1, err := NewManager(&cfg, js, src, strategy, WithHooks(hooks), WithLogger(logger))
 	require.NoError(t, err)
 
 	err = mgr1.Start(ctx)
@@ -94,7 +98,7 @@ func TestManager_LeadershipLoss_StateTransition(t *testing.T) {
 	t.Log("Worker 1 is leader and stable")
 
 	// Create second worker (will trigger scaling in leader)
-	mgr2, err := NewManager(&cfg, nc, src, strategy, WithLogger(logger))
+	mgr2, err := NewManager(&cfg, js, src, strategy, WithLogger(logger))
 	require.NoError(t, err)
 
 	// Ensure mgr2 is stopped before test ends

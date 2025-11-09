@@ -11,6 +11,7 @@ import (
 	"github.com/arloliu/parti/test/testutil"
 	partitest "github.com/arloliu/parti/testing"
 	"github.com/arloliu/parti/types"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 )
 
@@ -39,7 +40,9 @@ func TestManager_GracefulShutdown(t *testing.T) {
 	strategy := strategy.NewConsistentHash()
 
 	// Create manager
-	mgr, err := parti.NewManager(&cfg, nc, src, strategy)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+	mgr, err := parti.NewManager(&cfg, js, src, strategy)
 	require.NoError(t, err)
 
 	// Start manager
@@ -96,7 +99,9 @@ func TestManager_StartFailureCleanup(t *testing.T) {
 	src := source.NewStatic(partitions)
 	strategy := strategy.NewConsistentHash()
 
-	mgr, err := parti.NewManager(&cfg, nc, src, strategy)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+	mgr, err := parti.NewManager(&cfg, js, src, strategy)
 	require.NoError(t, err)
 
 	// Start with very short timeout (will fail)
@@ -141,7 +146,9 @@ func TestManager_CalculatorStopTimeout(t *testing.T) {
 	src := source.NewStatic(partitions)
 	strategy := strategy.NewConsistentHash()
 
-	mgr, err := parti.NewManager(&cfg, nc, src, strategy)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+	mgr, err := parti.NewManager(&cfg, js, src, strategy)
 	require.NoError(t, err)
 
 	// Start manager

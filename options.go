@@ -25,7 +25,9 @@ type managerOptions struct {
 // Example:
 //
 //	agent := myElectionAgent
-//	mgr := parti.NewManager(&cfg, conn, src, parti.WithElectionAgent(agent))
+//	js, _ := jetstream.New(conn)
+//	mgr, err := parti.NewManager(&cfg, js, src, strategy.NewConsistentHash(), parti.WithElectionAgent(agent))
+//	if err != nil { /* handle */ }
 func WithElectionAgent(agent ElectionAgent) Option {
 	return func(o *managerOptions) {
 		o.electionAgent = agent
@@ -47,7 +49,9 @@ func WithElectionAgent(agent ElectionAgent) Option {
 //	        return handleChanges(added, removed)
 //	    },
 //	}
-//	mgr := parti.NewManager(&cfg, conn, src, parti.WithHooks(hooks))
+//	js, _ := jetstream.New(conn)
+//	mgr, err := parti.NewManager(&cfg, js, src, strategy.NewConsistentHash(), parti.WithHooks(hooks))
+//	if err != nil { /* handle */ }
 func WithHooks(hooks *Hooks) Option {
 	return func(o *managerOptions) {
 		o.hooks = hooks
@@ -65,7 +69,9 @@ func WithHooks(hooks *Hooks) Option {
 // Example:
 //
 //	metrics := myPrometheusCollector
-//	mgr := parti.NewManager(&cfg, conn, src, parti.WithMetrics(metrics))
+//	js, _ := jetstream.New(conn)
+//	mgr, err := parti.NewManager(&cfg, js, src, strategy.NewConsistentHash(), parti.WithMetrics(metrics))
+//	if err != nil { /* handle */ }
 func WithMetrics(metrics MetricsCollector) Option {
 	return func(o *managerOptions) {
 		o.metrics = metrics
@@ -83,7 +89,9 @@ func WithMetrics(metrics MetricsCollector) Option {
 // Example:
 //
 //	logger := zap.NewExample().Sugar()
-//	mgr := parti.NewManager(&cfg, conn, src, parti.WithLogger(logger))
+//	js, _ := jetstream.New(conn)
+//	mgr, err := parti.NewManager(&cfg, js, src, strategy.NewConsistentHash(), parti.WithLogger(logger))
+//	if err != nil { /* handle */ }
 func WithLogger(logger Logger) Option {
 	return func(o *managerOptions) {
 		o.logger = logger
@@ -133,8 +141,10 @@ type WorkerConsumerUpdater interface {
 //
 // Example:
 //
-//	helper, _ := subscription.NewWorkerConsumer(nc, subscription.WorkerConsumerConfig{ /* ... */ }, handler)
-//	mgr, _ := parti.NewManager(cfg, nc, src, strategy, parti.WithWorkerConsumerUpdater(helper))
+//	js, _ := jetstream.New(nc)
+//	helper, _ := subscription.NewWorkerConsumerJS(js, subscription.WorkerConsumerConfig{ /* ... */ }, handler)
+//	mgr, err := parti.NewManager(cfg, js, src, strategy, parti.WithWorkerConsumerUpdater(helper))
+//	if err != nil { /* handle */ }
 func WithWorkerConsumerUpdater(updater WorkerConsumerUpdater) Option {
 	return func(o *managerOptions) {
 		o.consumerUpdater = updater

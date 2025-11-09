@@ -12,6 +12,7 @@ import (
 	"github.com/arloliu/parti/test/testutil"
 	partitest "github.com/arloliu/parti/testing"
 	"github.com/arloliu/parti/types"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 )
 
@@ -58,8 +59,10 @@ func TestConsistentHash_PartitionAffinity(t *testing.T) {
 	// Phase 1: Start initial workers and record assignments
 	t.Logf("Phase 1: Starting %d initial workers...", initialWorkers)
 	initialManagers := make([]*parti.Manager, initialWorkers)
+	js, err := jetstream.New(conn)
+	require.NoError(t, err)
 	for i := range initialManagers {
-		mgr, err := parti.NewManager(&cfg, conn, source.NewStatic(partitions), strategy.NewConsistentHash())
+		mgr, err := parti.NewManager(&cfg, js, source.NewStatic(partitions), strategy.NewConsistentHash())
 		require.NoError(t, err)
 		initialManagers[i] = mgr
 	}
@@ -75,7 +78,7 @@ func TestConsistentHash_PartitionAffinity(t *testing.T) {
 	}
 
 	// Wait for all managers to reach stable state
-	err := testutil.WaitAllManagersState(ctx, initialWaiters, parti.StateStable, 15*time.Second)
+	err = testutil.WaitAllManagersState(ctx, initialWaiters, parti.StateStable, 15*time.Second)
 	require.NoError(t, err, "not all initial managers reached stable state")
 
 	// Record initial assignments (worker ID -> partition keys)
@@ -92,7 +95,7 @@ func TestConsistentHash_PartitionAffinity(t *testing.T) {
 
 	// Phase 2: Add one more worker and observe rebalancing
 	t.Logf("Phase 2: Adding 1 worker (scale %d→%d)...", initialWorkers, finalWorkers)
-	newMgr, err := parti.NewManager(&cfg, conn, source.NewStatic(partitions), strategy.NewConsistentHash())
+	newMgr, err := parti.NewManager(&cfg, js, source.NewStatic(partitions), strategy.NewConsistentHash())
 	require.NoError(t, err)
 
 	go func() {
@@ -217,8 +220,10 @@ func TestRoundRobin_EvenDistribution(t *testing.T) {
 	logger := logging.NewNop()
 	managers := make([]*parti.Manager, numWorkers)
 	mgrWaiters := make([]testutil.ManagerWaiter, numWorkers)
+	js, err := jetstream.New(conn)
+	require.NoError(t, err)
 	for i := range managers {
-		mgr, err := parti.NewManager(&cfg, conn, source.NewStatic(partitions), strategy.NewRoundRobin(), parti.WithLogger(logger))
+		mgr, err := parti.NewManager(&cfg, js, source.NewStatic(partitions), strategy.NewRoundRobin(), parti.WithLogger(logger))
 		require.NoError(t, err)
 		managers[i] = mgr
 		mgrWaiters[i] = mgr
@@ -232,7 +237,7 @@ func TestRoundRobin_EvenDistribution(t *testing.T) {
 		}(mgr)
 	}
 
-	err := testutil.WaitAllManagersState(t.Context(), mgrWaiters, parti.StateStable, 15*time.Second)
+	err = testutil.WaitAllManagersState(t.Context(), mgrWaiters, parti.StateStable, 15*time.Second)
 	require.NoError(t, err, "not all managers reached stable state")
 
 	// Collect assignments and verify distribution
@@ -364,8 +369,10 @@ func TestWeightedPartitions_LoadBalancing(t *testing.T) {
 
 	// Create managers with WeightedConsistentHash (supports weights)
 	managers := make([]*parti.Manager, numWorkers)
+	js, err := jetstream.New(conn)
+	require.NoError(t, err)
 	for i := range managers {
-		mgr, err := parti.NewManager(cfg, conn, source.NewStatic(partitions), strategy.NewWeightedConsistentHash())
+		mgr, err := parti.NewManager(cfg, js, source.NewStatic(partitions), strategy.NewWeightedConsistentHash())
 		require.NoError(t, err)
 		managers[i] = mgr
 	}
@@ -381,12 +388,11 @@ func TestWeightedPartitions_LoadBalancing(t *testing.T) {
 	}
 
 	// Wait for all managers to reach stable state
-	err := testutil.WaitAllManagersState(ctx, mgrWaiters, parti.StateStable, 15*time.Second)
+	err = testutil.WaitAllManagersState(ctx, mgrWaiters, parti.StateStable, 15*time.Second)
 	require.NoError(t, err, "not all managers reached stable state")
 
 	// Collect assignments and calculate weights
 	workerWeights := make(map[string]int)
-	workerCounts := make(map[string]int)
 
 	for _, mgr := range managers {
 		workerID := mgr.WorkerID()
@@ -397,7 +403,6 @@ func TestWeightedPartitions_LoadBalancing(t *testing.T) {
 			count++
 		}
 		workerWeights[workerID] = int(weight)
-		workerCounts[workerID] = count
 		t.Logf("Worker %s: %d partitions, total weight=%d", workerID, count, weight)
 	}
 

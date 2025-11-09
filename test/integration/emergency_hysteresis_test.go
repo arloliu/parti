@@ -7,6 +7,7 @@ import (
 
 	"github.com/arloliu/parti"
 	"github.com/arloliu/parti/test/testutil"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 )
 
@@ -54,7 +55,9 @@ func TestEmergencyHysteresis_TransientDisappearance(t *testing.T) {
 
 	// Restart worker
 	t.Log("Restarting worker - simulating recovery")
-	newWorker, err := parti.NewManager(&cluster.Config, cluster.NC, cluster.Source, cluster.Strategy)
+	js, err := jetstream.New(cluster.NC)
+	require.NoError(t, err)
+	newWorker, err := parti.NewManager(&cluster.Config, js, cluster.Source, cluster.Strategy)
 	require.NoError(t, err)
 	cluster.Workers[0] = newWorker
 	err = newWorker.Start(ctx)

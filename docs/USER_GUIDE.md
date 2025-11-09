@@ -131,7 +131,8 @@ func main() {
     }
 
     // 6. Create manager
-    mgr, err := parti.NewManager(cfg, nc, src, assignStrategy, parti.WithHooks(hooks))
+    js, _ := jetstream.New(nc)
+    mgr, err := parti.NewManager(cfg, js, src, assignStrategy, parti.WithHooks(hooks))
     if err != nil {
         log.Fatal(err)
     }
@@ -670,7 +671,8 @@ parti.ErrElectionFailed          // Leader election failed
 #### Startup Errors
 
 ```go
-mgr, err := parti.NewManager(cfg, nc, src, strategy)
+js, _ := jetstream.New(nc)
+mgr, err := parti.NewManager(cfg, js, src, strategy)
 if err != nil {
     if errors.Is(err, parti.ErrInvalidConfig) {
         log.Fatal("Invalid configuration:", err)
@@ -1062,7 +1064,8 @@ helper, err := subscription.NewDurableHelper(nc, subscription.DurableConfig{
 }))
 if err != nil { log.Fatalf("helper init: %v", err) }
 
-mgr, err := parti.NewManager(cfg, nc, src, strategy, parti.WithWorkerConsumerUpdater(helper))
+js, _ := jetstream.New(nc)
+mgr, err := parti.NewManager(cfg, js, src, strategy, parti.WithWorkerConsumerUpdater(helper))
 if err != nil { log.Fatalf("manager init: %v", err) }
 if err := mgr.Start(context.Background()); err != nil { log.Fatalf("start: %v", err) }
 
@@ -1181,7 +1184,8 @@ cfg.Assignment.MinRebalanceThreshold = 0.20
 ```go
 // Use external election agent
 electionAgent := NewConsulElectionAgent(consulClient)
-mgr := parti.NewManager(cfg, nc, src, strategy,
+js, _ := jetstream.New(nc)
+mgr := parti.NewManager(cfg, js, src, strategy,
     parti.WithElectionAgent(electionAgent),
 )
 ```

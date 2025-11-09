@@ -18,7 +18,8 @@
 //	}
 //
 //	src := parti.StaticSource(partitions)
-//	mgr := parti.NewManager(&cfg, natsConn, src)
+//	js, _ := jetstream.New(natsConn)
+//	mgr := parti.NewManager(&cfg, js, src, strategy.NewConsistentHash())
 //
 //	if err := mgr.Start(ctx); err != nil {
 //	    log.Fatal(err)
@@ -62,7 +63,8 @@
 //	    },
 //	}
 //
-//	mgr := parti.NewManager(&cfg, natsConn, src,
+//	js, _ := jetstream.New(natsConn)
+//	mgr := parti.NewManager(&cfg, js, src,
 //	    parti.WithStrategy(strategy),
 //	    parti.WithHooks(hooks),
 //	)

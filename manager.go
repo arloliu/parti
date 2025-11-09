@@ -52,7 +52,8 @@ import (
 //	}
 type Manager struct {
 	cfg    Config
-	conn   *nats.Conn
+	conn   *nats.Conn // underlying connection (extracted from js.Conn())
+	js     jetstream.JetStream
 	source PartitionSource
 
 	// Optional dependencies
@@ -114,7 +115,7 @@ var _ types.StateProvider = (*Manager)(nil)
 // Returns a concrete *Manager struct following the "accept interfaces, return structs" principle.
 // Consumers can define their own interfaces for testing if needed.
 //
-// Parameters:
+// Legacy Parameters (deprecated signature):
 //   - cfg: Runtime configuration with parsed durations
 //   - conn: NATS connection for coordination
 //   - source: Partition source for discovering partitions
@@ -125,18 +126,37 @@ var _ types.StateProvider = (*Manager)(nil)
 //   - *Manager: Initialized manager instance
 //   - error: Validation error if configuration is invalid
 //
-// Example:
+// Example (current JetStream-based constructor):
 //
 //	cfg := parti.Config{WorkerIDPrefix: "worker", WorkerIDMax: 63}
 //	src := source.NewStatic(partitions)
 //	curStrategy := strategy.NewConsistentHash()
-//	mgr, err := parti.NewManager(&cfg, natsConn, src, curStrategy)
-func NewManager(cfg *Config, conn *nats.Conn, source PartitionSource, strategy AssignmentStrategy, opts ...Option) (*Manager, error) {
+//	js, _ := jetstream.New(natsConn)
+//	mgr, err := parti.NewManager(&cfg, js, src, curStrategy)
+//
+// NewManager creates a new Manager using a pre-initialized JetStream context.
+//
+// Breaking change notice: This constructor replaces the previous signature that
+// accepted *nats.Conn. Pass a jetstream.JetStream obtained via jetstream.New or
+// custom domain/prefix constructors. The underlying *nats.Conn is captured for
+// connectivity monitoring.
+//
+// Parameters:
+//   - cfg: Runtime configuration (will be defaulted & validated)
+//   - js: JetStream context (must be non-nil and backed by an active connection)
+//   - source: Partition source implementation
+//   - strategy: Assignment strategy implementation
+//   - opts: Functional options (hooks, metrics, logger, election agent, consumer updater)
+//
+// Returns:
+//   - *Manager: Initialized manager
+//   - error: Configuration validation or nil dependency errors
+func NewManager(cfg *Config, js jetstream.JetStream, source PartitionSource, strategy AssignmentStrategy, opts ...Option) (*Manager, error) {
 	if cfg == nil {
 		return nil, types.ErrInvalidConfig
 	}
-	if conn == nil {
-		return nil, types.ErrNATSConnectionRequired
+	if js == nil {
+		return nil, types.ErrNATSConnectionRequired // reuse existing sentinel (represents missing transport)
 	}
 	if source == nil {
 		return nil, types.ErrPartitionSourceRequired
@@ -145,10 +165,8 @@ func NewManager(cfg *Config, conn *nats.Conn, source PartitionSource, strategy A
 		return nil, types.ErrAssignmentStrategyRequired
 	}
 
-	// Fill in missing configuration values with defaults
+	// Fill defaults & validate
 	SetDefaults(cfg)
-
-	// Validate configuration
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
@@ -159,20 +177,15 @@ func NewManager(cfg *Config, conn *nats.Conn, source PartitionSource, strategy A
 		opt(options)
 	}
 
-	// Provide safe defaults for optional dependencies to avoid nil checks everywhere
 	metricsCollector := options.metrics
 	if metricsCollector == nil {
 		metricsCollector = metrics.NewNop()
 	}
-
 	loggerInstance := options.logger
 	if loggerInstance == nil {
 		loggerInstance = logging.NewNop()
 	}
-
-	// Validate with warnings after logger is available
 	cfg.ValidateWithWarnings(loggerInstance)
-
 	hooksInstance := options.hooks
 	if hooksInstance == nil {
 		nopHooks := hooks.NewNop()
@@ -181,7 +194,8 @@ func NewManager(cfg *Config, conn *nats.Conn, source PartitionSource, strategy A
 
 	m := &Manager{
 		cfg:             *cfg,
-		conn:            conn,
+		conn:            js.Conn(),
+		js:              js,
 		source:          source,
 		strategy:        strategy,
 		electionAgent:   options.electionAgent,
@@ -192,8 +206,6 @@ func NewManager(cfg *Config, conn *nats.Conn, source PartitionSource, strategy A
 		connMonitorStop: make(chan struct{}),
 		kvErrorWindow:   make([]time.Time, 0, cfg.DegradedBehavior.KVErrorThreshold),
 	}
-
-	// Initialize state
 	m.state.Store(int32(StateInit))
 	m.workerID.Store("")
 	m.assignment.Store(Assignment{})
@@ -255,10 +267,10 @@ func (m *Manager) Start(ctx context.Context) error {
 		defer cancel()
 	}
 
-	// Initialize NATS JetStream
-	js, err := jetstream.New(m.conn)
-	if err != nil {
-		return fmt.Errorf("failed to create jetstream context: %w", err)
+	// Use injected JetStream context (already constructed by caller)
+	js := m.js
+	if js == nil {
+		return errors.New("jetstream context not initialized")
 	}
 
 	// Create KV buckets for coordination

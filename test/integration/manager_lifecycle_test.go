@@ -13,6 +13,7 @@ import (
 	"github.com/arloliu/parti/test/testutil"
 	partitest "github.com/arloliu/parti/testing"
 	"github.com/arloliu/parti/types"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 )
 
@@ -43,8 +44,11 @@ func TestManager_StartStop(t *testing.T) {
 	// Create assignment strategy
 	strategy := strategy.NewConsistentHash()
 
+	js, err := jetstream.New(conn)
+	require.NoError(t, err)
+
 	// Create manager
-	mgr, err := parti.NewManager(&cfg, conn, src, strategy)
+	mgr, err := parti.NewManager(&cfg, js, src, strategy)
 	require.NoError(t, err)
 	require.NotNil(t, mgr)
 
@@ -104,8 +108,10 @@ func TestManager_MultipleWorkers(t *testing.T) {
 
 	// Create 3 workers
 	workers := make([]*parti.Manager, 3)
+	js, err := jetstream.New(conn)
+	require.NoError(t, err)
 	for i := range workers {
-		mgr, err := parti.NewManager(&cfg, conn, src, strategy, parti.WithLogger(debugLogger))
+		mgr, err := parti.NewManager(&cfg, js, src, strategy, parti.WithLogger(debugLogger))
 		require.NoError(t, err)
 		workers[i] = mgr
 	}
@@ -138,7 +144,7 @@ func TestManager_MultipleWorkers(t *testing.T) {
 	for i, mgr := range workers {
 		mgrWaiters[i] = mgr
 	}
-	err := testutil.WaitAllManagersState(t.Context(), mgrWaiters, parti.StateStable, 10*time.Second)
+	err = testutil.WaitAllManagersState(t.Context(), mgrWaiters, parti.StateStable, 10*time.Second)
 	require.NoError(t, err, "not all workers reached stable state")
 
 	// Verify all workers have IDs

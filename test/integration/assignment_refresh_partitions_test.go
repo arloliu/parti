@@ -13,6 +13,7 @@ import (
 	"github.com/arloliu/parti/test/testutil"
 	partitest "github.com/arloliu/parti/testing"
 	"github.com/arloliu/parti/types"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 )
 
@@ -69,7 +70,9 @@ func TestRefreshPartitions_Addition(t *testing.T) {
 	managers := make([]*parti.Manager, numManagers)
 
 	for i := 0; i < numManagers; i++ {
-		manager, err := parti.NewManager(cfg, conn, partitionSource, strategy.NewRoundRobin(), parti.WithLogger(debugLogger))
+		js, err := jetstream.New(conn)
+		require.NoError(t, err)
+		manager, err := parti.NewManager(cfg, js, partitionSource, strategy.NewRoundRobin(), parti.WithLogger(debugLogger))
 		require.NoError(t, err, "Failed to create manager %d", i)
 		managers[i] = manager
 	}
@@ -239,7 +242,9 @@ func TestRefreshPartitions_Removal(t *testing.T) {
 	managers := make([]*parti.Manager, numManagers)
 
 	for i := 0; i < numManagers; i++ {
-		manager, err := parti.NewManager(cfg, conn, partitionSource, strategy.NewRoundRobin(), parti.WithLogger(debugLogger))
+		js, err := jetstream.New(conn)
+		require.NoError(t, err)
+		manager, err := parti.NewManager(cfg, js, partitionSource, strategy.NewRoundRobin(), parti.WithLogger(debugLogger))
 		require.NoError(t, err, "Failed to create manager %d", i)
 		managers[i] = manager
 	}
@@ -418,7 +423,9 @@ func TestRefreshPartitions_WeightChange(t *testing.T) {
 	managers := make([]*parti.Manager, numManagers)
 
 	for i := 0; i < numManagers; i++ {
-		manager, err := parti.NewManager(cfg, conn, partitionSource, strategy.NewConsistentHash(), parti.WithLogger(debugLogger))
+		js, err := jetstream.New(conn)
+		require.NoError(t, err)
+		manager, err := parti.NewManager(cfg, js, partitionSource, strategy.NewConsistentHash(), parti.WithLogger(debugLogger))
 		require.NoError(t, err, "Failed to create manager %d", i)
 		managers[i] = manager
 	}
@@ -603,7 +610,9 @@ func TestRefreshPartitions_Cooldown(t *testing.T) {
 	managers := make([]*parti.Manager, numManagers)
 
 	for i := 0; i < numManagers; i++ {
-		manager, err := parti.NewManager(cfg, conn, partitionSource, strategy.NewRoundRobin(), parti.WithLogger(debugLogger))
+		js, err := jetstream.New(conn)
+		require.NoError(t, err)
+		manager, err := parti.NewManager(cfg, js, partitionSource, strategy.NewRoundRobin(), parti.WithLogger(debugLogger))
 		require.NoError(t, err, "Failed to create manager %d", i)
 		managers[i] = manager
 	}
