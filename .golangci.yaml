@@ -101,7 +101,7 @@ linters:
     nakedret:
       max-func-lines: 40
     nlreturn:
-      block-size: 3
+      block-size: 7
     nolintlint:
       require-explanation: false
       require-specific: true
@@ -167,6 +167,12 @@ linters:
           disabled: true
           exclude:
             - '**/*_test.go'
+        - name: enforce-switch-style
+          severity: warning
+          disabled: false
+          exclude:
+            - '**/*_test.go'
+          arguments: [ "allowNoDefault" ]
         - name: unhandled-error
           arguments:
             - fmt.Errorf

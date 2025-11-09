@@ -19,6 +19,18 @@ const (
 	// DefaultRetryBackoff is the default duration between retry attempts.
 	DefaultRetryBackoff = 100 * time.Millisecond
 
+	// DefaultRetryBase is the default base backoff for decorrelated jitter.
+	DefaultRetryBase = 200 * time.Millisecond
+
+	// DefaultRetryMultiplier is the default multiplier used to grow backoff.
+	DefaultRetryMultiplier = 1.6
+
+	// DefaultRetryMax is the default maximum backoff cap for control-plane retries.
+	DefaultRetryMax = 5 * time.Second
+
+	// DefaultMaxControlRetries is the default maximum control-plane retry attempts.
+	DefaultMaxControlRetries = 6
+
 	// DefaultAckWait is the default duration to wait for acknowledgment.
 	DefaultAckWait = 30 * time.Second
 
@@ -27,4 +39,11 @@ const (
 
 	// DefaultInactiveThreshold is the default inactive consumer cleanup threshold.
 	DefaultInactiveThreshold = 24 * time.Hour
+
+	// DefaultMaxSubjects is the default cap for filter subjects applied to a worker consumer.
+	DefaultMaxSubjects = 500
+
+	// DefaultHealthFailureThreshold is the default consecutive failure threshold
+	// before considering the worker consumer unhealthy.
+	DefaultHealthFailureThreshold = 3
 )

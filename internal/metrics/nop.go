@@ -128,3 +128,75 @@ func (n *NopMetrics) RecordHeartbeat(_ /* workerID */ string, _ /* success */ bo
 func (n *NopMetrics) RecordAssignmentChange(_ /* added */, _ /* removed */ int, _ /* version */ int64) {
 	// No-op
 }
+
+// WorkerConsumerMetrics implementation
+
+// IncrementWorkerConsumerControlRetry discards the control-plane retry counter.
+func (n *NopMetrics) IncrementWorkerConsumerControlRetry(_ /* op */ string) {
+	// No-op
+}
+
+// RecordWorkerConsumerRetryBackoff discards the backoff duration observation.
+func (n *NopMetrics) RecordWorkerConsumerRetryBackoff(_ /* op */ string, _ /* seconds */ float64) {
+	// No-op
+}
+
+// SetWorkerConsumerSubjectsCurrent discards the gauge set.
+func (n *NopMetrics) SetWorkerConsumerSubjectsCurrent(_ /* count */ int) {
+	// No-op
+}
+
+// IncrementWorkerConsumerSubjectChange discards subject change increments.
+func (n *NopMetrics) IncrementWorkerConsumerSubjectChange(_ /* kind */ string, _ /* count */ int) {
+	// No-op
+}
+
+// IncrementWorkerConsumerGuardrailViolation discards guardrail violation increments.
+func (n *NopMetrics) IncrementWorkerConsumerGuardrailViolation(_ /* kind */ string) {
+	// No-op
+}
+
+// IncrementWorkerConsumerSubjectThresholdWarning discards threshold warning increments.
+func (n *NopMetrics) IncrementWorkerConsumerSubjectThresholdWarning() {
+	// No-op
+}
+
+// RecordWorkerConsumerUpdate discards update result increments.
+func (n *NopMetrics) RecordWorkerConsumerUpdate(_ /* result */ string) {
+	// No-op
+}
+
+// ObserveWorkerConsumerUpdateLatency discards latency observations.
+func (n *NopMetrics) ObserveWorkerConsumerUpdateLatency(_ /* seconds */ float64) {
+	// No-op
+}
+
+// IncrementWorkerConsumerIteratorRestart discards iterator restart increments.
+func (n *NopMetrics) IncrementWorkerConsumerIteratorRestart(_ /* reason */ string) {
+	// No-op
+}
+
+// SetWorkerConsumerConsecutiveIteratorFailures discards consecutive failure gauge updates.
+func (n *NopMetrics) SetWorkerConsumerConsecutiveIteratorFailures(_ /* count */ int) {
+	// No-op
+}
+
+// SetWorkerConsumerHealthStatus discards health status updates.
+func (n *NopMetrics) SetWorkerConsumerHealthStatus(_ /* healthy */ bool) {
+	// No-op
+}
+
+// IncrementWorkerConsumerRecreationAttempt discards recreation attempt increments.
+func (n *NopMetrics) IncrementWorkerConsumerRecreationAttempt(_ /* reason */ string) {
+	// No-op
+}
+
+// RecordWorkerConsumerRecreation discards recreation outcome increments.
+func (n *NopMetrics) RecordWorkerConsumerRecreation(_ /* result */ string, _ /* reason */ string) {
+	// No-op
+}
+
+// ObserveWorkerConsumerRecreationDuration discards recreation duration observations.
+func (n *NopMetrics) ObserveWorkerConsumerRecreationDuration(_ /* seconds */ float64) {
+	// No-op
+}

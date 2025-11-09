@@ -2,6 +2,7 @@ package subscription
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"text/template"
 
@@ -152,4 +153,58 @@ func TestUpdateWorkerConsumer_NoOpEarlyExit(t *testing.T) {
 	}
 	// NOTE: Full UpdateWorkerConsumer path requires jetstream; kept for integration tests.
 	_ = context.Background() // silence unused import if future refactor removes context usage here
+}
+
+// Guardrail: exceeding MaxSubjects should error with ErrMaxSubjectsExceeded before any JS interaction.
+func TestUpdateWorkerConsumer_Guardrail_MaxSubjectsExceeded(t *testing.T) {
+	dh := unitHelper(t, "work.{{.PartitionID}}")
+	dh.config.MaxSubjects = 1 // allow only 1 subject
+	// workerID is required for UpdateWorkerConsumer
+	ctx := context.Background()
+
+	parts := []types.Partition{
+		{Keys: []string{"a"}},
+		{Keys: []string{"b"}},
+	}
+	err := dh.UpdateWorkerConsumer(ctx, "w1", parts)
+	if !errors.Is(err, ErrMaxSubjectsExceeded) {
+		t.Fatalf("expected ErrMaxSubjectsExceeded, got %v", err)
+	}
+}
+
+// Guardrail: workerID mutation should be rejected when AllowWorkerIDChange is false.
+func TestUpdateWorkerConsumer_Guardrail_WorkerIDMutation(t *testing.T) {
+	dh := unitHelper(t, "work.{{.PartitionID}}")
+	dh.workerID = "w1"
+	dh.workerSubjects = []string{"work.a"}
+	dh.config.AllowWorkerIDChange = false
+
+	ctx := context.Background()
+	parts := []types.Partition{{Keys: []string{"a"}}}
+	err := dh.UpdateWorkerConsumer(ctx, "w2", parts)
+	if !errors.Is(err, ErrWorkerIDMutation) {
+		t.Fatalf("expected ErrWorkerIDMutation, got %v", err)
+	}
+}
+
+// Health accessor should reflect configured threshold.
+func TestWorkerConsumerHealth_Threshold(t *testing.T) {
+	dh := unitHelper(t, "work.{{.PartitionID}}")
+	dh.config.HealthFailureThreshold = 2
+	// Simulate internal failure increments (bypass loop logic for unit test)
+	dh.consecutiveFailures = 1
+	h := dh.Health()
+	if !h.Healthy || h.ConsecutiveFailures != 1 {
+		t.Fatalf("expected healthy with 1 failure: %+v", h)
+	}
+	dh.consecutiveFailures = 2
+	h = dh.Health()
+	if !h.Healthy {
+		t.Fatalf("expected still healthy at threshold: %+v", h)
+	}
+	dh.consecutiveFailures = 3
+	h = dh.Health()
+	if h.Healthy {
+		t.Fatalf("expected unhealthy past threshold: %+v", h)
+	}
 }

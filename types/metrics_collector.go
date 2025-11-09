@@ -11,6 +11,7 @@ type MetricsCollector interface {
 	CalculatorMetrics
 	WorkerMetrics
 	AssignmentMetrics
+	WorkerConsumerMetrics
 }
 
 // ManagerMetrics defines metrics for manager-level operations.
@@ -134,4 +135,67 @@ type WorkerMetrics interface {
 type AssignmentMetrics interface {
 	// RecordAssignmentChange records partition assignment changes.
 	RecordAssignmentChange(added, removed int, version int64)
+}
+
+// WorkerConsumerMetrics defines metrics for the single durable consumer helper.
+type WorkerConsumerMetrics interface {
+	// IncrementWorkerConsumerControlRetry increments retry attempts by operation (create_update, iterate, info).
+	//
+	// Parameters:
+	//   - op: Operation name ("create_update", "iterate", "info")
+	IncrementWorkerConsumerControlRetry(op string)
+
+	// RecordWorkerConsumerRetryBackoff records backoff delay durations (seconds) by operation.
+	// Typically emitted alongside retry increments to populate histogram buckets.
+	//
+	// Parameters:
+	//   - op: Operation name
+	//   - seconds: Backoff duration in seconds
+	RecordWorkerConsumerRetryBackoff(op string, seconds float64)
+
+	// SetWorkerConsumerSubjectsCurrent sets the current number of subjects (gauge).
+	SetWorkerConsumerSubjectsCurrent(count int)
+
+	// IncrementWorkerConsumerSubjectChange increments add/remove counts on subject diffs.
+	IncrementWorkerConsumerSubjectChange(kind string, count int)
+
+	// IncrementWorkerConsumerGuardrailViolation increments violations (max_subjects, workerid_mutation).
+	IncrementWorkerConsumerGuardrailViolation(kind string)
+
+	// IncrementWorkerConsumerSubjectThresholdWarning increments threshold warning events.
+	IncrementWorkerConsumerSubjectThresholdWarning()
+
+	// RecordWorkerConsumerUpdate increments update results (success|failure|noop).
+	RecordWorkerConsumerUpdate(result string)
+
+	// ObserveWorkerConsumerUpdateLatency records update latency in seconds.
+	ObserveWorkerConsumerUpdateLatency(seconds float64)
+
+	// IncrementWorkerConsumerIteratorRestart increments iterator restart counts by reason (transient|heartbeat).
+	IncrementWorkerConsumerIteratorRestart(reason string)
+
+	// SetWorkerConsumerConsecutiveIteratorFailures sets the current consecutive iterator failures gauge.
+	SetWorkerConsumerConsecutiveIteratorFailures(count int)
+
+	// SetWorkerConsumerHealthStatus sets worker consumer health status gauge (1 healthy, 0 unhealthy).
+	SetWorkerConsumerHealthStatus(healthy bool)
+
+	// IncrementWorkerConsumerRecreationAttempt increments recreation attempts by reason.
+	//
+	// Parameters:
+	//   - reason: Reason category ("not_found"|"iterator_error"|"unknown")
+	IncrementWorkerConsumerRecreationAttempt(reason string)
+
+	// RecordWorkerConsumerRecreation records recreation outcomes by result and reason.
+	//
+	// Parameters:
+	//   - result: "success"|"failure"
+	//   - reason: "not_found"|"iterator_error"|"unknown"
+	RecordWorkerConsumerRecreation(result string, reason string)
+
+	// ObserveWorkerConsumerRecreationDuration observes total recreation latency in seconds.
+	//
+	// Parameters:
+	//   - seconds: Total duration of a recreation attempt sequence (success or terminal failure)
+	ObserveWorkerConsumerRecreationDuration(seconds float64)
 }

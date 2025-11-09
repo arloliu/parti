@@ -1219,6 +1219,59 @@ func WithWorkerConsumerUpdater(updater WorkerConsumerUpdater) Option
 
 When provided, the Manager invokes `UpdateWorkerConsumer` after initial assignment and on every subsequent change prior to calling `Hooks.OnAssignmentChanged`, allowing hooks to focus on lightweight side effects (metrics, logging) instead of subscription plumbing.
 
+### WorkerConsumer Health & Metrics
+
+The single durable worker consumer exposes health and emits metrics for operational visibility.
+
+```go
+type WorkerConsumerHealth struct {
+        ConsecutiveFailures int  // current consecutive iterator/handler failures
+        Healthy             bool // derived: true if ConsecutiveFailures <= HealthFailureThreshold
+}
+
+func (wc *WorkerConsumer) Health() WorkerConsumerHealth
+```
+
+Configuration fields in `WorkerConsumerConfig` impacting health & retries:
+```go
+HealthFailureThreshold int     // tolerated consecutive failures (default 3)
+RetryBase              time.Duration
+RetryMultiplier        float64
+RetryMax               time.Duration
+MaxControlRetries      int
+MaxSubjects            int    // subject cap (default 500)
+AllowWorkerIDChange    bool   // guardrail override (default false)
+RetrySeed              int64  // deterministic jitter seed for tests (0 => use global PRNG)
+```
+
+Emission Points (names subject to implementation in your MetricsCollector):
+- Update lifecycle:
+    - `worker_consumer_update_total{result="success|failure|noop"}`
+    - `worker_consumer_update_latency_seconds` (histogram)
+- Subjects & guardrails:
+    - `worker_consumer_subjects_current`
+    - `worker_consumer_subject_changes_total{type="add|remove"}`
+    - `worker_consumer_guardrail_violations_total{type="max_subjects|workerid_mutation"}`
+    - `worker_consumer_subject_threshold_warnings_total`
+- Iterator loop resilience:
+    - `worker_consumer_iterator_restarts_total{reason="heartbeat|transient"}`
+    - `worker_consumer_consecutive_iterator_failures`
+    - `worker_consumer_health_status` (1 healthy, 0 unhealthy)
+- Control-plane retry & jitter:
+    - `worker_consumer_control_retries_total{op="create_update|iterate"}`
+    - `worker_consumer_retry_backoff_seconds{op}`
+
+Jitter Backoff:
+Uses decorrelated jitter ("Full Jitter") via `jitterBackoff(prev, base, multiplier, cap)` with `math/rand/v2` (non-crypto). A deterministic RNG is created only when `RetrySeed` is non-zero (tests). Production path uses the package-level PRNG.
+
+Example snippet:
+```go
+wc, _ := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{ /* ... */ }, handler)
+// After updates applied:
+h := wc.Health()
+if !h.Healthy { log.Printf("unhealthy; consecutive failures=%d", h.ConsecutiveFailures) }
+```
+
 ### Legacy Helper (Per-Partition Subscriptions)
 
 `Helper` and its `UpdateSubscriptions` method remain for scenarios requiring one NATS subscription per partition. New integrations SHOULD prefer `DurableHelper` for better scalability.

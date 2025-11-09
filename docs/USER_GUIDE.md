@@ -1162,6 +1162,55 @@ hooks := &parti.Hooks{OnAssignmentChanged: func(ctx context.Context, added, remo
 }}
 ```
 
+### Worker Consumer Health & Metrics
+
+The single-durable helper exposes a lightweight health signal and emits core metrics for operability.
+
+Health:
+- `HealthFailureThreshold` (default: 3) controls how many consecutive iterator/handler failures are tolerated before the helper is considered unhealthy for metrics.
+- `(*WorkerConsumer).Health()` returns a snapshot:
+    - `ConsecutiveFailures`: current count
+    - `Healthy`: derived boolean based on the configured threshold
+
+Metrics (Prometheus names depend on your implementation of `types.MetricsCollector`):
+- Update path:
+    - `worker_consumer_update_total{result}` with `result in {success, failure, noop}`
+    - `worker_consumer_update_latency_seconds` (histogram)
+- Subjects and guardrails:
+    - `worker_consumer_subjects_current` (gauge)
+    - `worker_consumer_subject_changes_total{type="add|remove"}`
+    - `worker_consumer_guardrail_violations_total{type="max_subjects|workerid_mutation"}`
+    - `worker_consumer_subject_threshold_warnings_total` (≥90% of `MaxSubjects`)
+- Iterator loop:
+    - `worker_consumer_iterator_restarts_total{reason="heartbeat|transient"}`
+    - `worker_consumer_consecutive_iterator_failures` (gauge)
+    - `worker_consumer_health_status` (gauge: 1 healthy, 0 unhealthy)
+- Control-plane retries/backoff:
+    - `worker_consumer_control_retries_total{op="create_update|iterate"}`
+    - `worker_consumer_retry_backoff_seconds{op}` (histogram)
+
+Configuration knobs:
+```go
+subscription.WorkerConsumerConfig{
+        // Cap the subject set and get warnings at 90% of the cap
+        MaxSubjects:            500,
+        // Guard against accidental workerID changes (can be overridden for migrations)
+        AllowWorkerIDChange:    false,
+        // Health: consecutive failures tolerated before unhealthy
+        HealthFailureThreshold: 3,
+        // Decorrelated jitter backoff for control-plane retries
+        RetryBase:       200 * time.Millisecond,
+        RetryMultiplier: 1.6,
+        RetryMax:        5 * time.Second,
+        MaxControlRetries: 6,
+}
+```
+
+Notes:
+- Subjects are deduplicated and sorted deterministically before applying.
+- The pull loop starts lazily on first successful update and hot-reloads subjects without restarting.
+- Backoff jitter uses `math/rand/v2` (non-crypto), with an optional deterministic `RetrySeed` used only in tests.
+
 ### Pattern 3: Database-Backed Partitions
 
 ```go

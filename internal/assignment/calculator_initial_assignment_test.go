@@ -501,3 +501,17 @@ func (m *mockMetricsCollector) SetAlertLevel(level int)                         
 func (m *mockMetricsCollector) IncrementAlertEmitted(level string)                           {}
 func (m *mockMetricsCollector) RecordHeartbeat(workerID string, success bool)                {}
 func (m *mockMetricsCollector) RecordAssignmentChange(added, removed int, version int64)     {}
+func (m *mockMetricsCollector) IncrementWorkerConsumerControlRetry(op string)                {}
+func (m *mockMetricsCollector) RecordWorkerConsumerRetryBackoff(op string, seconds float64)  {}
+func (m *mockMetricsCollector) SetWorkerConsumerSubjectsCurrent(count int)                   {}
+func (m *mockMetricsCollector) IncrementWorkerConsumerSubjectChange(kind string, count int)  {}
+func (m *mockMetricsCollector) IncrementWorkerConsumerGuardrailViolation(kind string)        {}
+func (m *mockMetricsCollector) IncrementWorkerConsumerSubjectThresholdWarning()              {}
+func (m *mockMetricsCollector) RecordWorkerConsumerUpdate(result string)                     {}
+func (m *mockMetricsCollector) ObserveWorkerConsumerUpdateLatency(seconds float64)           {}
+func (m *mockMetricsCollector) IncrementWorkerConsumerIteratorRestart(reason string)         {}
+func (m *mockMetricsCollector) SetWorkerConsumerConsecutiveIteratorFailures(count int)       {}
+func (m *mockMetricsCollector) SetWorkerConsumerHealthStatus(healthy bool)                   {}
+func (m *mockMetricsCollector) IncrementWorkerConsumerRecreationAttempt(reason string)       {}
+func (m *mockMetricsCollector) RecordWorkerConsumerRecreation(result string, reason string)  {}
+func (m *mockMetricsCollector) ObserveWorkerConsumerRecreationDuration(seconds float64)      {}

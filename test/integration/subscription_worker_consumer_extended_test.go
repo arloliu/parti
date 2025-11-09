@@ -143,9 +143,10 @@ func TestWorkerConsumerWorkerIDSwitch(t *testing.T) {
 
 	mh := subscription.MessageHandlerFunc(func(c context.Context, msg jetstream.Msg) error { return msg.Ack() })
 	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
-		StreamName:      "switch-int-stream",
-		ConsumerPrefix:  "wkr",
-		SubjectTemplate: "switch.int.{{.PartitionID}}",
+		StreamName:          "switch-int-stream",
+		ConsumerPrefix:      "wkr",
+		SubjectTemplate:     "switch.int.{{.PartitionID}}",
+		AllowWorkerIDChange: true,
 	}, mh)
 	require.NoError(t, err)
 	defer helper.Close(context.Background())

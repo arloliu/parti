@@ -205,25 +205,17 @@ Expected Files:
 ### SC-P0-7 Operational Readiness & Observability
 Implementation Tasks:
 1. Enrich logs with structured fields: `worker_id`, `consumer_name`, `subject_count`, `op`, `result`.
-2. Implement `Dump()` on helper returning snapshot (subjects, health, last error, last update time).
-3. Add minimal runbook section in `docs/OPERATIONS.md` (recreation spikes, unhealthy state triage, guardrail violations).
-4. Provide example Grafana panel definitions (can defer full dashboard until metrics stable).
-5. Security review tasks: verify KV bucket ACLs, ensure workerID cannot be spoofed (context source locked to manager), sanitize error messages (no internal paths).
-6. Observability verification: confirm all critical transitions (healthy→unhealthy, handoff prepare→commit) produce structured logs and metrics.
+2. Observability verification: confirm all critical transitions (healthy→unhealthy, handoff prepare→commit) produce structured logs and metrics.
 
 Metrics:
 * `parti_worker_consumer_dump_requests_total` (optional if Dump used externally)
 
 Acceptance Criteria:
-* Runbook published and referenced by README / OPERATIONS.
 * Logs show required fields across major operations (spot-check integration test).
-* Security review checklist completed with no high findings.
-* Snapshot Dump returns consistent view used in tests.
 
 Expected Files:
-- `subscription/durable_helper.go` (Dump and log enrichment)
+- `subscription/durable_helper.go` (log enrichment)
 - `internal/logging/` and `types/logger.go` (ensure structured fields)
-- `docs/OPERATIONS.md` (runbook additions)
 - `examples/basic/README.md` (optional log/sample references)
 
 ---
