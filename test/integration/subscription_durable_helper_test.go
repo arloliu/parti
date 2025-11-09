@@ -32,7 +32,7 @@ func TestWorkerConsumer_NewAndDefaults(t *testing.T) {
 	require.NoError(t, err)
 
 	// Valid config (explicit ack policy)
-	helper, err := subscription.NewWorkerConsumer(nc, subscription.WorkerConsumerConfig{
+	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
 		StreamName:      "defaults-stream",
 		ConsumerPrefix:  "test",
 		SubjectTemplate: "work.{{.PartitionID}}",
@@ -42,7 +42,7 @@ func TestWorkerConsumer_NewAndDefaults(t *testing.T) {
 	require.NotNil(t, helper)
 
 	// Defaults applied when zero values provided (uses same stream)
-	helper2, err := subscription.NewWorkerConsumer(nc, subscription.WorkerConsumerConfig{
+	helper2, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
 		StreamName:      "defaults-stream",
 		ConsumerPrefix:  "test",
 		SubjectTemplate: "work.{{.PartitionID}}",
@@ -70,7 +70,7 @@ func TestWorkerConsumer_Basic(t *testing.T) {
 	require.NoError(t, err)
 
 	var msgCount atomic.Int32
-	helper, err := subscription.NewWorkerConsumer(nc, subscription.WorkerConsumerConfig{
+	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
 		StreamName:        "work-stream",
 		ConsumerPrefix:    "worker",
 		SubjectTemplate:   "work.{{.PartitionID}}",
@@ -132,7 +132,7 @@ func TestWorkerConsumer_MessageHandling(t *testing.T) {
 		return nil
 	})
 
-	helper, err := subscription.NewWorkerConsumer(nc, subscription.WorkerConsumerConfig{
+	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
 		StreamName:        "test-stream",
 		ConsumerPrefix:    "test",
 		SubjectTemplate:   "test.{{.PartitionID}}",
@@ -168,7 +168,7 @@ func TestWorkerConsumer_Info(t *testing.T) {
 	_, err = js.CreateStream(ctx, jetstream.StreamConfig{Name: "info-stream", Subjects: []string{"info.>"}})
 	require.NoError(t, err)
 
-	helper, err := subscription.NewWorkerConsumer(nc, subscription.WorkerConsumerConfig{
+	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
 		StreamName:        "info-stream",
 		ConsumerPrefix:    "info",
 		SubjectTemplate:   "info.{{.PartitionID}}",
@@ -206,7 +206,7 @@ func TestWorkerConsumer_CloseAndLogger(t *testing.T) {
 	require.NoError(t, err)
 
 	testLogger := partitesting.NewTestLogger(t)
-	helper, err := subscription.NewWorkerConsumer(nc, subscription.WorkerConsumerConfig{
+	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
 		StreamName:        "close-stream",
 		ConsumerPrefix:    "close",
 		SubjectTemplate:   "close.{{.PartitionID}}",

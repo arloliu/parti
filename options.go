@@ -142,7 +142,7 @@ type WorkerConsumerUpdater interface {
 // Example:
 //
 //	js, _ := jetstream.New(nc)
-//	helper, _ := subscription.NewWorkerConsumerJS(js, subscription.WorkerConsumerConfig{ /* ... */ }, handler)
+//	helper, _ := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{ /* ... */ }, handler)
 //	mgr, err := parti.NewManager(cfg, js, src, strategy, parti.WithWorkerConsumerUpdater(helper))
 //	if err != nil { /* handle */ }
 func WithWorkerConsumerUpdater(updater WorkerConsumerUpdater) Option {

@@ -33,15 +33,9 @@
 //     heartbeat interval for efficient streaming without busy polling.
 //   - Minimal defaults: Sensible configuration defaults applied automatically.
 //
-// Removed / Deprecated
-//   - UpdateSubscriptions (per-partition API) and related helper methods
-//     (getOrCreateConsumer, tryGetOrCreateConsumer, startPullLoop, generatePartitionID,
-//     consumerState tracking) have been removed. Tests referencing these have
-//     been migrated to worker-level semantics or excluded via build tags.
-//
 // Usage Pattern
 //
-//	helper, err := subscription.NewWorkerConsumer(nc, subscription.WorkerConsumerConfig{
+//	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
 //	    StreamName:      "events-stream",
 //	    ConsumerPrefix:  "worker",
 //	    SubjectTemplate: "events.{{.PartitionID}}",

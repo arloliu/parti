@@ -40,7 +40,7 @@ func TestSubscriptionHelper_Creation(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create durable helper (single-consumer)
-	helper, err := subscription.NewWorkerConsumer(conn, subscription.WorkerConsumerConfig{
+	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
 		StreamName:      "test-stream",
 		ConsumerPrefix:  "worker",
 		SubjectTemplate: "test.sub.{{.PartitionID}}",
@@ -169,7 +169,7 @@ func TestSubscriptionHelper_UpdateOnRebalance(t *testing.T) {
 	// Create stream and durable helper for first manager (reuse js)
 	_, err = js.CreateStream(ctx, jetstream.StreamConfig{Name: "test-stream", Subjects: []string{"rebalance.sub.>"}})
 	require.NoError(t, err)
-	helper, err := subscription.NewWorkerConsumer(conn, subscription.WorkerConsumerConfig{
+	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
 		StreamName:      "test-stream",
 		ConsumerPrefix:  "worker",
 		SubjectTemplate: "rebalance.sub.{{.PartitionID}}",
@@ -281,7 +281,7 @@ func TestSubscriptionHelper_Cleanup(t *testing.T) {
 	require.NoError(t, err)
 	_, err = js.CreateStream(ctx, jetstream.StreamConfig{Name: "test-stream", Subjects: []string{"cleanup.sub.>"}})
 	require.NoError(t, err)
-	helper, err := subscription.NewWorkerConsumer(conn, subscription.WorkerConsumerConfig{
+	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
 		StreamName:      "test-stream",
 		ConsumerPrefix:  "worker",
 		SubjectTemplate: "cleanup.sub.{{.PartitionID}}",
@@ -339,7 +339,7 @@ func TestSubscriptionHelper_ErrorHandling(t *testing.T) {
 	require.NoError(t, err)
 	_, err = js.CreateStream(ctx, jetstream.StreamConfig{Name: "test-stream", Subjects: []string{"err.sub.>"}})
 	require.NoError(t, err)
-	helper, err := subscription.NewWorkerConsumer(conn, subscription.WorkerConsumerConfig{
+	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
 		StreamName:      "test-stream",
 		ConsumerPrefix:  "worker",
 		SubjectTemplate: "err.sub.{{.PartitionID}}",

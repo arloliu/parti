@@ -126,7 +126,12 @@ func NewWorker(cfg Config) (*Worker, error) {
 		SubjectTemplate: "simulation.partition.{{.PartitionID}}",
 		StreamName:      "SIMULATION",
 	}
-	helper, err := subscription.NewWorkerConsumer(cfg.NC, helperConfig, subscription.MessageHandlerFunc(worker.processMessage))
+	js, err := jetstream.New(cfg.NC)
+	if err != nil {
+		return nil, fmt.Errorf("failed to init JetStream: %w", err)
+	}
+
+	helper, err := subscription.NewWorkerConsumer(js, helperConfig, subscription.MessageHandlerFunc(worker.processMessage))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create durable helper: %w", err)
 	}
@@ -135,10 +140,6 @@ func NewWorker(cfg Config) (*Worker, error) {
 	// Set up hooks to record metrics only (consumer updates handled by manager option)
 	hooks := &types.Hooks{OnAssignmentChanged: worker.handleAssignmentChanged}
 	// Create manager with hooks
-	js, err := jetstream.New(cfg.NC)
-	if err != nil {
-		return nil, fmt.Errorf("failed to init JetStream: %w", err)
-	}
 	manager, err := parti.NewManager(&partiCfg, js, partitionSource, assignmentStrategy,
 		parti.WithLogger(logger),
 		parti.WithHooks(hooks),

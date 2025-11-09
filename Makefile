@@ -158,4 +158,3 @@ clean: clean-test-results
 
 ## ci: Run all CI checks (lint, test, coverage)
 ci: lint vet test-all coverage
-	@echo "All CI checks passed!"

@@ -52,7 +52,6 @@ import (
 //	}
 type Manager struct {
 	cfg    Config
-	conn   *nats.Conn // underlying connection (extracted from js.Conn())
 	js     jetstream.JetStream
 	source PartitionSource
 
@@ -194,7 +193,6 @@ func NewManager(cfg *Config, js jetstream.JetStream, source PartitionSource, str
 
 	m := &Manager{
 		cfg:             *cfg,
-		conn:            js.Conn(),
 		js:              js,
 		source:          source,
 		strategy:        strategy,
@@ -233,7 +231,7 @@ func NewManager(cfg *Config, js jetstream.JetStream, source PartitionSource, str
 //
 // Example usage:
 //
-//	mgr := parti.NewManager(cfg, conn)
+//	mgr := parti.NewManager(cfg, js, source, strategy)
 //	if err := mgr.Start(ctx); err != nil {
 //	    // Cleanup on startup failure
 //	    _ = mgr.Stop(context.Background())
@@ -1283,7 +1281,8 @@ func (m *Manager) monitorNATSConnection() {
 
 // checkConnectionHealth checks NATS connection status and updates degraded state.
 func (m *Manager) checkConnectionHealth() {
-	isConnected := m.conn.Status() == nats.CONNECTED
+	conn := m.js.Conn()
+	isConnected := conn != nil && conn.Status() == nats.CONNECTED
 
 	now := time.Now()
 

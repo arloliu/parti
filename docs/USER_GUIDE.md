@@ -158,6 +158,20 @@ func main() {
         log.Printf("Error during shutdown: %v", err)
     }
 }
+
+### JetStream Context Best Practices
+
+| Topic | Recommendation |
+|-------|----------------|
+| Construction | Create once at process startup: `js, _ := jetstream.New(nc)` |
+| Reuse | Share `js` across managers and worker consumers; avoid repeated `jetstream.New` calls |
+| Domains | For multi-tenancy, prefer domain-aware JetStream creation (future helper) rather than multiple connections |
+| Lifetime | `js` lives as long as its underlying `*nats.Conn`; stop managers before closing the connection |
+| Reconnection | JetStream automatically follows connection reconnection; monitor degraded mode for prolonged outages |
+| Error Handling | Treat persistent stream/consumer errors as configuration issues; implement retries only for transient API failures |
+| Consumer Updates | Use `WorkerConsumerUpdater` for hot FilterSubjects reconciliation instead of manual consumer recreation |
+
+**Why explicit JetStream?**: It clarifies dependency boundaries, enables future domain/prefix features, and allows finer-grained test injection (e.g., mocked JetStream).
 ```
 
 ---

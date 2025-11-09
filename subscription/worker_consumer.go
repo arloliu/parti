@@ -41,87 +41,7 @@ type subjectContext struct {
 	PartitionID string
 }
 
-// NewWorkerConsumer creates a new durable consumer manager for a single worker.
-//
-// This helper implements the single-consumer (per-worker) pattern. Instead of
-// creating one consumer per partition, it maintains a single durable pull
-// consumer whose FilterSubjects set (plural) is updated whenever the worker's
-// assignment changes. This greatly reduces JetStream consumer churn and avoids
-// expensive restart storms during rapid scaling events while still allowing
-// precise subject-level filtering.
-//
-// The helper handles:
-//   - Durable consumer creation (CreateOrUpdateConsumer)
-//   - Subject template expansion per partition (deduped + sorted)
-//   - Resilient pull loop with heartbeat tolerance
-//   - ACK/NAK semantics driven by the injected MessageHandler
-//
-// Optional configuration fields are automatically set to sensible defaults if
-// not provided. The message handler is required and immutable for the lifetime
-// of the helper.
-//
-// Parameters:
-//   - conn: NATS connection (must be non-nil)
-//   - cfg: Helper configuration with required fields (StreamName, ConsumerPrefix, SubjectTemplate)
-//   - handler: Message handler invoked for each received JetStream message
-//
-// Returns:
-//   - *WorkerConsumer: Initialized helper with defaults applied
-//   - error: Configuration, connection, template parsing, or handler error
-//
-// Example (minimal configuration with defaults):
-//
-//	helper, err := subscription.NewWorkerConsumer(natsConn, subscription.WorkerConsumerConfig{
-//	    StreamName:      "work-stream",
-//	    ConsumerPrefix:  "processor",
-//	    SubjectTemplate: "metrics.{{.PartitionID}}.collected",
-//	}, subscription.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
-//	    // process message
-//	    return msg.Ack()
-//	}))
-//
-// Example (with custom configuration):
-//
-//	helper, err := subscription.NewWorkerConsumer(natsConn, subscription.WorkerConsumerConfig{
-//	    StreamName:        "work-stream",
-//	    ConsumerPrefix:    "processor",
-//	    SubjectTemplate:   "metrics.{{.PartitionID}}.collected",
-//	    BatchSize:         50,               // Override default (1)
-//	    FetchTimeout:      10 * time.Second, // Override default (5s)
-//	    AckWait:           45 * time.Second, // Override default (30s)
-//	    Logger:            myLogger,         // Optional: omit for no-op logger
-//	}, subscription.MessageHandlerFunc(customHandler))
-func NewWorkerConsumer(conn *nats.Conn, cfg WorkerConsumerConfig, handler MessageHandler) (*WorkerConsumer, error) {
-	if conn == nil {
-		return nil, errors.New("NATS connection is required")
-	}
-
-	if cfg.StreamName == "" {
-		return nil, errors.New("stream name is required")
-	}
-
-	if cfg.ConsumerPrefix == "" {
-		return nil, errors.New("consumer prefix is required")
-	}
-
-	if cfg.SubjectTemplate == "" {
-		return nil, errors.New("subject template is required")
-	}
-
-	if handler == nil {
-		return nil, errors.New("message handler is required")
-	}
-
-	// Create JetStream context and delegate to NewWorkerConsumerJS for construction
-	js, err := jetstream.New(conn)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create JetStream context: %w", err)
-	}
-
-	return NewWorkerConsumerJS(js, cfg, handler)
-}
-
-// NewWorkerConsumerJS creates a new WorkerConsumer using a pre-initialized JetStream context.
+// NewWorkerConsumer creates a new WorkerConsumer using a pre-initialized JetStream context.
 //
 // This overload enables looser coupling to the nats client by accepting the
 // jetstream.JetStream interface instead of a concrete *nats.Conn. The underlying
@@ -135,7 +55,7 @@ func NewWorkerConsumer(conn *nats.Conn, cfg WorkerConsumerConfig, handler Messag
 // Returns:
 //   - *WorkerConsumer: Initialized helper
 //   - error: Configuration or template parsing error
-func NewWorkerConsumerJS(js jetstream.JetStream, cfg WorkerConsumerConfig, handler MessageHandler) (*WorkerConsumer, error) {
+func NewWorkerConsumer(js jetstream.JetStream, cfg WorkerConsumerConfig, handler MessageHandler) (*WorkerConsumer, error) {
 	if js == nil {
 		return nil, errors.New("JetStream context is required")
 	}
@@ -196,7 +116,7 @@ func NewWorkerConsumerJS(js jetstream.JetStream, cfg WorkerConsumerConfig, handl
 //
 // Example:
 //
-//	helper, _ := subscription.NewWorkerConsumer(nc, subscription.WorkerConsumerConfig{
+//	helper, _ := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
 //	    StreamName:      "events",
 //	    ConsumerPrefix:  "worker",
 //	    SubjectTemplate: "events.{{.PartitionID}}",

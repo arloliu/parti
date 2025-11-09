@@ -9,6 +9,24 @@
 1. **[USER_GUIDE.md](USER_GUIDE.md)** - Complete user guide with examples and best practices
 2. **[API_REFERENCE.md](API_REFERENCE.md)** - Detailed API documentation
 3. **[OPERATIONS.md](OPERATIONS.md)** - Deployment and operations guide
+### Quick Start (JetStream-based)
+
+```go
+nc, _ := nats.Connect(nats.DefaultURL)
+js, _ := jetstream.New(nc)
+
+cfg := parti.Config{WorkerIDPrefix: "worker", WorkerIDMax: 63}
+partitions := []parti.Partition{{Keys: []string{"p-0"}, Weight: 100}}
+src := source.NewStatic(partitions)
+strat := strategy.NewConsistentHash()
+
+mgr, err := parti.NewManager(&cfg, js, src, strat)
+if err != nil { log.Fatal(err) }
+ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second); defer cancel()
+_ = mgr.Start(ctx)
+```
+
+Legacy constructor using `*nats.Conn` is deprecated—always pass a JetStream context.
 
 ---
 

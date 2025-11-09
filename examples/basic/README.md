@@ -35,6 +35,23 @@ go run ./examples/basic
 NATS_URL=nats://localhost:4222 go run ./examples/basic
 ```
 
+## Core Setup (JetStream-based)
+
+Minimal initialization now requires a JetStream context:
+
+```go
+nc, _ := nats.Connect(nats.DefaultURL)
+js, _ := jetstream.New(nc)
+
+cfg := parti.Config{WorkerIDPrefix: "example-worker", WorkerIDMin: 0, WorkerIDMax: 9}
+partitions := []parti.Partition{{Keys: []string{"partition-0"}, Weight: 100}}
+src := source.NewStatic(partitions)
+strat := strategy.NewConsistentHash()
+
+mgr, err := parti.NewManager(&cfg, js, src, strat)
+if err != nil { log.Fatal(err) }
+```
+
 ## Expected Output
 
 ```
@@ -81,16 +98,17 @@ go run ./examples/basic
 
 You'll see partitions automatically rebalanced across workers as new instances join.
 
-## Configuration
+## Configuration Highlights
 
-The example uses default configuration. Key settings:
+Defaults applied via `parti.SetDefaults(&cfg)` (implicit inside `NewManager`). Key aspects:
 
-- **Worker ID Range**: 0-9
-- **Worker ID Prefix**: "example-worker"
-- **Stabilization Window**: 30s for cold start, 10s for planned scale
-- **Assignment Strategy**: Weighted Consistent Hash (default)
+- Worker IDs: 0–9 (`WorkerIDMin/Max`)
+- Stabilization Windows: 30s cold start / 10s planned scale (tunable)
+- Strategy: Consistent hash (cache affinity >80%)
+- JetStream: Provided as `js` (explicit dependency; the old `*nats.Conn` constructor is deprecated)
 
 ## Next Steps
 
-- See `examples/defender/` for a real-world use case
-- See `examples/custom-strategy/` for advanced customization
+- Explore `examples/defender/` for failure-handling patterns
+- See `examples/custom-strategy/` to implement a custom `AssignmentStrategy`
+- Read `docs/USER_GUIDE.md` for JetStream best practices and tuning

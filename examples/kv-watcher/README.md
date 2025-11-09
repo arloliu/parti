@@ -26,6 +26,8 @@ cd examples/kv-watcher
 go run main.go
 ```
 
+> This example is independent of `parti.Manager` but uses JetStream internally. For Parti usage, always construct `js := jetstream.New(conn)` and pass `js` to `NewManager`.
+
 ## Expected Output
 
 The program runs 4 tests demonstrating different watcher configurations:
