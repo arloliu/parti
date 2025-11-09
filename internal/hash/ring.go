@@ -1,11 +1,12 @@
 package hash
 
 import (
+	"encoding/binary"
 	"slices"
-	"strconv"
+
+	"github.com/zeebo/xxh3"
 
 	"github.com/arloliu/parti/types"
-	"github.com/zeebo/xxh3"
 )
 
 // Ring implements a consistent hash ring with virtual nodes.
@@ -25,8 +26,9 @@ type Ring struct {
 
 // virtualNode represents a virtual node on the hash ring.
 type virtualNode struct {
-	hash     uint64 // Position on the ring
-	workerID string // Worker owning this virtual node
+	hash      uint64 // Position on the ring
+	workerID  string // Worker owning this virtual node
+	workerIdx int    // Index of the worker in workers slice
 }
 
 // NewRing creates a new consistent hash ring.
@@ -66,9 +68,9 @@ func NewRing(workers []string, virtualNodesPerWorker int, seed uint64) *Ring {
 		ring.workers = []string{}
 	}
 
-	// Add virtual nodes for each worker
-	for _, workerID := range ring.workers {
-		ring.addWorker(workerID, virtualNodesPerWorker)
+	// Add virtual nodes for each worker, tracking worker index inline
+	for i, workerID := range ring.workers {
+		ring.addWorker(workerID, i, virtualNodesPerWorker)
 	}
 
 	// Sort nodes by hash for binary search
@@ -101,27 +103,9 @@ func (r *Ring) GetNode(key string) string {
 		return ""
 	}
 
-	hash := r.hash(key)
+	h := r.hash(key)
 
-	// Binary search for first node >= hash
-	idx, found := slices.BinarySearchFunc(r.nodes, hash, func(node virtualNode, target uint64) int {
-		if node.hash < target {
-			return -1
-		}
-		if node.hash > target {
-			return 1
-		}
-
-		return 0
-	})
-
-	// If exact match found or idx points to valid position, use it
-	// If idx >= len(nodes), wrap around to first node
-	if !found && idx >= len(r.nodes) {
-		idx = 0
-	}
-
-	return r.nodes[idx].workerID
+	return r.getNodeByHash(h)
 }
 
 // GetNodeForPartition finds the worker for a partition.
@@ -138,10 +122,12 @@ func (r *Ring) GetNodeForPartition(partition types.Partition) string {
 		return ""
 	}
 
-	// Concatenate keys with separator
-	key := partition.ID()
+	// Hash partition keys using Partition.HashIDSeed which folds each key into
+	// a single xxh3 64-bit hash without building an intermediate joined string.
+	// This is zero-allocation and stable: earlier keys become the seed for later ones.
+	h := partition.HashIDSeed(r.seed)
 
-	return r.GetNode(key)
+	return r.getNodeByHash(h)
 }
 
 // Workers returns the list of unique workers on the ring.
@@ -150,22 +136,57 @@ func (r *Ring) Workers() []string {
 	return append([]string(nil), r.workers...)
 }
 
+// GetNodeIndexForPartition returns the worker index responsible for the given partition, or -1 if none.
+// This avoids an extra map lookup in hot assignment paths by skipping the workerID indirection.
+func (r *Ring) GetNodeIndexForPartition(partition types.Partition) int {
+	if len(partition.Keys) == 0 || len(r.nodes) == 0 {
+		return -1
+	}
+
+	h := partition.HashIDSeed(r.seed)
+	idx, found := slices.BinarySearchFunc(r.nodes, h, func(node virtualNode, t uint64) int {
+		if node.hash < t {
+			return -1
+		}
+		if node.hash > t {
+			return 1
+		}
+
+		return 0
+	})
+
+	if !found && idx >= len(r.nodes) {
+		idx = 0
+	}
+
+	return r.nodes[idx].workerIdx
+}
+
 // Size returns the total number of virtual nodes on the ring.
 func (r *Ring) Size() int {
 	return len(r.nodes)
 }
 
 // addWorker adds virtual nodes for a worker to the ring.
-func (r *Ring) addWorker(workerID string, virtualNodes int) {
+func (r *Ring) addWorker(workerID string, workerIdx int, virtualNodes int) {
 	for i := range virtualNodes {
-		// Create unique key for each virtual node
-		// Format: "worker-0#<i>" with decimal suffix for clarity
-		vnodeKey := workerID + "#" + strconv.Itoa(i)
-		h := r.hash(vnodeKey)
+		// Compute hash for (workerID, i) without building a concatenated string.
+		// Fold workerID, then vnode index using previous hash as seed for stable distribution.
+		var h uint64
+		if r.seed != 0 {
+			h = xxh3.HashStringSeed(workerID, r.seed)
+		} else {
+			h = xxh3.HashString(workerID)
+		}
+
+		var ib [8]byte
+		binary.LittleEndian.PutUint64(ib[:], uint64(i)) //nolint:gosec
+		h = xxh3.HashSeed(ib[:], h)
 
 		r.nodes = append(r.nodes, virtualNode{
-			hash:     h,
-			workerID: workerID,
+			hash:      h,
+			workerID:  workerID,
+			workerIdx: workerIdx,
 		})
 	}
 }
@@ -179,6 +200,31 @@ func (r *Ring) hash(key string) uint64 {
 	}
 
 	return xxh3.HashString(key)
+}
+
+// hashKeys removed: replaced by types.Partition.HashIDSeed for zero-allocation hashing with seed.
+
+// getNodeByHash returns the worker for a given hash value using binary search over the ring.
+func (r *Ring) getNodeByHash(target uint64) string {
+	// Binary search for first node >= target
+	idx, found := slices.BinarySearchFunc(r.nodes, target, func(node virtualNode, t uint64) int {
+		if node.hash < t {
+			return -1
+		}
+		if node.hash > t {
+			return 1
+		}
+
+		return 0
+	})
+
+	// If exact match found or idx points to valid position, use it
+	// If idx >= len(nodes), wrap around to first node
+	if !found && idx >= len(r.nodes) {
+		idx = 0
+	}
+
+	return r.nodes[idx].workerID
 }
 
 // WeightedRing extends Ring with partition weight awareness.

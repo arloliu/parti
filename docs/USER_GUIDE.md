@@ -48,6 +48,10 @@ Parti is a Go library for NATS-based work partitioning that provides dynamic par
 ## Getting Started
 
 ### Prerequisites
+### Partition Identity & Hashing
+
+Partitions carry a slice of string keys: `[]string{"topic", "partition-42"}`. Parti exposes multiple derived identifiers optimized for different use cases:
+
 
 - **Go**: Version 1.24 or later
 - **NATS Server**: Version 2.9.0+ with JetStream enabled

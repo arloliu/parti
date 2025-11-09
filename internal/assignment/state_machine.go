@@ -278,16 +278,25 @@ func (sm *StateMachine) WaitForShutdown() {
 
 // emitStateChange notifies all subscribers of a state transition.
 func (sm *StateMachine) emitStateChange(state types.CalculatorState) {
-	oldState := sm.GetState()
-	if oldState == state {
-		return // No change, no notification needed
+	// Atomically set the new state and emit exactly one notification.
+	// This prevents duplicate notifications when multiple goroutines
+	// attempt the same transition concurrently.
+	for {
+		old := types.CalculatorState(sm.current.Load())
+		if old == state {
+			return // No change, nothing to do
+		}
+
+		if sm.current.CompareAndSwap(int32(old), int32(state)) { //nolint:gosec // G115: enum to int32 is safe
+			sm.logger.Info("state transition", "from", old, "to", state)
+
+			sm.subscribers.Range(func(_ uint64, sub *stateSubscriber) bool {
+				sub.trySend(state, sm.metrics)
+				return true
+			})
+
+			return
+		}
+		// Another goroutine changed the state; retry with the new current value
 	}
-
-	sm.current.Store(int32(state)) //nolint:gosec // G115: state is bounded enum, safe conversion
-	sm.logger.Info("state transition", "from", oldState, "to", state)
-
-	sm.subscribers.Range(func(_ uint64, sub *stateSubscriber) bool {
-		sub.trySend(state, sm.metrics)
-		return true
-	})
 }

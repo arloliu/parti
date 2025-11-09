@@ -11,16 +11,6 @@ import (
 	"github.com/arloliu/parti/types"
 )
 
-// cachedWorkerList bundles worker data with its timestamp for atomic operations.
-//
-// This ensures that the worker list and its freshness timestamp are always
-// consistent when read together, preventing race conditions between updates
-// and emergency detection checks.
-type cachedWorkerList struct {
-	workers   []string
-	timestamp time.Time
-}
-
 // Calculator manages partition assignment calculation and distribution.
 //
 // The calculator runs on the leader worker and orchestrates three focused components:
@@ -63,6 +53,16 @@ type Calculator struct {
 	// Lifecycle
 	stopCh chan struct{}
 	doneCh chan struct{}
+}
+
+// cachedWorkerList bundles worker data with its timestamp for atomic operations.
+//
+// This ensures that the worker list and its freshness timestamp are always
+// consistent when read together, preventing race conditions between updates
+// and emergency detection checks.
+type cachedWorkerList struct {
+	workers   []string
+	timestamp time.Time
 }
 
 // NewCalculator creates a calculator with validated configuration.

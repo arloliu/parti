@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"slices"
+	"sync"
 
 	"github.com/arloliu/parti/internal/hash"
 	"github.com/arloliu/parti/internal/logging"
@@ -26,6 +27,13 @@ type WeightedConsistentHash struct {
 	extremeThreshold  float64
 	defaultWeight     int64
 	logger            types.Logger
+
+	// ring cache to avoid rebuilding when worker set and config are unchanged
+	cacheMu       sync.RWMutex
+	cachedWorkers []string
+	cachedVirtual int
+	cachedSeed    uint64
+	cachedRing    *hash.Ring
 }
 
 var _ types.AssignmentStrategy = (*WeightedConsistentHash)(nil)
@@ -156,28 +164,28 @@ func (wch *WeightedConsistentHash) Assign(workers []string, partitions []types.P
 	}
 
 	// Step 2: Sort workers for deterministic assignment and initialize tracking structures
-	sortedWorkers, assignments, workerLoad := wch.prepareWorkers(workers)
+	sortedWorkers, workerLoad, buckets := wch.prepare(workers, len(partitions))
 
 	// Step 3: Handle empty partition list (all workers get empty assignments)
 	if len(partitions) == 0 {
-		return assignments, nil
+		return convertBucketsToMap(sortedWorkers, buckets), nil
 	}
 
 	// Step 4: Compute effective weights (applying defaults for zero-weight partitions)
 	// and detect if all weights are equal
 	effectiveWeights, totalWeight, allEqual := wch.computeEffectiveWeights(partitions)
 
-	// Step 5: Build consistent hash ring for partition-to-worker mapping
-	ring := hash.NewRing(sortedWorkers, wch.virtualNodes, wch.hashSeed)
+	// Step 5: Build or reuse consistent hash ring for partition-to-worker mapping
+	ring := wch.getOrBuildRing(sortedWorkers)
 
 	// Step 6: Fast path for equal weights - use pure consistent hashing
 	// This maximizes cache affinity when load balancing isn't needed
 	if allEqual {
-		if err := wch.assignEqualWeightPartitions(ring, assignments, partitions); err != nil {
+		if err := wch.assignEqualWeightPartitionsByRingIndex(ring, buckets, partitions); err != nil {
 			return nil, err
 		}
 
-		return assignments, nil
+		return convertBucketsToMap(sortedWorkers, buckets), nil
 	}
 
 	// Step 7: Compute distribution thresholds for weighted assignment
@@ -188,11 +196,11 @@ func (wch *WeightedConsistentHash) Assign(workers []string, partitions []types.P
 
 	// Step 8: Phase 1 - Assign extreme partitions round-robin across workers
 	// This ensures heavy partitions are spread evenly before applying consistent hashing
-	wch.assignExtremePartitions(extremes, sortedWorkers, assignments, workerLoad, len(partitions), thresholds.extremeCutoff)
+	wch.assignExtremePartitionsIndexed(extremes, sortedWorkers, buckets, workerLoad, len(partitions), thresholds.extremeCutoff)
 
 	// Step 9: Phase 2 - Assign normal partitions using consistent hashing with load cap
 	// Preserves cache affinity while preventing individual workers from becoming overloaded
-	overflowCount, err := wch.assignNormalPartitions(normals, ring, sortedWorkers, assignments, workerLoad, thresholds.maxWorkerWeight)
+	overflowCount, err := wch.assignNormalPartitionsByRingIndex(normals, ring, buckets, workerLoad, thresholds.maxWorkerWeight)
 	if err != nil {
 		return nil, err
 	}
@@ -208,21 +216,59 @@ func (wch *WeightedConsistentHash) Assign(workers []string, partitions []types.P
 		)
 	}
 
-	return assignments, nil
+	return convertBucketsToMap(sortedWorkers, buckets), nil
 }
 
-func (wch *WeightedConsistentHash) prepareWorkers(workers []string) ([]string, map[string][]types.Partition, map[string]int64) {
+// getOrBuildRing returns a cached ring if the sorted workers and config match; otherwise builds and caches a new ring.
+func (wch *WeightedConsistentHash) getOrBuildRing(sortedWorkers []string) *hash.Ring {
+	wch.cacheMu.RLock()
+	cached := wch.cachedRing
+	if cached != nil && wch.cachedVirtual == wch.virtualNodes && wch.cachedSeed == wch.hashSeed && slices.Equal(wch.cachedWorkers, sortedWorkers) {
+		wch.cacheMu.RUnlock()
+		return cached
+	}
+	wch.cacheMu.RUnlock()
+
+	// Build new ring outside lock
+	newRing := hash.NewRing(sortedWorkers, wch.virtualNodes, wch.hashSeed)
+
+	// Cache it
+	wch.cacheMu.Lock()
+	// Store a copy of workers to avoid external mutation risks
+	wch.cachedWorkers = append([]string(nil), sortedWorkers...)
+	wch.cachedVirtual = wch.virtualNodes
+	wch.cachedSeed = wch.hashSeed
+	wch.cachedRing = newRing
+	wch.cacheMu.Unlock()
+
+	return newRing
+}
+
+func (wch *WeightedConsistentHash) prepare(workers []string, partitionsLen int) ([]string, []int64, [][]types.Partition) {
 	sortedWorkers := append([]string(nil), workers...)
 	slices.Sort(sortedWorkers)
 
-	assignments := make(map[string][]types.Partition, len(sortedWorkers))
-	workerLoad := make(map[string]int64, len(sortedWorkers))
-	for _, worker := range sortedWorkers {
-		assignments[worker] = []types.Partition{}
-		workerLoad[worker] = 0
+	workerLoad := make([]int64, len(sortedWorkers))
+
+	// Buckets for per-worker assignments; pre-size capacity heuristically to reduce growslice.
+	buckets := make([][]types.Partition, len(sortedWorkers))
+	// Heuristic: assume roughly even distribution, allocate ceil(partitions/workers) per bucket.
+	capPer := 0
+	if len(sortedWorkers) > 0 && partitionsLen > 0 {
+		capPer = (partitionsLen + len(sortedWorkers) - 1) / len(sortedWorkers)
+		if capPer < 1 {
+			capPer = 1
+		}
+	}
+	for i := range buckets {
+		if capPer > 0 {
+			buckets[i] = make([]types.Partition, 0, capPer)
+		} else {
+			buckets[i] = make([]types.Partition, 0)
+		}
 	}
 
-	return sortedWorkers, assignments, workerLoad
+	return sortedWorkers, workerLoad, buckets
 }
 
 func (wch *WeightedConsistentHash) computeEffectiveWeights(partitions []types.Partition) ([]int64, int64, bool) {
@@ -250,17 +296,17 @@ func (wch *WeightedConsistentHash) computeEffectiveWeights(partitions []types.Pa
 	return effectiveWeights, totalWeight, allEqual
 }
 
-func (wch *WeightedConsistentHash) assignEqualWeightPartitions(
+func (wch *WeightedConsistentHash) assignEqualWeightPartitionsByRingIndex(
 	ring *hash.Ring,
-	assignments map[string][]types.Partition,
+	buckets [][]types.Partition,
 	partitions []types.Partition,
 ) error {
 	for _, partition := range partitions {
-		worker := ring.GetNodeForPartition(partition)
-		if worker == "" {
+		idx := ring.GetNodeIndexForPartition(partition)
+		if idx < 0 {
 			return ErrNoWorkers
 		}
-		assignments[worker] = append(assignments[worker], partition)
+		buckets[idx] = append(buckets[idx], partition)
 	}
 
 	return nil
@@ -309,11 +355,11 @@ func splitPartitions(
 	return extremes, normals
 }
 
-func (wch *WeightedConsistentHash) assignExtremePartitions(
+func (wch *WeightedConsistentHash) assignExtremePartitionsIndexed(
 	extremes []partitionEntry,
 	workers []string,
-	assignments map[string][]types.Partition,
-	workerLoad map[string]int64,
+	buckets [][]types.Partition,
+	workerLoad []int64,
 	totalPartitions int,
 	extremeCutoff float64,
 ) {
@@ -332,10 +378,10 @@ func (wch *WeightedConsistentHash) assignExtremePartitions(
 		return 1
 	})
 
-	for idx, entry := range extremes {
-		worker := workers[idx%len(workers)]
-		assignments[worker] = append(assignments[worker], entry.partition)
-		workerLoad[worker] += entry.weight
+	for i, entry := range extremes {
+		widx := i % len(workers)
+		buckets[widx] = append(buckets[widx], entry.partition)
+		workerLoad[widx] += entry.weight
 	}
 
 	wch.logger.Debug(
@@ -346,32 +392,31 @@ func (wch *WeightedConsistentHash) assignExtremePartitions(
 	)
 }
 
-func (wch *WeightedConsistentHash) assignNormalPartitions(
+func (wch *WeightedConsistentHash) assignNormalPartitionsByRingIndex(
 	normals []partitionEntry,
 	ring *hash.Ring,
-	workers []string,
-	assignments map[string][]types.Partition,
-	workerLoad map[string]int64,
+	buckets [][]types.Partition,
+	workerLoad []int64,
 	maxWorkerWeight float64,
 ) (int, error) {
 	overflowCount := 0
 
 	// Iterate in original discovery order so consistent-hash affinity remains predictable.
 	for _, entry := range normals {
-		worker := ring.GetNodeForPartition(entry.partition)
-		if worker == "" {
+		idx := ring.GetNodeIndexForPartition(entry.partition)
+		if idx < 0 {
 			return 0, ErrNoWorkers
 		}
 
-		if maxWorkerWeight > 0 && float64(workerLoad[worker]+entry.weight) > maxWorkerWeight {
-			worker = wch.findLightestWorker(workers, workerLoad)
-			if maxWorkerWeight > 0 && float64(workerLoad[worker]+entry.weight) > maxWorkerWeight {
+		if maxWorkerWeight > 0 && float64(workerLoad[idx]+entry.weight) > maxWorkerWeight {
+			idx = wch.findLightestWorkerIndexed(workerLoad)
+			if maxWorkerWeight > 0 && float64(workerLoad[idx]+entry.weight) > maxWorkerWeight {
 				overflowCount++
 			}
 		}
 
-		assignments[worker] = append(assignments[worker], entry.partition)
-		workerLoad[worker] += entry.weight
+		buckets[idx] = append(buckets[idx], entry.partition)
+		workerLoad[idx] += entry.weight
 	}
 
 	return overflowCount, nil
@@ -411,19 +456,26 @@ func (wch *WeightedConsistentHash) effectiveWeight(weight int64) int64 {
 	return wch.defaultWeight
 }
 
-func (wch *WeightedConsistentHash) findLightestWorker(workers []string, workerLoad map[string]int64) string {
-	lightest := workers[0]
-	minLoad := workerLoad[lightest]
+func (wch *WeightedConsistentHash) findLightestWorkerIndexed(workerLoad []int64) int {
+	lightestIdx := 0
+	minLoad := workerLoad[0]
 
-	for _, worker := range workers[1:] {
-		load := workerLoad[worker]
-		if load < minLoad || (load == minLoad && worker < lightest) {
-			lightest = worker
+	for i := 1; i < len(workerLoad); i++ {
+		load := workerLoad[i]
+		if load < minLoad || (load == minLoad && i < lightestIdx) {
+			lightestIdx = i
 			minLoad = load
 		}
 	}
 
-	return lightest
+	return lightestIdx
 }
 
-// joinKeys deprecated: replaced by Partition.Compare for allocation-free ordering.
+func convertBucketsToMap(workers []string, buckets [][]types.Partition) map[string][]types.Partition {
+	res := make(map[string][]types.Partition, len(workers))
+	for i, w := range workers {
+		res[w] = buckets[i]
+	}
+
+	return res
+}

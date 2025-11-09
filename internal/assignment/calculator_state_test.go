@@ -431,7 +431,10 @@ func TestCalculator_StateTransitions_GetState(t *testing.T) {
 	ctx := context.Background()
 	calc.enterScalingState(ctx, "cold_start", 50*time.Millisecond)
 
-	// Wait for the state machine to complete transitions
+	// First wait until we actually observe Scaling (to avoid matching the initial Idle)
+	require.True(t, collector.WaitForState(types.CalcStateScaling, 1*time.Second),
+		"Timeout waiting to observe Scaling state")
+	// Then wait for the state machine to complete transitions back to Idle
 	require.True(t, collector.WaitForState(types.CalcStateIdle, 2*time.Second),
 		"Timeout waiting for return to Idle state")
 
@@ -474,7 +477,9 @@ func TestCalculator_StateTransitions_Scaling(t *testing.T) {
 	require.Equal(t, types.CalcStateScaling, calc.GetState())
 	require.Equal(t, "cold_start", calc.GetScalingReason())
 
-	// Wait for complete transition back to Idle
+	// Wait to observe Scaling first (avoid matching initial Idle), then final Idle
+	require.True(t, collector.WaitForState(types.CalcStateScaling, 1*time.Second),
+		"Timeout waiting to observe Scaling state")
 	require.True(t, collector.WaitForState(types.CalcStateIdle, 2*time.Second),
 		"Timeout waiting for return to Idle state")
 

@@ -1,6 +1,10 @@
 package types
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/zeebo/xxh3"
+)
 
 // Partition represents a logical work partition.
 //
@@ -42,6 +46,72 @@ func (p Partition) ID() string {
 	}
 
 	return strings.Join(p.Keys, "-")
+}
+
+// HashID returns a stable 64-bit hash of the partition's key sequence using chained XXH3 hashing.
+//
+// This method computes the hash without allocating by folding each key into the hash of the
+// previous key (seed chaining). Boundary ambiguity is avoided because each key boundary starts
+// a fresh seeded hash step instead of raw concatenation.
+//
+// Algorithm:
+//   - If the partition has no keys, returns 0
+//   - For the first key: xxh3.HashString(key)
+//   - For subsequent keys: xxh3.HashStringSeed(key, previousHash)
+//   - Final hash value is returned as the partition's HashID
+//
+// Returns:
+//   - uint64: 64-bit hash (0 if no keys)
+//
+// Example:
+//
+//	p := Partition{Keys: []string{"topic", "42"}}
+//	h := p.HashID()
+//	_ = h // use in consistent hashing or caching structures
+func (p Partition) HashID() uint64 {
+	if len(p.Keys) == 0 {
+		return 0
+	}
+	var h uint64
+	for _, k := range p.Keys {
+		if h == 0 {
+			h = xxh3.HashString(k)
+			continue
+		}
+		h = xxh3.HashStringSeed(k, h)
+	}
+
+	return h
+}
+
+// HashIDSeed returns a stable 64-bit hash of the partition's key sequence using chained XXH3 hashing
+// incorporating an explicit seed value. When seed == 0 this is equivalent to HashID().
+//
+// The first key is hashed with the provided seed (if non-zero) or unseeded; subsequent keys are
+// hashed using the previous hash value as the seed, preserving boundary separation without
+// concatenation allocations.
+//
+// Returns:
+//   - uint64: 64-bit hash (0 if no keys)
+func (p Partition) HashIDSeed(seed uint64) uint64 {
+	if len(p.Keys) == 0 {
+		return 0
+	}
+	var h uint64
+	for i, k := range p.Keys {
+		if i == 0 { // first key
+			if seed != 0 {
+				h = xxh3.HashStringSeed(k, seed)
+			} else {
+				h = xxh3.HashString(k)
+			}
+
+			continue
+		}
+		h = xxh3.HashStringSeed(k, h)
+	}
+
+	return h
 }
 
 // Compare performs a lexicographic comparison of partition key sequences.

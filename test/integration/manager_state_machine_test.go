@@ -7,6 +7,7 @@ import (
 
 	"github.com/arloliu/parti/test/testutil"
 	"github.com/arloliu/parti/types"
+	"github.com/stretchr/testify/require"
 )
 
 // To enable debug logging for troubleshooting, import and use:
@@ -63,7 +64,9 @@ func TestStateMachine_ColdStart(t *testing.T) {
 	// Verify exactly one leader exists
 	cluster.VerifyExactlyOneLeader()
 
-	// Verify all workers have assignments
+	// Verify all workers have assignments (wait to avoid transient propagation lag)
+	require.True(t, cluster.WaitForAllWorkersHavePartitions(8*time.Second),
+		"timed out waiting for all workers to have partitions")
 	cluster.VerifyAllWorkersHavePartitions()
 	cluster.VerifyTotalPartitionCount(10)
 
@@ -112,6 +115,8 @@ func TestStateMachine_PlannedScale(t *testing.T) {
 
 	// Verify initial state
 	cluster.VerifyExactlyOneLeader()
+	require.True(t, cluster.WaitForAllWorkersHavePartitions(8*time.Second),
+		"timed out waiting for all workers to have partitions")
 	cluster.VerifyAllWorkersHavePartitions()
 
 	// Record assignments before scaling
@@ -141,6 +146,8 @@ func TestStateMachine_PlannedScale(t *testing.T) {
 
 	// Verify scaled state
 	cluster.VerifyExactlyOneLeader()
+	require.True(t, cluster.WaitForAllWorkersHavePartitions(8*time.Second),
+		"timed out waiting for all workers to have partitions")
 	cluster.VerifyAllWorkersHavePartitions()
 	cluster.VerifyTotalPartitionCount(20)
 
@@ -294,6 +301,8 @@ func TestStateMachine_Emergency(t *testing.T) {
 	// Verify all partitions are still assigned (or at least most of them)
 	// Note: With stable IDs, some partitions might not be reassigned immediately
 	// if the system thinks the dead worker might come back
+	require.True(t, cluster.WaitForAllWorkersHavePartitions(8*time.Second),
+		"timed out waiting for all workers to have partitions")
 	cluster.VerifyAllWorkersHavePartitions()
 
 	// Count unique partitions
@@ -390,6 +399,8 @@ func TestStateMachine_Restart(t *testing.T) {
 	}
 
 	// Verify all workers have assignments
+	require.True(t, cluster2.WaitForAllWorkersHavePartitions(12*time.Second),
+		"timed out waiting for all workers to have partitions")
 	cluster2.VerifyAllWorkersHavePartitions()
 	cluster2.VerifyTotalPartitionCount(100)
 

@@ -6,6 +6,7 @@
 .coverage
 .benchmarks/
 
+.flake_logs/
 test/simulation/bin/
 test/simulation/checkpoints/
 

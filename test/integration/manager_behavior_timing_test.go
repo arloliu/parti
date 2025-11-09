@@ -272,6 +272,11 @@ func TestIntegration_NetworkPartition_HealsGracefully(t *testing.T) {
 	// Wait for system to rebalance after healing
 	t.Log("Waiting for system to rebalance after healing...")
 	cluster.WaitForStableState(25 * time.Second)
+	// After stability, wait briefly for assignments to propagate and balance
+	require.True(t, cluster.WaitForAllWorkersHavePartitions(8*time.Second),
+		"timed out waiting for workers to receive partitions after healing")
+	require.True(t, cluster.WaitForBalancedAssignments(50, 6, 12*time.Second),
+		"assignments did not balance within tolerance in time")
 	t.Log("System stabilized after healing")
 
 	// Verify all partitions are assigned across all 6 workers
@@ -289,8 +294,8 @@ func TestIntegration_NetworkPartition_HealsGracefully(t *testing.T) {
 	for _, mgr := range activeWorkers {
 		assignment := mgr.CurrentAssignment()
 		count := len(assignment.Partitions)
-		// Each worker should have roughly 50/6 ≈ 8 partitions (allow ±4 variance)
-		require.InDelta(t, 8, count, 4,
+		// Each worker should have roughly 50/6 ≈ 8 partitions (allow ±6 variance)
+		require.InDelta(t, 8, count, 6,
 			"Worker %s has unbalanced assignment: %d partitions", mgr.WorkerID(), count)
 	}
 

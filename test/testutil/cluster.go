@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -100,6 +101,7 @@ type StateTracker struct {
 	T           *testing.T
 	mu          sync.RWMutex
 	States      []types.State
+	closed      atomic.Bool
 }
 
 // CreateStateTracker creates a new state tracker.
@@ -114,13 +116,21 @@ func CreateStateTracker(t *testing.T, workerIndex int) *StateTracker {
 // Hook returns a hook function for tracking state changes.
 func (st *StateTracker) Hook() func(context.Context, types.State, types.State) error {
 	return func(ctx context.Context, from, to types.State) error {
-		st.T.Logf("Worker %d: %s → %s", st.WorkerIndex, from.String(), to.String())
+		// Avoid logging after the test has finished, which would cause a panic.
+		if !st.closed.Load() {
+			st.T.Logf("Worker %d: %s → %s", st.WorkerIndex, from.String(), to.String())
+		}
 		st.mu.Lock()
 		st.States = append(st.States, to)
 		st.mu.Unlock()
 
 		return nil
 	}
+}
+
+// Close marks the tracker as closed to prevent logging after test completion.
+func (st *StateTracker) Close() {
+	st.closed.Store(true)
 }
 
 // HasState checks if the worker went through a specific state.
@@ -226,6 +236,9 @@ func (wc *WorkerCluster) AddWorker(ctx context.Context, opts ...types.Logger) *p
 	workerIdx := len(wc.Workers)
 	tracker := CreateStateTracker(wc.T, workerIdx)
 	wc.StateTrackers = append(wc.StateTrackers, tracker)
+	// Ensure we stop logging state transitions once the test ends to avoid panics
+	// from goroutines attempting to log after test completion.
+	wc.T.Cleanup(func() { tracker.Close() })
 
 	hooks := &parti.Hooks{
 		OnStateChanged: tracker.Hook(),
@@ -360,6 +373,84 @@ func (wc *WorkerCluster) VerifyAllWorkersHavePartitions() {
 		wc.T.Logf("Worker %d (%s): %d partitions",
 			i, mgr.WorkerID(), len(assignment.Partitions))
 	}
+}
+
+// WaitForAllWorkersHavePartitions waits until every active (non-shutdown) worker has >=1 partition.
+// This is more robust than immediate assertions after stabilization because assignment publication
+// and follower consumption can lag briefly behind state transitions. Returns true if condition met.
+func (wc *WorkerCluster) WaitForAllWorkersHavePartitions(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		allHave := true
+		for i, mgr := range wc.Workers {
+			if mgr.State() == types.StateShutdown {
+				continue
+			}
+			assignment := mgr.CurrentAssignment()
+			if len(assignment.Partitions) == 0 {
+				allHave = false
+				wc.T.Logf("Worker %d (%s) waiting for partitions...", i, mgr.WorkerID())
+				break
+			}
+		}
+		if allHave {
+			return true
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+
+	return false
+}
+
+// WaitForBalancedAssignments waits until assignments across active workers are within an allowed delta
+// around an expected average. This helps avoid flakes where a transient scaling or rebalancing window
+// temporarily skews distribution. Returns true if balance achieved.
+// expectedTotal: total partitions expected across active workers.
+// variance: allowed difference from average (abs(actual - avg) <= variance).
+func (wc *WorkerCluster) WaitForBalancedAssignments(expectedTotal int, variance int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		active := wc.GetActiveWorkers()
+		if len(active) == 0 {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		total := 0
+		counts := make([]int, len(active))
+		for i, mgr := range active {
+			a := mgr.CurrentAssignment()
+			counts[i] = len(a.Partitions)
+			total += counts[i]
+		}
+		if total != expectedTotal {
+			wc.T.Logf("Waiting for expected total %d (current %d)...", expectedTotal, total)
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		avg := float64(total) / float64(len(active))
+		balanced := true
+		for i, c := range counts {
+			if diff := absInt(int(avg) - c); diff > variance {
+				wc.T.Logf("Worker %d imbalance: count=%d avg=%.2f variance=%d diff=%d", i, c, avg, variance, diff)
+				balanced = false
+				break
+			}
+		}
+		if balanced {
+			return true
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	return false
+}
+
+func absInt(x int) int {
+	if x < 0 {
+		return -x
+	}
+
+	return x
 }
 
 // VerifyTotalPartitionCount verifies the total number of unique partitions assigned.
