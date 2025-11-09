@@ -1,8 +1,8 @@
 package hash
 
 import (
-	"encoding/binary"
 	"slices"
+	"strconv"
 
 	"github.com/arloliu/parti/types"
 	"github.com/zeebo/xxh3"
@@ -16,8 +16,8 @@ type Ring struct {
 	// nodes contains all virtual nodes on the ring, sorted by hash
 	nodes []virtualNode
 
-	// workerMap maps virtual node index to worker ID
-	workerMap map[int]string
+	// workers holds the unique list of workers present on the ring
+	workers []string
 
 	// seed for hash function (0 means no seed)
 	seed uint64
@@ -45,19 +45,42 @@ type virtualNode struct {
 //	workerID := ring.GetNode(partitionKey)
 func NewRing(workers []string, virtualNodesPerWorker int, seed uint64) *Ring {
 	ring := &Ring{
-		nodes:     make([]virtualNode, 0, len(workers)*virtualNodesPerWorker),
-		workerMap: make(map[int]string),
-		seed:      seed,
+		nodes:   make([]virtualNode, 0, len(workers)*virtualNodesPerWorker),
+		workers: nil,
+		seed:    seed,
+	}
+
+	// Deduplicate workers while preserving order
+	if len(workers) > 0 {
+		seen := make(map[string]struct{}, len(workers))
+		uniq := make([]string, 0, len(workers))
+		for _, w := range workers {
+			if _, ok := seen[w]; ok {
+				continue
+			}
+			seen[w] = struct{}{}
+			uniq = append(uniq, w)
+		}
+		ring.workers = uniq
+	} else {
+		ring.workers = []string{}
 	}
 
 	// Add virtual nodes for each worker
-	for _, workerID := range workers {
+	for _, workerID := range ring.workers {
 		ring.addWorker(workerID, virtualNodesPerWorker)
 	}
 
 	// Sort nodes by hash for binary search
 	slices.SortFunc(ring.nodes, func(a, b virtualNode) int {
-		return int(a.hash - b.hash) //nolint:gosec
+		if a.hash < b.hash {
+			return -1
+		}
+		if a.hash > b.hash {
+			return 1
+		}
+
+		return 0
 	})
 
 	return ring
@@ -82,7 +105,14 @@ func (r *Ring) GetNode(key string) string {
 
 	// Binary search for first node >= hash
 	idx, found := slices.BinarySearchFunc(r.nodes, hash, func(node virtualNode, target uint64) int {
-		return int(node.hash - target) //nolint:gosec
+		if node.hash < target {
+			return -1
+		}
+		if node.hash > target {
+			return 1
+		}
+
+		return 0
 	})
 
 	// If exact match found or idx points to valid position, use it
@@ -116,17 +146,8 @@ func (r *Ring) GetNodeForPartition(partition types.Partition) string {
 
 // Workers returns the list of unique workers on the ring.
 func (r *Ring) Workers() []string {
-	seen := make(map[string]bool)
-	workers := make([]string, 0)
-
-	for _, node := range r.nodes {
-		if !seen[node.workerID] {
-			seen[node.workerID] = true
-			workers = append(workers, node.workerID)
-		}
-	}
-
-	return workers
+	// Return a copy to avoid external mutation
+	return append([]string(nil), r.workers...)
 }
 
 // Size returns the total number of virtual nodes on the ring.
@@ -136,18 +157,14 @@ func (r *Ring) Size() int {
 
 // addWorker adds virtual nodes for a worker to the ring.
 func (r *Ring) addWorker(workerID string, virtualNodes int) {
-	// Pre-allocate buffer for virtual node key to avoid allocations
-	buf := make([]byte, 8)
-
 	for i := range virtualNodes {
 		// Create unique key for each virtual node
-		// Format: "worker-0#<i>" where i is encoded as little-endian uint64
-		binary.LittleEndian.PutUint64(buf, uint64(i)) //nolint:gosec // index overflow is not a concern
-		vnodeKey := workerID + "#" + string(buf)
-		hash := r.hash(vnodeKey)
+		// Format: "worker-0#<i>" with decimal suffix for clarity
+		vnodeKey := workerID + "#" + strconv.Itoa(i)
+		h := r.hash(vnodeKey)
 
 		r.nodes = append(r.nodes, virtualNode{
-			hash:     hash,
+			hash:     h,
 			workerID: workerID,
 		})
 	}

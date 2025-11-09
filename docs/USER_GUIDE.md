@@ -225,6 +225,74 @@ Each worker claims a stable ID from a configured range (e.g., `worker-0` to `wor
 
 Workers search sequentially for available IDs and claim them atomically in NATS KV with a TTL. The ID is renewed periodically via heartbeat.
 
+### Stable ID Renewal Lifecycle
+
+The stable ID lease is maintained by a background renewal loop started explicitly after a successful claim.
+
+Key operations:
+
+1. `Claim(ctx)`
+    - Attempts IDs in the configured range sequentially: `[WorkerIDMin, WorkerIDMax]`.
+    - Uses KV `Create` (atomic) and falls back to `Put` for stale/expired keys.
+    - Returns the claimed worker ID (e.g. `"worker-0"`).
+
+2. `StartRenewal()`
+    - Starts an internal goroutine that periodically renews the KV key (updates timestamp value).
+    - No longer accepts a context; its lifetime is independent of external cancellation.
+    - Renewal interval: `ttl / 3` (minimum 100ms). Each tick uses a short timeout context (clamped between 100ms and 5s) internally.
+    - Idempotent: repeated calls return `ErrRenewalAlreadyStarted`.
+    - Returns `ErrNotClaimed` if called before a successful `Claim()`, and `ErrAlreadyClosed` after `Close()` or `Release()`.
+
+3. `Release(ctx)`
+    - Stops the renewal loop and deletes the KV key, freeing the ID for other workers.
+    - Safe to call multiple times; subsequent calls return `ErrNotClaimed`.
+    - Use during graceful shutdown when the ID should become immediately available.
+
+4. `Close()`
+    - Stops the renewal loop *without* deleting the KV key.
+    - Useful for handoff scenarios (e.g., another process will resume renewal soon) or when you want the lease to persist temporarily.
+    - After `Close()`, `StartRenewal()` returns `ErrAlreadyClosed`.
+
+Error Summary:
+| Error | When Returned |
+|-------|---------------|
+| `ErrNotClaimed` | `StartRenewal()` or `Release()` called before `Claim()` |
+| `ErrRenewalAlreadyStarted` | Second (or later) `StartRenewal()` call |
+| `ErrAlreadyClosed` | `StartRenewal()` after `Release()` or `Close()` |
+
+Recommended Sequence:
+
+```go
+workerID, err := claimer.Claim(ctx)
+if err != nil {
+     log.Fatalf("claim failed: %v", err)
+}
+
+if err := claimer.StartRenewal(); err != nil {
+     log.Fatalf("renewal start failed: %v", err)
+}
+
+// ... run workload ...
+
+// Graceful shutdown: release ID for reuse
+if err := claimer.Release(ctx); err != nil {
+     log.Printf("release warning: %v", err)
+}
+```
+
+Handoff Example:
+
+```go
+// Stop renewal but keep the key so a takeover process can resume quickly
+claimer.Close()
+// New process claims same ID (if renewal resumes before TTL expiry)
+```
+
+Design Notes:
+- External contexts no longer control renewal lifetime, preventing accidental lease loss after early startup cancellation.
+- Renewal failures are logged and retried on the next interval; only `Release()` / `Close()` stop the loop.
+- Keeping the key after `Close()` supports low-downtime rolling handoffs.
+
 ### Leader Election
 
 After claiming an ID, workers participate in leader election:

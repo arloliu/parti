@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/arloliu/parti/internal/logging"
@@ -14,14 +15,33 @@ import (
 
 // Common errors returned by the claimer.
 var (
-	ErrNoAvailableID = errors.New("no available worker ID in pool")
-	ErrNotClaimed    = errors.New("worker ID not claimed")
-	ErrAlreadyClosed = errors.New("claimer already closed")
+	ErrNoAvailableID         = errors.New("no available worker ID in pool")
+	ErrNotClaimed            = errors.New("worker ID not claimed")
+	ErrAlreadyClosed         = errors.New("claimer already closed")
+	ErrRenewalAlreadyStarted = errors.New("renewal loop already started")
 )
 
-// Claimer handles stable worker ID claiming and renewal.
+// Claimer handles stable worker ID claiming and background renewal using NATS KV.
 //
-// It uses NATS KV for atomic ID claiming with TTL-based leases.
+// Overview:
+//   - Claim(ctx) acquires the first available ID in [minID, maxID] using KV Create semantics.
+//   - StartRenewal() starts a background goroutine that periodically renews the claim.
+//     The provided ctx is used only for initial checks; the goroutine lifetime is controlled
+//     by Release() or Close(). Each renewal tick uses its own short timeout context.
+//   - Release(ctx) stops renewal and deletes the KV key, freeing the ID for reuse.
+//   - Close() stops renewal without deleting the key, for handoff scenarios.
+//
+// Lifecycle contract:
+//   - StartRenewal is idempotent: subsequent calls after success return ErrRenewalAlreadyStarted.
+//   - StartRenewal returns ErrNotClaimed if called before a successful Claim.
+//   - Release is idempotent and safe for concurrent calls; it waits for renewal to stop when started.
+//   - Close is idempotent; once closed, StartRenewal returns ErrAlreadyClosed.
+//
+// Concurrency and timing:
+//   - Renewal interval is ttl/3 with a minimum of 100ms.
+//   - Each renew attempt uses context.WithTimeout with duration clamped to [100ms, 5s].
+//   - Renew errors are logged and do not stop the loop; loop stops only via Release/Close.
+//
 // Workers sequentially search the ID pool until finding an available ID.
 type Claimer struct {
 	kv     jetstream.KeyValue
@@ -34,6 +54,9 @@ type Claimer struct {
 	stopCh   chan struct{} // Signal to stop renewal goroutine
 	doneCh   chan struct{} // Signal that renewal has stopped
 	stopOnce sync.Once     // Ensures stopCh is closed only once
+
+	renewStarted atomic.Int32 // 0 = not started, 1 = started
+	closed       atomic.Int32 // 0 = open, 1 = closed (Release/Close called)
 
 	logger types.Logger
 }
@@ -159,54 +182,67 @@ func (c *Claimer) Claim(ctx context.Context) (string, error) {
 // StartRenewal starts background renewal of the claimed ID.
 //
 // Renews the ID claim at regular intervals (ttl/3) to maintain the lease.
-// Must be called after successful Claim(). The context is used for timeout
-// control during renewal operations but won't stop the renewal loop - use
-// Release() for graceful shutdown.
-//
-// Parameters:
-//   - ctx: Context for timeout control during renewal operations
+// Must be called after successful Claim(). The renewal loop's lifetime is
+// independent of any external context; use Release() or Close() to stop it.
 //
 // Returns:
 //   - error: ErrNotClaimed if ID not claimed yet
+//   - error: ErrRenewalAlreadyStarted if called more than once
+//   - error: ErrAlreadyClosed if the claimer was closed
 //
 // Example:
 //
 //	workerID, _ := claimer.Claim(ctx)
-//	if err := claimer.StartRenewal(ctx); err != nil {
+//	if err := claimer.StartRenewal(); err != nil {
 //	    log.Fatalf("Failed to start renewal: %v", err)
 //	}
 //	defer claimer.Release(ctx)
-func (c *Claimer) StartRenewal(ctx context.Context) error {
+//
+// Idempotent: subsequent successful calls return ErrRenewalAlreadyStarted.
+// Safe: returns ErrNotClaimed if called before successful Claim. Returns ErrAlreadyClosed
+// if the claimer has been closed.
+func (c *Claimer) StartRenewal() error {
 	if c.workerID == "" {
 		return ErrNotClaimed
 	}
+	if c.closed.Load() == 1 {
+		return ErrAlreadyClosed
+	}
+	if !c.renewStarted.CompareAndSwap(0, 1) {
+		return ErrRenewalAlreadyStarted
+	}
 
-	go c.renewalLoop(ctx)
+	go c.renewalLoop()
 
 	return nil
 }
 
 // renewalLoop periodically renews the ID claim until stopped.
-func (c *Claimer) renewalLoop(ctx context.Context) {
+func (c *Claimer) renewalLoop() {
 	defer close(c.doneCh)
 
-	// Renew at 1/3 of TTL to provide safety margin
-	renewInterval := c.ttl / 3
+	// Renew at 1/3 of TTL to provide safety margin; enforce minimum interval.
+	renewInterval := max(c.ttl/3, 100*time.Millisecond)
 	ticker := time.NewTicker(renewInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-ctx.Done():
-			return
 		case <-c.stopCh:
 			return
 		case <-ticker.C:
-			if err := c.renew(ctx); err != nil {
-				// Log error but continue trying
-				// In production, this should use the configured logger
-				_ = err
+			// Per-iteration timeout (half TTL capped) to avoid indefinite stalls.
+			opTimeout := c.ttl / 2
+			if opTimeout < 100*time.Millisecond {
+				opTimeout = 100 * time.Millisecond
+			} else if opTimeout > 5*time.Second {
+				opTimeout = 5 * time.Second
 			}
+			opCtx, cancel := context.WithTimeout(context.Background(), opTimeout)
+			if err := c.renew(opCtx); err != nil {
+				c.logger.Error("stable ID renewal failed", "worker_id", c.workerID, "error", err)
+			}
+			cancel()
 		}
 	}
 }
@@ -216,12 +252,13 @@ func (c *Claimer) renew(ctx context.Context) error {
 	if c.workerID == "" {
 		return ErrNotClaimed
 	}
+	if c.kv == nil {
+		return errors.New("kv bucket is nil")
+	}
 
 	key := c.keyForID(c.workerID)
 	value := time.Now().Format(time.RFC3339)
 
-	// Use Put() instead of Update() to overwrite regardless of revision
-	// This allows renewal to work even if the key was created/updated by another process
 	_, err := c.kv.Put(ctx, key, []byte(value))
 	if err != nil {
 		return fmt.Errorf("failed to renew ID %s: %w", c.workerID, err)
@@ -250,31 +287,41 @@ func (c *Claimer) Release(ctx context.Context) error {
 	if c.workerID == "" {
 		return ErrNotClaimed
 	}
-
-	// Stop renewal goroutine (safe for concurrent calls)
-	c.stopOnce.Do(func() {
-		close(c.stopCh)
-	})
-
-	// Wait for renewal to stop with timeout
-	select {
-	case <-c.doneCh:
-		// Renewal stopped cleanly
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(5 * time.Second):
-		// Renewal didn't stop, continue anyway
+	if c.closed.CompareAndSwap(0, 1) {
+		// first time close; signal stop
+		c.stopOnce.Do(func() { close(c.stopCh) })
 	}
 
-	// Delete the key from KV
+	// Wait only if renewal started.
+	if c.renewStarted.Load() == 1 {
+		select {
+		case <-c.doneCh:
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Second):
+			// timeout; proceed to attempt delete anyway
+		}
+	}
+
 	key := c.keyForID(c.workerID)
-	if err := c.kv.Delete(ctx, key); err != nil {
-		return fmt.Errorf("failed to delete ID %s: %w", c.workerID, err)
+	if c.kv != nil {
+		if err := c.kv.Delete(ctx, key); err != nil {
+			return fmt.Errorf("failed to delete ID %s: %w", c.workerID, err)
+		}
 	}
 
 	c.workerID = ""
 
 	return nil
+}
+
+// Close stops the renewal loop without releasing (deleting) the claimed ID.
+// Useful for handoff scenarios where another process will assume renewal soon.
+// Idempotent; safe to call multiple times.
+func (c *Claimer) Close() {
+	if c.closed.CompareAndSwap(0, 1) {
+		c.stopOnce.Do(func() { close(c.stopCh) })
+	}
 }
 
 // WorkerID returns the currently claimed worker ID.

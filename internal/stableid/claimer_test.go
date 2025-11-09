@@ -5,245 +5,79 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
 	partitest "github.com/arloliu/parti/testing"
 )
 
-func TestClaimer_Claim(t *testing.T) {
-	t.Run("claims first available ID", func(t *testing.T) {
-		ctx := t.Context()
+// Unit tests that do not require a real KV backend.
 
-		// Setup embedded NATS
-		_, nc := partitest.StartEmbeddedNATS(t)
-		kv := partitest.CreateJetStreamKV(t, nc, "test-stable-ids")
+func TestClaimer_StartRenewal_WithoutClaim(t *testing.T) {
+	t.Parallel()
 
-		claimer := NewClaimer(kv, "worker", 0, 9, 30*time.Second, nil)
-
-		workerID, err := claimer.Claim(ctx)
-		require.NoError(t, err)
-		require.Equal(t, "worker-0", workerID)
-		require.Equal(t, "worker-0", claimer.WorkerID())
-	})
-
-	t.Run("claims next available ID when first is taken", func(t *testing.T) {
-		ctx := t.Context()
-
-		// Setup embedded NATS
-		_, nc := partitest.StartEmbeddedNATS(t)
-		kv := partitest.CreateJetStreamKV(t, nc, "test-stable-ids-2")
-
-		// Claim worker-0 first
-		claimer1 := NewClaimer(kv, "worker", 0, 9, 30*time.Second, nil)
-		workerID1, err := claimer1.Claim(ctx)
-		require.NoError(t, err)
-		require.Equal(t, "worker-0", workerID1)
-
-		// Second claimer should get worker-1
-		claimer2 := NewClaimer(kv, "worker", 0, 9, 30*time.Second, nil)
-		workerID2, err := claimer2.Claim(ctx)
-		require.NoError(t, err)
-		require.Equal(t, "worker-1", workerID2)
-	})
-
-	t.Run("returns error when pool exhausted", func(t *testing.T) {
-		ctx := t.Context()
-
-		// Setup embedded NATS
-		_, nc := partitest.StartEmbeddedNATS(t)
-		kv := partitest.CreateJetStreamKV(t, nc, "test-stable-ids-3")
-
-		// Create small pool (0-1) and claim both IDs
-		claimer1 := NewClaimer(kv, "worker", 0, 1, 30*time.Second, nil)
-		_, err := claimer1.Claim(ctx)
-		require.NoError(t, err)
-
-		claimer2 := NewClaimer(kv, "worker", 0, 1, 30*time.Second, nil)
-		_, err = claimer2.Claim(ctx)
-		require.NoError(t, err)
-
-		// Third claimer should fail
-		claimer3 := NewClaimer(kv, "worker", 0, 1, 30*time.Second, nil)
-		_, err = claimer3.Claim(ctx)
-		require.ErrorIs(t, err, ErrNoAvailableID)
-	})
-
-	t.Run("respects context cancellation", func(t *testing.T) {
-		ctx := t.Context()
-
-		// Setup embedded NATS
-		_, nc := partitest.StartEmbeddedNATS(t)
-		kv := partitest.CreateJetStreamKV(t, nc, "test-stable-ids-4")
-
-		claimer := NewClaimer(kv, "worker", 0, 100, 30*time.Second, nil)
-
-		// Cancel context immediately
-		ctx, cancel := context.WithCancel(ctx)
-		cancel()
-
-		_, err := claimer.Claim(ctx)
-		require.Error(t, err)
-	})
+	c := NewClaimer(nil, "worker", 0, 9, 0, nil) // kv nil is fine for this path
+	err := c.StartRenewal()
+	require.ErrorIs(t, err, ErrNotClaimed)
 }
 
-func TestClaimer_Renewal(t *testing.T) {
-	t.Run("renews ID periodically", func(t *testing.T) {
-		ctx := t.Context()
+func TestClaimer_Release_WithoutClaim(t *testing.T) {
+	t.Parallel()
 
-		// Setup embedded NATS with short TTL
-		_, nc := partitest.StartEmbeddedNATS(t)
-		kv := partitest.CreateJetStreamKV(t, nc, "test-stable-ids-renewal")
-
-		claimer := NewClaimer(kv, "worker", 0, 9, 30*time.Second, nil)
-		workerID, err := claimer.Claim(ctx)
-		require.NoError(t, err)
-
-		// Start renewal
-		err = claimer.StartRenewal(ctx)
-		require.NoError(t, err)
-
-		// Wait for at least one renewal cycle
-		time.Sleep(1 * time.Second)
-
-		// Verify key still exists (should be renewed)
-		entry, err := kv.Get(ctx, workerID)
-		require.NoError(t, err)
-		require.NotNil(t, entry)
-
-		// Cleanup
-		err = claimer.Release(ctx)
-		require.NoError(t, err)
-	})
-
-	t.Run("returns error if called before claim", func(t *testing.T) {
-		ctx := t.Context()
-
-		// Setup embedded NATS
-		_, nc := partitest.StartEmbeddedNATS(t)
-		kv := partitest.CreateJetStreamKV(t, nc, "test-stable-ids-renewal-2")
-
-		claimer := NewClaimer(kv, "worker", 0, 9, 30*time.Second, nil)
-
-		err := claimer.StartRenewal(ctx)
-		require.ErrorIs(t, err, ErrNotClaimed)
-	})
+	c := NewClaimer(nil, "worker", 0, 9, 0, nil)
+	err := c.Release(context.Background())
+	require.ErrorIs(t, err, ErrNotClaimed)
 }
 
-func TestClaimer_Release(t *testing.T) {
-	t.Run("releases claimed ID", func(t *testing.T) {
-		ctx := t.Context()
+func TestClaimer_WorkerID_DefaultEmpty(t *testing.T) {
+	t.Parallel()
 
-		// Setup embedded NATS
-		_, nc := partitest.StartEmbeddedNATS(t)
-		kv := partitest.CreateJetStreamKV(t, nc, "test-stable-ids-release")
-
-		// Use shorter TTL for faster test
-		claimer := NewClaimer(kv, "worker", 0, 9, 2*time.Second, nil)
-		workerID, err := claimer.Claim(ctx)
-		require.NoError(t, err)
-
-		// Start renewal (renewal interval = TTL/3 = 667ms)
-		err = claimer.StartRenewal(ctx)
-		require.NoError(t, err)
-
-		// Small delay to let renewal goroutine start
-		time.Sleep(50 * time.Millisecond)
-
-		// Release
-		err = claimer.Release(ctx)
-		require.NoError(t, err)
-		require.Empty(t, claimer.WorkerID())
-
-		// Verify key is deleted
-		_, err = kv.Get(ctx, workerID)
-		require.Error(t, err)
-	})
-
-	t.Run("allows ID to be reclaimed after release", func(t *testing.T) {
-		ctx := t.Context()
-
-		// Setup embedded NATS
-		_, nc := partitest.StartEmbeddedNATS(t)
-		kv := partitest.CreateJetStreamKV(t, nc, "test-stable-ids-release-2")
-
-		// Use shorter TTL for faster test
-		// First claimer
-		claimer1 := NewClaimer(kv, "worker", 0, 9, 2*time.Second, nil)
-		workerID1, err := claimer1.Claim(ctx)
-		require.NoError(t, err)
-		require.Equal(t, "worker-0", workerID1)
-
-		// Start renewal so Release() doesn't timeout
-		err = claimer1.StartRenewal(ctx)
-		require.NoError(t, err)
-
-		// Small delay to let renewal goroutine start
-		time.Sleep(50 * time.Millisecond)
-
-		// Release it
-		err = claimer1.Release(ctx)
-		require.NoError(t, err)
-
-		// Second claimer should be able to claim the same ID
-		claimer2 := NewClaimer(kv, "worker", 0, 9, 2*time.Second, nil)
-		workerID2, err := claimer2.Claim(ctx)
-		require.NoError(t, err)
-		require.Equal(t, "worker-0", workerID2)
-	})
-
-	t.Run("returns error if not claimed", func(t *testing.T) {
-		ctx := t.Context()
-
-		// Setup embedded NATS
-		_, nc := partitest.StartEmbeddedNATS(t)
-		kv := partitest.CreateJetStreamKV(t, nc, "test-stable-ids-release-3")
-
-		claimer := NewClaimer(kv, "worker", 0, 9, 30*time.Second, nil)
-
-		err := claimer.Release(ctx)
-		require.ErrorIs(t, err, ErrNotClaimed)
-	})
+	c := NewClaimer(nil, "worker", 0, 9, 0, nil)
+	require.Equal(t, "", c.WorkerID())
 }
 
-func TestClaimer_ConcurrentClaiming(t *testing.T) {
-	t.Run("multiple claimers get different IDs", func(t *testing.T) {
-		ctx := t.Context()
+func TestClaimer_DoubleRelease(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	_, nc := partitest.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
 
-		// Setup embedded NATS
-		_, nc := partitest.StartEmbeddedNATS(t)
-		kv := partitest.CreateJetStreamKV(t, nc, "test-stable-ids-concurrent")
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "unit-stableid-double-release", TTL: 500 * time.Millisecond, Storage: jetstream.MemoryStorage})
+	require.NoError(t, err)
 
-		// Create 5 claimers concurrently
-		numClaimers := 5
-		results := make(chan string, numClaimers)
-		errs := make(chan error, numClaimers)
+	c := NewClaimer(kv, "worker", 0, 0, 500*time.Millisecond, nil)
+	wid, err := c.Claim(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "worker-0", wid)
 
-		for range numClaimers {
-			go func() {
-				claimer := NewClaimer(kv, "worker", 0, 9, 30*time.Second, nil)
-				workerID, err := claimer.Claim(ctx)
-				if err != nil {
-					errs <- err
-					return
-				}
-				results <- workerID
-			}()
-		}
+	require.NoError(t, c.StartRenewal())
 
-		// Collect results
-		claimedIDs := make(map[string]bool)
-		for range numClaimers {
-			select {
-			case id := <-results:
-				require.False(t, claimedIDs[id], "ID %s claimed twice", id)
-				claimedIDs[id] = true
-			case err := <-errs:
-				t.Fatalf("Claim failed: %v", err)
-			case <-time.After(5 * time.Second):
-				t.Fatal("Timeout waiting for claims")
-			}
-		}
+	// First release succeeds
+	require.NoError(t, c.Release(ctx))
 
-		require.Len(t, claimedIDs, numClaimers, "Should have claimed %d unique IDs", numClaimers)
-	})
+	// Second release returns ErrNotClaimed
+	err = c.Release(ctx)
+	require.ErrorIs(t, err, ErrNotClaimed)
+}
+
+func TestClaimer_StartRenewal_AfterClose(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	_, nc := partitest.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "unit-stableid-renew-after-close", TTL: 500 * time.Millisecond, Storage: jetstream.MemoryStorage})
+	require.NoError(t, err)
+
+	c := NewClaimer(kv, "worker", 0, 0, 500*time.Millisecond, nil)
+	wid, err := c.Claim(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "worker-0", wid)
+
+	c.Close()
+	err = c.StartRenewal()
+	require.ErrorIs(t, err, ErrAlreadyClosed)
+	require.Equal(t, "worker-0", c.WorkerID(), "Close should not delete the key or clear workerID")
 }

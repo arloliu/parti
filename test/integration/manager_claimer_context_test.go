@@ -2,6 +2,7 @@ package integration_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -11,126 +12,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestClaimerContextLifecycle_StartupContextCancellation proves the bug:
-// If StartRenewal() receives a startup context that gets cancelled after startup,
-// the renewal loop stops and the stable ID expires, allowing other workers to claim it.
-func TestClaimerContextLifecycle_StartupContextCancellation(t *testing.T) {
-	_, nc := partitest.StartEmbeddedNATS(t)
-	js, err := jetstream.New(nc)
-	require.NoError(t, err)
-
-	// Create KV bucket with SHORT TTL for fast testing
-	ttl := 3 * time.Second
-	kv, err := js.CreateKeyValue(context.Background(), jetstream.KeyValueConfig{
-		Bucket:  "test-stable-id-context-bug",
-		History: 1,
-		TTL:     ttl,
-	})
-	require.NoError(t, err)
-
-	// Simulate Manager.Start() behavior with startup context
-	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancelStartup()
-
-	// Manager's lifecycle context (should be used for renewal)
-	managerCtx, cancelManager := context.WithCancel(context.Background())
-	defer cancelManager()
-
-	// Worker 1: Claims ID using startup context (BUG)
-	claimer1 := stableid.NewClaimer(kv, "worker", 0, 10, ttl, nil)
-
-	workerID1, err := claimer1.Claim(startupCtx)
-	require.NoError(t, err)
-	require.Equal(t, "worker-0", workerID1)
-
-	// Start renewal with WRONG context (startup context) - THIS IS THE BUG
-	err = claimer1.StartRenewal(startupCtx)
-	require.NoError(t, err)
-
-	t.Logf("Worker 1 claimed: %s at T+0s", workerID1)
-
-	// Wait for "startup" to complete, then cancel startup context
-	time.Sleep(500 * time.Millisecond)
-	cancelStartup() // This simulates startup context being cancelled after Manager.Start() returns
-	t.Log("Startup context cancelled at T+500ms")
-
-	// Wait for TTL to expire (3 seconds) - if renewal stopped, ID will expire
-	t.Logf("Waiting %v for stable ID to expire (if renewal stopped)...", ttl)
-	time.Sleep(ttl + 500*time.Millisecond) // TTL + buffer
-
-	// Worker 2: Try to claim the same ID - should succeed because Worker 1's ID expired
-	claimer2 := stableid.NewClaimer(kv, "worker", 0, 10, ttl, nil)
-
-	workerID2, err := claimer2.Claim(managerCtx)
-	require.NoError(t, err)
-	require.Equal(t, "worker-0", workerID2, "BUG CONFIRMED: Worker 2 claimed same ID as Worker 1!")
-
-	t.Logf("BUG VERIFIED: Worker 2 claimed same ID '%s' after Worker 1's renewal stopped!", workerID2)
-
-	// Cleanup
-	require.NoError(t, claimer2.Release(managerCtx))
-}
-
-// TestClaimerContextLifecycle_ManagerContextCorrect proves the fix:
-// If StartRenewal() receives the manager's lifecycle context,
-// renewal continues even after startup completes, preventing ID expiration.
-func TestClaimerContextLifecycle_ManagerContextCorrect(t *testing.T) {
-	_, nc := partitest.StartEmbeddedNATS(t)
-	js, err := jetstream.New(nc)
-	require.NoError(t, err)
-
-	// Create KV bucket with SHORT TTL for fast testing
-	ttl := 3 * time.Second
-	kv, err := js.CreateKeyValue(context.Background(), jetstream.KeyValueConfig{
-		Bucket:  "test-stable-id-context-fix",
-		History: 1,
-		TTL:     ttl,
-	})
-	require.NoError(t, err)
-
-	// Simulate Manager.Start() behavior with startup context
-	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancelStartup()
-
-	// Manager's lifecycle context (should be used for renewal)
-	managerCtx, cancelManager := context.WithCancel(context.Background())
-	defer cancelManager()
-
-	// Worker 1: Claims ID using startup context for Claim()
-	claimer1 := stableid.NewClaimer(kv, "worker", 0, 10, ttl, nil)
-
-	workerID1, err := claimer1.Claim(startupCtx)
-	require.NoError(t, err)
-	require.Equal(t, "worker-0", workerID1)
-
-	// Start renewal with CORRECT context (manager context) - THIS IS THE FIX
-	err = claimer1.StartRenewal(managerCtx)
-	require.NoError(t, err)
-
-	t.Logf("Worker 1 claimed: %s at T+0s", workerID1)
-
-	// Wait for "startup" to complete, then cancel startup context
-	time.Sleep(500 * time.Millisecond)
-	cancelStartup() // Startup context cancelled, but renewal should continue
-	t.Log("Startup context cancelled at T+500ms (renewal should continue)")
-
-	// Wait longer than TTL to verify renewal is working
-	t.Logf("Waiting %v (longer than TTL) to verify renewal keeps ID alive...", ttl+time.Second)
-	time.Sleep(ttl + time.Second)
-
-	// Worker 2: Try to claim the same ID - should FAIL because Worker 1's renewal is still working
-	claimer2 := stableid.NewClaimer(kv, "worker", 0, 0, ttl, nil) // Only try ID 0
-
-	workerID2, err := claimer2.Claim(managerCtx)
-	require.Error(t, err, "Worker 2 should fail to claim worker-0 because Worker 1 is still renewing it")
-	require.Equal(t, stableid.ErrNoAvailableID, err)
-	require.Equal(t, "", workerID2)
-
-	t.Log("FIX VERIFIED: Worker 2 cannot claim worker-0 because renewal kept it alive!")
-
-	// Cleanup
-	require.NoError(t, claimer1.Release(managerCtx))
-}
+// The previous tests that verified renewal behavior against startup vs manager contexts
+// are no longer necessary: StartRenewal() no longer accepts a context, and its lifecycle
+// is controlled via Release()/Close(). Remaining tests focus on renewal timing and
+// multi-worker behavior.
 
 // TestClaimerContextLifecycle_RenewalInterval verifies renewal happens at expected intervals.
 func TestClaimerContextLifecycle_RenewalInterval(t *testing.T) {
@@ -156,7 +41,7 @@ func TestClaimerContextLifecycle_RenewalInterval(t *testing.T) {
 	require.Equal(t, "worker-0", workerID)
 
 	// Start renewal
-	err = claimer.StartRenewal(ctx)
+	err = claimer.StartRenewal()
 	require.NoError(t, err)
 
 	t.Logf("Claimed: %s, expecting renewal every ~%v", workerID, expectedInterval)
@@ -230,9 +115,8 @@ func TestClaimerContextLifecycle_MultipleWorkers(t *testing.T) {
 		cancelStartup()
 		workerIDs[i] = workerID
 
-		// BUG: Using startup context for renewal (will fail)
-		// FIX: Should use managerCtx instead
-		err = claimer.StartRenewal(startupCtx) // BUG - using wrong context
+		// Using startup context for renewal is acceptable; loop lifecycle is now independent of ctx
+		err = claimer.StartRenewal()
 		require.NoError(t, err)
 
 		t.Logf("Worker %d claimed: %s", i, workerID)
@@ -249,25 +133,18 @@ func TestClaimerContextLifecycle_MultipleWorkers(t *testing.T) {
 	}
 	t.Logf("All %d workers have unique IDs", numWorkers)
 
-	// Wait for TTL to expire - if renewal stopped, IDs will become available
-	t.Logf("Waiting %v for stable IDs to expire (if renewal stopped)...", ttl)
+	// Wait for TTL to confirm IDs are kept alive by renewal
+	t.Logf("Waiting %v to confirm IDs remain renewed...", ttl)
 	time.Sleep(ttl + time.Second)
 
-	// Try to claim IDs again - if bug exists, should be able to claim previously claimed IDs
-	for i := 0; i < numWorkers; i++ {
-		newClaimer := stableid.NewClaimer(kv, "worker", 0, 10, ttl, nil)
-		newID, err := newClaimer.Claim(context.Background())
-		if err == nil {
-			t.Logf("BUG VERIFIED: New claimer claimed previously used ID: %s", newID)
-			// Check if this ID was previously claimed
-			for j, oldID := range workerIDs {
-				if oldID == newID {
-					t.Logf("   This ID belonged to Worker %d!", j)
-					break
-				}
-			}
-			require.NoError(t, newClaimer.Release(context.Background()))
-		}
+	// Assert that previously claimed IDs cannot be reclaimed: attempt to claim exact same IDs by constraining range
+	for i := range numWorkers {
+		// Parse numeric suffix from workerIDs[i]
+		var idx int
+		_, _ = fmt.Sscanf(workerIDs[i], "worker-%d", &idx)
+		newClaimer := stableid.NewClaimer(kv, "worker", idx, idx, ttl, nil)
+		_, err := newClaimer.Claim(context.Background())
+		require.ErrorIs(t, err, stableid.ErrNoAvailableID, "ID %s should still be held by renewal", workerIDs[i])
 	}
 
 	// Cleanup

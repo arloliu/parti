@@ -758,11 +758,7 @@ func (m *Manager) claimWorkerID(ctx context.Context, kv jetstream.KeyValue) erro
 	m.workerID.Store(workerID)
 	m.logger.Info("claimed stable worker ID", "worker_id", workerID)
 
-	// Start renewal goroutine with manager's lifecycle context (not startup context)
-	// CRITICAL: Must use m.ctx (manager lifecycle) not ctx (startup context)
-	// The startup context gets cancelled after Start() returns, which would
-	// stop renewal and allow the stable ID to expire and be reclaimed by other workers.
-	if err := claimer.StartRenewal(m.ctx); err != nil {
+	if err := claimer.StartRenewal(); err != nil {
 		return fmt.Errorf("failed to start renewal: %w", err)
 	}
 

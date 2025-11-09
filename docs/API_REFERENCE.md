@@ -9,14 +9,15 @@
 ## Table of Contents
 
 1. [Manager Interface](#manager-interface)
-2. [Core Interfaces](#core-interfaces)
-3. [Configuration Types](#configuration-types)
-4. [Data Types](#data-types)
-5. [Strategy Package](#strategy-package)
-6. [Source Package](#source-package)
-7. [Subscription Package](#subscription-package)
-8. [Testing Package](#testing-package)
-9. [Error Types](#error-types)
+2. [Stable ID Renewal Lifecycle](#stable-id-renewal-lifecycle)
+3. [Core Interfaces](#core-interfaces)
+4. [Configuration Types](#configuration-types)
+5. [Data Types](#data-types)
+6. [Strategy Package](#strategy-package)
+7. [Source Package](#source-package)
+8. [Subscription Package](#subscription-package)
+9. [Testing Package](#testing-package)
+10. [Error Types](#error-types)
 
 ---
 
@@ -62,6 +63,9 @@ mgr, err := parti.NewManager(cfg, js, src, strategy)
 if err != nil {
     log.Fatal(err)
 }
+
+// Note: After startup, a stable worker ID is claimed and renewed in the background.
+// See the Stable ID Renewal Lifecycle section for details.
 ```
 
 ---
@@ -256,6 +260,19 @@ if err := mgr.RefreshPartitions(ctx); err != nil {
 ```
 
 ---
+
+## Stable ID Renewal Lifecycle
+
+Short version (5 bullets):
+
+- StartRenewal() starts the background renewal loop (no ctx), renews every ttl/3 (min 100ms), and is idempotent.
+- Claim(ctx) is required first; otherwise StartRenewal() returns ErrNotClaimed.
+- Release(ctx) stops the loop and deletes the key; calling it again returns ErrNotClaimed.
+- Close() stops the loop but keeps the key; after Close(), StartRenewal() returns ErrAlreadyClosed.
+- Renewal tick uses an internal short timeout (100ms–5s); failures are logged and retried next tick.
+
+For details and examples, see the User Guide: Stable ID Renewal Lifecycle.
+https://github.com/arloliu/parti/blob/main/docs/USER_GUIDE.md#stable-id-renewal-lifecycle
 
 ## Core Interfaces
 
