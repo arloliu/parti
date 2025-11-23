@@ -10,23 +10,25 @@ import (
 )
 
 const (
-	defaultVirtualNodes      = 150
-	defaultOverloadThreshold = 2.0
-	defaultExtremeThreshold  = 10.0
-	defaultWeight            = int64(1)
+	defaultVirtualNodes            = 150
+	defaultOverloadThreshold       = 1.2
+	defaultExtremeThreshold        = 20.0
+	defaultMinPartitionCountFactor = 0.3
+	defaultWeight                  = int64(1)
 
-	minOverloadThreshold = 1.15
+	minOverloadThreshold = 1.1
 	minExtremeThreshold  = 1.5
 )
 
 // WeightedConsistentHash implements weighted consistent hashing with extreme partition handling.
 type WeightedConsistentHash struct {
-	virtualNodes      int
-	hashSeed          uint64
-	overloadThreshold float64
-	extremeThreshold  float64
-	defaultWeight     int64
-	logger            types.Logger
+	virtualNodes            int
+	hashSeed                uint64
+	overloadThreshold       float64
+	extremeThreshold        float64
+	minPartitionCountFactor float64
+	defaultWeight           int64
+	logger                  types.Logger
 
 	// ring cache to avoid rebuilding when worker set and config are unchanged
 	cacheMu       sync.RWMutex
@@ -44,7 +46,6 @@ type WeightedConsistentHashOption func(*WeightedConsistentHash)
 type partitionEntry struct {
 	partition types.Partition
 	weight    int64
-	index     int
 }
 
 type distributionThresholds struct {
@@ -55,18 +56,19 @@ type distributionThresholds struct {
 // NewWeightedConsistentHash creates a new weighted consistent hash strategy.
 //
 // Parameters:
-//   - opts: Optional configuration (WithWeightedVirtualNodes, WithWeightedHashSeed, WithOverloadThreshold, WithExtremeThreshold, WithDefaultWeight, WithWeightedLogger)
+//   - opts: Optional configuration (WithWeightedVirtualNodes, WithWeightedHashSeed, WithOverloadThreshold, WithExtremeThreshold, WithMinPartitionCount, WithDefaultWeight, WithWeightedLogger)
 //
 // Returns:
 //   - *WeightedConsistentHash: Initialized weighted consistent hash strategy ready for use.
 func NewWeightedConsistentHash(opts ...WeightedConsistentHashOption) *WeightedConsistentHash {
 	wch := &WeightedConsistentHash{
-		virtualNodes:      defaultVirtualNodes,
-		hashSeed:          0,
-		overloadThreshold: defaultOverloadThreshold,
-		extremeThreshold:  defaultExtremeThreshold,
-		defaultWeight:     defaultWeight,
-		logger:            logging.NewNop(),
+		virtualNodes:            defaultVirtualNodes,
+		hashSeed:                0,
+		overloadThreshold:       defaultOverloadThreshold,
+		extremeThreshold:        defaultExtremeThreshold,
+		minPartitionCountFactor: defaultMinPartitionCountFactor,
+		defaultWeight:           defaultWeight,
+		logger:                  logging.NewNop(),
 	}
 
 	for _, opt := range opts {
@@ -122,6 +124,15 @@ func WithWeightedLogger(logger types.Logger) WeightedConsistentHashOption {
 	}
 }
 
+// WithMinPartitionCount sets the minimum percentage of average partition count
+// that a worker must accept before load shedding occurs.
+// factor: 0.0 to 1.0 (e.g., 0.3 means 30% of avg count)
+func WithMinPartitionCount(factor float64) WeightedConsistentHashOption {
+	return func(wch *WeightedConsistentHash) {
+		wch.minPartitionCountFactor = factor
+	}
+}
+
 // Assign calculates partition assignments using weighted consistent hashing with extreme partition handling.
 //
 // The algorithm balances two competing goals:
@@ -173,7 +184,7 @@ func (wch *WeightedConsistentHash) Assign(workers []string, partitions []types.P
 
 	// Step 4: Compute effective weights (applying defaults for zero-weight partitions)
 	// and detect if all weights are equal
-	effectiveWeights, totalWeight, allEqual := wch.computeEffectiveWeights(partitions)
+	totalWeight, allEqual := wch.analyzeWeights(partitions)
 
 	// Step 5: Build or reuse consistent hash ring for partition-to-worker mapping
 	ring := wch.getOrBuildRing(sortedWorkers)
@@ -192,7 +203,7 @@ func (wch *WeightedConsistentHash) Assign(workers []string, partitions []types.P
 	// - extremeCutoff: Partitions heavier than this get round-robin treatment
 	// - maxWorkerWeight: Soft cap on worker load (can be exceeded if unavoidable)
 	thresholds := wch.computeThresholds(totalWeight, len(partitions), len(sortedWorkers), wch.extremeThreshold, wch.overloadThreshold)
-	extremes, normals := splitPartitions(partitions, effectiveWeights, thresholds.extremeCutoff)
+	extremes, normals := wch.splitPartitions(partitions, thresholds.extremeCutoff)
 
 	// Step 8: Phase 1 - Assign extreme partitions round-robin across workers
 	// This ensures heavy partitions are spread evenly before applying consistent hashing
@@ -200,7 +211,13 @@ func (wch *WeightedConsistentHash) Assign(workers []string, partitions []types.P
 
 	// Step 9: Phase 2 - Assign normal partitions using consistent hashing with load cap
 	// Preserves cache affinity while preventing individual workers from becoming overloaded
-	overflowCount, err := wch.assignNormalPartitionsByRingIndex(normals, ring, buckets, workerLoad, thresholds.maxWorkerWeight)
+	minPartitionCount := 0
+	if wch.minPartitionCountFactor > 0 && len(workers) > 0 {
+		avgCount := float64(len(partitions)) / float64(len(workers))
+		minPartitionCount = int(avgCount * wch.minPartitionCountFactor)
+	}
+
+	overflowCount, err := wch.assignNormalPartitionsByRingIndex(normals, ring, buckets, workerLoad, thresholds.maxWorkerWeight, minPartitionCount)
 	if err != nil {
 		return nil, err
 	}
@@ -271,15 +288,13 @@ func (wch *WeightedConsistentHash) prepare(workers []string, partitionsLen int) 
 	return sortedWorkers, workerLoad, buckets
 }
 
-func (wch *WeightedConsistentHash) computeEffectiveWeights(partitions []types.Partition) ([]int64, int64, bool) {
-	effectiveWeights := make([]int64, len(partitions))
+func (wch *WeightedConsistentHash) analyzeWeights(partitions []types.Partition) (int64, bool) {
 	totalWeight := int64(0)
 	allEqual := true
 	var firstWeight int64
 
 	for i, partition := range partitions {
 		weight := wch.effectiveWeight(partition.Weight)
-		effectiveWeights[i] = weight
 		totalWeight += weight
 
 		if i == 0 {
@@ -293,7 +308,7 @@ func (wch *WeightedConsistentHash) computeEffectiveWeights(partitions []types.Pa
 		}
 	}
 
-	return effectiveWeights, totalWeight, allEqual
+	return totalWeight, allEqual
 }
 
 func (wch *WeightedConsistentHash) assignEqualWeightPartitionsByRingIndex(
@@ -333,16 +348,16 @@ func (wch *WeightedConsistentHash) computeThresholds(
 	}
 }
 
-func splitPartitions(
+func (wch *WeightedConsistentHash) splitPartitions(
 	partitions []types.Partition,
-	effectiveWeights []int64,
 	extremeCutoff float64,
 ) (extremes []partitionEntry, normals []partitionEntry) {
 	extremes = make([]partitionEntry, 0)
 	normals = make([]partitionEntry, 0, len(partitions))
 
-	for idx, partition := range partitions {
-		entry := partitionEntry{partition: partition, weight: effectiveWeights[idx], index: idx}
+	for _, partition := range partitions {
+		weight := wch.effectiveWeight(partition.Weight)
+		entry := partitionEntry{partition: partition, weight: weight}
 		if extremeCutoff > 0 && float64(entry.weight) > extremeCutoff {
 			extremes = append(extremes, entry)
 
@@ -398,6 +413,7 @@ func (wch *WeightedConsistentHash) assignNormalPartitionsByRingIndex(
 	buckets [][]types.Partition,
 	workerLoad []int64,
 	maxWorkerWeight float64,
+	minPartitionCount int,
 ) (int, error) {
 	overflowCount := 0
 
@@ -408,7 +424,10 @@ func (wch *WeightedConsistentHash) assignNormalPartitionsByRingIndex(
 			return 0, ErrNoWorkers
 		}
 
-		if maxWorkerWeight > 0 && float64(workerLoad[idx]+entry.weight) > maxWorkerWeight {
+		isOverloaded := maxWorkerWeight > 0 && float64(workerLoad[idx]+entry.weight) > maxWorkerWeight
+		hasMinCount := len(buckets[idx]) >= minPartitionCount
+
+		if isOverloaded && hasMinCount {
 			idx = wch.findLightestWorkerIndexed(workerLoad)
 			if maxWorkerWeight > 0 && float64(workerLoad[idx]+entry.weight) > maxWorkerWeight {
 				overflowCount++

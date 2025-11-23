@@ -1,0 +1,5036 @@
+{
+  "partitions": [
+    {
+      "key": "DEVICE1",
+      "weight": 43271459
+    },
+    {
+      "key": "DEVICE2",
+      "weight": 43254750
+    },
+    {
+      "key": "DEVICE3",
+      "weight": 43238041
+    },
+    {
+      "key": "DEVICE4",
+      "weight": 43221332
+    },
+    {
+      "key": "DEVICE5",
+      "weight": 43205162
+    },
+    {
+      "key": "DEVICE6",
+      "weight": 43188992
+    },
+    {
+      "key": "DEVICE7",
+      "weight": 43187914
+    },
+    {
+      "key": "DEVICE8",
+      "weight": 43155574
+    },
+    {
+      "key": "DEVICE9",
+      "weight": 43139404
+    },
+    {
+      "key": "DEVICE10",
+      "weight": 43138865
+    },
+    {
+      "key": "DEVICE11",
+      "weight": 43105447
+    },
+    {
+      "key": "DEVICE12",
+      "weight": 40270846
+    },
+    {
+      "key": "DEVICE13",
+      "weight": 39378192
+    },
+    {
+      "key": "DEVICE14",
+      "weight": 39317556
+    },
+    {
+      "key": "DEVICE15",
+      "weight": 15873780
+    },
+    {
+      "key": "DEVICE16",
+      "weight": 14781614
+    },
+    {
+      "key": "DEVICE17",
+      "weight": 14749728
+    },
+    {
+      "key": "DEVICE18",
+      "weight": 12663774
+    },
+    {
+      "key": "DEVICE19",
+      "weight": 12648076
+    },
+    {
+      "key": "DEVICE20",
+      "weight": 12643376
+    },
+    {
+      "key": "DEVICE21",
+      "weight": 10510173
+    },
+    {
+      "key": "DEVICE22",
+      "weight": 10509574
+    },
+    {
+      "key": "DEVICE23",
+      "weight": 10498296
+    },
+    {
+      "key": "DEVICE24",
+      "weight": 10496236
+    },
+    {
+      "key": "DEVICE25",
+      "weight": 10486233
+    },
+    {
+      "key": "DEVICE26",
+      "weight": 10485378
+    },
+    {
+      "key": "DEVICE27",
+      "weight": 10152376
+    },
+    {
+      "key": "DEVICE28",
+      "weight": 8909508
+    },
+    {
+      "key": "DEVICE29",
+      "weight": 8447314
+    },
+    {
+      "key": "DEVICE30",
+      "weight": 8308719
+    },
+    {
+      "key": "DEVICE31",
+      "weight": 8293414
+    },
+    {
+      "key": "DEVICE32",
+      "weight": 8194080
+    },
+    {
+      "key": "DEVICE33",
+      "weight": 7927866
+    },
+    {
+      "key": "DEVICE34",
+      "weight": 7653856
+    },
+    {
+      "key": "DEVICE35",
+      "weight": 7427727
+    },
+    {
+      "key": "DEVICE36",
+      "weight": 7392073
+    },
+    {
+      "key": "DEVICE37",
+      "weight": 7391817
+    },
+    {
+      "key": "DEVICE38",
+      "weight": 7382070
+    },
+    {
+      "key": "DEVICE39",
+      "weight": 7371553
+    },
+    {
+      "key": "DEVICE40",
+      "weight": 7257240
+    },
+    {
+      "key": "DEVICE41",
+      "weight": 6661989
+    },
+    {
+      "key": "DEVICE42",
+      "weight": 6658584
+    },
+    {
+      "key": "DEVICE43",
+      "weight": 6638168
+    },
+    {
+      "key": "DEVICE44",
+      "weight": 5773623
+    },
+    {
+      "key": "DEVICE45",
+      "weight": 5721360
+    },
+    {
+      "key": "DEVICE46",
+      "weight": 5717128
+    },
+    {
+      "key": "DEVICE47",
+      "weight": 5602353
+    },
+    {
+      "key": "DEVICE48",
+      "weight": 5344263
+    },
+    {
+      "key": "DEVICE49",
+      "weight": 5139506
+    },
+    {
+      "key": "DEVICE50",
+      "weight": 5076112
+    },
+    {
+      "key": "DEVICE51",
+      "weight": 4878561
+    },
+    {
+      "key": "DEVICE52",
+      "weight": 4167624
+    },
+    {
+      "key": "DEVICE53",
+      "weight": 4148064
+    },
+    {
+      "key": "DEVICE54",
+      "weight": 4085228
+    },
+    {
+      "key": "DEVICE55",
+      "weight": 3996352
+    },
+    {
+      "key": "DEVICE56",
+      "weight": 3987550
+    },
+    {
+      "key": "DEVICE57",
+      "weight": 3948349
+    },
+    {
+      "key": "DEVICE58",
+      "weight": 3916577
+    },
+    {
+      "key": "DEVICE59",
+      "weight": 3657236
+    },
+    {
+      "key": "DEVICE60",
+      "weight": 3529968
+    },
+    {
+      "key": "DEVICE61",
+      "weight": 3529864
+    },
+    {
+      "key": "DEVICE62",
+      "weight": 2868874
+    },
+    {
+      "key": "DEVICE63",
+      "weight": 2868573
+    },
+    {
+      "key": "DEVICE64",
+      "weight": 2839720
+    },
+    {
+      "key": "DEVICE65",
+      "weight": 2823322
+    },
+    {
+      "key": "DEVICE66",
+      "weight": 2808416
+    },
+    {
+      "key": "DEVICE67",
+      "weight": 2757217
+    },
+    {
+      "key": "DEVICE68",
+      "weight": 2727748
+    },
+    {
+      "key": "DEVICE69",
+      "weight": 2696042
+    },
+    {
+      "key": "DEVICE70",
+      "weight": 9000000
+    },
+    {
+      "key": "DEVICE71",
+      "weight": 9000000
+    },
+    {
+      "key": "DEVICE72",
+      "weight": 9000000
+    },
+    {
+      "key": "DEVICE73",
+      "weight": 9000000
+    },
+    {
+      "key": "DEVICE74",
+      "weight": 9000000
+    },
+    {
+      "key": "DEVICE75",
+      "weight": 9000000
+    },
+    {
+      "key": "DEVICE76",
+      "weight": 9000000
+    },
+    {
+      "key": "DEVICE77",
+      "weight": 9000000
+    },
+    {
+      "key": "DEVICE78",
+      "weight": 9000000
+    },
+    {
+      "key": "DEVICE79",
+      "weight": 1441440
+    },
+    {
+      "key": "DEVICE80",
+      "weight": 1320312
+    },
+    {
+      "key": "DEVICE81",
+      "weight": 2418382
+    },
+    {
+      "key": "DEVICE82",
+      "weight": 1653915
+    },
+    {
+      "key": "DEVICE83",
+      "weight": 5196415
+    },
+    {
+      "key": "DEVICE84",
+      "weight": 4023482
+    },
+    {
+      "key": "DEVICE85",
+      "weight": 4064749
+    },
+    {
+      "key": "DEVICE86",
+      "weight": 2133612
+    },
+    {
+      "key": "DEVICE87",
+      "weight": 5825054
+    },
+    {
+      "key": "DEVICE88",
+      "weight": 2822412
+    },
+    {
+      "key": "DEVICE89",
+      "weight": 5644810
+    },
+    {
+      "key": "DEVICE90",
+      "weight": 2885558
+    },
+    {
+      "key": "DEVICE91",
+      "weight": 907088
+    },
+    {
+      "key": "DEVICE92",
+      "weight": 3246575
+    },
+    {
+      "key": "DEVICE93",
+      "weight": 1341211
+    },
+    {
+      "key": "DEVICE94",
+      "weight": 3490572
+    },
+    {
+      "key": "DEVICE95",
+      "weight": 1876493
+    },
+    {
+      "key": "DEVICE96",
+      "weight": 1886746
+    },
+    {
+      "key": "DEVICE97",
+      "weight": 1969454
+    },
+    {
+      "key": "DEVICE98",
+      "weight": 2615045
+    },
+    {
+      "key": "DEVICE99",
+      "weight": 1221235
+    },
+    {
+      "key": "DEVICE100",
+      "weight": 1222724
+    },
+    {
+      "key": "DEVICE101",
+      "weight": 985594
+    },
+    {
+      "key": "DEVICE102",
+      "weight": 3186514
+    },
+    {
+      "key": "DEVICE103",
+      "weight": 4740381
+    },
+    {
+      "key": "DEVICE104",
+      "weight": 1863374
+    },
+    {
+      "key": "DEVICE105",
+      "weight": 761663
+    },
+    {
+      "key": "DEVICE106",
+      "weight": 924922
+    },
+    {
+      "key": "DEVICE107",
+      "weight": 904917
+    },
+    {
+      "key": "DEVICE108",
+      "weight": 1868752
+    },
+    {
+      "key": "DEVICE109",
+      "weight": 1061842
+    },
+    {
+      "key": "DEVICE110",
+      "weight": 560217
+    },
+    {
+      "key": "DEVICE111",
+      "weight": 558663
+    },
+    {
+      "key": "DEVICE112",
+      "weight": 557207
+    },
+    {
+      "key": "DEVICE113",
+      "weight": 1183265
+    },
+    {
+      "key": "DEVICE114",
+      "weight": 549723
+    },
+    {
+      "key": "DEVICE115",
+      "weight": 547951
+    },
+    {
+      "key": "DEVICE116",
+      "weight": 547015
+    },
+    {
+      "key": "DEVICE117",
+      "weight": 544936
+    },
+    {
+      "key": "DEVICE118",
+      "weight": 543722
+    },
+    {
+      "key": "DEVICE119",
+      "weight": 539896
+    },
+    {
+      "key": "DEVICE120",
+      "weight": 537758
+    },
+    {
+      "key": "DEVICE121",
+      "weight": 533697
+    },
+    {
+      "key": "DEVICE122",
+      "weight": 1281778
+    },
+    {
+      "key": "DEVICE123",
+      "weight": 527627
+    },
+    {
+      "key": "DEVICE124",
+      "weight": 527324
+    },
+    {
+      "key": "DEVICE125",
+      "weight": 523905
+    },
+    {
+      "key": "DEVICE126",
+      "weight": 523143
+    },
+    {
+      "key": "DEVICE127",
+      "weight": 520701
+    },
+    {
+      "key": "DEVICE128",
+      "weight": 2210175
+    },
+    {
+      "key": "DEVICE129",
+      "weight": 515395
+    },
+    {
+      "key": "DEVICE130",
+      "weight": 642225
+    },
+    {
+      "key": "DEVICE131",
+      "weight": 1443867
+    },
+    {
+      "key": "DEVICE132",
+      "weight": 599907
+    },
+    {
+      "key": "DEVICE133",
+      "weight": 610461
+    },
+    {
+      "key": "DEVICE134",
+      "weight": 588528
+    },
+    {
+      "key": "DEVICE135",
+      "weight": 556273
+    },
+    {
+      "key": "DEVICE136",
+      "weight": 462747
+    },
+    {
+      "key": "DEVICE137",
+      "weight": 723909
+    },
+    {
+      "key": "DEVICE138",
+      "weight": 585474
+    },
+    {
+      "key": "DEVICE139",
+      "weight": 454591
+    },
+    {
+      "key": "DEVICE140",
+      "weight": 472034
+    },
+    {
+      "key": "DEVICE141",
+      "weight": 8838170
+    },
+    {
+      "key": "DEVICE142",
+      "weight": 8840003
+    },
+    {
+      "key": "DEVICE143",
+      "weight": 1670977
+    },
+    {
+      "key": "DEVICE144",
+      "weight": 1850598
+    },
+    {
+      "key": "DEVICE145",
+      "weight": 434343
+    },
+    {
+      "key": "DEVICE146",
+      "weight": 853262
+    },
+    {
+      "key": "DEVICE147",
+      "weight": 424008
+    },
+    {
+      "key": "DEVICE148",
+      "weight": 420050
+    },
+    {
+      "key": "DEVICE149",
+      "weight": 417950
+    },
+    {
+      "key": "DEVICE150",
+      "weight": 449082
+    },
+    {
+      "key": "DEVICE151",
+      "weight": 1196162
+    },
+    {
+      "key": "DEVICE152",
+      "weight": 1108816
+    },
+    {
+      "key": "DEVICE153",
+      "weight": 658794
+    },
+    {
+      "key": "DEVICE154",
+      "weight": 1201276
+    },
+    {
+      "key": "DEVICE155",
+      "weight": 851660
+    },
+    {
+      "key": "DEVICE156",
+      "weight": 1635329
+    },
+    {
+      "key": "DEVICE157",
+      "weight": 1463340
+    },
+    {
+      "key": "DEVICE158",
+      "weight": 1607071
+    },
+    {
+      "key": "DEVICE159",
+      "weight": 1621784
+    },
+    {
+      "key": "DEVICE160",
+      "weight": 1437764
+    },
+    {
+      "key": "DEVICE161",
+      "weight": 1431617
+    },
+    {
+      "key": "DEVICE162",
+      "weight": 1610420
+    },
+    {
+      "key": "DEVICE163",
+      "weight": 1054910
+    },
+    {
+      "key": "DEVICE164",
+      "weight": 1518619
+    },
+    {
+      "key": "DEVICE165",
+      "weight": 1530550
+    },
+    {
+      "key": "DEVICE166",
+      "weight": 1521362
+    },
+    {
+      "key": "DEVICE167",
+      "weight": 354463
+    },
+    {
+      "key": "DEVICE168",
+      "weight": 1510001
+    },
+    {
+      "key": "DEVICE169",
+      "weight": 1447705
+    },
+    {
+      "key": "DEVICE170",
+      "weight": 697805
+    },
+    {
+      "key": "DEVICE171",
+      "weight": 1294055
+    },
+    {
+      "key": "DEVICE172",
+      "weight": 1498894
+    },
+    {
+      "key": "DEVICE173",
+      "weight": 1306967
+    },
+    {
+      "key": "DEVICE174",
+      "weight": 832731
+    },
+    {
+      "key": "DEVICE175",
+      "weight": 904211
+    },
+    {
+      "key": "DEVICE176",
+      "weight": 707214
+    },
+    {
+      "key": "DEVICE177",
+      "weight": 667058
+    },
+    {
+      "key": "DEVICE178",
+      "weight": 896614
+    },
+    {
+      "key": "DEVICE179",
+      "weight": 1116219
+    },
+    {
+      "key": "DEVICE180",
+      "weight": 1271462
+    },
+    {
+      "key": "DEVICE181",
+      "weight": 1260973
+    },
+    {
+      "key": "DEVICE182",
+      "weight": 317063
+    },
+    {
+      "key": "DEVICE183",
+      "weight": 705101
+    },
+    {
+      "key": "DEVICE184",
+      "weight": 1185301
+    },
+    {
+      "key": "DEVICE185",
+      "weight": 961780
+    },
+    {
+      "key": "DEVICE186",
+      "weight": 311627
+    },
+    {
+      "key": "DEVICE187",
+      "weight": 1348937
+    },
+    {
+      "key": "DEVICE188",
+      "weight": 1131854
+    },
+    {
+      "key": "DEVICE189",
+      "weight": 296898
+    },
+    {
+      "key": "DEVICE190",
+      "weight": 1210839
+    },
+    {
+      "key": "DEVICE191",
+      "weight": 1247636
+    },
+    {
+      "key": "DEVICE192",
+      "weight": 1259216
+    },
+    {
+      "key": "DEVICE193",
+      "weight": 1121768
+    },
+    {
+      "key": "DEVICE194",
+      "weight": 292893
+    },
+    {
+      "key": "DEVICE195",
+      "weight": 1134233
+    },
+    {
+      "key": "DEVICE196",
+      "weight": 827347
+    },
+    {
+      "key": "DEVICE197",
+      "weight": 284942
+    },
+    {
+      "key": "DEVICE198",
+      "weight": 284804
+    },
+    {
+      "key": "DEVICE199",
+      "weight": 284596
+    },
+    {
+      "key": "DEVICE200",
+      "weight": 850819
+    },
+    {
+      "key": "DEVICE201",
+      "weight": 1121298
+    },
+    {
+      "key": "DEVICE202",
+      "weight": 1176701
+    },
+    {
+      "key": "DEVICE203",
+      "weight": 1056940
+    },
+    {
+      "key": "DEVICE204",
+      "weight": 1259471
+    },
+    {
+      "key": "DEVICE205",
+      "weight": 274815
+    },
+    {
+      "key": "DEVICE206",
+      "weight": 808202
+    },
+    {
+      "key": "DEVICE207",
+      "weight": 889505
+    },
+    {
+      "key": "DEVICE208",
+      "weight": 1128378
+    },
+    {
+      "key": "DEVICE209",
+      "weight": 837785
+    },
+    {
+      "key": "DEVICE210",
+      "weight": 808273
+    },
+    {
+      "key": "DEVICE211",
+      "weight": 774829
+    },
+    {
+      "key": "DEVICE212",
+      "weight": 699151
+    },
+    {
+      "key": "DEVICE213",
+      "weight": 622251
+    },
+    {
+      "key": "DEVICE214",
+      "weight": 1073016
+    },
+    {
+      "key": "DEVICE215",
+      "weight": 1013973
+    },
+    {
+      "key": "DEVICE216",
+      "weight": 1240774
+    },
+    {
+      "key": "DEVICE217",
+      "weight": 971356
+    },
+    {
+      "key": "DEVICE218",
+      "weight": 1054600
+    },
+    {
+      "key": "DEVICE219",
+      "weight": 1534560
+    },
+    {
+      "key": "DEVICE220",
+      "weight": 1105317
+    },
+    {
+      "key": "DEVICE221",
+      "weight": 629479
+    },
+    {
+      "key": "DEVICE222",
+      "weight": 1187658
+    },
+    {
+      "key": "DEVICE223",
+      "weight": 467420
+    },
+    {
+      "key": "DEVICE224",
+      "weight": 1344761
+    },
+    {
+      "key": "DEVICE225",
+      "weight": 610041
+    },
+    {
+      "key": "DEVICE226",
+      "weight": 1089235
+    },
+    {
+      "key": "DEVICE227",
+      "weight": 248872
+    },
+    {
+      "key": "DEVICE228",
+      "weight": 1487552
+    },
+    {
+      "key": "DEVICE229",
+      "weight": 378813
+    },
+    {
+      "key": "DEVICE230",
+      "weight": 765190
+    },
+    {
+      "key": "DEVICE231",
+      "weight": 823059
+    },
+    {
+      "key": "DEVICE232",
+      "weight": 850393
+    },
+    {
+      "key": "DEVICE233",
+      "weight": 962069
+    },
+    {
+      "key": "DEVICE234",
+      "weight": 574022
+    },
+    {
+      "key": "DEVICE235",
+      "weight": 450253
+    },
+    {
+      "key": "DEVICE236",
+      "weight": 491930
+    },
+    {
+      "key": "DEVICE237",
+      "weight": 1568617
+    },
+    {
+      "key": "DEVICE238",
+      "weight": 1309288
+    },
+    {
+      "key": "DEVICE239",
+      "weight": 907571
+    },
+    {
+      "key": "DEVICE240",
+      "weight": 922886
+    },
+    {
+      "key": "DEVICE241",
+      "weight": 1299083
+    },
+    {
+      "key": "DEVICE242",
+      "weight": 763073
+    },
+    {
+      "key": "DEVICE243",
+      "weight": 332346
+    },
+    {
+      "key": "DEVICE244",
+      "weight": 366295
+    },
+    {
+      "key": "DEVICE245",
+      "weight": 801320
+    },
+    {
+      "key": "DEVICE246",
+      "weight": 469301
+    },
+    {
+      "key": "DEVICE247",
+      "weight": 981654
+    },
+    {
+      "key": "DEVICE248",
+      "weight": 317019
+    },
+    {
+      "key": "DEVICE249",
+      "weight": 1607087
+    },
+    {
+      "key": "DEVICE250",
+      "weight": 1193340
+    },
+    {
+      "key": "DEVICE251",
+      "weight": 406326
+    },
+    {
+      "key": "DEVICE252",
+      "weight": 514823
+    },
+    {
+      "key": "DEVICE253",
+      "weight": 200910
+    },
+    {
+      "key": "DEVICE254",
+      "weight": 581315
+    },
+    {
+      "key": "DEVICE255",
+      "weight": 850659
+    },
+    {
+      "key": "DEVICE256",
+      "weight": 732037
+    },
+    {
+      "key": "DEVICE257",
+      "weight": 616276
+    },
+    {
+      "key": "DEVICE258",
+      "weight": 835533
+    },
+    {
+      "key": "DEVICE259",
+      "weight": 515926
+    },
+    {
+      "key": "DEVICE260",
+      "weight": 955821
+    },
+    {
+      "key": "DEVICE261",
+      "weight": 1483863
+    },
+    {
+      "key": "DEVICE262",
+      "weight": 762684
+    },
+    {
+      "key": "DEVICE263",
+      "weight": 313364
+    },
+    {
+      "key": "DEVICE264",
+      "weight": 483874
+    },
+    {
+      "key": "DEVICE265",
+      "weight": 647743
+    },
+    {
+      "key": "DEVICE266",
+      "weight": 623107
+    },
+    {
+      "key": "DEVICE267",
+      "weight": 642070
+    },
+    {
+      "key": "DEVICE268",
+      "weight": 618906
+    },
+    {
+      "key": "DEVICE269",
+      "weight": 474675
+    },
+    {
+      "key": "DEVICE270",
+      "weight": 674918
+    },
+    {
+      "key": "DEVICE271",
+      "weight": 605787
+    },
+    {
+      "key": "DEVICE272",
+      "weight": 763748
+    },
+    {
+      "key": "DEVICE273",
+      "weight": 332131
+    },
+    {
+      "key": "DEVICE274",
+      "weight": 596218
+    },
+    {
+      "key": "DEVICE275",
+      "weight": 757248
+    },
+    {
+      "key": "DEVICE276",
+      "weight": 725167
+    },
+    {
+      "key": "DEVICE277",
+      "weight": 669311
+    },
+    {
+      "key": "DEVICE278",
+      "weight": 442367
+    },
+    {
+      "key": "DEVICE279",
+      "weight": 755925
+    },
+    {
+      "key": "DEVICE280",
+      "weight": 559440
+    },
+    {
+      "key": "DEVICE281",
+      "weight": 634163
+    },
+    {
+      "key": "DEVICE282",
+      "weight": 665996
+    },
+    {
+      "key": "DEVICE283",
+      "weight": 923624
+    },
+    {
+      "key": "DEVICE284",
+      "weight": 396532
+    },
+    {
+      "key": "DEVICE285",
+      "weight": 247019
+    },
+    {
+      "key": "DEVICE286",
+      "weight": 431926
+    },
+    {
+      "key": "DEVICE287",
+      "weight": 431948
+    },
+    {
+      "key": "DEVICE288",
+      "weight": 753528
+    },
+    {
+      "key": "DEVICE289",
+      "weight": 428453
+    },
+    {
+      "key": "DEVICE290",
+      "weight": 432355
+    },
+    {
+      "key": "DEVICE291",
+      "weight": 493665
+    },
+    {
+      "key": "DEVICE292",
+      "weight": 371486
+    },
+    {
+      "key": "DEVICE293",
+      "weight": 675710
+    },
+    {
+      "key": "DEVICE294",
+      "weight": 576742
+    },
+    {
+      "key": "DEVICE295",
+      "weight": 966111
+    },
+    {
+      "key": "DEVICE296",
+      "weight": 626997
+    },
+    {
+      "key": "DEVICE297",
+      "weight": 793496
+    },
+    {
+      "key": "DEVICE298",
+      "weight": 352034
+    },
+    {
+      "key": "DEVICE299",
+      "weight": 703602
+    },
+    {
+      "key": "DEVICE300",
+      "weight": 639930
+    },
+    {
+      "key": "DEVICE301",
+      "weight": 975016
+    },
+    {
+      "key": "DEVICE302",
+      "weight": 613820
+    },
+    {
+      "key": "DEVICE303",
+      "weight": 559070
+    },
+    {
+      "key": "DEVICE304",
+      "weight": 505496
+    },
+    {
+      "key": "DEVICE305",
+      "weight": 309658
+    },
+    {
+      "key": "DEVICE306",
+      "weight": 253895
+    },
+    {
+      "key": "DEVICE307",
+      "weight": 221147
+    },
+    {
+      "key": "DEVICE308",
+      "weight": 822448
+    },
+    {
+      "key": "DEVICE309",
+      "weight": 478053
+    },
+    {
+      "key": "DEVICE310",
+      "weight": 1469981
+    },
+    {
+      "key": "DEVICE311",
+      "weight": 479863
+    },
+    {
+      "key": "DEVICE312",
+      "weight": 582218
+    },
+    {
+      "key": "DEVICE313",
+      "weight": 1501824
+    },
+    {
+      "key": "DEVICE314",
+      "weight": 333653
+    },
+    {
+      "key": "DEVICE315",
+      "weight": 1491591
+    },
+    {
+      "key": "DEVICE316",
+      "weight": 1265878
+    },
+    {
+      "key": "DEVICE317",
+      "weight": 174444
+    },
+    {
+      "key": "DEVICE318",
+      "weight": 649430
+    },
+    {
+      "key": "DEVICE319",
+      "weight": 307593
+    },
+    {
+      "key": "DEVICE320",
+      "weight": 589997
+    },
+    {
+      "key": "DEVICE321",
+      "weight": 642156
+    },
+    {
+      "key": "DEVICE322",
+      "weight": 606937
+    },
+    {
+      "key": "DEVICE323",
+      "weight": 576214
+    },
+    {
+      "key": "DEVICE324",
+      "weight": 634355
+    },
+    {
+      "key": "DEVICE325",
+      "weight": 620608
+    },
+    {
+      "key": "DEVICE326",
+      "weight": 590028
+    },
+    {
+      "key": "DEVICE327",
+      "weight": 768412
+    },
+    {
+      "key": "DEVICE328",
+      "weight": 616995
+    },
+    {
+      "key": "DEVICE329",
+      "weight": 512044
+    },
+    {
+      "key": "DEVICE330",
+      "weight": 694456
+    },
+    {
+      "key": "DEVICE331",
+      "weight": 277623
+    },
+    {
+      "key": "DEVICE332",
+      "weight": 440996
+    },
+    {
+      "key": "DEVICE333",
+      "weight": 568755
+    },
+    {
+      "key": "DEVICE334",
+      "weight": 515579
+    },
+    {
+      "key": "DEVICE335",
+      "weight": 364158
+    },
+    {
+      "key": "DEVICE336",
+      "weight": 537958
+    },
+    {
+      "key": "DEVICE337",
+      "weight": 171381
+    },
+    {
+      "key": "DEVICE338",
+      "weight": 248393
+    },
+    {
+      "key": "DEVICE339",
+      "weight": 1111222
+    },
+    {
+      "key": "DEVICE340",
+      "weight": 141410
+    },
+    {
+      "key": "DEVICE341",
+      "weight": 746278
+    },
+    {
+      "key": "DEVICE342",
+      "weight": 354676
+    },
+    {
+      "key": "DEVICE343",
+      "weight": 119141
+    },
+    {
+      "key": "DEVICE344",
+      "weight": 1801370
+    },
+    {
+      "key": "DEVICE345",
+      "weight": 225706
+    },
+    {
+      "key": "DEVICE346",
+      "weight": 198541
+    },
+    {
+      "key": "DEVICE347",
+      "weight": 1509453
+    },
+    {
+      "key": "DEVICE348",
+      "weight": 401847
+    },
+    {
+      "key": "DEVICE349",
+      "weight": 496895
+    },
+    {
+      "key": "DEVICE350",
+      "weight": 444316
+    },
+    {
+      "key": "DEVICE351",
+      "weight": 515163
+    },
+    {
+      "key": "DEVICE352",
+      "weight": 329511
+    },
+    {
+      "key": "DEVICE353",
+      "weight": 200471
+    },
+    {
+      "key": "DEVICE354",
+      "weight": 267332
+    },
+    {
+      "key": "DEVICE355",
+      "weight": 145238
+    },
+    {
+      "key": "DEVICE356",
+      "weight": 185950
+    },
+    {
+      "key": "DEVICE357",
+      "weight": 261750
+    },
+    {
+      "key": "DEVICE358",
+      "weight": 963713
+    },
+    {
+      "key": "DEVICE359",
+      "weight": 190771
+    },
+    {
+      "key": "DEVICE360",
+      "weight": 394518
+    },
+    {
+      "key": "DEVICE361",
+      "weight": 420831
+    },
+    {
+      "key": "DEVICE362",
+      "weight": 140300
+    },
+    {
+      "key": "DEVICE363",
+      "weight": 464433
+    },
+    {
+      "key": "DEVICE364",
+      "weight": 257530
+    },
+    {
+      "key": "DEVICE365",
+      "weight": 487305
+    },
+    {
+      "key": "DEVICE366",
+      "weight": 404754
+    },
+    {
+      "key": "DEVICE367",
+      "weight": 418670
+    },
+    {
+      "key": "DEVICE368",
+      "weight": 482432
+    },
+    {
+      "key": "DEVICE369",
+      "weight": 225836
+    },
+    {
+      "key": "DEVICE370",
+      "weight": 381515
+    },
+    {
+      "key": "DEVICE371",
+      "weight": 224506
+    },
+    {
+      "key": "DEVICE372",
+      "weight": 227889
+    },
+    {
+      "key": "DEVICE373",
+      "weight": 321674
+    },
+    {
+      "key": "DEVICE374",
+      "weight": 176968
+    },
+    {
+      "key": "DEVICE375",
+      "weight": 826797
+    },
+    {
+      "key": "DEVICE376",
+      "weight": 238068
+    },
+    {
+      "key": "DEVICE377",
+      "weight": 453626
+    },
+    {
+      "key": "DEVICE378",
+      "weight": 186718
+    },
+    {
+      "key": "DEVICE379",
+      "weight": 265266
+    },
+    {
+      "key": "DEVICE380",
+      "weight": 382764
+    },
+    {
+      "key": "DEVICE381",
+      "weight": 1080687
+    },
+    {
+      "key": "DEVICE382",
+      "weight": 857863
+    },
+    {
+      "key": "DEVICE383",
+      "weight": 388205
+    },
+    {
+      "key": "DEVICE384",
+      "weight": 763849
+    },
+    {
+      "key": "DEVICE385",
+      "weight": 379439
+    },
+    {
+      "key": "DEVICE386",
+      "weight": 434594
+    },
+    {
+      "key": "DEVICE387",
+      "weight": 277445
+    },
+    {
+      "key": "DEVICE388",
+      "weight": 1074230
+    },
+    {
+      "key": "DEVICE389",
+      "weight": 329602
+    },
+    {
+      "key": "DEVICE390",
+      "weight": 254166
+    },
+    {
+      "key": "DEVICE391",
+      "weight": 191538
+    },
+    {
+      "key": "DEVICE392",
+      "weight": 756718
+    },
+    {
+      "key": "DEVICE393",
+      "weight": 220209
+    },
+    {
+      "key": "DEVICE394",
+      "weight": 416326
+    },
+    {
+      "key": "DEVICE395",
+      "weight": 366457
+    },
+    {
+      "key": "DEVICE396",
+      "weight": 137102
+    },
+    {
+      "key": "DEVICE397",
+      "weight": 1322865
+    },
+    {
+      "key": "DEVICE398",
+      "weight": 776365
+    },
+    {
+      "key": "DEVICE399",
+      "weight": 367194
+    },
+    {
+      "key": "DEVICE400",
+      "weight": 531724
+    },
+    {
+      "key": "DEVICE401",
+      "weight": 291362
+    },
+    {
+      "key": "DEVICE402",
+      "weight": 134308
+    },
+    {
+      "key": "DEVICE403",
+      "weight": 101717
+    },
+    {
+      "key": "DEVICE404",
+      "weight": 553673
+    },
+    {
+      "key": "DEVICE405",
+      "weight": 133783
+    },
+    {
+      "key": "DEVICE406",
+      "weight": 287881
+    },
+    {
+      "key": "DEVICE407",
+      "weight": 983993
+    },
+    {
+      "key": "DEVICE408",
+      "weight": 687288
+    },
+    {
+      "key": "DEVICE409",
+      "weight": 321422
+    },
+    {
+      "key": "DEVICE410",
+      "weight": 296999
+    },
+    {
+      "key": "DEVICE411",
+      "weight": 300065
+    },
+    {
+      "key": "DEVICE412",
+      "weight": 342345
+    },
+    {
+      "key": "DEVICE413",
+      "weight": 118176
+    },
+    {
+      "key": "DEVICE414",
+      "weight": 167858
+    },
+    {
+      "key": "DEVICE415",
+      "weight": 266131
+    },
+    {
+      "key": "DEVICE416",
+      "weight": 276278
+    },
+    {
+      "key": "DEVICE417",
+      "weight": 435745
+    },
+    {
+      "key": "DEVICE418",
+      "weight": 317557
+    },
+    {
+      "key": "DEVICE419",
+      "weight": 177268
+    },
+    {
+      "key": "DEVICE420",
+      "weight": 294179
+    },
+    {
+      "key": "DEVICE421",
+      "weight": 325632
+    },
+    {
+      "key": "DEVICE422",
+      "weight": 356871
+    },
+    {
+      "key": "DEVICE423",
+      "weight": 269228
+    },
+    {
+      "key": "DEVICE424",
+      "weight": 165697
+    },
+    {
+      "key": "DEVICE425",
+      "weight": 627039
+    },
+    {
+      "key": "DEVICE426",
+      "weight": 342276
+    },
+    {
+      "key": "DEVICE427",
+      "weight": 464284
+    },
+    {
+      "key": "DEVICE428",
+      "weight": 311827
+    },
+    {
+      "key": "DEVICE429",
+      "weight": 384135
+    },
+    {
+      "key": "DEVICE430",
+      "weight": 259766
+    },
+    {
+      "key": "DEVICE431",
+      "weight": 281077
+    },
+    {
+      "key": "DEVICE432",
+      "weight": 94924
+    },
+    {
+      "key": "DEVICE433",
+      "weight": 328090
+    },
+    {
+      "key": "DEVICE434",
+      "weight": 285334
+    },
+    {
+      "key": "DEVICE435",
+      "weight": 372099
+    },
+    {
+      "key": "DEVICE436",
+      "weight": 183973
+    },
+    {
+      "key": "DEVICE437",
+      "weight": 186622
+    },
+    {
+      "key": "DEVICE438",
+      "weight": 145238
+    },
+    {
+      "key": "DEVICE439",
+      "weight": 257427
+    },
+    {
+      "key": "DEVICE440",
+      "weight": 446872
+    },
+    {
+      "key": "DEVICE441",
+      "weight": 137498
+    },
+    {
+      "key": "DEVICE442",
+      "weight": 142528
+    },
+    {
+      "key": "DEVICE443",
+      "weight": 146217
+    },
+    {
+      "key": "DEVICE444",
+      "weight": 150280
+    },
+    {
+      "key": "DEVICE445",
+      "weight": 438638
+    },
+    {
+      "key": "DEVICE446",
+      "weight": 123095
+    },
+    {
+      "key": "DEVICE447",
+      "weight": 294812
+    },
+    {
+      "key": "DEVICE448",
+      "weight": 156868
+    },
+    {
+      "key": "DEVICE449",
+      "weight": 621535
+    },
+    {
+      "key": "DEVICE450",
+      "weight": 140476
+    },
+    {
+      "key": "DEVICE451",
+      "weight": 122020
+    },
+    {
+      "key": "DEVICE452",
+      "weight": 450183
+    },
+    {
+      "key": "DEVICE453",
+      "weight": 60077
+    },
+    {
+      "key": "DEVICE454",
+      "weight": 567523
+    },
+    {
+      "key": "DEVICE455",
+      "weight": 243847
+    },
+    {
+      "key": "DEVICE456",
+      "weight": 250168
+    },
+    {
+      "key": "DEVICE457",
+      "weight": 175536
+    },
+    {
+      "key": "DEVICE458",
+      "weight": 193794
+    },
+    {
+      "key": "DEVICE459",
+      "weight": 352782
+    },
+    {
+      "key": "DEVICE460",
+      "weight": 134454
+    },
+    {
+      "key": "DEVICE461",
+      "weight": 317222
+    },
+    {
+      "key": "DEVICE462",
+      "weight": 387303
+    },
+    {
+      "key": "DEVICE463",
+      "weight": 169871
+    },
+    {
+      "key": "DEVICE464",
+      "weight": 558688
+    },
+    {
+      "key": "DEVICE465",
+      "weight": 421406
+    },
+    {
+      "key": "DEVICE466",
+      "weight": 133337
+    },
+    {
+      "key": "DEVICE467",
+      "weight": 122765
+    },
+    {
+      "key": "DEVICE468",
+      "weight": 589723
+    },
+    {
+      "key": "DEVICE469",
+      "weight": 481402
+    },
+    {
+      "key": "DEVICE470",
+      "weight": 89115
+    },
+    {
+      "key": "DEVICE471",
+      "weight": 128874
+    },
+    {
+      "key": "DEVICE472",
+      "weight": 170312
+    },
+    {
+      "key": "DEVICE473",
+      "weight": 135234
+    },
+    {
+      "key": "DEVICE474",
+      "weight": 349803
+    },
+    {
+      "key": "DEVICE475",
+      "weight": 418534
+    },
+    {
+      "key": "DEVICE476",
+      "weight": 142266
+    },
+    {
+      "key": "DEVICE477",
+      "weight": 145853
+    },
+    {
+      "key": "DEVICE478",
+      "weight": 221573
+    },
+    {
+      "key": "DEVICE479",
+      "weight": 473544
+    },
+    {
+      "key": "DEVICE480",
+      "weight": 96362
+    },
+    {
+      "key": "DEVICE481",
+      "weight": 148381
+    },
+    {
+      "key": "DEVICE482",
+      "weight": 128023
+    },
+    {
+      "key": "DEVICE483",
+      "weight": 146728
+    },
+    {
+      "key": "DEVICE484",
+      "weight": 81959
+    },
+    {
+      "key": "DEVICE485",
+      "weight": 163304
+    },
+    {
+      "key": "DEVICE486",
+      "weight": 140803
+    },
+    {
+      "key": "DEVICE487",
+      "weight": 87254
+    },
+    {
+      "key": "DEVICE488",
+      "weight": 143637
+    },
+    {
+      "key": "DEVICE489",
+      "weight": 330418
+    },
+    {
+      "key": "DEVICE490",
+      "weight": 383908
+    },
+    {
+      "key": "DEVICE491",
+      "weight": 152322
+    },
+    {
+      "key": "DEVICE492",
+      "weight": 125371
+    },
+    {
+      "key": "DEVICE493",
+      "weight": 155190
+    },
+    {
+      "key": "DEVICE494",
+      "weight": 126026
+    },
+    {
+      "key": "DEVICE495",
+      "weight": 102976
+    },
+    {
+      "key": "DEVICE496",
+      "weight": 91373
+    },
+    {
+      "key": "DEVICE497",
+      "weight": 168161
+    },
+    {
+      "key": "DEVICE498",
+      "weight": 113174
+    },
+    {
+      "key": "DEVICE499",
+      "weight": 96464
+    },
+    {
+      "key": "DEVICE500",
+      "weight": 407074
+    },
+    {
+      "key": "DEVICE501",
+      "weight": 103712
+    },
+    {
+      "key": "DEVICE502",
+      "weight": 195215
+    },
+    {
+      "key": "DEVICE503",
+      "weight": 109563
+    },
+    {
+      "key": "DEVICE504",
+      "weight": 108170
+    },
+    {
+      "key": "DEVICE505",
+      "weight": 387889
+    },
+    {
+      "key": "DEVICE506",
+      "weight": 139912
+    },
+    {
+      "key": "DEVICE507",
+      "weight": 76904
+    },
+    {
+      "key": "DEVICE508",
+      "weight": 180732
+    },
+    {
+      "key": "DEVICE509",
+      "weight": 105653
+    },
+    {
+      "key": "DEVICE510",
+      "weight": 257227
+    },
+    {
+      "key": "DEVICE511",
+      "weight": 263461
+    },
+    {
+      "key": "DEVICE512",
+      "weight": 201284
+    },
+    {
+      "key": "DEVICE513",
+      "weight": 157470
+    },
+    {
+      "key": "DEVICE514",
+      "weight": 111093
+    },
+    {
+      "key": "DEVICE515",
+      "weight": 113636
+    },
+    {
+      "key": "DEVICE516",
+      "weight": 176442
+    },
+    {
+      "key": "DEVICE517",
+      "weight": 172191
+    },
+    {
+      "key": "DEVICE518",
+      "weight": 205159
+    },
+    {
+      "key": "DEVICE519",
+      "weight": 93605
+    },
+    {
+      "key": "DEVICE520",
+      "weight": 59570
+    },
+    {
+      "key": "DEVICE521",
+      "weight": 58407
+    },
+    {
+      "key": "DEVICE522",
+      "weight": 167075
+    },
+    {
+      "key": "DEVICE523",
+      "weight": 200210
+    },
+    {
+      "key": "DEVICE524",
+      "weight": 178834
+    },
+    {
+      "key": "DEVICE525",
+      "weight": 156867
+    },
+    {
+      "key": "DEVICE526",
+      "weight": 143881
+    },
+    {
+      "key": "DEVICE527",
+      "weight": 132005
+    },
+    {
+      "key": "DEVICE528",
+      "weight": 146681
+    },
+    {
+      "key": "DEVICE529",
+      "weight": 107463
+    },
+    {
+      "key": "DEVICE530",
+      "weight": 188841
+    },
+    {
+      "key": "DEVICE531",
+      "weight": 167481
+    },
+    {
+      "key": "DEVICE532",
+      "weight": 145908
+    },
+    {
+      "key": "DEVICE533",
+      "weight": 179428
+    },
+    {
+      "key": "DEVICE534",
+      "weight": 78908
+    },
+    {
+      "key": "DEVICE535",
+      "weight": 164092
+    },
+    {
+      "key": "DEVICE536",
+      "weight": 179371
+    },
+    {
+      "key": "DEVICE537",
+      "weight": 74749
+    },
+    {
+      "key": "DEVICE538",
+      "weight": 214199
+    },
+    {
+      "key": "DEVICE539",
+      "weight": 162952
+    },
+    {
+      "key": "DEVICE540",
+      "weight": 166175
+    },
+    {
+      "key": "DEVICE541",
+      "weight": 69186
+    },
+    {
+      "key": "DEVICE542",
+      "weight": 228436
+    },
+    {
+      "key": "DEVICE543",
+      "weight": 160164
+    },
+    {
+      "key": "DEVICE544",
+      "weight": 175460
+    },
+    {
+      "key": "DEVICE545",
+      "weight": 140228
+    },
+    {
+      "key": "DEVICE546",
+      "weight": 54799
+    },
+    {
+      "key": "DEVICE547",
+      "weight": 164322
+    },
+    {
+      "key": "DEVICE548",
+      "weight": 175909
+    },
+    {
+      "key": "DEVICE549",
+      "weight": 82607
+    },
+    {
+      "key": "DEVICE550",
+      "weight": 170342
+    },
+    {
+      "key": "DEVICE551",
+      "weight": 60317
+    },
+    {
+      "key": "DEVICE552",
+      "weight": 79778
+    },
+    {
+      "key": "DEVICE553",
+      "weight": 71326
+    },
+    {
+      "key": "DEVICE554",
+      "weight": 83430
+    },
+    {
+      "key": "DEVICE555",
+      "weight": 184178
+    },
+    {
+      "key": "DEVICE556",
+      "weight": 98444
+    },
+    {
+      "key": "DEVICE557",
+      "weight": 52875
+    },
+    {
+      "key": "DEVICE558",
+      "weight": 179063
+    },
+    {
+      "key": "DEVICE559",
+      "weight": 55207
+    },
+    {
+      "key": "DEVICE560",
+      "weight": 68132
+    },
+    {
+      "key": "DEVICE561",
+      "weight": 124579
+    },
+    {
+      "key": "DEVICE562",
+      "weight": 162347
+    },
+    {
+      "key": "DEVICE563",
+      "weight": 130769
+    },
+    {
+      "key": "DEVICE564",
+      "weight": 196279
+    },
+    {
+      "key": "DEVICE565",
+      "weight": 166108
+    },
+    {
+      "key": "DEVICE566",
+      "weight": 118381
+    },
+    {
+      "key": "DEVICE567",
+      "weight": 63133
+    },
+    {
+      "key": "DEVICE568",
+      "weight": 146971
+    },
+    {
+      "key": "DEVICE569",
+      "weight": 65318
+    },
+    {
+      "key": "DEVICE570",
+      "weight": 239459
+    },
+    {
+      "key": "DEVICE571",
+      "weight": 176455
+    },
+    {
+      "key": "DEVICE572",
+      "weight": 274610
+    },
+    {
+      "key": "DEVICE573",
+      "weight": 125975
+    },
+    {
+      "key": "DEVICE574",
+      "weight": 139823
+    },
+    {
+      "key": "DEVICE575",
+      "weight": 52748
+    },
+    {
+      "key": "DEVICE576",
+      "weight": 133281
+    },
+    {
+      "key": "DEVICE577",
+      "weight": 57344
+    },
+    {
+      "key": "DEVICE578",
+      "weight": 138366
+    },
+    {
+      "key": "DEVICE579",
+      "weight": 74398
+    },
+    {
+      "key": "DEVICE580",
+      "weight": 84566
+    },
+    {
+      "key": "DEVICE581",
+      "weight": 32395
+    },
+    {
+      "key": "DEVICE582",
+      "weight": 126911
+    },
+    {
+      "key": "DEVICE583",
+      "weight": 266228
+    },
+    {
+      "key": "DEVICE584",
+      "weight": 127103
+    },
+    {
+      "key": "DEVICE585",
+      "weight": 71516
+    },
+    {
+      "key": "DEVICE586",
+      "weight": 78003
+    },
+    {
+      "key": "DEVICE587",
+      "weight": 74123
+    },
+    {
+      "key": "DEVICE588",
+      "weight": 89337
+    },
+    {
+      "key": "DEVICE589",
+      "weight": 84046
+    },
+    {
+      "key": "DEVICE590",
+      "weight": 263894
+    },
+    {
+      "key": "DEVICE591",
+      "weight": 90095
+    },
+    {
+      "key": "DEVICE592",
+      "weight": 58422
+    },
+    {
+      "key": "DEVICE593",
+      "weight": 126878
+    },
+    {
+      "key": "DEVICE594",
+      "weight": 419325
+    },
+    {
+      "key": "DEVICE595",
+      "weight": 162179
+    },
+    {
+      "key": "DEVICE596",
+      "weight": 164760
+    },
+    {
+      "key": "DEVICE597",
+      "weight": 65554
+    },
+    {
+      "key": "DEVICE598",
+      "weight": 125189
+    },
+    {
+      "key": "DEVICE599",
+      "weight": 177700
+    },
+    {
+      "key": "DEVICE600",
+      "weight": 137392
+    },
+    {
+      "key": "DEVICE601",
+      "weight": 215282
+    },
+    {
+      "key": "DEVICE602",
+      "weight": 166835
+    },
+    {
+      "key": "DEVICE603",
+      "weight": 176648
+    },
+    {
+      "key": "DEVICE604",
+      "weight": 74735
+    },
+    {
+      "key": "DEVICE605",
+      "weight": 130081
+    },
+    {
+      "key": "DEVICE606",
+      "weight": 35688
+    },
+    {
+      "key": "DEVICE607",
+      "weight": 53719
+    },
+    {
+      "key": "DEVICE608",
+      "weight": 44024
+    },
+    {
+      "key": "DEVICE609",
+      "weight": 74393
+    },
+    {
+      "key": "DEVICE610",
+      "weight": 38088
+    },
+    {
+      "key": "DEVICE611",
+      "weight": 34683
+    },
+    {
+      "key": "DEVICE612",
+      "weight": 34650
+    },
+    {
+      "key": "DEVICE613",
+      "weight": 114880
+    },
+    {
+      "key": "DEVICE614",
+      "weight": 54089
+    },
+    {
+      "key": "DEVICE615",
+      "weight": 43805
+    },
+    {
+      "key": "DEVICE616",
+      "weight": 26521
+    },
+    {
+      "key": "DEVICE617",
+      "weight": 371672
+    },
+    {
+      "key": "DEVICE618",
+      "weight": 74818
+    },
+    {
+      "key": "DEVICE619",
+      "weight": 108912
+    },
+    {
+      "key": "DEVICE620",
+      "weight": 300792
+    },
+    {
+      "key": "DEVICE621",
+      "weight": 68626
+    },
+    {
+      "key": "DEVICE622",
+      "weight": 304428
+    },
+    {
+      "key": "DEVICE623",
+      "weight": 335999
+    },
+    {
+      "key": "DEVICE624",
+      "weight": 136478
+    },
+    {
+      "key": "DEVICE625",
+      "weight": 351742
+    },
+    {
+      "key": "DEVICE626",
+      "weight": 137982
+    },
+    {
+      "key": "DEVICE627",
+      "weight": 42533
+    },
+    {
+      "key": "DEVICE628",
+      "weight": 93525
+    },
+    {
+      "key": "DEVICE629",
+      "weight": 91228
+    },
+    {
+      "key": "DEVICE630",
+      "weight": 134504
+    },
+    {
+      "key": "DEVICE631",
+      "weight": 32715
+    },
+    {
+      "key": "DEVICE632",
+      "weight": 267302
+    },
+    {
+      "key": "DEVICE633",
+      "weight": 97360
+    },
+    {
+      "key": "DEVICE634",
+      "weight": 64408
+    },
+    {
+      "key": "DEVICE635",
+      "weight": 71171
+    },
+    {
+      "key": "DEVICE636",
+      "weight": 38551
+    },
+    {
+      "key": "DEVICE637",
+      "weight": 46376
+    },
+    {
+      "key": "DEVICE638",
+      "weight": 38287
+    },
+    {
+      "key": "DEVICE639",
+      "weight": 38289
+    },
+    {
+      "key": "DEVICE640",
+      "weight": 91978
+    },
+    {
+      "key": "DEVICE641",
+      "weight": 185387
+    },
+    {
+      "key": "DEVICE642",
+      "weight": 171125
+    },
+    {
+      "key": "DEVICE643",
+      "weight": 87815
+    },
+    {
+      "key": "DEVICE644",
+      "weight": 189686
+    },
+    {
+      "key": "DEVICE645",
+      "weight": 266298
+    },
+    {
+      "key": "DEVICE646",
+      "weight": 49226
+    },
+    {
+      "key": "DEVICE647",
+      "weight": 108648
+    },
+    {
+      "key": "DEVICE648",
+      "weight": 62853
+    },
+    {
+      "key": "DEVICE649",
+      "weight": 34814
+    },
+    {
+      "key": "DEVICE650",
+      "weight": 36780
+    },
+    {
+      "key": "DEVICE651",
+      "weight": 108766
+    },
+    {
+      "key": "DEVICE652",
+      "weight": 21231
+    },
+    {
+      "key": "DEVICE653",
+      "weight": 249293
+    },
+    {
+      "key": "DEVICE654",
+      "weight": 234218
+    },
+    {
+      "key": "DEVICE655",
+      "weight": 99178
+    },
+    {
+      "key": "DEVICE656",
+      "weight": 109931
+    },
+    {
+      "key": "DEVICE657",
+      "weight": 19251
+    },
+    {
+      "key": "DEVICE658",
+      "weight": 131489
+    },
+    {
+      "key": "DEVICE659",
+      "weight": 119081
+    },
+    {
+      "key": "DEVICE660",
+      "weight": 109881
+    },
+    {
+      "key": "DEVICE661",
+      "weight": 84290
+    },
+    {
+      "key": "DEVICE662",
+      "weight": 106149
+    },
+    {
+      "key": "DEVICE663",
+      "weight": 48516
+    },
+    {
+      "key": "DEVICE664",
+      "weight": 86269
+    },
+    {
+      "key": "DEVICE665",
+      "weight": 34796
+    },
+    {
+      "key": "DEVICE666",
+      "weight": 66000
+    },
+    {
+      "key": "DEVICE667",
+      "weight": 105982
+    },
+    {
+      "key": "DEVICE668",
+      "weight": 59183
+    },
+    {
+      "key": "DEVICE669",
+      "weight": 105401
+    },
+    {
+      "key": "DEVICE670",
+      "weight": 38121
+    },
+    {
+      "key": "DEVICE671",
+      "weight": 77846
+    },
+    {
+      "key": "DEVICE672",
+      "weight": 138816
+    },
+    {
+      "key": "DEVICE673",
+      "weight": 66184
+    },
+    {
+      "key": "DEVICE674",
+      "weight": 43839
+    },
+    {
+      "key": "DEVICE675",
+      "weight": 130127
+    },
+    {
+      "key": "DEVICE676",
+      "weight": 105682
+    },
+    {
+      "key": "DEVICE677",
+      "weight": 141059
+    },
+    {
+      "key": "DEVICE678",
+      "weight": 95255
+    },
+    {
+      "key": "DEVICE679",
+      "weight": 114817
+    },
+    {
+      "key": "DEVICE680",
+      "weight": 105226
+    },
+    {
+      "key": "DEVICE681",
+      "weight": 87470
+    },
+    {
+      "key": "DEVICE682",
+      "weight": 144042
+    },
+    {
+      "key": "DEVICE683",
+      "weight": 73753
+    },
+    {
+      "key": "DEVICE684",
+      "weight": 81677
+    },
+    {
+      "key": "DEVICE685",
+      "weight": 143686
+    },
+    {
+      "key": "DEVICE686",
+      "weight": 152237
+    },
+    {
+      "key": "DEVICE687",
+      "weight": 53890
+    },
+    {
+      "key": "DEVICE688",
+      "weight": 37749
+    },
+    {
+      "key": "DEVICE689",
+      "weight": 149511
+    },
+    {
+      "key": "DEVICE690",
+      "weight": 81621
+    },
+    {
+      "key": "DEVICE691",
+      "weight": 164246
+    },
+    {
+      "key": "DEVICE692",
+      "weight": 101879
+    },
+    {
+      "key": "DEVICE693",
+      "weight": 100088
+    },
+    {
+      "key": "DEVICE694",
+      "weight": 98549
+    },
+    {
+      "key": "DEVICE695",
+      "weight": 105304
+    },
+    {
+      "key": "DEVICE696",
+      "weight": 104030
+    },
+    {
+      "key": "DEVICE697",
+      "weight": 106452
+    },
+    {
+      "key": "DEVICE698",
+      "weight": 32450
+    },
+    {
+      "key": "DEVICE699",
+      "weight": 107740
+    },
+    {
+      "key": "DEVICE700",
+      "weight": 37167
+    },
+    {
+      "key": "DEVICE701",
+      "weight": 78365
+    },
+    {
+      "key": "DEVICE702",
+      "weight": 106288
+    },
+    {
+      "key": "DEVICE703",
+      "weight": 163243
+    },
+    {
+      "key": "DEVICE704",
+      "weight": 145661
+    },
+    {
+      "key": "DEVICE705",
+      "weight": 70731
+    },
+    {
+      "key": "DEVICE706",
+      "weight": 68568
+    },
+    {
+      "key": "DEVICE707",
+      "weight": 84606
+    },
+    {
+      "key": "DEVICE708",
+      "weight": 137332
+    },
+    {
+      "key": "DEVICE709",
+      "weight": 130159
+    },
+    {
+      "key": "DEVICE710",
+      "weight": 71175
+    },
+    {
+      "key": "DEVICE711",
+      "weight": 24875
+    },
+    {
+      "key": "DEVICE712",
+      "weight": 42771
+    },
+    {
+      "key": "DEVICE713",
+      "weight": 81411
+    },
+    {
+      "key": "DEVICE714",
+      "weight": 78198
+    },
+    {
+      "key": "DEVICE715",
+      "weight": 51226
+    },
+    {
+      "key": "DEVICE716",
+      "weight": 63308
+    },
+    {
+      "key": "DEVICE717",
+      "weight": 35588
+    },
+    {
+      "key": "DEVICE718",
+      "weight": 51801
+    },
+    {
+      "key": "DEVICE719",
+      "weight": 47490
+    },
+    {
+      "key": "DEVICE720",
+      "weight": 66066
+    },
+    {
+      "key": "DEVICE721",
+      "weight": 131391
+    },
+    {
+      "key": "DEVICE722",
+      "weight": 144238
+    },
+    {
+      "key": "DEVICE723",
+      "weight": 115087
+    },
+    {
+      "key": "DEVICE724",
+      "weight": 125137
+    },
+    {
+      "key": "DEVICE725",
+      "weight": 49023
+    },
+    {
+      "key": "DEVICE726",
+      "weight": 25737
+    },
+    {
+      "key": "DEVICE727",
+      "weight": 142946
+    },
+    {
+      "key": "DEVICE728",
+      "weight": 130614
+    },
+    {
+      "key": "DEVICE729",
+      "weight": 24212
+    },
+    {
+      "key": "DEVICE730",
+      "weight": 42221
+    },
+    {
+      "key": "DEVICE731",
+      "weight": 129133
+    },
+    {
+      "key": "DEVICE732",
+      "weight": 50363
+    },
+    {
+      "key": "DEVICE733",
+      "weight": 29473
+    },
+    {
+      "key": "DEVICE734",
+      "weight": 137707
+    },
+    {
+      "key": "DEVICE735",
+      "weight": 81646
+    },
+    {
+      "key": "DEVICE736",
+      "weight": 96464
+    },
+    {
+      "key": "DEVICE737",
+      "weight": 65169
+    },
+    {
+      "key": "DEVICE738",
+      "weight": 124937
+    },
+    {
+      "key": "DEVICE739",
+      "weight": 127497
+    },
+    {
+      "key": "DEVICE740",
+      "weight": 131497
+    },
+    {
+      "key": "DEVICE741",
+      "weight": 50028
+    },
+    {
+      "key": "DEVICE742",
+      "weight": 26377
+    },
+    {
+      "key": "DEVICE743",
+      "weight": 134415
+    },
+    {
+      "key": "DEVICE744",
+      "weight": 132463
+    },
+    {
+      "key": "DEVICE745",
+      "weight": 49043
+    },
+    {
+      "key": "DEVICE746",
+      "weight": 127227
+    },
+    {
+      "key": "DEVICE747",
+      "weight": 122431
+    },
+    {
+      "key": "DEVICE748",
+      "weight": 130084
+    },
+    {
+      "key": "DEVICE749",
+      "weight": 36532
+    },
+    {
+      "key": "DEVICE750",
+      "weight": 142834
+    },
+    {
+      "key": "DEVICE751",
+      "weight": 115961
+    },
+    {
+      "key": "DEVICE752",
+      "weight": 126208
+    },
+    {
+      "key": "DEVICE753",
+      "weight": 141115
+    },
+    {
+      "key": "DEVICE754",
+      "weight": 58287
+    },
+    {
+      "key": "DEVICE755",
+      "weight": 32669
+    },
+    {
+      "key": "DEVICE756",
+      "weight": 46564
+    },
+    {
+      "key": "DEVICE757",
+      "weight": 100276
+    },
+    {
+      "key": "DEVICE758",
+      "weight": 143631
+    },
+    {
+      "key": "DEVICE759",
+      "weight": 145524
+    },
+    {
+      "key": "DEVICE760",
+      "weight": 18446
+    },
+    {
+      "key": "DEVICE761",
+      "weight": 133367
+    },
+    {
+      "key": "DEVICE762",
+      "weight": 140622
+    },
+    {
+      "key": "DEVICE763",
+      "weight": 79354
+    },
+    {
+      "key": "DEVICE764",
+      "weight": 138201
+    },
+    {
+      "key": "DEVICE765",
+      "weight": 34331
+    },
+    {
+      "key": "DEVICE766",
+      "weight": 139932
+    },
+    {
+      "key": "DEVICE767",
+      "weight": 40399
+    },
+    {
+      "key": "DEVICE768",
+      "weight": 40138
+    },
+    {
+      "key": "DEVICE769",
+      "weight": 133750
+    },
+    {
+      "key": "DEVICE770",
+      "weight": 138932
+    },
+    {
+      "key": "DEVICE771",
+      "weight": 134823
+    },
+    {
+      "key": "DEVICE772",
+      "weight": 134820
+    },
+    {
+      "key": "DEVICE773",
+      "weight": 136149
+    },
+    {
+      "key": "DEVICE774",
+      "weight": 32187
+    },
+    {
+      "key": "DEVICE775",
+      "weight": 133109
+    },
+    {
+      "key": "DEVICE776",
+      "weight": 135091
+    },
+    {
+      "key": "DEVICE777",
+      "weight": 135653
+    },
+    {
+      "key": "DEVICE778",
+      "weight": 137094
+    },
+    {
+      "key": "DEVICE779",
+      "weight": 33617
+    },
+    {
+      "key": "DEVICE780",
+      "weight": 122016
+    },
+    {
+      "key": "DEVICE781",
+      "weight": 22731
+    },
+    {
+      "key": "DEVICE782",
+      "weight": 26241
+    },
+    {
+      "key": "DEVICE783",
+      "weight": 26107
+    },
+    {
+      "key": "DEVICE784",
+      "weight": 26041
+    },
+    {
+      "key": "DEVICE785",
+      "weight": 140447
+    },
+    {
+      "key": "DEVICE786",
+      "weight": 22059
+    },
+    {
+      "key": "DEVICE787",
+      "weight": 49068
+    },
+    {
+      "key": "DEVICE788",
+      "weight": 139614
+    },
+    {
+      "key": "DEVICE789",
+      "weight": 142012
+    },
+    {
+      "key": "DEVICE790",
+      "weight": 106255
+    },
+    {
+      "key": "DEVICE791",
+      "weight": 105739
+    },
+    {
+      "key": "DEVICE792",
+      "weight": 105730
+    },
+    {
+      "key": "DEVICE793",
+      "weight": 104443
+    },
+    {
+      "key": "DEVICE794",
+      "weight": 104987
+    },
+    {
+      "key": "DEVICE795",
+      "weight": 133854
+    },
+    {
+      "key": "DEVICE796",
+      "weight": 44480
+    },
+    {
+      "key": "DEVICE797",
+      "weight": 150082
+    },
+    {
+      "key": "DEVICE798",
+      "weight": 145212
+    },
+    {
+      "key": "DEVICE799",
+      "weight": 20325
+    },
+    {
+      "key": "DEVICE800",
+      "weight": 20023
+    },
+    {
+      "key": "DEVICE801",
+      "weight": 15605
+    },
+    {
+      "key": "DEVICE802",
+      "weight": 18660
+    },
+    {
+      "key": "DEVICE803",
+      "weight": 27582
+    },
+    {
+      "key": "DEVICE804",
+      "weight": 18546
+    },
+    {
+      "key": "DEVICE805",
+      "weight": 22221
+    },
+    {
+      "key": "DEVICE806",
+      "weight": 22135
+    },
+    {
+      "key": "DEVICE807",
+      "weight": 42756
+    },
+    {
+      "key": "DEVICE808",
+      "weight": 21951
+    },
+    {
+      "key": "DEVICE809",
+      "weight": 18922
+    },
+    {
+      "key": "DEVICE810",
+      "weight": 26409
+    },
+    {
+      "key": "DEVICE811",
+      "weight": 22561
+    },
+    {
+      "key": "DEVICE812",
+      "weight": 11863
+    },
+    {
+      "key": "DEVICE813",
+      "weight": 8765
+    },
+    {
+      "key": "DEVICE814",
+      "weight": 17685
+    },
+    {
+      "key": "DEVICE815",
+      "weight": 18437
+    },
+    {
+      "key": "DEVICE816",
+      "weight": 25518
+    },
+    {
+      "key": "DEVICE817",
+      "weight": 21055
+    },
+    {
+      "key": "DEVICE818",
+      "weight": 21040
+    },
+    {
+      "key": "DEVICE819",
+      "weight": 40849
+    },
+    {
+      "key": "DEVICE820",
+      "weight": 92484
+    },
+    {
+      "key": "DEVICE821",
+      "weight": 17236
+    },
+    {
+      "key": "DEVICE822",
+      "weight": 19929
+    },
+    {
+      "key": "DEVICE823",
+      "weight": 17233
+    },
+    {
+      "key": "DEVICE824",
+      "weight": 17232
+    },
+    {
+      "key": "DEVICE825",
+      "weight": 17231
+    },
+    {
+      "key": "DEVICE826",
+      "weight": 17228
+    },
+    {
+      "key": "DEVICE827",
+      "weight": 17225
+    },
+    {
+      "key": "DEVICE828",
+      "weight": 10149
+    },
+    {
+      "key": "DEVICE829",
+      "weight": 8699
+    },
+    {
+      "key": "DEVICE830",
+      "weight": 89108
+    },
+    {
+      "key": "DEVICE831",
+      "weight": 88466
+    },
+    {
+      "key": "DEVICE832",
+      "weight": 15740
+    },
+    {
+      "key": "DEVICE833",
+      "weight": 89676
+    },
+    {
+      "key": "DEVICE834",
+      "weight": 12138
+    },
+    {
+      "key": "DEVICE835",
+      "weight": 26206
+    },
+    {
+      "key": "DEVICE836",
+      "weight": 14040
+    },
+    {
+      "key": "DEVICE837",
+      "weight": 6380
+    },
+    {
+      "key": "DEVICE838",
+      "weight": 82227
+    },
+    {
+      "key": "DEVICE839",
+      "weight": 6340
+    },
+    {
+      "key": "DEVICE840",
+      "weight": 13720
+    },
+    {
+      "key": "DEVICE841",
+      "weight": 3956
+    },
+    {
+      "key": "DEVICE842",
+      "weight": 13630
+    },
+    {
+      "key": "DEVICE843",
+      "weight": 13444
+    },
+    {
+      "key": "DEVICE844",
+      "weight": 13649
+    },
+    {
+      "key": "DEVICE845",
+      "weight": 13632
+    },
+    {
+      "key": "DEVICE846",
+      "weight": 13668
+    },
+    {
+      "key": "DEVICE847",
+      "weight": 13646
+    },
+    {
+      "key": "DEVICE848",
+      "weight": 13645
+    },
+    {
+      "key": "DEVICE849",
+      "weight": 13653
+    },
+    {
+      "key": "DEVICE850",
+      "weight": 13580
+    },
+    {
+      "key": "DEVICE851",
+      "weight": 13623
+    },
+    {
+      "key": "DEVICE852",
+      "weight": 13592
+    },
+    {
+      "key": "DEVICE853",
+      "weight": 13581
+    },
+    {
+      "key": "DEVICE854",
+      "weight": 13574
+    },
+    {
+      "key": "DEVICE855",
+      "weight": 13607
+    },
+    {
+      "key": "DEVICE856",
+      "weight": 13586
+    },
+    {
+      "key": "DEVICE857",
+      "weight": 13676
+    },
+    {
+      "key": "DEVICE858",
+      "weight": 13475
+    },
+    {
+      "key": "DEVICE859",
+      "weight": 13561
+    },
+    {
+      "key": "DEVICE860",
+      "weight": 13500
+    },
+    {
+      "key": "DEVICE861",
+      "weight": 13501
+    },
+    {
+      "key": "DEVICE862",
+      "weight": 8456
+    },
+    {
+      "key": "DEVICE863",
+      "weight": 13074
+    },
+    {
+      "key": "DEVICE864",
+      "weight": 3749
+    },
+    {
+      "key": "DEVICE865",
+      "weight": 6046
+    },
+    {
+      "key": "DEVICE866",
+      "weight": 3389
+    },
+    {
+      "key": "DEVICE867",
+      "weight": 78580
+    },
+    {
+      "key": "DEVICE868",
+      "weight": 13429
+    },
+    {
+      "key": "DEVICE869",
+      "weight": 5607
+    },
+    {
+      "key": "DEVICE870",
+      "weight": 13029
+    },
+    {
+      "key": "DEVICE871",
+      "weight": 11226
+    },
+    {
+      "key": "DEVICE872",
+      "weight": 23307
+    },
+    {
+      "key": "DEVICE873",
+      "weight": 5321
+    },
+    {
+      "key": "DEVICE874",
+      "weight": 2926
+    },
+    {
+      "key": "DEVICE875",
+      "weight": 2893
+    },
+    {
+      "key": "DEVICE876",
+      "weight": 4940
+    },
+    {
+      "key": "DEVICE877",
+      "weight": 4956
+    },
+    {
+      "key": "DEVICE878",
+      "weight": 3288
+    },
+    {
+      "key": "DEVICE879",
+      "weight": 4639
+    },
+    {
+      "key": "DEVICE880",
+      "weight": 16184
+    },
+    {
+      "key": "DEVICE881",
+      "weight": 4102
+    },
+    {
+      "key": "DEVICE882",
+      "weight": 15194
+    },
+    {
+      "key": "DEVICE883",
+      "weight": 7450
+    },
+    {
+      "key": "DEVICE884",
+      "weight": 2112
+    },
+    {
+      "key": "DEVICE885",
+      "weight": 10391
+    },
+    {
+      "key": "DEVICE886",
+      "weight": 7356
+    },
+    {
+      "key": "DEVICE887",
+      "weight": 2203
+    },
+    {
+      "key": "DEVICE888",
+      "weight": 3999
+    },
+    {
+      "key": "DEVICE889",
+      "weight": 6513
+    },
+    {
+      "key": "DEVICE890",
+      "weight": 34812
+    },
+    {
+      "key": "DEVICE891",
+      "weight": 69050
+    },
+    {
+      "key": "DEVICE892",
+      "weight": 3610
+    },
+    {
+      "key": "DEVICE893",
+      "weight": 4267
+    },
+    {
+      "key": "DEVICE894",
+      "weight": 8939
+    },
+    {
+      "key": "DEVICE895",
+      "weight": 1539
+    },
+    {
+      "key": "DEVICE896",
+      "weight": 10736
+    },
+    {
+      "key": "DEVICE897",
+      "weight": 2262
+    },
+    {
+      "key": "DEVICE898",
+      "weight": 7583
+    },
+    {
+      "key": "DEVICE899",
+      "weight": 8558
+    },
+    {
+      "key": "DEVICE900",
+      "weight": 2868
+    },
+    {
+      "key": "DEVICE901",
+      "weight": 26273
+    },
+    {
+      "key": "DEVICE902",
+      "weight": 23987
+    },
+    {
+      "key": "DEVICE903",
+      "weight": 30954
+    },
+    {
+      "key": "DEVICE904",
+      "weight": 25418
+    },
+    {
+      "key": "DEVICE905",
+      "weight": 1832
+    },
+    {
+      "key": "DEVICE906",
+      "weight": 1409
+    },
+    {
+      "key": "DEVICE907",
+      "weight": 3611
+    },
+    {
+      "key": "DEVICE908",
+      "weight": 1333
+    },
+    {
+      "key": "DEVICE909",
+      "weight": 1330
+    },
+    {
+      "key": "DEVICE910",
+      "weight": 1330
+    },
+    {
+      "key": "DEVICE911",
+      "weight": 1330
+    },
+    {
+      "key": "DEVICE912",
+      "weight": 1322
+    },
+    {
+      "key": "DEVICE913",
+      "weight": 2633
+    },
+    {
+      "key": "DEVICE914",
+      "weight": 1311
+    },
+    {
+      "key": "DEVICE915",
+      "weight": 1303
+    },
+    {
+      "key": "DEVICE916",
+      "weight": 1303
+    },
+    {
+      "key": "DEVICE917",
+      "weight": 1299
+    },
+    {
+      "key": "DEVICE918",
+      "weight": 1295
+    },
+    {
+      "key": "DEVICE919",
+      "weight": 1295
+    },
+    {
+      "key": "DEVICE920",
+      "weight": 1292
+    },
+    {
+      "key": "DEVICE921",
+      "weight": 1292
+    },
+    {
+      "key": "DEVICE922",
+      "weight": 1284
+    },
+    {
+      "key": "DEVICE923",
+      "weight": 2528
+    },
+    {
+      "key": "DEVICE924",
+      "weight": 2867
+    },
+    {
+      "key": "DEVICE925",
+      "weight": 2764
+    },
+    {
+      "key": "DEVICE926",
+      "weight": 2726
+    },
+    {
+      "key": "DEVICE927",
+      "weight": 9236
+    },
+    {
+      "key": "DEVICE928",
+      "weight": 2362
+    },
+    {
+      "key": "DEVICE929",
+      "weight": 1485
+    },
+    {
+      "key": "DEVICE930",
+      "weight": 2075
+    },
+    {
+      "key": "DEVICE931",
+      "weight": 2146
+    },
+    {
+      "key": "DEVICE932",
+      "weight": 1155
+    },
+    {
+      "key": "DEVICE933",
+      "weight": 1083
+    },
+    {
+      "key": "DEVICE934",
+      "weight": 2703
+    },
+    {
+      "key": "DEVICE935",
+      "weight": 1741
+    },
+    {
+      "key": "DEVICE936",
+      "weight": 2297
+    },
+    {
+      "key": "DEVICE937",
+      "weight": 2570
+    },
+    {
+      "key": "DEVICE938",
+      "weight": 2493
+    },
+    {
+      "key": "DEVICE939",
+      "weight": 1117
+    },
+    {
+      "key": "DEVICE940",
+      "weight": 2778
+    },
+    {
+      "key": "DEVICE941",
+      "weight": 1443
+    },
+    {
+      "key": "DEVICE942",
+      "weight": 2480
+    },
+    {
+      "key": "DEVICE943",
+      "weight": 1416
+    },
+    {
+      "key": "DEVICE944",
+      "weight": 1400
+    },
+    {
+      "key": "DEVICE945",
+      "weight": 1842
+    },
+    {
+      "key": "DEVICE946",
+      "weight": 2464
+    },
+    {
+      "key": "DEVICE947",
+      "weight": 1063
+    },
+    {
+      "key": "DEVICE948",
+      "weight": 1760
+    },
+    {
+      "key": "DEVICE949",
+      "weight": 1634
+    },
+    {
+      "key": "DEVICE950",
+      "weight": 878
+    },
+    {
+      "key": "DEVICE951",
+      "weight": 2416
+    },
+    {
+      "key": "DEVICE952",
+      "weight": 2416
+    },
+    {
+      "key": "DEVICE953",
+      "weight": 2414
+    },
+    {
+      "key": "DEVICE954",
+      "weight": 2412
+    },
+    {
+      "key": "DEVICE955",
+      "weight": 2412
+    },
+    {
+      "key": "DEVICE956",
+      "weight": 2412
+    },
+    {
+      "key": "DEVICE957",
+      "weight": 2408
+    },
+    {
+      "key": "DEVICE958",
+      "weight": 2408
+    },
+    {
+      "key": "DEVICE959",
+      "weight": 2406
+    },
+    {
+      "key": "DEVICE960",
+      "weight": 2408
+    },
+    {
+      "key": "DEVICE961",
+      "weight": 2406
+    },
+    {
+      "key": "DEVICE962",
+      "weight": 2408
+    },
+    {
+      "key": "DEVICE963",
+      "weight": 2408
+    },
+    {
+      "key": "DEVICE964",
+      "weight": 2408
+    },
+    {
+      "key": "DEVICE965",
+      "weight": 2407
+    },
+    {
+      "key": "DEVICE966",
+      "weight": 2407
+    },
+    {
+      "key": "DEVICE967",
+      "weight": 2406
+    },
+    {
+      "key": "DEVICE968",
+      "weight": 2408
+    },
+    {
+      "key": "DEVICE969",
+      "weight": 2408
+    },
+    {
+      "key": "DEVICE970",
+      "weight": 2408
+    },
+    {
+      "key": "DEVICE971",
+      "weight": 2408
+    },
+    {
+      "key": "DEVICE972",
+      "weight": 2408
+    },
+    {
+      "key": "DEVICE973",
+      "weight": 2405
+    },
+    {
+      "key": "DEVICE974",
+      "weight": 2407
+    },
+    {
+      "key": "DEVICE975",
+      "weight": 2408
+    },
+    {
+      "key": "DEVICE976",
+      "weight": 2408
+    },
+    {
+      "key": "DEVICE977",
+      "weight": 2407
+    },
+    {
+      "key": "DEVICE978",
+      "weight": 2408
+    },
+    {
+      "key": "DEVICE979",
+      "weight": 1204
+    },
+    {
+      "key": "DEVICE980",
+      "weight": 2408
+    },
+    {
+      "key": "DEVICE981",
+      "weight": 1204
+    },
+    {
+      "key": "DEVICE982",
+      "weight": 2408
+    },
+    {
+      "key": "DEVICE983",
+      "weight": 2405
+    },
+    {
+      "key": "DEVICE984",
+      "weight": 2406
+    },
+    {
+      "key": "DEVICE985",
+      "weight": 2408
+    },
+    {
+      "key": "DEVICE986",
+      "weight": 2408
+    },
+    {
+      "key": "DEVICE987",
+      "weight": 2406
+    },
+    {
+      "key": "DEVICE988",
+      "weight": 2408
+    },
+    {
+      "key": "DEVICE989",
+      "weight": 2406
+    },
+    {
+      "key": "DEVICE990",
+      "weight": 2407
+    },
+    {
+      "key": "DEVICE991",
+      "weight": 2406
+    },
+    {
+      "key": "DEVICE992",
+      "weight": 2406
+    },
+    {
+      "key": "DEVICE993",
+      "weight": 2408
+    },
+    {
+      "key": "DEVICE994",
+      "weight": 2408
+    },
+    {
+      "key": "DEVICE995",
+      "weight": 2408
+    },
+    {
+      "key": "DEVICE996",
+      "weight": 2408
+    },
+    {
+      "key": "DEVICE997",
+      "weight": 2408
+    },
+    {
+      "key": "DEVICE998",
+      "weight": 602
+    },
+    {
+      "key": "DEVICE999",
+      "weight": 2406
+    },
+    {
+      "key": "DEVICE1000",
+      "weight": 2406
+    },
+    {
+      "key": "DEVICE1001",
+      "weight": 2407
+    },
+    {
+      "key": "DEVICE1002",
+      "weight": 2408
+    },
+    {
+      "key": "DEVICE1003",
+      "weight": 2407
+    },
+    {
+      "key": "DEVICE1004",
+      "weight": 2408
+    },
+    {
+      "key": "DEVICE1005",
+      "weight": 2405
+    },
+    {
+      "key": "DEVICE1006",
+      "weight": 2408
+    },
+    {
+      "key": "DEVICE1007",
+      "weight": 2405
+    },
+    {
+      "key": "DEVICE1008",
+      "weight": 2406
+    },
+    {
+      "key": "DEVICE1009",
+      "weight": 2405
+    },
+    {
+      "key": "DEVICE1010",
+      "weight": 2404
+    },
+    {
+      "key": "DEVICE1011",
+      "weight": 2404
+    },
+    {
+      "key": "DEVICE1012",
+      "weight": 2396
+    },
+    {
+      "key": "DEVICE1013",
+      "weight": 2397
+    },
+    {
+      "key": "DEVICE1014",
+      "weight": 600
+    },
+    {
+      "key": "DEVICE1015",
+      "weight": 2395
+    },
+    {
+      "key": "DEVICE1016",
+      "weight": 600
+    },
+    {
+      "key": "DEVICE1017",
+      "weight": 1799
+    },
+    {
+      "key": "DEVICE1018",
+      "weight": 2398
+    },
+    {
+      "key": "DEVICE1019",
+      "weight": 2396
+    },
+    {
+      "key": "DEVICE1020",
+      "weight": 2397
+    },
+    {
+      "key": "DEVICE1021",
+      "weight": 1798
+    },
+    {
+      "key": "DEVICE1022",
+      "weight": 2393
+    },
+    {
+      "key": "DEVICE1023",
+      "weight": 1799
+    },
+    {
+      "key": "DEVICE1024",
+      "weight": 2397
+    },
+    {
+      "key": "DEVICE1025",
+      "weight": 2396
+    },
+    {
+      "key": "DEVICE1026",
+      "weight": 600
+    },
+    {
+      "key": "DEVICE1027",
+      "weight": 600
+    },
+    {
+      "key": "DEVICE1028",
+      "weight": 1200
+    },
+    {
+      "key": "DEVICE1029",
+      "weight": 2397
+    },
+    {
+      "key": "DEVICE1030",
+      "weight": 2397
+    },
+    {
+      "key": "DEVICE1031",
+      "weight": 1798
+    },
+    {
+      "key": "DEVICE1032",
+      "weight": 1798
+    },
+    {
+      "key": "DEVICE1033",
+      "weight": 2397
+    },
+    {
+      "key": "DEVICE1034",
+      "weight": 2396
+    },
+    {
+      "key": "DEVICE1035",
+      "weight": 2397
+    },
+    {
+      "key": "DEVICE1036",
+      "weight": 2396
+    },
+    {
+      "key": "DEVICE1037",
+      "weight": 2397
+    },
+    {
+      "key": "DEVICE1038",
+      "weight": 2397
+    },
+    {
+      "key": "DEVICE1039",
+      "weight": 2396
+    },
+    {
+      "key": "DEVICE1040",
+      "weight": 2396
+    },
+    {
+      "key": "DEVICE1041",
+      "weight": 2397
+    },
+    {
+      "key": "DEVICE1042",
+      "weight": 2396
+    },
+    {
+      "key": "DEVICE1043",
+      "weight": 2397
+    },
+    {
+      "key": "DEVICE1044",
+      "weight": 599
+    },
+    {
+      "key": "DEVICE1045",
+      "weight": 599
+    },
+    {
+      "key": "DEVICE1046",
+      "weight": 599
+    },
+    {
+      "key": "DEVICE1047",
+      "weight": 2396
+    },
+    {
+      "key": "DEVICE1048",
+      "weight": 1797
+    },
+    {
+      "key": "DEVICE1049",
+      "weight": 599
+    },
+    {
+      "key": "DEVICE1050",
+      "weight": 2396
+    },
+    {
+      "key": "DEVICE1051",
+      "weight": 2396
+    },
+    {
+      "key": "DEVICE1052",
+      "weight": 2395
+    },
+    {
+      "key": "DEVICE1053",
+      "weight": 2396
+    },
+    {
+      "key": "DEVICE1054",
+      "weight": 2396
+    },
+    {
+      "key": "DEVICE1055",
+      "weight": 2396
+    },
+    {
+      "key": "DEVICE1056",
+      "weight": 2395
+    },
+    {
+      "key": "DEVICE1057",
+      "weight": 2396
+    },
+    {
+      "key": "DEVICE1058",
+      "weight": 599
+    },
+    {
+      "key": "DEVICE1059",
+      "weight": 2396
+    },
+    {
+      "key": "DEVICE1060",
+      "weight": 2396
+    },
+    {
+      "key": "DEVICE1061",
+      "weight": 599
+    },
+    {
+      "key": "DEVICE1062",
+      "weight": 2396
+    },
+    {
+      "key": "DEVICE1063",
+      "weight": 2395
+    },
+    {
+      "key": "DEVICE1064",
+      "weight": 2395
+    },
+    {
+      "key": "DEVICE1065",
+      "weight": 599
+    },
+    {
+      "key": "DEVICE1066",
+      "weight": 2396
+    },
+    {
+      "key": "DEVICE1067",
+      "weight": 2395
+    },
+    {
+      "key": "DEVICE1068",
+      "weight": 2395
+    },
+    {
+      "key": "DEVICE1069",
+      "weight": 599
+    },
+    {
+      "key": "DEVICE1070",
+      "weight": 2393
+    },
+    {
+      "key": "DEVICE1071",
+      "weight": 599
+    },
+    {
+      "key": "DEVICE1072",
+      "weight": 2393
+    },
+    {
+      "key": "DEVICE1073",
+      "weight": 2396
+    },
+    {
+      "key": "DEVICE1074",
+      "weight": 2394
+    },
+    {
+      "key": "DEVICE1075",
+      "weight": 599
+    },
+    {
+      "key": "DEVICE1076",
+      "weight": 599
+    },
+    {
+      "key": "DEVICE1077",
+      "weight": 2396
+    },
+    {
+      "key": "DEVICE1078",
+      "weight": 2395
+    },
+    {
+      "key": "DEVICE1079",
+      "weight": 599
+    },
+    {
+      "key": "DEVICE1080",
+      "weight": 2395
+    },
+    {
+      "key": "DEVICE1081",
+      "weight": 2395
+    },
+    {
+      "key": "DEVICE1082",
+      "weight": 599
+    },
+    {
+      "key": "DEVICE1083",
+      "weight": 599
+    },
+    {
+      "key": "DEVICE1084",
+      "weight": 2394
+    },
+    {
+      "key": "DEVICE1085",
+      "weight": 2395
+    },
+    {
+      "key": "DEVICE1086",
+      "weight": 599
+    },
+    {
+      "key": "DEVICE1087",
+      "weight": 599
+    },
+    {
+      "key": "DEVICE1088",
+      "weight": 599
+    },
+    {
+      "key": "DEVICE1089",
+      "weight": 2395
+    },
+    {
+      "key": "DEVICE1090",
+      "weight": 599
+    },
+    {
+      "key": "DEVICE1091",
+      "weight": 2395
+    },
+    {
+      "key": "DEVICE1092",
+      "weight": 1795
+    },
+    {
+      "key": "DEVICE1093",
+      "weight": 599
+    },
+    {
+      "key": "DEVICE1094",
+      "weight": 599
+    },
+    {
+      "key": "DEVICE1095",
+      "weight": 599
+    },
+    {
+      "key": "DEVICE1096",
+      "weight": 599
+    },
+    {
+      "key": "DEVICE1097",
+      "weight": 599
+    },
+    {
+      "key": "DEVICE1098",
+      "weight": 599
+    },
+    {
+      "key": "DEVICE1099",
+      "weight": 599
+    },
+    {
+      "key": "DEVICE1100",
+      "weight": 599
+    },
+    {
+      "key": "DEVICE1101",
+      "weight": 598
+    },
+    {
+      "key": "DEVICE1102",
+      "weight": 598
+    },
+    {
+      "key": "DEVICE1103",
+      "weight": 598
+    },
+    {
+      "key": "DEVICE1104",
+      "weight": 598
+    },
+    {
+      "key": "DEVICE1105",
+      "weight": 598
+    },
+    {
+      "key": "DEVICE1106",
+      "weight": 598
+    },
+    {
+      "key": "DEVICE1107",
+      "weight": 976
+    },
+    {
+      "key": "DEVICE1108",
+      "weight": 705
+    },
+    {
+      "key": "DEVICE1109",
+      "weight": 1442
+    },
+    {
+      "key": "DEVICE1110",
+      "weight": 1469
+    },
+    {
+      "key": "DEVICE1111",
+      "weight": 1375
+    },
+    {
+      "key": "DEVICE1112",
+      "weight": 671
+    },
+    {
+      "key": "DEVICE1113",
+      "weight": 1014
+    },
+    {
+      "key": "DEVICE1114",
+      "weight": 1458
+    },
+    {
+      "key": "DEVICE1115",
+      "weight": 1349
+    },
+    {
+      "key": "DEVICE1116",
+      "weight": 864
+    },
+    {
+      "key": "DEVICE1117",
+      "weight": 1211
+    },
+    {
+      "key": "DEVICE1118",
+      "weight": 630
+    },
+    {
+      "key": "DEVICE1119",
+      "weight": 807
+    },
+    {
+      "key": "DEVICE1120",
+      "weight": 1027
+    },
+    {
+      "key": "DEVICE1121",
+      "weight": 1180
+    },
+    {
+      "key": "DEVICE1122",
+      "weight": 1164
+    },
+    {
+      "key": "DEVICE1123",
+      "weight": 515
+    },
+    {
+      "key": "DEVICE1124",
+      "weight": 1049
+    },
+    {
+      "key": "DEVICE1125",
+      "weight": 1075
+    },
+    {
+      "key": "DEVICE1126",
+      "weight": 775
+    },
+    {
+      "key": "DEVICE1127",
+      "weight": 462
+    },
+    {
+      "key": "DEVICE1128",
+      "weight": 991
+    },
+    {
+      "key": "DEVICE1129",
+      "weight": 563
+    },
+    {
+      "key": "DEVICE1130",
+      "weight": 1037
+    },
+    {
+      "key": "DEVICE1131",
+      "weight": 744
+    },
+    {
+      "key": "DEVICE1132",
+      "weight": 675
+    },
+    {
+      "key": "DEVICE1133",
+      "weight": 712
+    },
+    {
+      "key": "DEVICE1134",
+      "weight": 807
+    },
+    {
+      "key": "DEVICE1135",
+      "weight": 709
+    },
+    {
+      "key": "DEVICE1136",
+      "weight": 970
+    },
+    {
+      "key": "DEVICE1137",
+      "weight": 930
+    },
+    {
+      "key": "DEVICE1138",
+      "weight": 990
+    },
+    {
+      "key": "DEVICE1139",
+      "weight": 786
+    },
+    {
+      "key": "DEVICE1140",
+      "weight": 360
+    },
+    {
+      "key": "DEVICE1141",
+      "weight": 702
+    },
+    {
+      "key": "DEVICE1142",
+      "weight": 685
+    },
+    {
+      "key": "DEVICE1143",
+      "weight": 991
+    },
+    {
+      "key": "DEVICE1144",
+      "weight": 975
+    },
+    {
+      "key": "DEVICE1145",
+      "weight": 975
+    },
+    {
+      "key": "DEVICE1146",
+      "weight": 652
+    },
+    {
+      "key": "DEVICE1147",
+      "weight": 605
+    },
+    {
+      "key": "DEVICE1148",
+      "weight": 632
+    },
+    {
+      "key": "DEVICE1149",
+      "weight": 873
+    },
+    {
+      "key": "DEVICE1150",
+      "weight": 828
+    },
+    {
+      "key": "DEVICE1151",
+      "weight": 814
+    },
+    {
+      "key": "DEVICE1152",
+      "weight": 585
+    },
+    {
+      "key": "DEVICE1153",
+      "weight": 479
+    },
+    {
+      "key": "DEVICE1154",
+      "weight": 797
+    },
+    {
+      "key": "DEVICE1155",
+      "weight": 479
+    },
+    {
+      "key": "DEVICE1156",
+      "weight": 316
+    },
+    {
+      "key": "DEVICE1157",
+      "weight": 669
+    },
+    {
+      "key": "DEVICE1158",
+      "weight": 853
+    },
+    {
+      "key": "DEVICE1159",
+      "weight": 659
+    },
+    {
+      "key": "DEVICE1160",
+      "weight": 619
+    },
+    {
+      "key": "DEVICE1161",
+      "weight": 520
+    },
+    {
+      "key": "DEVICE1162",
+      "weight": 404
+    },
+    {
+      "key": "DEVICE1163",
+      "weight": 332
+    },
+    {
+      "key": "DEVICE1164",
+      "weight": 645
+    },
+    {
+      "key": "DEVICE1165",
+      "weight": 419
+    },
+    {
+      "key": "DEVICE1166",
+      "weight": 499
+    },
+    {
+      "key": "DEVICE1167",
+      "weight": 412
+    },
+    {
+      "key": "DEVICE1168",
+      "weight": 479
+    },
+    {
+      "key": "DEVICE1169",
+      "weight": 444
+    },
+    {
+      "key": "DEVICE1170",
+      "weight": 331
+    },
+    {
+      "key": "DEVICE1171",
+      "weight": 369
+    },
+    {
+      "key": "DEVICE1172",
+      "weight": 352
+    },
+    {
+      "key": "DEVICE1173",
+      "weight": 366
+    },
+    {
+      "key": "DEVICE1174",
+      "weight": 371
+    },
+    {
+      "key": "DEVICE1175",
+      "weight": 677
+    },
+    {
+      "key": "DEVICE1176",
+      "weight": 555
+    },
+    {
+      "key": "DEVICE1177",
+      "weight": 335
+    },
+    {
+      "key": "DEVICE1178",
+      "weight": 326
+    },
+    {
+      "key": "DEVICE1179",
+      "weight": 347
+    },
+    {
+      "key": "DEVICE1180",
+      "weight": 304
+    },
+    {
+      "key": "DEVICE1181",
+      "weight": 353
+    },
+    {
+      "key": "DEVICE1182",
+      "weight": 327
+    },
+    {
+      "key": "DEVICE1183",
+      "weight": 355
+    },
+    {
+      "key": "DEVICE1184",
+      "weight": 362
+    },
+    {
+      "key": "DEVICE1185",
+      "weight": 322
+    },
+    {
+      "key": "DEVICE1186",
+      "weight": 344
+    },
+    {
+      "key": "DEVICE1187",
+      "weight": 291
+    },
+    {
+      "key": "DEVICE1188",
+      "weight": 329
+    },
+    {
+      "key": "DEVICE1189",
+      "weight": 324
+    },
+    {
+      "key": "DEVICE1190",
+      "weight": 317
+    },
+    {
+      "key": "DEVICE1191",
+      "weight": 323
+    },
+    {
+      "key": "DEVICE1192",
+      "weight": 322
+    },
+    {
+      "key": "DEVICE1193",
+      "weight": 360
+    },
+    {
+      "key": "DEVICE1194",
+      "weight": 330
+    },
+    {
+      "key": "DEVICE1195",
+      "weight": 343
+    },
+    {
+      "key": "DEVICE1196",
+      "weight": 292
+    },
+    {
+      "key": "DEVICE1197",
+      "weight": 328
+    },
+    {
+      "key": "DEVICE1198",
+      "weight": 330
+    },
+    {
+      "key": "DEVICE1199",
+      "weight": 313
+    },
+    {
+      "key": "DEVICE1200",
+      "weight": 353
+    },
+    {
+      "key": "DEVICE1201",
+      "weight": 296
+    },
+    {
+      "key": "DEVICE1202",
+      "weight": 175
+    },
+    {
+      "key": "DEVICE1203",
+      "weight": 324
+    },
+    {
+      "key": "DEVICE1204",
+      "weight": 372
+    },
+    {
+      "key": "DEVICE1205",
+      "weight": 326
+    },
+    {
+      "key": "DEVICE1206",
+      "weight": 299
+    },
+    {
+      "key": "DEVICE1207",
+      "weight": 298
+    },
+    {
+      "key": "DEVICE1208",
+      "weight": 565
+    },
+    {
+      "key": "DEVICE1209",
+      "weight": 290
+    },
+    {
+      "key": "DEVICE1210",
+      "weight": 296
+    },
+    {
+      "key": "DEVICE1211",
+      "weight": 298
+    },
+    {
+      "key": "DEVICE1212",
+      "weight": 590
+    },
+    {
+      "key": "DEVICE1213",
+      "weight": 277
+    },
+    {
+      "key": "DEVICE1214",
+      "weight": 290
+    },
+    {
+      "key": "DEVICE1215",
+      "weight": 286
+    },
+    {
+      "key": "DEVICE1216",
+      "weight": 278
+    },
+    {
+      "key": "DEVICE1217",
+      "weight": 275
+    },
+    {
+      "key": "DEVICE1218",
+      "weight": 274
+    },
+    {
+      "key": "DEVICE1219",
+      "weight": 205
+    },
+    {
+      "key": "DEVICE1220",
+      "weight": 280
+    },
+    {
+      "key": "DEVICE1221",
+      "weight": 152
+    },
+    {
+      "key": "DEVICE1222",
+      "weight": 239
+    },
+    {
+      "key": "DEVICE1223",
+      "weight": 275
+    },
+    {
+      "key": "DEVICE1224",
+      "weight": 279
+    },
+    {
+      "key": "DEVICE1225",
+      "weight": 281
+    },
+    {
+      "key": "DEVICE1226",
+      "weight": 261
+    },
+    {
+      "key": "DEVICE1227",
+      "weight": 249
+    },
+    {
+      "key": "DEVICE1228",
+      "weight": 286
+    },
+    {
+      "key": "DEVICE1229",
+      "weight": 275
+    },
+    {
+      "key": "DEVICE1230",
+      "weight": 265
+    },
+    {
+      "key": "DEVICE1231",
+      "weight": 268
+    },
+    {
+      "key": "DEVICE1232",
+      "weight": 262
+    },
+    {
+      "key": "DEVICE1233",
+      "weight": 261
+    },
+    {
+      "key": "DEVICE1234",
+      "weight": 275
+    },
+    {
+      "key": "DEVICE1235",
+      "weight": 247
+    },
+    {
+      "key": "DEVICE1236",
+      "weight": 240
+    },
+    {
+      "key": "DEVICE1237",
+      "weight": 255
+    },
+    {
+      "key": "DEVICE1238",
+      "weight": 268
+    },
+    {
+      "key": "DEVICE1239",
+      "weight": 249
+    },
+    {
+      "key": "DEVICE1240",
+      "weight": 246
+    },
+    {
+      "key": "DEVICE1241",
+      "weight": 241
+    },
+    {
+      "key": "DEVICE1242",
+      "weight": 236
+    },
+    {
+      "key": "DEVICE1243",
+      "weight": 236
+    },
+    {
+      "key": "DEVICE1244",
+      "weight": 234
+    },
+    {
+      "key": "DEVICE1245",
+      "weight": 241
+    },
+    {
+      "key": "DEVICE1246",
+      "weight": 231
+    },
+    {
+      "key": "DEVICE1247",
+      "weight": 224
+    },
+    {
+      "key": "DEVICE1248",
+      "weight": 230
+    },
+    {
+      "key": "DEVICE1249",
+      "weight": 221
+    },
+    {
+      "key": "DEVICE1250",
+      "weight": 215
+    },
+    {
+      "key": "DEVICE1251",
+      "weight": 213
+    },
+    {
+      "key": "DEVICE1252",
+      "weight": 212
+    },
+    {
+      "key": "DEVICE1253",
+      "weight": 207
+    },
+    {
+      "key": "DEVICE1254",
+      "weight": 222
+    },
+    {
+      "key": "DEVICE1255",
+      "weight": 259
+    },
+    {
+      "key": "DEVICE1256",
+      "weight": 54
+    },
+    {
+      "key": "DEVICE1257",
+      "weight": 79
+    },
+    {
+      "key": "DEVICE1258",
+      "weight": 52
+    }
+  ]
+}
