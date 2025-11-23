@@ -1,0 +1,59 @@
+simulation:
+  duration: 2m
+  mode: all-in-one
+  cooldown: 10s
+
+partitions:
+  count: 100
+  message_rate_per_partition: 10.0
+  distribution: uniform
+  weights:
+    exponential:
+      extreme_percent: 0.0
+      extreme_weight: 1
+      normal_weight: 1
+
+producers:
+  count: 5
+  rate_variation:
+    enabled: false
+
+workers:
+  count: 5
+  assignment_strategy: ConsistentHash
+  strategy_config:
+    virtual_nodes: 20
+  processing_delay:
+    min: 5ms
+    max: 20ms
+  consumer_batch_size: 10
+  handler_concurrency: 2
+  max_subjects: 100
+  enforce_exclusive_consumption: true
+  processing_gate:
+    allowed_states: ["stable"]
+
+coordinator:
+  validation_window: 2m
+
+chaos:
+  enabled: true
+  interval: 15s-16s
+  events:
+    - "leader_failure"
+
+nats:
+  url: "nats://localhost:4222"
+  jetstream:
+    replicas: 1
+    max_memory: 1GB
+    max_file: 1GB
+
+metrics:
+  export_interval: 1s
+  validation:
+    enabled: true
+    slo:
+      assignment_latency_p99: 500ms
+      rebalance_latency_p99: 5s
+      catch_up_latency_p99: 5s

@@ -1,0 +1,28 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'parti-simulation'
+
+scrape_configs:
+  # Prometheus itself
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Simulation metrics (when running on host machine)
+  - job_name: 'simulation'
+    static_configs:
+      # Use Docker bridge IP to reach host (172.17.0.1 is default docker0 bridge)
+      # Alternative: use host.docker.internal on Docker Desktop, or add extra_hosts
+      - targets: ['172.17.0.1:9091']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'simulation'
+
+  # NATS monitoring
+  - job_name: 'nats'
+    static_configs:
+      - targets: ['nats:8222']
+    metrics_path: '/metrics'

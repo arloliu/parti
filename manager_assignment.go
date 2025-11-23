@@ -1,0 +1,392 @@
+package parti
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/arloliu/parti/internal/assignment"
+	"github.com/arloliu/parti/types"
+	"github.com/nats-io/nats.go/jetstream"
+)
+
+// RefreshPartitions triggers partition discovery refresh.
+//
+// This method forces the partition source to be re-queried and, if the worker is
+// the leader, triggers an immediate rebalance with the updated partition list.
+// Non-leader workers will receive the updated assignments automatically.
+//
+// Use this when:
+//   - Partitions are added/removed dynamically (e.g., Kafka topics, Redis shards)
+//   - You want to redistribute work after manual partition changes
+//   - Your partition source has changed but workers haven't detected it yet
+//
+// Parameters:
+//   - ctx: Context for operation timeout
+//
+// Returns:
+//   - error: Refresh error, or ErrNotStarted if manager isn't running
+//
+// Example:
+//
+//	// After adding new partitions to your partition source
+//	if err := manager.RefreshPartitions(ctx); err != nil {
+//	    log.Printf("Failed to refresh partitions: %v", err)
+//	}
+func (m *Manager) RefreshPartitions(ctx context.Context) error {
+	// Check if manager is started
+	currentState := m.State()
+	if currentState == StateInit || currentState == StateShutdown {
+		return types.ErrNotStarted
+	}
+
+	// Only leaders can trigger rebalancing
+	// Followers will receive updated assignments automatically
+	if !m.IsLeader() {
+		m.logger.Info("skipping partition refresh: not leader")
+		return nil
+	}
+
+	// Check if calculator is available
+	m.mu.RLock()
+	calc := m.calculator
+	m.mu.RUnlock()
+
+	if _, ok := calc.(*assignment.NopCalculator); ok {
+		return errors.New("calculator not initialized")
+	}
+
+	m.logger.Info("refreshing partitions and triggering rebalance")
+
+	// Trigger rebalance which will call source.ListPartitions() to get fresh partition list
+	if err := calc.TriggerRebalance(ctx); err != nil {
+		return fmt.Errorf("failed to trigger rebalance: %w", err)
+	}
+
+	return nil
+}
+
+// startCalculator starts the assignment calculator (leader only).
+func (m *Manager) startCalculator(assignmentKV, heartbeatKV jetstream.KeyValue) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, ok := m.calculator.(*assignment.Calculator); ok {
+		return nil // Already started
+	}
+
+	calc, err := assignment.NewCalculator(&assignment.Config{
+		AssignmentKV:         assignmentKV,
+		HeartbeatKV:          heartbeatKV,
+		Source:               m.source,
+		Strategy:             m.strategy,
+		AssignmentPrefix:     "assignment",
+		HeartbeatPrefix:      "heartbeat",
+		HeartbeatTTL:         m.cfg.HeartbeatTTL,
+		EmergencyGracePeriod: m.cfg.EmergencyGracePeriod,
+		Cooldown:             m.cfg.Assignment.MinRebalanceInterval,
+		MinThreshold:         m.cfg.Assignment.MinRebalanceThreshold,
+		RestartRatio:         m.cfg.RestartDetectionRatio,
+		ColdStartWindow:      m.cfg.ColdStartWindow,
+		PlannedScaleWindow:   m.cfg.PlannedScaleWindow,
+		Metrics:              m.metrics,
+		Logger:               m.logger,
+		StateProvider:        m, // Pass manager as state provider for degraded mode checks
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create calculator: %w", err)
+	}
+
+	m.calculator = calc
+
+	// Start monitoring calculator state BEFORE starting the calculator
+	// This ensures we don't miss any state transitions that happen during startup
+	m.wg.Go(m.monitorCalculatorState)
+
+	// Give the monitor goroutine a moment to set up its subscription
+	// This prevents race conditions where calculator state changes before monitor is ready
+	time.Sleep(10 * time.Millisecond)
+
+	// Start calculator in background
+	if err := calc.Start(m.ctx); err != nil {
+		m.calculator = nil
+		return fmt.Errorf("failed to start calculator: %w", err)
+	}
+
+	m.logger.Info("assignment calculator started", "worker_id", m.WorkerID())
+
+	return nil
+}
+
+// monitorCalculatorState monitors the calculator's internal state and syncs it to Manager state.
+//
+// This goroutine listens to the Calculator's state change channel and updates
+// the Manager's state machine accordingly. Replaces the previous polling-based
+// approach (200ms ticker) with event-driven synchronization for zero-lag updates.
+//
+// This method runs only on the leader and translates calculator states to Manager states:
+//   - types.CalcStateScaling → StateScaling
+//   - types.CalcStateRebalancing → StateRebalancing
+//   - types.CalcStateEmergency → StateEmergency
+//   - types.CalcStateIdle (after rebalancing) → StateStable
+func (m *Manager) monitorCalculatorState() {
+	m.logger.Info("starting calculator state monitor")
+
+	// Subscribe to calculator state changes with mutex protection
+	m.mu.RLock()
+	calc := m.calculator
+	m.mu.RUnlock()
+
+	stateCh, unsubscribe := calc.SubscribeToStateChanges()
+	defer unsubscribe()
+
+	for {
+		select {
+		case <-m.ctx.Done():
+			m.logger.Info("calculator state monitor stopped")
+			return
+
+		case calcState, ok := <-stateCh:
+			if !ok {
+				m.logger.Info("calculator state channel closed, stopping monitor")
+				return
+			}
+			// Synchronize Manager state based on Calculator state
+			if err := m.syncStateFromCalculator(calcState); err != nil {
+				m.logError("failed to sync state from calculator",
+					"calc_state", calcState,
+					"error", err,
+				)
+			}
+		}
+	}
+}
+
+// stopCalculator stops the assignment calculator.
+func (m *Manager) stopCalculator() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Before stopping, check if we need to transition state
+	// If we're in a leader-only state (Scaling/Rebalancing/Emergency),
+	// transition back to a follower state
+	currentState := m.State()
+	switch currentState {
+	case StateScaling, StateRebalancing, StateEmergency:
+		// Lost leadership while in leader-only state
+		// Transition to Stable if we have an assignment, otherwise WaitingAssignment
+		currentAssignment := m.CurrentAssignment()
+		if len(currentAssignment.Partitions) > 0 {
+			m.transitionState(currentState, StateStable)
+			m.logger.Info("transitioned to Stable after losing leadership",
+				"worker_id", m.WorkerID(),
+				"from_state", currentState.String(),
+			)
+		} else {
+			m.transitionState(currentState, StateWaitingAssignment)
+			m.logger.Info("transitioned to WaitingAssignment after losing leadership",
+				"worker_id", m.WorkerID(),
+				"from_state", currentState.String(),
+			)
+		}
+
+	default:
+		// No state transition needed for non-leader states
+	}
+
+	// Stop calculator with fresh context for cleanup
+	// IMPORTANT: Cannot use m.ctx here because it's already cancelled during Stop()
+	// Creating a timeout from cancelled context would result in immediate cancellation
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stopCancel()
+
+	if err := m.calculator.Stop(stopCtx); err != nil {
+		m.logError("failed to stop calculator", "error", err)
+	}
+
+	m.calculator = assignment.NewNopCalculator()
+
+	m.logger.Info("assignment calculator stopped", "worker_id", m.WorkerID())
+}
+
+// calculateAndPublish calculates and publishes assignments.
+func (m *Manager) calculateAndPublish(_ context.Context) error {
+	m.mu.RLock()
+	calc := m.calculator
+	m.mu.RUnlock()
+
+	if _, ok := calc.(*assignment.NopCalculator); ok {
+		return errors.New("calculator not started")
+	}
+
+	// Calculator runs in background and publishes automatically
+	// Just wait a bit for initial calculation
+	time.Sleep(500 * time.Millisecond)
+
+	return nil
+}
+
+// fetchAssignment fetches the assignment for this worker from KV.
+func (m *Manager) fetchAssignment(ctx context.Context, kv jetstream.KeyValue) (*Assignment, error) {
+	workerID := m.WorkerID()
+	key := fmt.Sprintf("assignment.%s", workerID) // Match calculator's key format
+	entry, err := kv.Get(ctx, key)
+	if err != nil {
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			return nil, nil //nolint:nilnil // nil assignment with nil error indicates not yet assigned (valid state)
+		}
+
+		return nil, fmt.Errorf("failed to get assignment: %w", err)
+	}
+
+	var asgn Assignment
+	if err := json.Unmarshal(entry.Value(), &asgn); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal assignment: %w", err)
+	}
+
+	return &asgn, nil
+}
+
+// monitorAssignmentChanges monitors for assignment changes.
+func (m *Manager) monitorAssignmentChanges(ctx context.Context, kv jetstream.KeyValue) {
+	workerID := m.WorkerID()
+	key := fmt.Sprintf("assignment.%s", workerID) // Match calculator's key format
+
+	// Watch for updates to this worker's assignment key
+	// The watcher will deliver initial value, then a nil entry marker, then future updates
+	watcher, err := kv.Watch(ctx, key)
+	if err != nil {
+		m.logError("failed to watch assignments", "error", err)
+
+		return
+	}
+
+	defer func() {
+		if err := watcher.Stop(); err != nil {
+			m.logError("failed to stop watcher", "error", err)
+		}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			m.logger.Debug("assignment monitor stopping (context cancelled)", "worker_id", workerID)
+			return
+		case entry := <-watcher.Updates():
+			if entry == nil {
+				// Nil entry indicates end of initial values replay
+				// This is normal - continue watching for future updates
+				continue
+			}
+
+			if entry.Operation() == jetstream.KeyValueDelete {
+				m.logger.Debug("ignoring assignment deletion during leader transition")
+				continue
+			}
+
+			var newAssignment Assignment
+			if err := json.Unmarshal(entry.Value(), &newAssignment); err != nil {
+				m.logError("failed to unmarshal assignment", "error", err)
+
+				continue
+			}
+
+			// Get old assignment
+			oldAssignment := m.CurrentAssignment()
+
+			// Check if assignment actually changed
+			if oldAssignment.Version >= newAssignment.Version {
+				continue // Ignore stale or duplicate assignments
+			}
+
+			// Update stored assignment
+			m.assignment.Store(newAssignment)
+
+			m.logger.Info("assignment updated",
+				"worker_id", workerID,
+				"old_version", oldAssignment.Version,
+				"new_version", newAssignment.Version,
+				"old_partitions", len(oldAssignment.Partitions),
+				"new_partitions", len(newAssignment.Partitions),
+			)
+
+			// Trigger assignment change hook
+			// Run callbacks in background to avoid blocking
+			m.wg.Go(func() {
+				// 1) Invoke consumer updater if provided
+				// Apply assignment via coordinator (handles flag internally).
+				if err := m.handoffCoordinator.Apply(m.ctx, workerID, oldAssignment, newAssignment); err != nil {
+					m.logError("handoff apply error", "error", err)
+				}
+
+				// 2) Invoke OnAssignmentChanged hook if provided (old, new semantics)
+				if m.hooks.OnAssignmentChanged != nil {
+					if err := m.hooks.OnAssignmentChanged(m.ctx, oldAssignment.Partitions, newAssignment.Partitions); err != nil {
+						m.logError("assignment change hook error", "error", err)
+					}
+				}
+			})
+
+			// Record metrics
+			added := len(newAssignment.Partitions) - len(oldAssignment.Partitions)
+			if added < 0 {
+				added = 0
+			}
+			removed := len(oldAssignment.Partitions) - len(newAssignment.Partitions)
+			if removed < 0 {
+				removed = 0
+			}
+			m.metrics.RecordAssignmentChange(added, removed, newAssignment.Version)
+		}
+	}
+}
+
+// refreshAssignmentFromNATS attempts to fetch the current assignment from NATS KV.
+func (m *Manager) refreshAssignmentFromNATS() error {
+	workerID := m.WorkerID()
+	if workerID == "" {
+		return errors.New("worker ID not set")
+	}
+
+	key := fmt.Sprintf("assignment.%s", workerID)
+	entry, err := m.assignmentKV.Get(m.ctx, key)
+	if err != nil {
+		return fmt.Errorf("failed to get assignment from KV: %w", err)
+	}
+
+	var curAssignment Assignment
+	if err := json.Unmarshal(entry.Value(), &curAssignment); err != nil {
+		return fmt.Errorf("failed to unmarshal assignment: %w", err)
+	}
+
+	now := time.Now()
+	m.assignment.Store(curAssignment)
+	m.lastAssignmentAt.Store(&now)
+	m.lastAssignment.Store(m.clonePartitions(curAssignment.Partitions))
+
+	m.logger.Info("assignment refreshed from NATS",
+		"version", curAssignment.Version,
+		"partitions", len(curAssignment.Partitions),
+	)
+
+	return nil
+}
+
+// clonePartitions creates a deep copy of partition slice.
+func (m *Manager) clonePartitions(partitions []Partition) []Partition {
+	if partitions == nil {
+		return nil
+	}
+
+	cloned := make([]Partition, len(partitions))
+	for i, p := range partitions {
+		cloned[i] = Partition{
+			Keys:   append([]string(nil), p.Keys...),
+			Weight: p.Weight,
+		}
+	}
+
+	return cloned
+}

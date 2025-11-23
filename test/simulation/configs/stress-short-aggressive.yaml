@@ -1,0 +1,75 @@
+simulation:
+  duration: 2m
+  mode: all-in-one
+
+partitions:
+  count: 300
+  message_rate_per_partition: 2.0
+  distribution: exponential
+  weights:
+    exponential:
+      extreme_percent: 0.05
+      extreme_weight: 100
+      normal_weight: 1
+
+producers:
+  count: 8
+  rate_variation:
+    enabled: true
+    pattern: global
+    min_multiplier: 0.5
+    max_multiplier: 2.5
+    ramp_interval: 50s
+
+workers:
+  count: 10
+  assignment_strategy: WeightedConsistentHash
+  strategy_config:
+    virtual_nodes: 50
+  processing_delay:
+    min: 30ms
+    max: 400ms
+  consumer_batch_size: 16
+  handler_concurrency: 2
+  max_subjects: 300
+  enforce_exclusive_consumption: true
+  processing_gate:
+    warmup_duration: 5s
+    warmup_allowed_states: ["stable"]
+    allowed_states: ["stable"]
+    nak_delay: 60ms
+    nak_jitter: 0.4
+    debug: false
+
+coordinator:
+  validation_window: 2m
+  dup_trace:
+    enabled: true
+    window: 20s
+    threshold_per_min: 2.0
+    top_n: 8
+  gap_aging: 20s
+
+chaos:
+  enabled: true
+  events:
+    - scale_up
+    - scale_down
+  interval: 20s-35s
+
+nats:
+  mode: embedded
+  url: "nats://localhost:4222"
+  jetstream:
+    max_memory: 1GB
+    max_storage: 1GB
+
+metrics:
+  prometheus:
+    enabled: false
+    port: 9091
+
+checkpoint:
+  enabled: false
+  interval: 5m
+  path: "./checkpoints"

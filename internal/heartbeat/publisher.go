@@ -1,0 +1,250 @@
+package heartbeat
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/nats-io/nats.go/jetstream"
+
+	"github.com/arloliu/parti/internal/logging"
+	imetrics "github.com/arloliu/parti/internal/metrics"
+	"github.com/arloliu/parti/types"
+)
+
+// Common errors for heartbeat operations.
+var (
+	ErrNotStarted     = errors.New("publisher not started")
+	ErrAlreadyStarted = errors.New("publisher already started")
+	ErrNoWorkerID     = errors.New("worker ID not set")
+)
+
+// Publisher publishes periodic heartbeats to NATS KV.
+//
+// Each worker maintains a heartbeat key in a KV bucket with a TTL.
+// If the worker crashes or stops publishing, the key expires and other
+// workers detect its absence.
+type Publisher struct {
+	kv       jetstream.KeyValue
+	prefix   string
+	workerID string
+	interval time.Duration
+
+	mu      sync.Mutex
+	started bool
+	stopCh  chan struct{}
+	doneCh  chan struct{}
+	ticker  *time.Ticker
+	logger  types.Logger
+	metrics types.WorkerMetrics
+}
+
+// New creates a new heartbeat publisher with dependency injection.
+//
+// The KV bucket should be configured with a TTL of ~3x the heartbeat interval
+// to detect crashes after 3 missed heartbeats.
+//
+// Parameters:
+//   - kv: JetStream KV bucket for heartbeat storage
+//   - prefix: Key prefix for heartbeat keys (e.g., "worker-hb")
+//   - workerID: Worker ID for heartbeat publishing
+//   - interval: Heartbeat interval (typically 2s)
+//   - metrics: Worker metrics collector (nil creates no-op metrics)
+//   - logger: Logger instance (nil creates no-op logger)
+//
+// Returns:
+//   - *Publisher: New heartbeat publisher instance
+//
+// Example:
+//
+//	kv, _ := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{
+//	    Bucket:  "parti-heartbeats",
+//	    TTL:     6 * time.Second,  // 3x interval
+//	    Storage: jetstream.FileStorage,
+//	})
+//	publisher := heartbeat.New(kv, "worker-hb", "worker-1", 2*time.Second, metrics, logger)
+func New(
+	kv jetstream.KeyValue,
+	prefix string,
+	workerID string,
+	interval time.Duration,
+	metrics types.WorkerMetrics,
+	logger types.Logger,
+) *Publisher {
+	// Provide no-op implementations if nil
+	if metrics == nil {
+		metrics = imetrics.NewNop()
+	}
+	if logger == nil {
+		logger = logging.NewNop()
+	}
+
+	return &Publisher{
+		kv:       kv,
+		prefix:   prefix,
+		workerID: workerID,
+		interval: interval,
+		logger:   logger,
+		metrics:  metrics,
+		stopCh:   make(chan struct{}),
+		doneCh:   make(chan struct{}),
+	}
+}
+
+// Start begins publishing heartbeats in the background.
+//
+// Publishes the first heartbeat immediately, then at regular intervals.
+// Continues until Stop() is called.
+//
+// Parameters:
+//   - ctx: Context for initial heartbeat publish
+//
+// Returns:
+//   - error: ErrAlreadyStarted if already running, ErrNoWorkerID if worker ID not set
+func (p *Publisher) Start(ctx context.Context) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.started {
+		return ErrAlreadyStarted
+	}
+
+	if p.workerID == "" {
+		return ErrNoWorkerID
+	}
+
+	p.started = true
+	p.ticker = time.NewTicker(p.interval)
+
+	// Publish first heartbeat immediately with provided context (prevents startup hang)
+	if err := p.publish(ctx); err != nil {
+		p.started = false
+		return fmt.Errorf("failed to publish initial heartbeat: %w", err)
+	}
+
+	// Start background publisher
+	go p.publishLoop()
+
+	return nil
+}
+
+// Stop stops the heartbeat publisher and deletes the heartbeat entry from KV.
+//
+// Blocks until the publisher goroutine exits and cleanup completes.
+// The heartbeat entry is deleted to immediately signal worker shutdown
+// instead of waiting for TTL expiration.
+//
+// Returns:
+//   - error: ErrNotStarted if not running, or cleanup error if delete fails
+func (p *Publisher) Stop() error {
+	p.mu.Lock()
+
+	if !p.started {
+		p.mu.Unlock()
+		return ErrNotStarted
+	}
+
+	// Stop ticker and signal goroutine
+	p.ticker.Stop()
+	close(p.stopCh)
+	p.started = false
+
+	p.mu.Unlock()
+
+	// Wait for goroutine to finish
+	<-p.doneCh
+
+	// Delete heartbeat entry from KV (cleanup)
+	// Use background context with timeout since worker is shutting down
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	key := p.keyForWorker(p.workerID)
+	if err := p.kv.Delete(ctx, key); err != nil {
+		// Don't fail on cleanup errors, but return them for logging
+		return fmt.Errorf("stopped but failed to delete heartbeat: %w", err)
+	}
+
+	return nil
+}
+
+// publishLoop is the background goroutine that publishes heartbeats.
+func (p *Publisher) publishLoop() {
+	defer close(p.doneCh)
+
+	for {
+		select {
+		case <-p.stopCh:
+			return
+		case <-p.ticker.C:
+			// Use background context since this is a long-running goroutine
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err := p.publish(ctx)
+			cancel()
+
+			if err != nil {
+				p.recordMetric(false)
+				// Log error but continue trying
+				// In production, this should use the configured logger
+				_ = err
+			} else {
+				p.recordMetric(true)
+			}
+		}
+	}
+}
+
+// publish writes the heartbeat to NATS KV.
+func (p *Publisher) publish(ctx context.Context) error {
+	key := p.keyForWorker(p.workerID)
+	value := []byte(time.Now().Format(time.RFC3339Nano))
+
+	// Try to update first (more common case)
+	_, err := p.kv.Put(ctx, key, value)
+	if err != nil {
+		return fmt.Errorf("failed to publish heartbeat for %s: %w", p.workerID, err)
+	}
+
+	return nil
+}
+
+// keyForWorker generates the KV key for a worker's heartbeat.
+func (p *Publisher) keyForWorker(workerID string) string {
+	return fmt.Sprintf("%s.%s", p.prefix, workerID)
+}
+
+// recordMetric records heartbeat success/failure to metrics collector.
+func (p *Publisher) recordMetric(success bool) {
+	p.mu.Lock()
+	metrics := p.metrics
+	workerID := p.workerID
+	p.mu.Unlock()
+
+	if metrics != nil {
+		metrics.RecordHeartbeat(workerID, success)
+	}
+}
+
+// WorkerID returns the current worker ID.
+//
+// Returns:
+//   - string: Worker ID
+func (p *Publisher) WorkerID() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.workerID
+}
+
+// IsStarted returns whether the publisher is currently running.
+//
+// Returns:
+//   - bool: true if started, false otherwise
+func (p *Publisher) IsStarted() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.started
+}

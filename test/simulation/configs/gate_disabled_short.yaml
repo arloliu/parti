@@ -1,0 +1,85 @@
+simulation:
+  duration: 5m
+  mode: all-in-one
+
+partitions:
+  count: 1500
+  message_rate_per_partition: 0.1
+  distribution: exponential
+  weights:
+    exponential:
+      extreme_percent: 0.05
+      extreme_weight: 100
+      normal_weight: 1
+
+producers:
+  count: 10
+  rate_variation:
+    enabled: true
+    pattern: global
+    min_multiplier: 0.5
+    max_multiplier: 2.0
+    ramp_interval: 1m
+
+workers:
+  count: 50
+  assignment_strategy: WeightedConsistentHash
+  strategy_config:
+    virtual_nodes: 150
+  processing_delay:
+    min: 10ms
+    max: 100ms
+  consumer_batch_size: 16
+  handler_concurrency: 1
+  max_subjects: 1500
+  # DISABLED GATE
+  enforce_exclusive_consumption: false
+  processing_gate:
+    warmup_duration: 5s
+    warmup_allowed_states: ["stable"]
+    allowed_states: ["commit", "stable"]
+    nak_delay: 50ms
+    nak_jitter: 0.3
+    debug: false
+
+coordinator:
+  validation_window: 10m
+  dup_trace:
+    enabled: true
+    window: 30s
+    threshold_per_min: 1.0
+    top_n: 10
+  gap_aging: 60s
+  slo:
+    enable_catch_up: true
+    catch_up_deadline: 30s
+    catch_up_percent: 99
+    absence_threshold: 5s
+
+chaos:
+  enabled: true
+  events:
+    - worker_crash
+    - worker_restart
+    - scale_up
+    - scale_down
+    - leader_failure
+    - producer_crash
+    - network_disconnect
+    - worker_pause
+  interval: 30s-1m
+
+nats:
+  mode: embedded
+  url: "nats://localhost:4222"
+  jetstream:
+    max_memory: 4GB
+    max_storage: 2GB
+
+metrics:
+  prometheus:
+    enabled: true
+    port: 9091
+
+checkpoint:
+  enabled: false

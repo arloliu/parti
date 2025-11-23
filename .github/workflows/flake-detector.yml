@@ -1,0 +1,48 @@
+name: Flake Detector (non-blocking)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * *' # daily at 06:00 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  flake-detector:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    continue-on-error: true # non-blocking monitor
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Cache Go build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Run flake detector (unit only, race)
+        env:
+          MAX_RUNS: '10'
+          TEST_SET: unit
+          RACE: '1'
+          PARALLELISM: '4'
+          TEST_TIMEOUT: 6m
+        run: |
+          bash scripts/flake_detector.sh
+
+      - name: Summarize
+        if: always()
+        run: |
+          echo "Flake detector completed (non-blocking). Inspect job logs for failures or flakes."

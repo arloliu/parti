@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Cache Go build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Install golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m
+
+      - name: Run unit tests (race)
+        run: go test -race -count=1 ./...
+
+      - name: Run integration tests (non-short, race)
+        env:
+          TEST_TIMEOUT: 12m
+        run: |
+          # Run only integration package with race to keep CI time reasonable
+          go test -race -count=1 ./test/integration/...
+
+      - name: Build examples
+        run: |
+          for d in $(ls examples); do
+            if [ -d examples/$d ]; then
+              echo "Building example $d"
+              go build ./examples/$d
+            fi
+          done
+
+  # Fast feedback job (just build & vet) for PRs
+  quick-check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Go Vet
+        run: go vet ./...
+      - name: Build
+        run: go build ./...

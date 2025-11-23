@@ -1,0 +1,44 @@
+simulation:
+  duration: 2m
+  mode: all-in-one
+
+partitions:
+  count: 50
+  message_rate_per_partition: 5.0  # 250 msg/sec total
+  distribution: uniform
+
+producers:
+  count: 2
+
+workers:
+  count: 10
+  assignment_strategy: ConsistentHash
+  processing_delay:
+    min: 5ms
+    max: 20ms
+
+coordinator:
+  validation_window: 1m
+
+chaos:
+  enabled: true
+  events:
+    - worker_crash
+    - worker_restart
+    - scale_down
+    - producer_crash
+    - leader_failure
+  interval: 10s-20s  # Frequent chaos for testing
+
+nats:
+  mode: embedded
+
+metrics:
+  prometheus:
+    enabled: true
+    port: 9091
+
+checkpoint:
+  enabled: true
+  interval: 30s
+  path: "./checkpoints-chaos-test"

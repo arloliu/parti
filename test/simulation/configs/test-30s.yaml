@@ -1,0 +1,23 @@
+simulation:
+  duration: 30s
+  mode: all-in-one
+partitions:
+  count: 5
+  message_rate_per_partition: 2.0
+  distribution: uniform
+producers:
+  count: 1
+workers:
+  count: 2
+  assignment_strategy: ConsistentHash
+  processing_delay:
+    min: 5ms
+    max: 20ms
+chaos:
+  enabled: false
+nats:
+  mode: embedded
+metrics:
+  enabled: false
+checkpoint:
+  enabled: false

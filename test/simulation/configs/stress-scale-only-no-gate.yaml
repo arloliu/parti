@@ -1,0 +1,71 @@
+simulation:
+  duration: 5m
+  mode: all-in-one
+  cooldown: 40s
+
+partitions:
+  count: 1500
+  message_rate_per_partition: 0.1
+  distribution: exponential
+  weights:
+    exponential:
+      extreme_percent: 0.05
+      extreme_weight: 100
+      normal_weight: 1
+
+producers:
+  count: 10
+  rate_variation:
+    enabled: true
+    pattern: global
+    min_multiplier: 0.5
+    max_multiplier: 2.0
+    ramp_interval: 5m
+
+workers:
+  count: 50
+  assignment_strategy: WeightedConsistentHash
+  strategy_config:
+    virtual_nodes: 150
+  processing_delay:
+    min: 10ms
+    max: 100ms
+  consumer_batch_size: 16
+  handler_concurrency: 1
+  max_subjects: 1500
+  # Disable exclusive consumption: Processing Gate will not be enabled
+  enforce_exclusive_consumption: false
+  # processing_gate settings are omitted since gate is disabled
+
+coordinator:
+  validation_window: 10m
+  dup_trace:
+    enabled: true
+    window: 30s
+    threshold_per_min: 1.0
+    top_n: 10
+  gap_aging: 60s
+
+chaos:
+  enabled: true
+  events:
+    - scale_up
+    - scale_down
+  interval: 5s-10s
+
+nats:
+  mode: embedded
+  url: "nats://localhost:4222"
+  jetstream:
+    max_memory: 4GB
+    max_storage: 2GB
+
+metrics:
+  prometheus:
+    enabled: true
+    port: 9091
+
+checkpoint:
+  enabled: true
+  interval: 15m
+  path: "./checkpoints"

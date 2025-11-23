@@ -1,0 +1,80 @@
+simulation:
+  duration: 3m  # Shorter iteration while tuning catch-up recovery
+  mode: all-in-one
+
+partitions:
+  count: 300
+  message_rate_per_partition: 2.0
+  distribution: exponential
+  weights:
+    exponential:
+      extreme_percent: 0.05
+      extreme_weight: 100
+      normal_weight: 1
+
+producers:
+  count: 6
+  rate_variation:
+    enabled: true
+    pattern: global
+    min_multiplier: 0.5
+    max_multiplier: 2.0
+    ramp_interval: 1m
+
+workers:
+  count: 15
+  assignment_strategy: WeightedConsistentHash
+  strategy_config:
+    virtual_nodes: 60
+  processing_delay:
+    min: 8ms      # Slightly faster min to accelerate healing
+    max: 80ms     # Reduce max to improve catch-up throughput
+  consumer_batch_size: 16
+  handler_concurrency: 4  # Increase concurrency to heal backlog faster
+  max_subjects: 300
+  enforce_exclusive_consumption: true
+  processing_gate:
+    warmup_duration: 5s
+    warmup_allowed_states: ["stable"]
+    allowed_states: ["stable"]
+    nak_delay: 50ms
+    nak_jitter: 0.3
+    debug: false
+
+coordinator:
+  validation_window: 2m
+  dup_trace:
+    enabled: true
+    window: 30s
+    threshold_per_min: 1.0
+    top_n: 5
+  gap_aging: 30s
+  slo:
+    hole_max_age: 15s
+    enable_catch_up: true
+    absence_threshold: 2s        # Still greater than typical inter-message gap
+    catch_up_deadline: 30s       # Deadline for latency exceed classification
+    catch_up_percent: 10         # Heal 10% of backlog to complete recovery sooner
+
+chaos:
+  enabled: true
+  events:
+    - worker_pause      # isolate pause-induced backlog; removed other chaos to preserve assignments
+  interval: 15s-20s
+
+nats:
+  mode: embedded
+  url: "nats://localhost:4222"
+  jetstream:
+    max_memory: 1GB
+    max_storage: 1GB
+
+metrics:
+  prometheus:
+    enabled: false
+    port: 9091
+
+checkpoint:
+  enabled: false
+  interval: 5m
+  path: "./checkpoints"

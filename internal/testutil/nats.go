@@ -1,0 +1,589 @@
+package testutil
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/arloliu/parti"
+	"github.com/arloliu/parti/source"
+	"github.com/arloliu/parti/strategy"
+	partitest "github.com/arloliu/parti/testing"
+	"github.com/arloliu/parti/types"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
+	"github.com/stretchr/testify/require"
+)
+
+// StartEmbeddedNATS starts an embedded NATS server for integration tests.
+// It wraps the parti/testing package function for convenience.
+func StartEmbeddedNATS(t *testing.T) (*nats.Conn, func()) {
+	t.Helper()
+	srv, nc := partitest.StartEmbeddedNATS(t)
+	cleanup := func() {
+		nc.Close()
+		srv.Shutdown()
+		srv.WaitForShutdown()
+	}
+
+	return nc, cleanup
+}
+
+// IntegrationTestConfig provides default configuration for integration tests.
+func IntegrationTestConfig() parti.Config {
+	cfg := parti.Config{
+		WorkerIDPrefix:        "worker",
+		WorkerIDMin:           0,
+		WorkerIDMax:           100,                    // Support up to 100 workers for load tests
+		WorkerIDTTL:           5 * time.Second,        // Reduced from 10s
+		HeartbeatInterval:     500 * time.Millisecond, // Reduced from 1s
+		HeartbeatTTL:          5 * time.Second,        // Increased to 5s to prevent flakes in CI
+		ElectionTimeout:       3 * time.Second,        // Increased to 3s
+		StartupTimeout:        10 * time.Second,       // Reduced from 25s
+		ShutdownTimeout:       3 * time.Second,        // Reduced from 5s
+		ColdStartWindow:       3 * time.Second,        // Increased from 1s to exceed MinRebalanceInterval
+		PlannedScaleWindow:    2 * time.Second,        // Increased from 500ms to match MinRebalanceInterval
+		RestartDetectionRatio: 0.5,
+		Assignment: parti.AssignmentConfig{
+			MinRebalanceInterval: 2 * time.Second, // Reduced from default 10s - faster rebalancing in tests
+		},
+	}
+	parti.SetDefaults(&cfg) // Apply default KV bucket names
+
+	return cfg
+}
+
+// FastTestConfig provides aggressive timeouts for faster leader election tests.
+// Use this for tests that focus on leader election and don't need long stabilization.
+func FastTestConfig() parti.Config {
+	cfg := parti.Config{
+		WorkerIDPrefix:        "worker",
+		WorkerIDMin:           0,
+		WorkerIDMax:           20,                     // Support up to 20 workers
+		WorkerIDTTL:           30 * time.Second,       // Long TTL to prevent expiration during concurrent startup
+		HeartbeatInterval:     300 * time.Millisecond, // Very fast heartbeats
+		HeartbeatTTL:          3 * time.Second,        // Balance: long enough for assignments, short enough for dead worker detection
+		ElectionTimeout:       1 * time.Second,        // Very fast election - failover in 1-2s
+		StartupTimeout:        5 * time.Second,
+		ShutdownTimeout:       2 * time.Second,
+		ColdStartWindow:       500 * time.Millisecond, // Very fast cold start
+		PlannedScaleWindow:    300 * time.Millisecond,
+		RestartDetectionRatio: 0.5,
+		Assignment: parti.AssignmentConfig{
+			MinRebalanceInterval: 300 * time.Millisecond, // Must be <= PlannedScaleWindow (300ms)
+		},
+	}
+	parti.SetDefaults(&cfg) // Apply default KV bucket names
+
+	return cfg
+}
+
+// CreateTestPartitions creates n partitions for testing.
+func CreateTestPartitions(n int) []types.Partition {
+	partitions := make([]types.Partition, n)
+	for i := range partitions {
+		partitions[i] = types.Partition{
+			Keys:   []string{fmt.Sprintf("partition-%d", i)},
+			Weight: 100,
+		}
+	}
+
+	return partitions
+}
+
+// StateTracker tracks state transitions for a worker.
+// All methods are thread-safe and can be called concurrently.
+type StateTracker struct {
+	WorkerIndex int
+	T           *testing.T
+	mu          sync.RWMutex
+	States      []types.State
+	closed      atomic.Bool
+}
+
+// CreateStateTracker creates a new state tracker.
+func CreateStateTracker(t *testing.T, workerIndex int) *StateTracker {
+	return &StateTracker{
+		WorkerIndex: workerIndex,
+		States:      make([]types.State, 0),
+		T:           t,
+	}
+}
+
+// Hook returns a hook function for tracking state changes.
+func (st *StateTracker) Hook() func(context.Context, types.State, types.State) error {
+	return func(ctx context.Context, from, to types.State) error {
+		// Avoid logging after the test has finished, which would cause a panic.
+		if !st.closed.Load() {
+			st.T.Logf("Worker %d: %s → %s", st.WorkerIndex, from.String(), to.String())
+		}
+		st.mu.Lock()
+		st.States = append(st.States, to)
+		st.mu.Unlock()
+
+		return nil
+	}
+}
+
+// Close marks the tracker as closed to prevent logging after test completion.
+func (st *StateTracker) Close() {
+	st.closed.Store(true)
+}
+
+// HasState checks if the worker went through a specific state.
+func (st *StateTracker) HasState(state types.State) bool {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+
+	for _, s := range st.States {
+		if s == state {
+			return true
+		}
+	}
+
+	return false
+}
+
+// GetStates returns a copy of all states.
+func (st *StateTracker) GetStates() []types.State {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+
+	result := make([]types.State, len(st.States))
+	copy(result, st.States)
+
+	return result
+}
+
+// WorkerCluster manages a cluster of workers for testing.
+type WorkerCluster struct {
+	Workers       []*parti.Manager
+	StateTrackers []*StateTracker
+	Config        parti.Config
+	Source        types.PartitionSource
+	Strategy      types.AssignmentStrategy
+	NC            *nats.Conn
+	JS            jetstream.JetStream
+	T             *testing.T
+	mu            sync.RWMutex // Protects Workers and StateTrackers
+}
+
+// NewWorkerCluster creates a new worker cluster for testing.
+func NewWorkerCluster(t *testing.T, nc *nats.Conn, numPartitions int) *WorkerCluster {
+	cfg := IntegrationTestConfig()
+	partitions := CreateTestPartitions(numPartitions)
+	src := source.NewStatic(partitions)
+	assignmentStrategy := strategy.NewConsistentHash()
+	js, err := jetstream.New(nc)
+	require.NoError(t, err, "failed to init jetstream context")
+
+	return &WorkerCluster{
+		Workers:       make([]*parti.Manager, 0),
+		StateTrackers: make([]*StateTracker, 0),
+		Config:        cfg,
+		Source:        src,
+		Strategy:      assignmentStrategy,
+		NC:            nc,
+		JS:            js,
+		T:             t,
+	}
+}
+
+// NewFastWorkerCluster creates a worker cluster with aggressive timeouts for fast leader election tests.
+// Use this for tests that focus on leader election failover and don't need long stabilization windows.
+func NewFastWorkerCluster(t *testing.T, nc *nats.Conn, numPartitions int) *WorkerCluster {
+	cfg := FastTestConfig()
+	partitions := CreateTestPartitions(numPartitions)
+	src := source.NewStatic(partitions)
+	assignmentStrategy := strategy.NewConsistentHash()
+	js, err := jetstream.New(nc)
+	require.NoError(t, err, "failed to init jetstream context")
+
+	return &WorkerCluster{
+		Workers:       make([]*parti.Manager, 0),
+		StateTrackers: make([]*StateTracker, 0),
+		Config:        cfg,
+		Source:        src,
+		Strategy:      assignmentStrategy,
+		NC:            nc,
+		JS:            js,
+		T:             t,
+	}
+}
+
+// AddWorker adds a worker to the cluster with state tracking.
+//
+// Optional logger can be passed to enable debug logging for troubleshooting:
+//
+//	debugLogger := logger.NewTest(t)
+//	cluster.AddWorker(ctx, debugLogger)
+//
+// Without a logger, the worker will use the default NopLogger (no output).
+//
+// Parameters:
+//   - ctx: Context for the worker lifecycle
+//   - opts: Optional logger for debug output
+//
+// Returns:
+//   - *parti.Manager: The created worker manager
+func (wc *WorkerCluster) AddWorker(ctx context.Context, opts ...types.Logger) *parti.Manager {
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+
+	workerIdx := len(wc.Workers)
+	tracker := CreateStateTracker(wc.T, workerIdx)
+	wc.StateTrackers = append(wc.StateTrackers, tracker)
+	// Ensure we stop logging state transitions once the test ends to avoid panics
+	// from goroutines attempting to log after test completion.
+	wc.T.Cleanup(func() { tracker.Close() })
+
+	hooks := &parti.Hooks{
+		OnStateChanged: tracker.Hook(),
+	}
+
+	// Build manager options
+	managerOpts := []parti.Option{parti.WithHooks(hooks)}
+
+	// Add logger if provided
+	if len(opts) > 0 && opts[0] != nil {
+		managerOpts = append(managerOpts, parti.WithLogger(opts[0]))
+	}
+
+	mgr, err := parti.NewManager(
+		&wc.Config, wc.JS, wc.Source, wc.Strategy,
+		managerOpts...,
+	)
+	require.NoError(wc.T, err, "failed to create worker %d", workerIdx)
+
+	wc.Workers = append(wc.Workers, mgr)
+
+	return mgr
+}
+
+// AddWorkerWithoutTracking adds a worker without state tracking.
+func (wc *WorkerCluster) AddWorkerWithoutTracking(ctx context.Context) *parti.Manager {
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+
+	mgr, err := parti.NewManager(&wc.Config, wc.JS, wc.Source, wc.Strategy)
+	require.NoError(wc.T, err, "failed to create worker")
+
+	wc.Workers = append(wc.Workers, mgr)
+
+	return mgr
+}
+
+// StartWorkers starts all workers in the cluster.
+func (wc *WorkerCluster) StartWorkers(ctx context.Context) {
+	wc.mu.RLock()
+	workers := make([]*parti.Manager, len(wc.Workers))
+	copy(workers, wc.Workers)
+	wc.mu.RUnlock()
+
+	for i, mgr := range workers {
+		err := mgr.Start(ctx)
+		require.NoError(wc.T, err, "worker %d failed to start", i)
+	}
+}
+
+// StopWorkers stops all workers gracefully.
+// Skips workers that are already in Shutdown state.
+func (wc *WorkerCluster) StopWorkers() {
+	wc.mu.RLock()
+	workers := make([]*parti.Manager, len(wc.Workers))
+	copy(workers, wc.Workers)
+	wc.mu.RUnlock()
+
+	for i, mgr := range workers {
+		// Skip if already shutdown
+		if mgr.State() == types.StateShutdown {
+			wc.T.Logf("Worker %d already shutdown, skipping", i)
+			continue
+		}
+
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+
+		// Stop in goroutine with timeout to prevent hanging
+		done := make(chan error, 1)
+		go func() {
+			done <- mgr.Stop(stopCtx)
+		}()
+
+		select {
+		case err := <-done:
+			if err != nil {
+				wc.T.Logf("Worker %d stop error (non-fatal): %v", i, err)
+			}
+		case <-time.After(5 * time.Second):
+			wc.T.Logf("Worker %d stop timeout after 5s (non-fatal)", i)
+		}
+
+		cancel()
+	}
+}
+
+// WaitForStableState waits for all workers to reach Stable state.
+func (wc *WorkerCluster) WaitForStableState(timeout time.Duration) {
+	require.Eventually(wc.T, func() bool {
+		stableCount := 0
+		for i, mgr := range wc.Workers {
+			state := mgr.State()
+			if state != types.StateStable {
+				wc.T.Logf("Worker %d (%s) in state: %s (leader: %v)",
+					i, mgr.WorkerID(), state.String(), mgr.IsLeader())
+			} else {
+				stableCount++
+			}
+		}
+		wc.T.Logf("Stable workers: %d/%d", stableCount, len(wc.Workers))
+
+		return stableCount == len(wc.Workers)
+	}, timeout, 500*time.Millisecond, "workers did not reach Stable state")
+}
+
+// VerifyExactlyOneLeader verifies that exactly one worker is the leader.
+func (wc *WorkerCluster) VerifyExactlyOneLeader() *parti.Manager {
+	leaderCount := 0
+	var leader *parti.Manager
+	for i, mgr := range wc.Workers {
+		// Skip shutdown workers
+		if mgr.State() == types.StateShutdown {
+			continue
+		}
+		if mgr.IsLeader() {
+			leaderCount++
+			leader = mgr
+			wc.T.Logf("Worker %d (%s) is the leader", i, mgr.WorkerID())
+		}
+	}
+	require.Equal(wc.T, 1, leaderCount, "expected exactly one leader")
+
+	return leader
+}
+
+// VerifyAllWorkersHavePartitions verifies all workers have at least one partition.
+func (wc *WorkerCluster) VerifyAllWorkersHavePartitions() {
+	for i, mgr := range wc.Workers {
+		assignment := mgr.CurrentAssignment()
+		require.Greater(wc.T, len(assignment.Partitions), 0,
+			"worker %d has no partitions", i)
+		wc.T.Logf("Worker %d (%s): %d partitions",
+			i, mgr.WorkerID(), len(assignment.Partitions))
+	}
+}
+
+// WaitForAllWorkersHavePartitions waits until every active (non-shutdown) worker has >=1 partition.
+// This is more robust than immediate assertions after stabilization because assignment publication
+// and follower consumption can lag briefly behind state transitions. Returns true if condition met.
+func (wc *WorkerCluster) WaitForAllWorkersHavePartitions(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		allHave := true
+		for i, mgr := range wc.Workers {
+			if mgr.State() == types.StateShutdown {
+				continue
+			}
+			assignment := mgr.CurrentAssignment()
+			if len(assignment.Partitions) == 0 {
+				allHave = false
+				wc.T.Logf("Worker %d (%s) waiting for partitions...", i, mgr.WorkerID())
+				break
+			}
+		}
+		if allHave {
+			return true
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+
+	return false
+}
+
+// WaitForBalancedAssignments waits until assignments across active workers are within an allowed delta
+// around an expected average. This helps avoid flakes where a transient scaling or rebalancing window
+// temporarily skews distribution. Returns true if balance achieved.
+// expectedTotal: total partitions expected across active workers.
+// variance: allowed difference from average (abs(actual - avg) <= variance).
+func (wc *WorkerCluster) WaitForBalancedAssignments(expectedTotal int, variance int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		active := wc.GetActiveWorkers()
+		if len(active) == 0 {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		total := 0
+		counts := make([]int, len(active))
+		for i, mgr := range active {
+			a := mgr.CurrentAssignment()
+			counts[i] = len(a.Partitions)
+			total += counts[i]
+		}
+		if total != expectedTotal {
+			wc.T.Logf("Waiting for expected total %d (current %d)...", expectedTotal, total)
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		avg := float64(total) / float64(len(active))
+		balanced := true
+		for i, c := range counts {
+			if diff := absInt(int(avg) - c); diff > variance {
+				wc.T.Logf("Worker %d imbalance: count=%d avg=%.2f variance=%d diff=%d", i, c, avg, variance, diff)
+				balanced = false
+				break
+			}
+		}
+		if balanced {
+			return true
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	return false
+}
+
+func absInt(x int) int {
+	if x < 0 {
+		return -x
+	}
+
+	return x
+}
+
+// VerifyTotalPartitionCount verifies the total number of unique partitions assigned.
+func (wc *WorkerCluster) VerifyTotalPartitionCount(expected int) {
+	// Use a map to track unique partitions across all workers
+	uniquePartitions := make(map[string]bool)
+
+	for i, mgr := range wc.Workers {
+		assignment := mgr.CurrentAssignment()
+		wc.T.Logf("Worker %d (%s): %d partitions",
+			i, mgr.WorkerID(), len(assignment.Partitions))
+
+		// Add partitions to unique set
+		for _, p := range assignment.Partitions {
+			// Use the first key as partition identifier
+			if len(p.Keys) > 0 {
+				uniquePartitions[p.Keys[0]] = true
+			}
+		}
+	}
+
+	totalUnique := len(uniquePartitions)
+	require.Equal(wc.T, expected, totalUnique,
+		"unique partition count mismatch (expected %d, got %d unique partitions)", expected, totalUnique)
+}
+
+// VerifyStateTransition verifies that at least one worker went through the specified state.
+func (wc *WorkerCluster) VerifyStateTransition(state types.State) {
+	found := false
+	for i, tracker := range wc.StateTrackers {
+		if tracker.HasState(state) {
+			wc.T.Logf("Worker %d went through %s state", i, state.String())
+			found = true
+		}
+	}
+	require.True(wc.T, found,
+		"no worker entered %s state", state.String())
+}
+
+// VerifyStateTransitionAny verifies that at least one worker went through any of the specified states.
+func (wc *WorkerCluster) VerifyStateTransitionAny(states ...types.State) {
+	found := false
+	foundState := ""
+	for i, tracker := range wc.StateTrackers {
+		for _, state := range states {
+			if tracker.HasState(state) {
+				wc.T.Logf("Worker %d went through %s state", i, state.String())
+				found = true
+				foundState = state.String()
+
+				break
+			}
+		}
+		if found {
+			break
+		}
+	}
+	stateNames := make([]string, len(states))
+	for i, s := range states {
+		stateNames[i] = s.String()
+	}
+	require.True(wc.T, found,
+		"no worker entered any of the expected states: %v (found: %s)", stateNames, foundState)
+}
+
+// GetLeader returns the current leader or nil.
+func (wc *WorkerCluster) GetLeader() *parti.Manager {
+	for _, mgr := range wc.Workers {
+		if mgr.IsLeader() {
+			return mgr
+		}
+	}
+
+	return nil
+}
+
+// RemoveWorker stops and removes a worker from the cluster (simulates crash).
+// It calls Stop() but doesn't remove from the Workers slice to avoid index issues.
+// Tests should account for stopped workers when counting leaders/stable workers.
+// RemoveWorker stops and removes a worker from the cluster.
+func (wc *WorkerCluster) RemoveWorker(index int) {
+	wc.mu.Lock()
+	require.Less(wc.T, index, len(wc.Workers), "invalid worker index")
+
+	mgr := wc.Workers[index]
+	wc.mu.Unlock()
+
+	// Stop the worker (outside the lock to avoid deadlock)
+	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	err := mgr.Stop(stopCtx)
+	cancel()
+	require.NoError(wc.T, err, "failed to stop worker %d", index)
+
+	// Remove from slice
+	wc.mu.Lock()
+	wc.Workers = append(wc.Workers[:index], wc.Workers[index+1:]...)
+	wc.StateTrackers = append(wc.StateTrackers[:index], wc.StateTrackers[index+1:]...)
+	wc.mu.Unlock()
+
+	wc.T.Logf("Removed worker %d (%s) from cluster", index, mgr.WorkerID())
+}
+
+// GetActiveWorkers returns only the workers that are not in Shutdown state.
+func (wc *WorkerCluster) GetActiveWorkers() []*parti.Manager {
+	wc.mu.RLock()
+	defer wc.mu.RUnlock()
+
+	active := make([]*parti.Manager, 0, len(wc.Workers))
+	for _, mgr := range wc.Workers {
+		if mgr.State() != types.StateShutdown {
+			active = append(active, mgr)
+		}
+	}
+
+	return active
+}
+
+// GetWorkers returns a snapshot of all workers (including stopped ones).
+// This is safe for concurrent access.
+func (wc *WorkerCluster) GetWorkers() []*parti.Manager {
+	wc.mu.RLock()
+	defer wc.mu.RUnlock()
+
+	workers := make([]*parti.Manager, len(wc.Workers))
+	copy(workers, wc.Workers)
+
+	return workers
+}
+
+// WorkerCount returns the current number of workers in the cluster.
+func (wc *WorkerCluster) WorkerCount() int {
+	wc.mu.RLock()
+	defer wc.mu.RUnlock()
+
+	return len(wc.Workers)
+}

@@ -1,0 +1,45 @@
+simulation:
+  duration: 2m
+  mode: all-in-one
+
+nats:
+  mode: embedded
+
+partitions:
+  count: 50
+  message_rate_per_partition: 5
+  distribution: uniform
+
+producers:
+  count: 2
+
+workers:
+  count: 10
+  assignment_strategy: WeightedConsistentHash
+  processing_delay:
+    min: 1ms
+    max: 5ms
+
+chaos:
+  enabled: true
+  interval: "15s-25s"
+  events:
+    - worker_crash
+    - worker_restart
+    - leader_failure
+    - producer_crash
+    - scale_down
+    - scale_up
+    - worker_pause
+    - network_disconnect
+
+coordinator:
+  slo:
+    enable_catch_up: true
+    catch_up_deadline: 30s
+    catch_up_percent: 99
+    absence_threshold: 5s
+
+metrics:
+  prometheus:
+    enabled: false
