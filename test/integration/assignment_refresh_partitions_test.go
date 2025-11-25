@@ -218,7 +218,8 @@ func TestRefreshPartitions_Addition(t *testing.T) {
 			Weight: 100,
 		}
 	}
-	partitionSource.Update(allPartitions)
+	err := partitionSource.Update(ctx, allPartitions)
+	require.NoError(t, err)
 
 	// Find the leader and call RefreshPartitions
 	var leader *parti.Manager
@@ -234,7 +235,7 @@ func TestRefreshPartitions_Addition(t *testing.T) {
 	refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer refreshCancel()
 
-	err := leader.RefreshPartitions(refreshCtx)
+	err = leader.RefreshPartitions(refreshCtx)
 	require.NoError(t, err, "RefreshPartitions failed")
 
 	// Wait for assignments to stabilize after refresh
@@ -330,7 +331,8 @@ func TestRefreshPartitions_Removal(t *testing.T) {
 			Weight: 100,
 		}
 	}
-	partitionSource.Update(reducedPartitions)
+	err := partitionSource.Update(ctx, reducedPartitions)
+	require.NoError(t, err)
 
 	// Find the leader and call RefreshPartitions
 	leader := findLeader(t, managers)
@@ -454,7 +456,8 @@ func TestRefreshPartitions_WeightChange(t *testing.T) {
 			Weight: 100, // Normal weight
 		}
 	}
-	partitionSource.Update(weightedPartitions)
+	err := partitionSource.Update(ctx, weightedPartitions)
+	require.NoError(t, err)
 
 	// Find the leader and call RefreshPartitions
 	leader := findLeader(t, managers)

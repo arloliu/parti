@@ -82,7 +82,8 @@ func TestWorkerConsumerUpdate(t *testing.T) {
 	// Now modify the partition source to simulate an assignment change (remove b, add c)
 	newPartitions := []parti.Partition{{Keys: []string{"a"}}, {Keys: []string{"c"}}}
 	// Update static source to simulate change
-	src.Update(newPartitions)
+	err = src.Update(ctx, newPartitions)
+	require.NoError(t, err)
 
 	// Trigger refresh which will lead to recalculation and assignment change
 	refreshCtx, refreshCancel := context.WithTimeout(ctx, 5*time.Second)

@@ -107,9 +107,9 @@ func TestHandoffConflictStress(t *testing.T) {
 	// Metrics recorder has been injected via options; continue churn and let conflicts accumulate.
 	for i := 0; i < 20; i++ {
 		if i%2 == 0 {
-			src.Update(makePartitions(10))
+			_ = src.Update(ctx, makePartitions(10))
 		} else {
-			src.Update(makePartitions(8))
+			_ = src.Update(ctx, makePartitions(8))
 		}
 		_ = m1.RefreshPartitions(ctx)
 		_ = m2.RefreshPartitions(ctx)
@@ -117,7 +117,7 @@ func TestHandoffConflictStress(t *testing.T) {
 	}
 
 	// Final stabilization after churn
-	curParts, err := src.ListPartitions(ctx)
+	curParts, err := src.List(ctx)
 	require.NoError(t, err)
 	ids := make([]string, 0, len(curParts))
 	for _, p := range curParts {
@@ -130,7 +130,7 @@ func TestHandoffConflictStress(t *testing.T) {
 	claims, err := parti.InspectHandoffClaims(ctx, js, bucket)
 	require.NoError(t, err)
 	// Build current partition set
-	curParts, err = src.ListPartitions(ctx)
+	curParts, err = src.List(ctx)
 	require.NoError(t, err)
 	curSet := make(map[string]struct{}, len(curParts))
 	for _, p := range curParts {

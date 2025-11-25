@@ -13,7 +13,10 @@ type Static struct {
 	partitions []types.Partition
 }
 
-var _ types.PartitionSource = (*Static)(nil)
+var (
+	_ types.PartitionSource  = (*Static)(nil)
+	_ types.PartitionUpdater = (*Static)(nil)
+)
 
 // NewStatic creates a new static partition source.
 //
@@ -42,12 +45,24 @@ func NewStatic(partitions []types.Partition) *Static {
 	}
 }
 
-// ListPartitions returns the static list of partitions.
+// Start implements PartitionSource.Start.
+// For Static source, this is a no-op.
+func (s *Static) Start(_ context.Context) error {
+	return nil
+}
+
+// Stop implements PartitionSource.Stop.
+// For Static source, this is a no-op.
+func (s *Static) Stop() error {
+	return nil
+}
+
+// List returns the static list of partitions.
 //
 // Returns:
 //   - []types.Partition: The fixed list of partitions
 //   - error: Always nil (never fails)
-func (s *Static) ListPartitions(_ context.Context) ([]types.Partition, error) {
+func (s *Static) List(_ context.Context) ([]types.Partition, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -63,17 +78,22 @@ func (s *Static) ListPartitions(_ context.Context) ([]types.Partition, error) {
 // which is useful for testing partition refresh scenarios.
 //
 // Parameters:
+//   - ctx: Context for the operation (unused)
 //   - partitions: New list of partitions
+//
+// Returns:
+//   - error: Always nil
 //
 // Example:
 //
 //	src := source.NewStatic(initialPartitions)
 //	// Later: add more partitions
-//	src.Update(expandedPartitions)
-func (s *Static) Update(partitions []types.Partition) {
+//	src.Update(context.Background(), expandedPartitions)
+func (s *Static) Update(_ context.Context, partitions []types.Partition) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.partitions = make([]types.Partition, len(partitions))
 	copy(s.partitions, partitions)
+	return nil
 }

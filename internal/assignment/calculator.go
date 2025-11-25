@@ -478,7 +478,7 @@ func (c *Calculator) selectStabilizationWindow(ctx context.Context) time.Duratio
 
 	// If many workers appear at once, it's likely a cold start
 	// Use restart ratio to decide
-	partitions, _ := c.Source.ListPartitions(ctx)
+	partitions, _ := c.Source.List(ctx)
 	expectedWorkers := len(partitions) / 10 // Rough estimate
 	if expectedWorkers == 0 {
 		expectedWorkers = 1
@@ -836,7 +836,7 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 		}
 	}
 
-	partitions, err := c.Source.ListPartitions(ctx)
+	partitions, err := c.Source.List(ctx)
 	if err != nil {
 		c.Metrics.RecordRebalanceAttempt(lifecycle, false)
 		return fmt.Errorf("failed to list partitions: %w", err)

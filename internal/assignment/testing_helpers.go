@@ -14,8 +14,18 @@ type mockSource struct {
 	err        error
 }
 
-// ListPartitions returns the configured partitions or error.
-func (m *mockSource) ListPartitions(_ context.Context) ([]types.Partition, error) {
+// Start implements PartitionSource.Start.
+func (m *mockSource) Start(_ context.Context) error {
+	return nil
+}
+
+// Stop implements PartitionSource.Stop.
+func (m *mockSource) Stop() error {
+	return nil
+}
+
+// List returns the configured partitions or error.
+func (m *mockSource) List(_ context.Context) ([]types.Partition, error) {
 	if m.err != nil {
 		return nil, m.err
 	}

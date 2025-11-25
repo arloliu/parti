@@ -36,8 +36,8 @@ func TestPartitionSource_StaticSource(t *testing.T) {
 	require.NotNil(t, src, "NewStatic should not return nil")
 
 	// List partitions
-	partitions, err := src.ListPartitions(ctx)
-	require.NoError(t, err, "ListPartitions should not return error")
+	partitions, err := src.List(ctx)
+	require.NoError(t, err, "List should not return error")
 	require.Len(t, partitions, 3, "Should return 3 partitions")
 
 	// Verify partition contents
@@ -57,10 +57,11 @@ func TestPartitionSource_StaticSource(t *testing.T) {
 		{Keys: []string{"partition-005"}, Weight: 100},
 	}
 
-	src.Update(updatedPartitions)
+	err = src.Update(ctx, updatedPartitions)
+	require.NoError(t, err, "Update should not return error")
 
-	partitions, err = src.ListPartitions(ctx)
-	require.NoError(t, err, "ListPartitions should not return error")
+	partitions, err = src.List(ctx)
+	require.NoError(t, err, "List should not return error")
 	require.Len(t, partitions, 5, "Should return 5 partitions after update")
 
 	// Verify updated contents
@@ -69,17 +70,17 @@ func TestPartitionSource_StaticSource(t *testing.T) {
 		require.Equal(t, updatedPartitions[i].Weight, p.Weight, "Updated partition weight should match")
 	}
 
-	// Test 3: Verify ListPartitions returns a copy (not the internal slice)
-	t.Log("Test 3: Verify ListPartitions returns a copy")
+	// Test 3: Verify List returns a copy (not the internal slice)
+	t.Log("Test 3: Verify List returns a copy")
 
-	partitions1, _ := src.ListPartitions(ctx)
-	partitions2, _ := src.ListPartitions(ctx)
+	partitions1, _ := src.List(ctx)
+	partitions2, _ := src.List(ctx)
 
 	// Modify first result
 	partitions1[0].Weight = 999
 
 	// Second result should be unchanged
-	require.NotEqual(t, partitions1[0].Weight, partitions2[0].Weight, "ListPartitions should return a copy")
+	require.NotEqual(t, partitions1[0].Weight, partitions2[0].Weight, "List should return a copy")
 	require.Equal(t, int64(100), partitions2[0].Weight, "Second call should return original weight")
 
 	t.Log("Test passed - static source works correctly")
@@ -100,27 +101,29 @@ func TestPartitionSource_EmptyPartitions(t *testing.T) {
 
 	src := source.NewStatic([]types.Partition{})
 
-	partitions, err := src.ListPartitions(ctx)
-	require.NoError(t, err, "ListPartitions should not return error for empty list")
+	partitions, err := src.List(ctx)
+	require.NoError(t, err, "List should not return error for empty list")
 	require.Len(t, partitions, 0, "Should return empty slice")
 	require.NotNil(t, partitions, "Should return empty slice, not nil")
 
 	// Test 2: Update from non-empty to empty
 	t.Log("Test 2: Verify updating to empty list works")
 
-	src.Update([]types.Partition{
+	err = src.Update(ctx, []types.Partition{
 		{Keys: []string{"partition-001"}, Weight: 100},
 	})
+	require.NoError(t, err)
 
-	partitions, err = src.ListPartitions(ctx)
+	partitions, err = src.List(ctx)
 	require.NoError(t, err, "Should return partition")
 	require.Len(t, partitions, 1, "Should have 1 partition")
 
 	// Update to empty
-	src.Update([]types.Partition{})
+	err = src.Update(ctx, []types.Partition{})
+	require.NoError(t, err)
 
-	partitions, err = src.ListPartitions(ctx)
-	require.NoError(t, err, "ListPartitions should not return error after empty update")
+	partitions, err = src.List(ctx)
+	require.NoError(t, err, "List should not return error after empty update")
 	require.Len(t, partitions, 0, "Should return empty slice after update")
 
 	// Test 3: Create source with nil
@@ -128,8 +131,8 @@ func TestPartitionSource_EmptyPartitions(t *testing.T) {
 
 	srcNil := source.NewStatic(nil)
 
-	partitions, err = srcNil.ListPartitions(ctx)
-	require.NoError(t, err, "ListPartitions should not return error for nil input")
+	partitions, err = srcNil.List(ctx)
+	require.NoError(t, err, "List should not return error for nil input")
 	require.Len(t, partitions, 0, "Should return empty slice for nil input")
 
 	t.Log("Test passed - empty partition handling works correctly")
@@ -157,7 +160,7 @@ func TestPartitionSource_ConcurrentAccess(t *testing.T) {
 	src := source.NewStatic(initialPartitions)
 
 	// Test concurrent reads and writes
-	t.Log("Testing concurrent ListPartitions and Update operations...")
+	t.Log("Testing concurrent List and Update operations...")
 
 	const (
 		numReaders = 10
@@ -173,7 +176,7 @@ func TestPartitionSource_ConcurrentAccess(t *testing.T) {
 		readerID := i
 		wg.Go(func() {
 			for j := 0; j < iterations; j++ {
-				partitions, err := src.ListPartitions(ctx)
+				partitions, err := src.List(ctx)
 				if err != nil {
 					errChan <- fmt.Errorf("reader %d: iteration %d: %w", readerID, j, err)
 					return
@@ -210,7 +213,10 @@ func TestPartitionSource_ConcurrentAccess(t *testing.T) {
 					}
 				}
 
-				src.Update(newPartitions)
+				if err := src.Update(ctx, newPartitions); err != nil {
+					errChan <- fmt.Errorf("writer %d: iteration %d: update failed: %w", i, j, err)
+					return
+				}
 
 				// Brief sleep to allow readers to see the update
 				time.Sleep(time.Millisecond)
@@ -231,8 +237,8 @@ func TestPartitionSource_ConcurrentAccess(t *testing.T) {
 	require.Empty(t, errors, "Should have no errors during concurrent access: %v", errors)
 
 	// Final verification
-	partitions, err := src.ListPartitions(ctx)
-	require.NoError(t, err, "Final ListPartitions should succeed")
+	partitions, err := src.List(ctx)
+	require.NoError(t, err, "Final List should succeed")
 	require.NotEmpty(t, partitions, "Should have partitions after concurrent operations")
 
 	t.Logf("Test passed - %d readers and %d writers completed %d iterations each without errors",

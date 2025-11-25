@@ -13,7 +13,10 @@ import (
 // Mock implementations for testing
 type mockSource struct{}
 
-func (m *mockSource) ListPartitions(_ /* ctx */ context.Context) ([]Partition, error) {
+func (m *mockSource) Start(_ context.Context) error { return nil }
+func (m *mockSource) Stop() error                   { return nil }
+
+func (m *mockSource) List(_ /* ctx */ context.Context) ([]Partition, error) {
 	return []Partition{{Keys: []string{"p0"}, Weight: 100}}, nil
 }
 

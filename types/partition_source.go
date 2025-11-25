@@ -9,12 +9,21 @@ import "context"
 //   - Static: fixed list for testing
 //   - Custom: any dynamic partition discovery logic
 //
-// The Manager calls ListPartitions during:
+// The Manager calls List during:
 //   - Startup (initial discovery)
 //   - RefreshPartitions() (manual refresh)
 //   - Periodic refresh (if configured)
 type PartitionSource interface {
-	// ListPartitions returns all available partitions.
+	// Start initializes the source (e.g., starts watchers).
+	//
+	// Parameters:
+	//   - ctx: Context for initialization
+	//
+	// Returns:
+	//   - error: Initialization error
+	Start(ctx context.Context) error
+
+	// List returns all available partitions.
 	//
 	// Implementations should:
 	//   - Return consistent results for the same backend state
@@ -27,5 +36,27 @@ type PartitionSource interface {
 	// Returns:
 	//   - []Partition: List of discovered partitions
 	//   - error: Discovery error (nil on success)
-	ListPartitions(ctx context.Context) ([]Partition, error)
+	List(ctx context.Context) ([]Partition, error)
+
+	// Stop cleans up resources (e.g., stops watchers).
+	//
+	// Returns:
+	//   - error: Cleanup error
+	Stop() error
+}
+
+// PartitionUpdater allows updating the partition definition in the backend.
+//
+// This interface is optional and typically used by admin tools or tests
+// to modify the source of truth (e.g., NATS KV, file).
+type PartitionUpdater interface {
+	// Update updates the partition list in the backend.
+	//
+	// Parameters:
+	//   - ctx: Context for the operation
+	//   - partitions: New list of partitions
+	//
+	// Returns:
+	//   - error: Update error
+	Update(ctx context.Context, partitions []Partition) error
 }

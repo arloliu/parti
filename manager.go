@@ -311,6 +311,11 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 	m.logger.Info("startup: claimed stable worker ID", "worker_id", m.WorkerID())
 
+	// Step 1.2: Start partition source
+	if err := m.source.Start(startupCtx); err != nil {
+		return fmt.Errorf("failed to start partition source: %w", err)
+	}
+
 	// Step 1.5: Ensure coordination buckets (election/heartbeat/assignment)
 	electionKV, heartbeatKV, assignmentKV, err := m.ensureCoreKVBuckets(startupCtx, js)
 	if err != nil {
@@ -426,10 +431,18 @@ func (m *Manager) Stop(ctx context.Context) error {
 		// Channel already closed or monitor not running
 	}
 
+	// Step 1.6: Stop partition source
+	if err := m.source.Stop(); err != nil {
+		m.logError("failed to stop partition source", "error", err)
+		shutdownErr = fmt.Errorf("partition source stop failed: %w", err)
+	}
+
 	// Step 2: Stop heartbeat publisher (ignore ErrNotStarted)
 	if err := m.heartbeat.Stop(); err != nil && !errors.Is(err, heartbeat.ErrNotStarted) {
 		m.logError("failed to stop heartbeat", "error", err)
-		shutdownErr = fmt.Errorf("heartbeat stop failed: %w", err)
+		if shutdownErr == nil {
+			shutdownErr = fmt.Errorf("heartbeat stop failed: %w", err)
+		}
 	}
 
 	// Step 3: Release election if we hold leadership

@@ -197,7 +197,8 @@ func TestSubscriptionHelper_UpdateOnRebalance(t *testing.T) {
 			Weight: 100,
 		}
 	}
-	partitionSource.Update(allPartitions)
+	err = partitionSource.Update(ctx, allPartitions)
+	require.NoError(t, err)
 
 	// Find leader and refresh
 	var leader *parti.Manager
