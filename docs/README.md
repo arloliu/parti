@@ -15,7 +15,7 @@
 nc, _ := nats.Connect(nats.DefaultURL)
 js, _ := jetstream.New(nc)
 
-cfg := parti.Config{WorkerIDPrefix: "worker", WorkerIDMax: 63}
+cfg := parti.Config{WorkerIDPrefix: "worker", WorkerIDMax: 999}
 partitions := []parti.Partition{{Keys: []string{"p-0"}, Weight: 100}}
 src := source.NewStatic(partitions)
 strat := strategy.NewConsistentHash()

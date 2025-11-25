@@ -88,7 +88,7 @@ A mapping of partitions to workers. Assignments are versioned and stored in NATS
 type Config struct {
     // Worker Identity
     WorkerIDPrefix string        // Prefix for worker IDs (default: "worker")
-    WorkerIDMax    int           // Maximum ID number (default: 63)
+    WorkerIDMax    int           // Maximum ID number (default: 999)
     WorkerIDTTL    time.Duration // TTL for ID claims (default: 30s)
 
     // Heartbeat Configuration

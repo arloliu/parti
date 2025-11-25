@@ -328,7 +328,7 @@ type Config struct {
 
 	// WorkerIDMax is the maximum stable ID number (inclusive).
 	// Determines the maximum number of concurrent workers: (WorkerIDMax - WorkerIDMin + 1).
-	// For example, WorkerIDMin=0 and WorkerIDMax=99 allows up to 100 workers.
+	// For example, WorkerIDMin=0 and WorkerIDMax=999 allows up to 1000 workers.
 	WorkerIDMax int `yaml:"workerIdMax"`
 
 	// WorkerIDTTL is how long a worker ID claim remains valid in the key-value store.
@@ -428,7 +428,7 @@ func DefaultConfig() Config {
 	return Config{
 		WorkerIDPrefix:        "worker",
 		WorkerIDMin:           0,
-		WorkerIDMax:           99,
+		WorkerIDMax:           999,
 		WorkerIDTTL:           30 * time.Second,
 		HeartbeatInterval:     2 * time.Second,
 		HeartbeatTTL:          6 * time.Second,

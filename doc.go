@@ -14,7 +14,7 @@
 //	cfg := parti.Config{
 //	    WorkerIDPrefix: "worker",
 //	    WorkerIDMin:    0,
-//	    WorkerIDMax:    63,
+//	    WorkerIDMax:    999,
 //	}
 //
 //	src := parti.StaticSource(partitions)

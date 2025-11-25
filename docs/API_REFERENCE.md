@@ -52,7 +52,7 @@ func NewManager(
 ```go
 cfg := &parti.Config{
     WorkerIDPrefix: "worker",
-    WorkerIDMax:    63,
+    WorkerIDMax:    999,
 }
 parti.SetDefaults(cfg)
 
@@ -755,7 +755,7 @@ func SetDefaults(cfg *Config)
 
 **Example**:
 ```go
-cfg := &Config{WorkerIDMax: 63}
+cfg := &Config{WorkerIDMax: 999}
 parti.SetDefaults(cfg)
 // Now cfg has all defaults filled in
 ```

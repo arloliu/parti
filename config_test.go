@@ -13,7 +13,7 @@ func TestDefaultConfig(t *testing.T) {
 
 	require.Equal(t, "worker", cfg.WorkerIDPrefix)
 	require.Equal(t, 0, cfg.WorkerIDMin)
-	require.Equal(t, 99, cfg.WorkerIDMax)
+	require.Equal(t, 999, cfg.WorkerIDMax)
 	require.Equal(t, 30*time.Second, cfg.WorkerIDTTL)
 	require.Equal(t, 2*time.Second, cfg.HeartbeatInterval)
 	require.Equal(t, 6*time.Second, cfg.HeartbeatTTL)
@@ -34,7 +34,7 @@ func TestSetDefaults(t *testing.T) {
 		SetDefaults(&cfg)
 
 		require.Equal(t, "worker", cfg.WorkerIDPrefix)
-		require.Equal(t, 99, cfg.WorkerIDMax)
+		require.Equal(t, 999, cfg.WorkerIDMax)
 		require.Equal(t, 30*time.Second, cfg.WorkerIDTTL)
 		require.Equal(t, 0.15, cfg.Assignment.MinRebalanceThreshold)
 		require.Equal(t, 10*time.Second, cfg.Assignment.MinRebalanceInterval)
@@ -92,7 +92,7 @@ func TestSetDefaults(t *testing.T) {
 		require.Equal(t, "myworker", cfg.WorkerIDPrefix)
 		require.Equal(t, 45*time.Second, cfg.WorkerIDTTL)
 		// Defaults applied
-		require.Equal(t, 99, cfg.WorkerIDMax)
+		require.Equal(t, 999, cfg.WorkerIDMax)
 		require.Equal(t, 2*time.Second, cfg.HeartbeatInterval)
 		require.Equal(t, 0.15, cfg.Assignment.MinRebalanceThreshold)
 	})
@@ -160,7 +160,7 @@ heartbeatInterval: 5s
 	require.Equal(t, 5*time.Second, cfg.HeartbeatInterval)
 
 	// Defaults applied
-	require.Equal(t, 99, cfg.WorkerIDMax)
+	require.Equal(t, 999, cfg.WorkerIDMax)
 	require.Equal(t, 6*time.Second, cfg.HeartbeatTTL)
 	require.Equal(t, 30*time.Second, cfg.WorkerIDTTL)
 	require.Equal(t, 0.15, cfg.Assignment.MinRebalanceThreshold)
@@ -345,7 +345,7 @@ func TestTestConfig(t *testing.T) {
 	// Verify other defaults are preserved
 	require.Equal(t, "worker", cfg.WorkerIDPrefix)
 	require.Equal(t, 0, cfg.WorkerIDMin)
-	require.Equal(t, 99, cfg.WorkerIDMax)
+	require.Equal(t, 999, cfg.WorkerIDMax)
 }
 
 func TestConfig_ValidateDegradedAlerts(t *testing.T) {

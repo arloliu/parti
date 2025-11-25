@@ -162,7 +162,7 @@ var _ types.StateProvider = (*Manager)(nil)
 //
 // Example:
 //
-//	cfg := parti.Config{WorkerIDPrefix: "worker", WorkerIDMax: 63}
+//	cfg := parti.Config{WorkerIDPrefix: "worker", WorkerIDMax: 999}
 //	src := source.NewStatic(partitions)
 //	curStrategy := strategy.NewConsistentHash()
 //	js, _ := jetstream.New(natsConn)
