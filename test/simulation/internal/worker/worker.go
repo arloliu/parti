@@ -233,11 +233,9 @@ func NewWorker(cfg Config) (*Worker, error) { //nolint:cyclop
 		MaxDeliver: 50,
 		// Give messages more time before redelivery to allow drains/healing during cooldown.
 		AckWait: 90 * time.Second,
-		// Cap total in-flight across the durable to avoid runaway backlog.
-		MaxAckPending: 2048,
 		// Caps to bound per-subject concurrency and reduce disorder.
-		PerSubjectMaxWaiting:    2,
-		PerSubjectMaxAckPending: perSubMaxAckPending,
+		MaxWaiting:    2,
+		MaxAckPending: perSubMaxAckPending,
 		// Suppress pulls when not owner or not in commit/stable to reduce NAK storms.
 		PullGatingEnabled: true,
 	}

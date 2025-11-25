@@ -8,7 +8,9 @@ const (
 	DefaultBatchSize = 1
 
 	// DefaultMaxWaiting is the default maximum number of outstanding pull requests.
-	DefaultMaxWaiting = 512
+	// This is set conservatively to 2 to prevent "thundering herd" issues when
+	// managing many partitions per worker.
+	DefaultMaxWaiting = 2
 
 	// DefaultFetchTimeout is the default maximum duration to wait for messages.
 	DefaultFetchTimeout = 5 * time.Second

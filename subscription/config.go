@@ -69,7 +69,7 @@ type ResolverConfig struct {
 //   - SubjectTemplate: text/template expanded per partition with {{.PartitionID}}
 //
 // Optional tuning fields are documented inline below. Zero values are replaced by
-// sensible defaults via applyDefaults().
+// sensible defaults via SetDefaults().
 type WorkerConsumerConfig struct {
 	// StreamName is the JetStream stream name where subjects live. Required.
 	StreamName string
@@ -148,26 +148,18 @@ type WorkerConsumerConfig struct {
 	// Default: DefaultFetchTimeout (5s).
 	FetchTimeout time.Duration
 
-	// MaxWaiting is the max outstanding pull requests allowed for the consumer.
-	// Default: DefaultMaxWaiting (512).
+	// MaxWaiting caps outstanding pull requests for each per-subject durable.
+	// Default: DefaultMaxWaiting (2).
 	MaxWaiting int
 
 	// MaxAckPending limits the number of in-flight unacknowledged messages the server will allow
-	// for this consumer. If zero, the server default is used. This is most useful when using
+	// for each per-subject durable. If zero, the server default is used. This is most useful when using
 	// ManualAck and background processing to cap concurrent in-flight work at the server layer.
 	MaxAckPending int
 
-	// PerSubjectMaxWaiting caps outstanding pull requests for each per-subject durable.
-	// If zero, a conservative default of 2 is used.
-	PerSubjectMaxWaiting int
-
-	// PerSubjectMaxAckPending caps in-flight acks per per-subject durable.
-	// If zero, server defaults apply.
-	PerSubjectMaxAckPending int
-
-	// MaxPerSubjectConsumers caps the total number of per-subject consumers/loops.
+	// MaxConcurrentSubjects caps the total number of per-subject consumers/loops.
 	// When exceeded, additional subjects are skipped with a warning and metric increment.
-	MaxPerSubjectConsumers int
+	MaxConcurrentSubjects int
 
 	// AckPolicy controls JetStream ack policy. Defaults to AckExplicitPolicy.
 	AckPolicy jetstream.AckPolicy
@@ -204,28 +196,58 @@ type WorkerConsumerConfig struct {
 	IteratorFactory func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error)
 }
 
-// applyDefaults fills unset optional fields with project defaults.
-func (cfg *WorkerConsumerConfig) applyDefaults() {
+// DefaultWorkerConsumerConfig returns a WorkerConsumerConfig with sensible defaults.
+// Note: Required fields (StreamName, ConsumerPrefix, SubjectTemplate) must still be set by the user.
+func DefaultWorkerConsumerConfig() WorkerConsumerConfig {
+	return WorkerConsumerConfig{
+		AckPolicy:         jetstream.AckExplicitPolicy,
+		AckWait:           DefaultAckWait,
+		MaxDeliver:        DefaultMaxDeliver,
+		InactiveThreshold: DefaultInactiveThreshold,
+		BatchSize:         DefaultBatchSize,
+		MaxWaiting:        DefaultMaxWaiting,
+		FetchTimeout:      DefaultFetchTimeout,
+		Retry: RetryConfig{
+			Backoff:    DefaultRetryBackoff,
+			Base:       DefaultRetryBase,
+			Multiplier: DefaultRetryMultiplier,
+			Max:        DefaultRetryMax,
+		},
+		IteratorEscalationWindow:    DefaultIteratorEscalationWindow,
+		IteratorEscalationThreshold: DefaultIteratorEscalationThreshold,
+		PartitionRefreshMinInterval: 500 * time.Millisecond,
+		DrainOnRemoveTimeout:        10 * time.Second,
+		Resolver: ResolverConfig{
+			HandoffBucketName:   "parti-handoff",
+			HandoffClaimsPrefix: "claims/",
+		},
+	}
+}
+
+// SetDefaults applies default values to zero-valued configuration fields.
+func SetDefaults(cfg *WorkerConsumerConfig) {
+	defaults := DefaultWorkerConsumerConfig()
+
 	cfg.AckPolicy = defaultAckPolicy(cfg.AckPolicy)
-	cfg.AckWait = defaultDuration(cfg.AckWait, DefaultAckWait)
-	cfg.MaxDeliver = defaultInt(cfg.MaxDeliver, DefaultMaxDeliver)
-	cfg.InactiveThreshold = defaultDuration(cfg.InactiveThreshold, DefaultInactiveThreshold)
-	cfg.BatchSize = defaultInt(cfg.BatchSize, DefaultBatchSize)
-	cfg.MaxWaiting = defaultInt(cfg.MaxWaiting, DefaultMaxWaiting)
-	cfg.FetchTimeout = defaultDuration(cfg.FetchTimeout, DefaultFetchTimeout)
+	cfg.AckWait = defaultDuration(cfg.AckWait, defaults.AckWait)
+	cfg.MaxDeliver = defaultInt(cfg.MaxDeliver, defaults.MaxDeliver)
+	cfg.InactiveThreshold = defaultDuration(cfg.InactiveThreshold, defaults.InactiveThreshold)
+	cfg.BatchSize = defaultInt(cfg.BatchSize, defaults.BatchSize)
+	cfg.MaxWaiting = defaultInt(cfg.MaxWaiting, defaults.MaxWaiting)
+	cfg.FetchTimeout = defaultDuration(cfg.FetchTimeout, defaults.FetchTimeout)
 
 	// Retry defaults
-	cfg.Retry.Backoff = defaultDuration(cfg.Retry.Backoff, DefaultRetryBackoff)
-	cfg.Retry.Base = defaultRetryBase(cfg.Retry.Base, cfg.Retry.Backoff, DefaultRetryBase)
-	cfg.Retry.Multiplier = defaultFloat(cfg.Retry.Multiplier, DefaultRetryMultiplier)
-	cfg.Retry.Max = defaultDuration(cfg.Retry.Max, DefaultRetryMax)
+	cfg.Retry.Backoff = defaultDuration(cfg.Retry.Backoff, defaults.Retry.Backoff)
+	cfg.Retry.Base = defaultRetryBase(cfg.Retry.Base, cfg.Retry.Backoff, defaults.Retry.Base)
+	cfg.Retry.Multiplier = defaultFloat(cfg.Retry.Multiplier, defaults.Retry.Multiplier)
+	cfg.Retry.Max = defaultDuration(cfg.Retry.Max, defaults.Retry.Max)
 
-	cfg.IteratorEscalationWindow = defaultDuration(cfg.IteratorEscalationWindow, DefaultIteratorEscalationWindow)
-	cfg.IteratorEscalationThreshold = defaultInt(cfg.IteratorEscalationThreshold, DefaultIteratorEscalationThreshold)
+	cfg.IteratorEscalationWindow = defaultDuration(cfg.IteratorEscalationWindow, defaults.IteratorEscalationWindow)
+	cfg.IteratorEscalationThreshold = defaultInt(cfg.IteratorEscalationThreshold, defaults.IteratorEscalationThreshold)
 
 	// Throttle default for resolver refreshes
 	if cfg.PartitionRefreshMinInterval <= 0 {
-		cfg.PartitionRefreshMinInterval = 500 * time.Millisecond
+		cfg.PartitionRefreshMinInterval = defaults.PartitionRefreshMinInterval
 	}
 
 	if cfg.Logger == nil {
@@ -245,11 +267,12 @@ func (cfg *WorkerConsumerConfig) applyProcessingGateDefaults() {
 
 		// Apply bucket and prefix defaults when gate is enabled and no custom resolver
 		if cfg.ProcessingGate.Enabled && cfg.Resolver.OwnershipResolver == nil {
+			defaults := DefaultWorkerConsumerConfig()
 			if cfg.Resolver.HandoffBucketName == "" {
-				cfg.Resolver.HandoffBucketName = "parti-handoff"
+				cfg.Resolver.HandoffBucketName = defaults.Resolver.HandoffBucketName
 			}
 			if cfg.Resolver.HandoffClaimsPrefix == "" {
-				cfg.Resolver.HandoffClaimsPrefix = "claims/"
+				cfg.Resolver.HandoffClaimsPrefix = defaults.Resolver.HandoffClaimsPrefix
 			}
 		}
 

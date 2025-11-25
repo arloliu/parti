@@ -92,7 +92,7 @@ func NewWorkerConsumer(js jetstream.JetStream, cfg WorkerConsumerConfig, handler
 		return nil, errors.New("message handler is required")
 	}
 
-	cfg.applyDefaults()
+	SetDefaults(&cfg)
 
 	// parse subject template
 	tmpl, err := template.New("subject").Parse(cfg.SubjectTemplate)
@@ -408,15 +408,15 @@ func (wc *WorkerConsumer) drainPerSubject(ctx context.Context, cons jetstream.Co
 }
 
 func (wc *WorkerConsumer) addSubjectLoop(ctx context.Context, workerID string, subject string) error {
-	if wc.config.MaxPerSubjectConsumers > 0 {
+	if wc.config.MaxConcurrentSubjects > 0 {
 		wc.mu.RLock()
 		current := len(wc.subjects)
 		wc.mu.RUnlock()
 
-		if current >= wc.config.MaxPerSubjectConsumers {
+		if current >= wc.config.MaxConcurrentSubjects {
 			wc.logger.Warn("per-subject consumer cap reached; skipping subject",
 				"subject", subject,
-				"cap", wc.config.MaxPerSubjectConsumers,
+				"cap", wc.config.MaxConcurrentSubjects,
 			)
 			if wc.config.Metrics != nil {
 				wc.config.Metrics.IncrementWorkerConsumerSubjectThresholdWarning()
@@ -565,8 +565,8 @@ func (wc *WorkerConsumer) ensurePerSubjectConsumer(ctx context.Context, durable 
 		AckWait:           wc.config.AckWait,
 		MaxDeliver:        wc.config.MaxDeliver,
 		InactiveThreshold: wc.config.InactiveThreshold,
-		MaxWaiting:        defaultInt(wc.config.PerSubjectMaxWaiting, 2),
-		MaxAckPending:     wc.config.PerSubjectMaxAckPending,
+		MaxWaiting:        defaultInt(wc.config.MaxWaiting, DefaultMaxWaiting),
+		MaxAckPending:     wc.config.MaxAckPending,
 	}
 
 	var lastErr error
