@@ -1,4 +1,3 @@
-// Package kvutil provides utilities for working with NATS JetStream KeyValue stores.
 package kvutil
 
 import (

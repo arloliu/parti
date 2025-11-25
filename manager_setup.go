@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/arloliu/parti/internal/assignment/handoff"
-	"github.com/arloliu/parti/internal/kvutil"
+	"github.com/arloliu/parti/kvutil"
 	"github.com/arloliu/parti/types"
 	"github.com/nats-io/nats.go/jetstream"
 )

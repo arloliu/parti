@@ -13,7 +13,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/arloliu/parti/internal/kvutil"
+	"github.com/arloliu/parti/kvutil"
 	"github.com/arloliu/parti/types"
 	"github.com/zeebo/xxh3"
 )

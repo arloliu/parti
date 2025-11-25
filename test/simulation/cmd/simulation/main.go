@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/arloliu/parti"
-	"github.com/arloliu/parti/internal/kvutil"
+	"github.com/arloliu/parti/kvutil"
 	"github.com/arloliu/parti/test/simulation/internal/config"
 	"github.com/arloliu/parti/test/simulation/internal/coordinator"
 	"github.com/arloliu/parti/test/simulation/internal/metrics"

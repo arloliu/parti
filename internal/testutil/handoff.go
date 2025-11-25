@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/arloliu/parti"
-	"github.com/arloliu/parti/internal/kvutil"
+	"github.com/arloliu/parti/kvutil"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
