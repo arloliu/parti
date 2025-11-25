@@ -1,5 +1,9 @@
 # Parti
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/arloliu/parti.svg)](https://pkg.go.dev/github.com/arloliu/parti)
+[![Go Report Card](https://goreportcard.com/badge/github.com/arloliu/parti)](https://goreportcard.com/report/github.com/arloliu/parti)
+[![License: Apache](https://img.shields.io/badge/License-Apache-blue.svg)](LICENSE)
+
 **Parti** is a Go library for NATS-based work partitioning that provides dynamic partition assignment across worker instances with stable worker IDs, leader-based coordination, and robust failure handling.
 
 It is designed for building distributed systems where work needs to be sharded across a dynamic set of workers, such as stream processors, job queues, or sharded databases.
