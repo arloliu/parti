@@ -1116,6 +1116,23 @@ for _, p := range assignment.Partitions {
 
 ---
 
+### HandoffState
+
+Represents the state of the two-phase handoff process.
+
+```go
+type HandoffState int
+
+const (
+    HandoffStateUnknown HandoffState = iota
+    HandoffStateStable
+    HandoffStatePrepare
+    HandoffStateCommit
+)
+```
+
+---
+
 ## Strategy Package
 
 Package `github.com/arloliu/parti/strategy` provides built-in assignment strategies.
@@ -1177,6 +1194,38 @@ strategy := strategy.NewRoundRobin()
 
 ---
 
+### WeightedConsistentHash
+
+Weighted consistent hashing with overload protection and extreme partition handling.
+
+```go
+func NewWeightedConsistentHash(opts ...WeightedConsistentHashOption) *WeightedConsistentHash
+```
+
+**Options**:
+
+#### WithWeightedVirtualNodes
+Sets the number of virtual nodes per worker (default: 150).
+
+#### WithOverloadThreshold
+Sets the maximum allowed load variance (default: 1.2 or 120%).
+
+#### WithExtremeThreshold
+Sets the threshold for identifying "extreme" (heavy) partitions (default: 20.0).
+
+#### WithMinPartitionCount
+Sets the minimum partition count factor (default: 0.3).
+
+**Example**:
+```go
+strategy := strategy.NewWeightedConsistentHash(
+    strategy.WithWeightedVirtualNodes(200),
+    strategy.WithOverloadThreshold(1.1), // Tighter balance
+)
+```
+
+---
+
 ## Source Package
 
 Package `github.com/arloliu/parti/source` provides built-in partition sources.
@@ -1196,6 +1245,42 @@ partitions := []parti.Partition{
     {Keys: []string{"topic1", "1"}, Weight: 100},
 }
 src := source.NewStatic(partitions)
+```
+
+---
+
+### NatsKV
+
+NATS KeyValue-backed partition source that supports dynamic updates.
+
+```go
+func NewNatsKV(kv jetstream.KeyValue, key string, logger types.Logger) *NatsKV
+```
+
+**Methods**:
+
+#### Update
+
+Updates the partition list in the KV bucket with automatic Gzip compression for large payloads.
+
+```go
+func (s *NatsKV) Update(ctx context.Context, partitions []types.Partition) error
+```
+
+**Parameters**:
+- `ctx`: Context for cancellation
+- `partitions`: New list of partitions to store
+
+**Returns**:
+- `error`: Update error
+
+**Example**:
+```go
+kv, _ := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "partitions"})
+src := source.NewNatsKV(kv, "config", logger)
+
+// Update partitions (automatically compressed if needed)
+err := src.Update(ctx, newPartitions)
 ```
 
 ---
@@ -1372,6 +1457,8 @@ func TestMyFeature(t *testing.T) {
 
 ## Error Types
 
+Sentinel errors are defined in the `types` package.
+
 ### Configuration Errors
 
 ```go
@@ -1404,7 +1491,7 @@ Returned by operations that cannot proceed while the manager is in degraded mode
 
 ```go
 assignment, err := mgr.CurrentAssignment()
-if errors.Is(err, parti.ErrDegradedMode) {
+if errors.Is(err, types.ErrDegradedMode) {
     log.Warn("Using stale assignment from cache")
 }
 ```
@@ -1428,7 +1515,7 @@ hooks := &parti.Hooks{
 Use `errors.Is()` for error checking:
 
 ```go
-if errors.Is(err, parti.ErrStableIDExhausted) {
+if errors.Is(err, types.ErrStableIDExhausted) {
     log.Fatal("Increase WorkerIDMax in configuration")
 }
 ```

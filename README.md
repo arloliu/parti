@@ -12,6 +12,7 @@ It is designed for building distributed systems where work needs to be sharded a
 
 - **Stable Worker IDs**: Workers claim stable IDs (e.g., `worker-0`, `worker-1`) that persist across restarts, minimizing assignment churn during rolling updates.
 - **Leader-Based Assignment**: A single leader worker calculates assignments, ensuring consistency and preventing split-brain scenarios.
+- **Dynamic Partition Discovery**: Supports dynamic partition updates via NATS KV without restarting workers.
 - **Two-Phase Handoff**: Implements a Prepare/Commit protocol for partition reassignment, ensuring no partition is processed by two workers simultaneously.
 - **Degraded Mode**: Continues operation using cached assignments when NATS connectivity is lost, prioritizing availability over strict consistency during outages.
 - **Processing Gate**: Controls message processing flow based on assignment status, preventing processing of revoked partitions.
@@ -85,7 +86,7 @@ func main() {
     consumer, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
         StreamName:      "ORDERS",
         ConsumerPrefix:  "processor",
-        SubjectTemplate: "orders.{{.PartitionID}}", // e.g., orders.orders-0
+        SubjectTemplate: "orders.{{.PartitionID}}.complete", // e.g., orders.0.complete
         ProcessingGate: subscription.ProcessingGateConfig{
             Enabled: true, // Block processing if partition is revoked
         },
@@ -131,7 +132,6 @@ func handleMessage(ctx context.Context, msg jetstream.Msg) error {
 
 - [User Guide](docs/USER_GUIDE.md): Detailed guides on configuration, handoff, and degraded mode.
 - [API Reference](docs/API_REFERENCE.md): Comprehensive API documentation.
-- [Operations Guide](docs/OPERATIONS.md): Deployment, monitoring, and troubleshooting.
 
 ## License
 

@@ -265,10 +265,35 @@ if err != nil {
     log.Fatal(err)
 }
 
-// 3. Register with Manager
+// 3. Create dependencies
+// Partition Source: Static list for this example
+src := source.NewStatic([]parti.Partition{
+    {Keys: []string{"orders", "0"}},
+    {Keys: []string{"orders", "1"}},
+    {Keys: []string{"orders", "2"}},
+})
+
+// Assignment Strategy: Consistent Hashing
+strat := strategy.NewConsistentHash(
+    strategy.WithVirtualNodes(150),
+)
+
+// 4. Register with Manager
 mgr, err := parti.NewManager(cfg, js, src, strat,
     parti.WithWorkerConsumerUpdater(consumer),
 )
+if err != nil {
+    log.Fatal(err)
+}
+
+// 5. Start the Manager
+if err := mgr.Start(context.Background()); err != nil {
+    log.Fatal(err)
+}
+defer mgr.Stop()
+
+// 6. Wait for shutdown signal
+<-ctx.Done()
 ```
 
 ### Manual Acknowledgement
@@ -348,6 +373,21 @@ strategy := strategy.NewConsistentHash(
 )
 ```
 
+### Weighted Consistent Hashing
+
+Advanced strategy that balances load based on partition weights and handles "extreme" partitions (heavy hitters).
+
+*   **Load Balancing**: Distributes partitions to keep worker load within a threshold (default 1.2x average).
+*   **Extreme Partition Handling**: Isolates extremely heavy partitions (e.g., >20x average weight) to dedicated workers if possible.
+
+```go
+strategy := strategy.NewWeightedConsistentHash(
+    strategy.WithWeightedVirtualNodes(150),
+    strategy.WithOverloadThreshold(1.2), // Max 20% deviation from average load
+    strategy.WithExtremeThreshold(20.0), // Partitions 20x heavier than avg are "extreme"
+)
+```
+
 ### Round Robin
 
 Simple even distribution.
@@ -365,7 +405,28 @@ strategy := strategy.NewRoundRobin()
 Fixed list of partitions.
 
 ```go
-src := source.NewStatic(partitions)
+src := source.NewStatic([]parti.Partition{
+    {Keys: []string{"orders", "0"}},
+    {Keys: []string{"orders", "1"}},
+})
+```
+
+### NATS KV Source
+
+Dynamic source backed by a NATS KeyValue bucket. Updates to the KV key automatically trigger rebalancing.
+
+```go
+// 1. Create/Open KV bucket
+kv, _ := kvutil.EnsureKVBucket(ctx, js, "config", 0)
+
+// 2. Create source watching key "partitions"
+src := source.NewNatsKV(kv, "partitions", logger)
+
+// 3. Update partitions at runtime (from any process)
+partitions := []parti.Partition{...}
+if err := src.Update(ctx, partitions); err != nil {
+    log.Fatal(err)
+}
 ```
 
 ### Custom Source
