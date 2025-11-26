@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/arloliu/parti/internal/assignment"
+	"github.com/arloliu/parti/kvutil"
 	"github.com/arloliu/parti/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -231,21 +232,13 @@ func (m *Manager) calculateAndPublish(_ context.Context) error {
 func (m *Manager) fetchAssignment(ctx context.Context, kv jetstream.KeyValue) (*Assignment, error) {
 	workerID := m.WorkerID()
 	key := fmt.Sprintf("assignment.%s", workerID) // Match calculator's key format
-	entry, err := kv.Get(ctx, key)
-	if err != nil {
-		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			return nil, nil //nolint:nilnil // nil assignment with nil error indicates not yet assigned (valid state)
-		}
 
+	asgn, _, err := kvutil.GetJSON[Assignment](ctx, kv, key)
+	if err != nil {
 		return nil, fmt.Errorf("failed to get assignment: %w", err)
 	}
 
-	var asgn Assignment
-	if err := json.Unmarshal(entry.Value(), &asgn); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal assignment: %w", err)
-	}
-
-	return &asgn, nil
+	return asgn, nil
 }
 
 // monitorAssignmentChanges monitors for assignment changes.

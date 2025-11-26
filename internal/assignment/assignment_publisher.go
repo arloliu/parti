@@ -2,12 +2,12 @@ package assignment
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/arloliu/parti/kvutil"
 	"github.com/arloliu/parti/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -65,7 +65,7 @@ func NewAssignmentPublisher(
 // Returns:
 //   - error: Nil on success, error on KV access failure
 func (p *AssignmentPublisher) DiscoverHighestVersion(ctx context.Context) error {
-	keys, err := p.assignmentKV.Keys(ctx)
+	keys, err := kvutil.ListKeys(ctx, p.assignmentKV, p.keyPrefix, false)
 	if err != nil {
 		return fmt.Errorf("failed to list KV keys: %w", err)
 	}
@@ -75,23 +75,14 @@ func (p *AssignmentPublisher) DiscoverHighestVersion(ctx context.Context) error 
 	highestVersion := int64(0)
 	checkedCount := 0
 	for _, key := range keys {
-		// Skip non-assignment keys (heartbeats, etc.)
-		if !strings.HasPrefix(key, p.keyPrefix) {
-			p.logger.Debug("skipping non-assignment key", "key", key, "prefix", p.prefix)
-			continue
-		}
-
 		checkedCount++
-		entry, err := p.assignmentKV.Get(ctx, key)
+		asgn, _, err := kvutil.GetJSON[types.Assignment](ctx, p.assignmentKV, key)
 		if err != nil {
-			p.logger.Debug("failed to read assignment key", "key", key, "error", err)
-			continue // Skip entries we can't read
+			p.logger.Debug("failed to read/unmarshal assignment", "key", key, "error", err)
+			continue // Skip entries we can't read or are malformed
 		}
-
-		var asgn types.Assignment
-		if err := json.Unmarshal(entry.Value(), &asgn); err != nil {
-			p.logger.Debug("failed to unmarshal assignment", "key", key, "error", err)
-			continue // Skip malformed entries
+		if asgn == nil {
+			continue // Should not happen given ListKeys, but safe to check
 		}
 
 		p.logger.Debug("found assignment", "key", key, "version", asgn.Version)
@@ -129,7 +120,7 @@ func (p *AssignmentPublisher) cleanupStaleAssignments(ctx context.Context, worke
 	for _, workerID := range workersToRemove {
 		key := p.keyPrefix + workerID
 		p.logger.Debug("deleting stale assignment", "key", key, "worker_id", workerID)
-		if err := p.assignmentKV.Delete(ctx, key); err != nil {
+		if err := kvutil.DeleteKey(ctx, p.assignmentKV, key); err != nil {
 			p.logger.Warn("failed to delete stale assignment", "key", key, "error", err)
 			// Continue with other deletions even if one fails
 		} else {
@@ -232,14 +223,9 @@ func (p *AssignmentPublisher) Publish(
 			Partitions: parts,
 		}
 
-		data, err := json.Marshal(assignment)
-		if err != nil {
-			return fmt.Errorf("failed to marshal assignment: %w", err)
-		}
-
 		key := p.keyPrefix + workerID
 		p.logger.Debug("publishing assignment", "key", key, "worker_id", workerID, "partitions", len(parts), "version", p.currentVersion)
-		if _, err := p.assignmentKV.Put(ctx, key, data); err != nil {
+		if _, err := kvutil.PutJSON(ctx, p.assignmentKV, key, assignment); err != nil {
 			return fmt.Errorf("failed to publish assignment: %w", err)
 		}
 	}
