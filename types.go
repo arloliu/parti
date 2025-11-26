@@ -40,3 +40,11 @@ const (
 	StateDegraded          = types.StateDegraded
 	StateShutdown          = types.StateShutdown
 )
+
+// Re-export HandoffState constants.
+const (
+	HandoffStateUnknown = types.HandoffStateUnknown
+	HandoffStateStable  = types.HandoffStateStable
+	HandoffStatePrepare = types.HandoffStatePrepare
+	HandoffStateCommit  = types.HandoffStateCommit
+)
