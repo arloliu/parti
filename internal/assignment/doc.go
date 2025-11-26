@@ -42,7 +42,6 @@
 //	    HeartbeatTTL:         6 * time.Second,
 //	    EmergencyGracePeriod: 3 * time.Second,
 //	    Cooldown:             10 * time.Second,
-//	    MinThreshold:         0.2,
 //	    ColdStartWindow:      30 * time.Second,
 //	    PlannedScaleWindow:   10 * time.Second,
 //	})
@@ -110,7 +109,6 @@
 // The calculator supports several configuration options:
 //
 //   - Cooldown: Minimum time between rebalances (default: 10s)
-//   - MinThreshold: Minimum imbalance to trigger rebalance (default: 0.2)
 //   - RestartRatio: Fraction of workers indicating cold start (default: 0.5)
 //   - ColdStartWindow: Stabilization time for cold starts (default: 30s)
 //   - PlannedScaleWindow: Stabilization time for planned scaling (default: 10s)

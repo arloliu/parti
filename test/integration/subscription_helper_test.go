@@ -119,8 +119,7 @@ func TestSubscriptionHelper_UpdateOnRebalance(t *testing.T) {
 		PlannedScaleWindow:    2 * time.Second, // Must be >= MinRebalanceInterval
 		RestartDetectionRatio: 0.5,
 		Assignment: parti.AssignmentConfig{
-			MinRebalanceThreshold: 0.15,
-			MinRebalanceInterval:  2 * time.Second,
+			MinRebalanceInterval:  1 * time.Second,
 		},
 	}
 

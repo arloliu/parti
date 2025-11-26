@@ -362,7 +362,6 @@ func TestWeightedPartitions_LoadBalancing(t *testing.T) {
 		PlannedScaleWindow:    2 * time.Second,
 		RestartDetectionRatio: 0.5,
 		Assignment: parti.AssignmentConfig{
-			MinRebalanceThreshold: 0.15,
 			MinRebalanceInterval:  2 * time.Second, // Must be <= ColdStartWindow (3s)
 		},
 	}

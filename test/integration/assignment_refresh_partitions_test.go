@@ -35,8 +35,7 @@ func createTestConfig() *parti.Config {
 		PlannedScaleWindow:    2 * time.Second, // Must be >= MinRebalanceInterval
 		RestartDetectionRatio: 0.5,
 		Assignment: parti.AssignmentConfig{
-			MinRebalanceThreshold: 0.15,
-			MinRebalanceInterval:  2 * time.Second,
+			MinRebalanceInterval:  1 * time.Second,
 		},
 	}
 }
@@ -538,7 +537,6 @@ func TestRefreshPartitions_Cooldown(t *testing.T) {
 		PlannedScaleWindow:    3 * time.Second, // Must be >= MinRebalanceInterval
 		RestartDetectionRatio: 0.5,
 		Assignment: parti.AssignmentConfig{
-			MinRebalanceThreshold: 0.15,
 			MinRebalanceInterval:  3 * time.Second, // Longer cooldown for this test
 		},
 	}

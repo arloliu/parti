@@ -8,11 +8,6 @@ import (
 
 // AssignmentConfig controls rebalancing behavior.
 type AssignmentConfig struct {
-	// MinRebalanceThreshold is the minimum partition imbalance ratio (0.0-1.0) that triggers rebalancing.
-	// For example, 0.15 means rebalancing occurs when the difference between max and min partition
-	// counts exceeds 15% of the total partitions.
-	MinRebalanceThreshold float64 `yaml:"minRebalanceThreshold"`
-
 	// MinRebalanceInterval is the minimum time between rebalancing operations.
 	//
 	// Enforces rate limiting BEFORE stabilization windows to prevent thrashing
@@ -440,8 +435,7 @@ func DefaultConfig() Config {
 		StartupTimeout:        30 * time.Second,
 		ShutdownTimeout:       10 * time.Second,
 		Assignment: AssignmentConfig{
-			MinRebalanceThreshold: 0.15,
-			MinRebalanceInterval:  10 * time.Second,
+			MinRebalanceInterval: 10 * time.Second,
 		},
 		KVBuckets: KVBucketConfig{
 			StableIDBucket:   "parti-stableid",
@@ -513,9 +507,6 @@ func SetDefaults(cfg *Config) {
 	}
 	if cfg.ShutdownTimeout == 0 {
 		cfg.ShutdownTimeout = defaults.ShutdownTimeout
-	}
-	if cfg.Assignment.MinRebalanceThreshold == 0 {
-		cfg.Assignment.MinRebalanceThreshold = defaults.Assignment.MinRebalanceThreshold
 	}
 	if cfg.Assignment.MinRebalanceInterval == 0 {
 		cfg.Assignment.MinRebalanceInterval = defaults.Assignment.MinRebalanceInterval

@@ -32,7 +32,6 @@ type Config struct {
 	// Optional configuration (with defaults)
 	EmergencyGracePeriod time.Duration // Minimum time before emergency rebalance (default: 5s)
 	Cooldown             time.Duration // Minimum time between rebalances (default: 10s)
-	MinThreshold         float64       // Minimum rebalance threshold (default: 0.2)
 	RestartRatio         float64       // Cold start detection ratio (default: 0.5)
 	ColdStartWindow      time.Duration // Stabilization window for cold start (default: 30s)
 	PlannedScaleWindow   time.Duration // Stabilization window for planned scale (default: 10s)
@@ -82,9 +81,6 @@ func (c *Config) SetDefaults() {
 	}
 	if c.Cooldown == 0 {
 		c.Cooldown = 10 * time.Second
-	}
-	if c.MinThreshold == 0 {
-		c.MinThreshold = 0.2
 	}
 	if c.RestartRatio == 0 {
 		c.RestartRatio = 0.5

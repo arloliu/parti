@@ -24,7 +24,6 @@ func TestDefaultConfig(t *testing.T) {
 	require.Equal(t, 5*time.Second, cfg.ElectionTimeout)
 	require.Equal(t, 30*time.Second, cfg.StartupTimeout)
 	require.Equal(t, 10*time.Second, cfg.ShutdownTimeout)
-	require.Equal(t, 0.15, cfg.Assignment.MinRebalanceThreshold)
 	require.Equal(t, 10*time.Second, cfg.Assignment.MinRebalanceInterval)
 }
 
@@ -36,7 +35,6 @@ func TestSetDefaults(t *testing.T) {
 		require.Equal(t, "worker", cfg.WorkerIDPrefix)
 		require.Equal(t, 999, cfg.WorkerIDMax)
 		require.Equal(t, 30*time.Second, cfg.WorkerIDTTL)
-		require.Equal(t, 0.15, cfg.Assignment.MinRebalanceThreshold)
 		require.Equal(t, 10*time.Second, cfg.Assignment.MinRebalanceInterval)
 	})
 
@@ -56,7 +54,6 @@ func TestSetDefaults(t *testing.T) {
 			StartupTimeout:        60 * time.Second,
 			ShutdownTimeout:       20 * time.Second,
 			Assignment: AssignmentConfig{
-				MinRebalanceThreshold: 0.25,
 				MinRebalanceInterval:  15 * time.Second,
 			},
 		}
@@ -76,7 +73,6 @@ func TestSetDefaults(t *testing.T) {
 		require.Equal(t, 10*time.Second, cfg.ElectionTimeout)
 		require.Equal(t, 60*time.Second, cfg.StartupTimeout)
 		require.Equal(t, 20*time.Second, cfg.ShutdownTimeout)
-		require.Equal(t, 0.25, cfg.Assignment.MinRebalanceThreshold)
 		require.Equal(t, 15*time.Second, cfg.Assignment.MinRebalanceInterval)
 	})
 
@@ -94,7 +90,6 @@ func TestSetDefaults(t *testing.T) {
 		// Defaults applied
 		require.Equal(t, 999, cfg.WorkerIDMax)
 		require.Equal(t, 2*time.Second, cfg.HeartbeatInterval)
-		require.Equal(t, 0.15, cfg.Assignment.MinRebalanceThreshold)
 	})
 }
 
@@ -115,7 +110,6 @@ electionTimeout: 8s
 startupTimeout: 45s
 shutdownTimeout: 15s
 assignment:
-  minRebalanceThreshold: 0.2
   minRebalanceInterval: 12s
 `
 
@@ -136,7 +130,6 @@ assignment:
 	require.Equal(t, 8*time.Second, cfg.ElectionTimeout)
 	require.Equal(t, 45*time.Second, cfg.StartupTimeout)
 	require.Equal(t, 15*time.Second, cfg.ShutdownTimeout)
-	require.Equal(t, 0.2, cfg.Assignment.MinRebalanceThreshold)
 	require.Equal(t, 12*time.Second, cfg.Assignment.MinRebalanceInterval)
 }
 
@@ -163,7 +156,6 @@ heartbeatInterval: 5s
 	require.Equal(t, 999, cfg.WorkerIDMax)
 	require.Equal(t, 6*time.Second, cfg.HeartbeatTTL)
 	require.Equal(t, 30*time.Second, cfg.WorkerIDTTL)
-	require.Equal(t, 0.15, cfg.Assignment.MinRebalanceThreshold)
 	require.Equal(t, 10*time.Second, cfg.Assignment.MinRebalanceInterval)
 }
 
@@ -272,7 +264,6 @@ func TestConfigValidate(t *testing.T) {
 			ShutdownTimeout:       10 * time.Second,
 			RestartDetectionRatio: 0.5,
 			Assignment: AssignmentConfig{
-				MinRebalanceThreshold: 0.15,
 				MinRebalanceInterval:  5 * time.Second,
 			},
 			KVBuckets: KVBucketConfig{
@@ -307,7 +298,6 @@ func TestConfigValidate(t *testing.T) {
 			ShutdownTimeout:       10 * time.Second,
 			RestartDetectionRatio: 0.5,
 			Assignment: AssignmentConfig{
-				MinRebalanceThreshold: 0.15,
 				MinRebalanceInterval:  15 * time.Second,
 			},
 			KVBuckets: KVBucketConfig{
