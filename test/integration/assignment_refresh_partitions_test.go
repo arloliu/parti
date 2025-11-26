@@ -32,11 +32,9 @@ func createTestConfig() *parti.Config {
 		StartupTimeout:        5 * time.Second,
 		ShutdownTimeout:       2 * time.Second,
 		ColdStartWindow:       2 * time.Second,
-		PlannedScaleWindow:    2 * time.Second, // Must be >= MinRebalanceInterval
+		PlannedScaleWindow:    2 * time.Second, // Must be >= RebalanceCooldown
 		RestartDetectionRatio: 0.5,
-		Assignment: parti.AssignmentConfig{
-			MinRebalanceInterval:  1 * time.Second,
-		},
+		RebalanceCooldown:     1 * time.Second,
 	}
 }
 
@@ -533,12 +531,10 @@ func TestRefreshPartitions_Cooldown(t *testing.T) {
 		ElectionTimeout:       1 * time.Second,
 		StartupTimeout:        5 * time.Second,
 		ShutdownTimeout:       2 * time.Second,
-		ColdStartWindow:       4 * time.Second, // Must be >= MinRebalanceInterval
-		PlannedScaleWindow:    3 * time.Second, // Must be >= MinRebalanceInterval
+		ColdStartWindow:       4 * time.Second, // Must be >= RebalanceCooldown
+		PlannedScaleWindow:    3 * time.Second, // Must be >= RebalanceCooldown
 		RestartDetectionRatio: 0.5,
-		Assignment: parti.AssignmentConfig{
-			MinRebalanceInterval:  3 * time.Second, // Longer cooldown for this test
-		},
+		RebalanceCooldown:     3 * time.Second, // Longer cooldown for this test
 	}
 
 	// Create 2 managers

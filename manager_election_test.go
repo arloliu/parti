@@ -44,9 +44,7 @@ func TestManager_LeadershipLoss_StateTransition(t *testing.T) {
 		ColdStartWindow:       1 * time.Second,
 		PlannedScaleWindow:    500 * time.Millisecond,
 		RestartDetectionRatio: 0.5,
-		Assignment: AssignmentConfig{
-			MinRebalanceInterval: 100 * time.Millisecond, // Short cooldown for testing fast detection
-		},
+		RebalanceCooldown:     100 * time.Millisecond, // Short cooldown for testing fast detection
 	}
 
 	// Create partition source

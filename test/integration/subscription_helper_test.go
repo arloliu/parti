@@ -116,11 +116,9 @@ func TestSubscriptionHelper_UpdateOnRebalance(t *testing.T) {
 		StartupTimeout:        5 * time.Second,
 		ShutdownTimeout:       2 * time.Second,
 		ColdStartWindow:       2 * time.Second,
-		PlannedScaleWindow:    2 * time.Second, // Must be >= MinRebalanceInterval
+		PlannedScaleWindow:    2 * time.Second, // Must be >= RebalanceCooldown
 		RestartDetectionRatio: 0.5,
-		Assignment: parti.AssignmentConfig{
-			MinRebalanceInterval:  1 * time.Second,
-		},
+		RebalanceCooldown:     1 * time.Second,
 	}
 
 	// Create 2 managers

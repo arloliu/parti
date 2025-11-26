@@ -208,7 +208,7 @@ func TestAssignmentCorrectness_StableAssignments(t *testing.T) {
 	// Reduced windows for faster test execution while retaining stability safeguards
 	cfg.ColdStartWindow = 3 * time.Second
 	cfg.PlannedScaleWindow = 3 * time.Second
-	cfg.Assignment.MinRebalanceInterval = 2 * time.Second
+	cfg.RebalanceCooldown = 2 * time.Second
 
 	// Create managers
 	managers := make([]*parti.Manager, numWorkers)

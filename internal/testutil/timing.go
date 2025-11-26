@@ -13,69 +13,69 @@ import (
 // The profile follows internal invariants:
 //   - HeartbeatTTL = ttlMultiplier * HeartbeatInterval
 //   - EmergencyGracePeriod <= HeartbeatTTL and > HeartbeatInterval (when graceMultiplier > 1)
-//   - MinRebalanceInterval <= PlannedScaleWindow <= ColdStartWindow (for batching semantics)
+//   - RebalanceCooldown <= PlannedScaleWindow <= ColdStartWindow (for batching semantics)
 //
 // Only fields that differ from parti defaults should be set; ApplyTo merges with defaults.
 // Use MakeFast() for aggressively shortened but safe timings; MakeBaseline() mirrors
 // IntegrationTestConfig; MakeEmergencyFast() focuses on emergency detection edge cases.
 type TimingProfile struct {
-	HeartbeatInterval    time.Duration
-	TTLMultiplier        float64 // multiplier applied to HeartbeatInterval for HeartbeatTTL
-	GraceMultiplier      float64 // multiplier applied to HeartbeatInterval for EmergencyGracePeriod
-	ColdStartWindow      time.Duration
-	PlannedScaleWindow   time.Duration
-	MinRebalanceInterval time.Duration
-	ElectionTimeout      time.Duration
-	StartupTimeout       time.Duration
-	ShutdownTimeout      time.Duration
-	WorkerIDTTL          time.Duration
+	HeartbeatInterval  time.Duration
+	TTLMultiplier      float64 // multiplier applied to HeartbeatInterval for HeartbeatTTL
+	GraceMultiplier    float64 // multiplier applied to HeartbeatInterval for EmergencyGracePeriod
+	ColdStartWindow    time.Duration
+	PlannedScaleWindow time.Duration
+	RebalanceCooldown  time.Duration
+	ElectionTimeout    time.Duration
+	StartupTimeout     time.Duration
+	ShutdownTimeout    time.Duration
+	WorkerIDTTL        time.Duration
 }
 
 // MakeFast returns an aggressive profile for fast leader election & stabilization tests.
 func MakeFast() TimingProfile {
 	return TimingProfile{
-		HeartbeatInterval:    300 * time.Millisecond,
-		TTLMultiplier:        10.0 / 3.0, // ~3.33x -> ~1s TTL (rounded with integer math by caller)
-		GraceMultiplier:      2.0,        // Grace > interval, < ttl
-		ColdStartWindow:      500 * time.Millisecond,
-		PlannedScaleWindow:   300 * time.Millisecond,
-		MinRebalanceInterval: 300 * time.Millisecond,
-		ElectionTimeout:      1 * time.Second,
-		StartupTimeout:       5 * time.Second,
-		ShutdownTimeout:      2 * time.Second,
-		WorkerIDTTL:          30 * time.Second,
+		HeartbeatInterval:  300 * time.Millisecond,
+		TTLMultiplier:      10.0 / 3.0, // ~3.33x -> ~1s TTL (rounded with integer math by caller)
+		GraceMultiplier:    2.0,        // Grace > interval, < ttl
+		ColdStartWindow:    500 * time.Millisecond,
+		PlannedScaleWindow: 300 * time.Millisecond,
+		RebalanceCooldown:  300 * time.Millisecond,
+		ElectionTimeout:    1 * time.Second,
+		StartupTimeout:     5 * time.Second,
+		ShutdownTimeout:    2 * time.Second,
+		WorkerIDTTL:        30 * time.Second,
 	}
 }
 
 // MakeBaseline returns a stable baseline similar to IntegrationTestConfig for general scenarios.
 func MakeBaseline() TimingProfile {
 	return TimingProfile{
-		HeartbeatInterval:    500 * time.Millisecond,
-		TTLMultiplier:        4.0, // 2s TTL
-		GraceMultiplier:      0,   // disabled (use default unless emergency semantics needed)
-		ColdStartWindow:      3 * time.Second,
-		PlannedScaleWindow:   2 * time.Second,
-		MinRebalanceInterval: 2 * time.Second,
-		ElectionTimeout:      2 * time.Second,
-		StartupTimeout:       10 * time.Second,
-		ShutdownTimeout:      3 * time.Second,
-		WorkerIDTTL:          5 * time.Second,
+		HeartbeatInterval:  500 * time.Millisecond,
+		TTLMultiplier:      4.0, // 2s TTL
+		GraceMultiplier:    0,   // disabled (use default unless emergency semantics needed)
+		ColdStartWindow:    3 * time.Second,
+		PlannedScaleWindow: 2 * time.Second,
+		RebalanceCooldown:  2 * time.Second,
+		ElectionTimeout:    2 * time.Second,
+		StartupTimeout:     10 * time.Second,
+		ShutdownTimeout:    3 * time.Second,
+		WorkerIDTTL:        5 * time.Second,
 	}
 }
 
 // MakeEmergencyFast returns a profile tuned for emergency hysteresis edge tests.
 func MakeEmergencyFast() TimingProfile {
 	return TimingProfile{
-		HeartbeatInterval:    300 * time.Millisecond,
-		TTLMultiplier:        3.0, // 900ms TTL
-		GraceMultiplier:      1.8, // grace between interval and TTL (~540ms)
-		ColdStartWindow:      1200 * time.Millisecond,
-		PlannedScaleWindow:   800 * time.Millisecond,
-		MinRebalanceInterval: 400 * time.Millisecond,
-		ElectionTimeout:      1 * time.Second,
-		StartupTimeout:       5 * time.Second,
-		ShutdownTimeout:      2 * time.Second,
-		WorkerIDTTL:          20 * time.Second,
+		HeartbeatInterval:  300 * time.Millisecond,
+		TTLMultiplier:      3.0, // 900ms TTL
+		GraceMultiplier:    1.8, // grace between interval and TTL (~540ms)
+		ColdStartWindow:    1200 * time.Millisecond,
+		PlannedScaleWindow: 800 * time.Millisecond,
+		RebalanceCooldown:  400 * time.Millisecond,
+		ElectionTimeout:    1 * time.Second,
+		StartupTimeout:     5 * time.Second,
+		ShutdownTimeout:    2 * time.Second,
+		WorkerIDTTL:        20 * time.Second,
 	}
 }
 
@@ -101,8 +101,8 @@ func (tp TimingProfile) ApplyTo(cfg *parti.Config) *parti.Config {
 	if tp.PlannedScaleWindow > 0 {
 		cfg.PlannedScaleWindow = tp.PlannedScaleWindow
 	}
-	if tp.MinRebalanceInterval > 0 {
-		cfg.Assignment.MinRebalanceInterval = tp.MinRebalanceInterval
+	if tp.RebalanceCooldown > 0 {
+		cfg.RebalanceCooldown = tp.RebalanceCooldown
 	}
 	if tp.ElectionTimeout > 0 {
 		cfg.ElectionTimeout = tp.ElectionTimeout
@@ -118,9 +118,9 @@ func (tp TimingProfile) ApplyTo(cfg *parti.Config) *parti.Config {
 	}
 
 	// Invariant adjustments / sanity:
-	// Ensure PlannedScaleWindow >= MinRebalanceInterval
-	if cfg.PlannedScaleWindow < cfg.Assignment.MinRebalanceInterval {
-		cfg.PlannedScaleWindow = cfg.Assignment.MinRebalanceInterval
+	// Ensure PlannedScaleWindow >= RebalanceCooldown
+	if cfg.PlannedScaleWindow < cfg.RebalanceCooldown {
+		cfg.PlannedScaleWindow = cfg.RebalanceCooldown
 	}
 	// Ensure ColdStartWindow >= PlannedScaleWindow
 	if cfg.ColdStartWindow < cfg.PlannedScaleWindow {

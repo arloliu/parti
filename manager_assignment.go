@@ -86,7 +86,7 @@ func (m *Manager) startCalculator(assignmentKV, heartbeatKV jetstream.KeyValue) 
 		HeartbeatPrefix:      "heartbeat",
 		HeartbeatTTL:         m.cfg.HeartbeatTTL,
 		EmergencyGracePeriod: m.cfg.EmergencyGracePeriod,
-		Cooldown:             m.cfg.Assignment.MinRebalanceInterval,
+		Cooldown:             m.cfg.RebalanceCooldown,
 		RestartRatio:         m.cfg.RestartDetectionRatio,
 		ColdStartWindow:      m.cfg.ColdStartWindow,
 		PlannedScaleWindow:   m.cfg.PlannedScaleWindow,

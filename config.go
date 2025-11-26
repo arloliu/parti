@@ -6,21 +6,6 @@ import (
 	"time"
 )
 
-// AssignmentConfig controls rebalancing behavior.
-type AssignmentConfig struct {
-	// MinRebalanceInterval is the minimum time between rebalancing operations.
-	//
-	// Enforces rate limiting BEFORE stabilization windows to prevent thrashing
-	// during rapid topology changes. If a rebalance was completed <MinRebalanceInterval
-	// ago, new topology changes are deferred until the interval expires.
-	//
-	// Default: 10 seconds
-	// Recommendation: Should be <= PlannedScaleWindow for proper coordination
-	//
-	// Note: This was renamed from MinRebalanceInterval in v0.x for semantic clarity.
-	MinRebalanceInterval time.Duration `yaml:"minRebalanceInterval"`
-}
-
 // KVBucketConfig configures NATS JetStream KV bucket names and TTLs.
 type KVBucketConfig struct {
 	// StableIDBucket is the bucket name for stable worker ID claims.
@@ -280,31 +265,31 @@ func DegradedBehaviorPreset(preset string) (DegradedBehaviorConfig, error) {
 // ┌─────────────────────────────────────────────────────────────────────────┐
 // │ TIER 3: Rate Limiting - How often we can rebalance                     │
 // ├─────────────────────────────────────────────────────────────────────────┤
-// │ • MinRebalanceInterval: 10s (configurable)                             │
+// │ • RebalanceCooldown: 10s (configurable)                                │
 // │   - Enforced BEFORE stabilization windows begin                        │
 // │   - Prevents thrashing during rapid successive changes                 │
-// │   - If triggered <MinRebalanceInterval after last rebalance, defer     │
+// │   - If triggered <RebalanceCooldown after last rebalance, defer        │
 // └─────────────────────────────────────────────────────────────────────────┘
 //
 // Execution Flow Example:
 //
 //	T+0s:  Rebalance completes (lastRebalance = now)
 //	T+5s:  Worker joins
-//	       ├─ Check: 5s < 10s MinRebalanceInterval? YES
+//	       ├─ Check: 5s < 10s RebalanceCooldown? YES
 //	       └─ Action: Defer (no state change, check again later)
-//	T+10s: MinRebalanceInterval expires
+//	T+10s: RebalanceCooldown expires
 //	       ├─ Action: Enter Scaling state
 //	       └─ Start: 10s PlannedScaleWindow (Tier 2)
 //	T+20s: Stabilization complete
 //	       ├─ Action: Transition to Rebalancing state
 //	       └─ Action: Calculate and publish assignments
 //	T+25s: Another worker joins
-//	       ├─ Check: 5s < 10s MinRebalanceInterval? YES
+//	       ├─ Check: 5s < 10s RebalanceCooldown? YES
 //	       └─ Action: Defer to T+30s
 //	T+30s: Rate limit expires, cycle repeats
 //
 // Configuration Constraints:
-//   - MinRebalanceInterval <= PlannedScaleWindow (recommended)
+//   - RebalanceCooldown <= PlannedScaleWindow (recommended)
 //   - ColdStartWindow >= PlannedScaleWindow (cold start is slower)
 //   - EmergencyGracePeriod <= HeartbeatTTL (detection window)
 //
@@ -384,8 +369,17 @@ type Config struct {
 	// Recommended: 10 seconds.
 	ShutdownTimeout time.Duration `yaml:"shutdownTimeout"`
 
-	// Assignment controls partition assignment and rebalancing behavior.
-	Assignment AssignmentConfig `yaml:"assignment"`
+	// RebalanceCooldown is the minimum time between rebalancing operations.
+	//
+	// Enforces rate limiting BEFORE stabilization windows to prevent thrashing
+	// during rapid topology changes. If a rebalance was completed <RebalanceCooldown
+	// ago, new topology changes are deferred until the interval expires.
+	//
+	// Default: 10 seconds
+	// Recommendation: Should be <= PlannedScaleWindow for proper coordination
+	//
+	// Note: This was renamed from MinRebalanceInterval in v0.x for semantic clarity.
+	RebalanceCooldown time.Duration `yaml:"rebalanceCooldown"`
 
 	// KVBuckets controls NATS JetStream KV bucket configuration.
 	KVBuckets KVBucketConfig `yaml:"kvBuckets"`
@@ -434,9 +428,7 @@ func DefaultConfig() Config {
 		ElectionTimeout:       5 * time.Second,
 		StartupTimeout:        30 * time.Second,
 		ShutdownTimeout:       10 * time.Second,
-		Assignment: AssignmentConfig{
-			MinRebalanceInterval: 10 * time.Second,
-		},
+		RebalanceCooldown:     10 * time.Second,
 		KVBuckets: KVBucketConfig{
 			StableIDBucket:   "parti-stableid",
 			ElectionBucket:   "parti-election",
@@ -508,8 +500,8 @@ func SetDefaults(cfg *Config) {
 	if cfg.ShutdownTimeout == 0 {
 		cfg.ShutdownTimeout = defaults.ShutdownTimeout
 	}
-	if cfg.Assignment.MinRebalanceInterval == 0 {
-		cfg.Assignment.MinRebalanceInterval = defaults.Assignment.MinRebalanceInterval
+	if cfg.RebalanceCooldown == 0 {
+		cfg.RebalanceCooldown = defaults.RebalanceCooldown
 	}
 	if cfg.KVBuckets.StableIDBucket == "" {
 		cfg.KVBuckets.StableIDBucket = defaults.KVBuckets.StableIDBucket
@@ -634,10 +626,10 @@ func SetDefaults(cfg *Config) {
 //   - HeartbeatTTL >= 2 * HeartbeatInterval (allow 1 missed heartbeat)
 //   - WorkerIDTTL >= 3 * HeartbeatInterval (stable ID renewal)
 //   - WorkerIDTTL >= HeartbeatTTL (ID must outlive heartbeat)
-//   - MinRebalanceInterval > 0 (prevent thrashing)
+//   - RebalanceCooldown > 0 (prevent thrashing)
 //   - ColdStartWindow >= PlannedScaleWindow (cold start is slower)
-//   - MinRebalanceInterval <= PlannedScaleWindow (rate limit coordination)
-//   - MinRebalanceInterval <= ColdStartWindow (rate limit coordination)
+//   - RebalanceCooldown <= PlannedScaleWindow (rate limit coordination)
+//   - RebalanceCooldown <= ColdStartWindow (rate limit coordination)
 //   - EmergencyGracePeriod <= HeartbeatTTL (detection window)
 //
 // Returns:
@@ -667,9 +659,9 @@ func (cfg *Config) Validate() error { //nolint:cyclop
 		)
 	}
 
-	// Rule 4: MinRebalanceInterval sanity
-	if cfg.Assignment.MinRebalanceInterval <= 0 {
-		return fmt.Errorf("MinRebalanceInterval must be > 0, got %v", cfg.Assignment.MinRebalanceInterval)
+	// Rule 4: RebalanceCooldown sanity
+	if cfg.RebalanceCooldown <= 0 {
+		return fmt.Errorf("RebalanceCooldown must be > 0, got %v", cfg.RebalanceCooldown)
 	}
 
 	// Rule 5: Stabilization windows
@@ -680,18 +672,18 @@ func (cfg *Config) Validate() error { //nolint:cyclop
 		)
 	}
 
-	// Rule 6: MinRebalanceInterval vs windows (recommended)
-	if cfg.Assignment.MinRebalanceInterval > cfg.ColdStartWindow {
+	// Rule 6: RebalanceCooldown vs windows (recommended)
+	if cfg.RebalanceCooldown > cfg.ColdStartWindow {
 		return fmt.Errorf(
-			"MinRebalanceInterval (%v) should not exceed ColdStartWindow (%v)",
-			cfg.Assignment.MinRebalanceInterval, cfg.ColdStartWindow,
+			"RebalanceCooldown (%v) should not exceed ColdStartWindow (%v)",
+			cfg.RebalanceCooldown, cfg.ColdStartWindow,
 		)
 	}
 
-	if cfg.Assignment.MinRebalanceInterval > cfg.PlannedScaleWindow {
+	if cfg.RebalanceCooldown > cfg.PlannedScaleWindow {
 		return fmt.Errorf(
-			"MinRebalanceInterval (%v) should not exceed PlannedScaleWindow (%v) for proper coordination",
-			cfg.Assignment.MinRebalanceInterval, cfg.PlannedScaleWindow,
+			"RebalanceCooldown (%v) should not exceed PlannedScaleWindow (%v) for proper coordination",
+			cfg.RebalanceCooldown, cfg.PlannedScaleWindow,
 		)
 	}
 
@@ -815,11 +807,11 @@ func (cfg *Config) ValidateWithWarnings(logger Logger) {
 		)
 	}
 
-	// Warn if MinRebalanceInterval is very short
-	if cfg.Assignment.MinRebalanceInterval < 5*time.Second {
+	// Warn if RebalanceCooldown is very short
+	if cfg.RebalanceCooldown < 5*time.Second {
 		logger.Warn(
-			"MinRebalanceInterval is very short, may cause frequent rebalancing",
-			"cooldown", cfg.Assignment.MinRebalanceInterval,
+			"RebalanceCooldown is very short, may cause frequent rebalancing",
+			"cooldown", cfg.RebalanceCooldown,
 			"recommended", "10s or higher",
 		)
 	}
@@ -862,12 +854,12 @@ func TestConfig() Config {
 	cfg := DefaultConfig()
 
 	// Fast timings for test execution (10-100x faster)
-	cfg.Assignment.MinRebalanceInterval = 100 * time.Millisecond // 100x faster
-	cfg.ColdStartWindow = 1 * time.Second                        // 30x faster
-	cfg.PlannedScaleWindow = 500 * time.Millisecond              // 20x faster
-	cfg.HeartbeatInterval = 500 * time.Millisecond               // 4x faster
-	cfg.HeartbeatTTL = 1500 * time.Millisecond                   // 4x faster
-	cfg.WorkerIDTTL = 5 * time.Second                            // 6x faster
+	cfg.RebalanceCooldown = 100 * time.Millisecond  // 100x faster
+	cfg.ColdStartWindow = 1 * time.Second           // 30x faster
+	cfg.PlannedScaleWindow = 500 * time.Millisecond // 20x faster
+	cfg.HeartbeatInterval = 500 * time.Millisecond  // 4x faster
+	cfg.HeartbeatTTL = 1500 * time.Millisecond      // 4x faster
+	cfg.WorkerIDTTL = 5 * time.Second               // 6x faster
 
 	return cfg
 }

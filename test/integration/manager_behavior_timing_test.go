@@ -727,15 +727,15 @@ func TestScenario_RapidScaling_StabilizationWindows(t *testing.T) {
 	defer cleanup()
 
 	// Configure for rapid scaling scenario
-	// Key insight: MinRebalanceInterval should be longer than the time to add all workers
+	// Key insight: RebalanceCooldown should be longer than the time to add all workers
 	// to ensure they are batched into a single rebalance after stabilization
 	// Use TimingProfile for consistent rapid scaling semantics.
 	cfg := testutil.NewConfigFromProfile(testutil.TimingProfile{
-		HeartbeatInterval:    500 * time.Millisecond,
-		TTLMultiplier:        3.0, // 1.5s TTL
-		ColdStartWindow:      5 * time.Second,
-		PlannedScaleWindow:   3 * time.Second,
-		MinRebalanceInterval: 3 * time.Second,
+		HeartbeatInterval:  500 * time.Millisecond,
+		TTLMultiplier:      3.0, // 1.5s TTL
+		ColdStartWindow:    5 * time.Second,
+		PlannedScaleWindow: 3 * time.Second,
+		RebalanceCooldown:  3 * time.Second,
 	})
 
 	// Create cluster with 12 partitions
@@ -837,12 +837,12 @@ func TestScenario_SlowHeartbeats_NearExpiryBoundary(t *testing.T) {
 	// Configure with tight heartbeat timing
 	// Timing profile representing slow-but-valid heartbeat scenario.
 	cfg := testutil.NewConfigFromProfile(testutil.TimingProfile{
-		HeartbeatInterval:    1 * time.Second,
-		TTLMultiplier:        3.0, // 3s TTL
-		GraceMultiplier:      2.0, // 2s grace
-		ColdStartWindow:      5 * time.Second,
-		PlannedScaleWindow:   3 * time.Second,
-		MinRebalanceInterval: 2 * time.Second,
+		HeartbeatInterval:  1 * time.Second,
+		TTLMultiplier:      3.0, // 3s TTL
+		GraceMultiplier:    2.0, // 2s grace
+		ColdStartWindow:    5 * time.Second,
+		PlannedScaleWindow: 3 * time.Second,
+		RebalanceCooldown:  2 * time.Second,
 	})
 
 	cluster := testutil.NewWorkerCluster(t, nc, 6)
@@ -902,10 +902,10 @@ func TestScenario_ConcurrentLeaderElection_RaceCondition(t *testing.T) {
 
 	// Profile emphasizing election contention while preserving batching invariants.
 	cfg := testutil.NewConfigFromProfile(testutil.TimingProfile{
-		ElectionTimeout:      2 * time.Second,
-		ColdStartWindow:      5 * time.Second,
-		PlannedScaleWindow:   3 * time.Second,
-		MinRebalanceInterval: 2 * time.Second,
+		ElectionTimeout:    2 * time.Second,
+		ColdStartWindow:    5 * time.Second,
+		PlannedScaleWindow: 3 * time.Second,
+		RebalanceCooldown:  2 * time.Second,
 	})
 
 	cluster := testutil.NewWorkerCluster(t, nc, 6)

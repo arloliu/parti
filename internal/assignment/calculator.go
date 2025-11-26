@@ -529,7 +529,7 @@ func (c *Calculator) pollForChanges(ctx context.Context) error {
 //
 // Implements three-tier timing model:
 //  1. Detection Speed (Tier 1) - Watcher/polling notices changes quickly
-//  2. Rate Limiting (Tier 3) - Check MinRebalanceInterval FIRST to prevent thrashing
+//  2. Rate Limiting (Tier 3) - Check RebalanceCooldown FIRST to prevent thrashing
 //  3. Stabilization (Tier 2) - Apply window AFTER rate limit passes
 //
 // Tier ordering is critical:
@@ -594,7 +594,7 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 		return nil
 	}
 
-	// TIER 3: Rate limiting - Enforce MinRebalanceInterval FIRST
+	// TIER 3: Rate limiting - Enforce RebalanceCooldown FIRST
 	// This prevents thrashing during rapid successive changes
 	if cooldownActive {
 		lastRebalanceTime := c.publisher.LastRebalanceTime()

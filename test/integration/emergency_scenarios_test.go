@@ -34,7 +34,7 @@ func TestIntegration_Emergency_WorkerCrash_ReassignsPartitions(t *testing.T) {
 	cfg.HeartbeatInterval = 500 * time.Millisecond
 	cfg.HeartbeatTTL = 1500 * time.Millisecond // 3x interval
 	cfg.EmergencyGracePeriod = 1 * time.Second
-	cfg.Assignment.MinRebalanceInterval = 500 * time.Millisecond
+	cfg.RebalanceCooldown = 500 * time.Millisecond
 
 	// Create cluster with 3 workers and 12 partitions (4 per worker ideally)
 	cluster := testutil.NewWorkerCluster(t, nc, 12)
@@ -116,7 +116,7 @@ func TestIntegration_Emergency_CascadingFailures_HandlesGracefully(t *testing.T)
 	cfg.HeartbeatInterval = 500 * time.Millisecond
 	cfg.HeartbeatTTL = 1500 * time.Millisecond
 	cfg.EmergencyGracePeriod = 1 * time.Second
-	cfg.Assignment.MinRebalanceInterval = 500 * time.Millisecond
+	cfg.RebalanceCooldown = 500 * time.Millisecond
 
 	// Create cluster with 5 workers and 20 partitions
 	cluster := testutil.NewWorkerCluster(t, nc, 20)
@@ -203,7 +203,7 @@ func TestIntegration_Emergency_K8sRollingUpdate_NoDataLoss(t *testing.T) {
 	cfg.HeartbeatInterval = 500 * time.Millisecond
 	cfg.HeartbeatTTL = 2500 * time.Millisecond // Must be >= EmergencyGracePeriod
 	cfg.EmergencyGracePeriod = 2 * time.Second // Longer grace for rolling updates
-	cfg.Assignment.MinRebalanceInterval = 500 * time.Millisecond
+	cfg.RebalanceCooldown = 500 * time.Millisecond
 	cfg.ColdStartWindow = 3 * time.Second    // Same as planned scale window
 	cfg.PlannedScaleWindow = 3 * time.Second // Allow time for pods to restart
 
@@ -292,7 +292,7 @@ func TestIntegration_Emergency_SlowWorker_DoesNotBlockSystem(t *testing.T) {
 	cfg.HeartbeatInterval = 500 * time.Millisecond
 	cfg.HeartbeatTTL = 1500 * time.Millisecond
 	cfg.EmergencyGracePeriod = 1 * time.Second
-	cfg.Assignment.MinRebalanceInterval = 500 * time.Millisecond
+	cfg.RebalanceCooldown = 500 * time.Millisecond
 
 	cluster := testutil.NewWorkerCluster(t, nc, 12)
 	cluster.Config = cfg

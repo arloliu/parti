@@ -729,7 +729,7 @@ type Config struct {
     ShutdownTimeout  time.Duration
 
     // Assignment Configuration
-    Assignment AssignmentConfig
+    RebalanceCooldown time.Duration
 
     // Handoff Configuration
     Handoff HandoffConfig
@@ -777,23 +777,6 @@ if err := cfg.Validate(); err != nil {
     log.Fatalf("Invalid config: %v", err)
 }
 ```
-
----
-
-### AssignmentConfig
-
-Controls rebalancing behavior.
-
-```go
-type AssignmentConfig struct {
-    MinRebalanceThreshold float64       // Min imbalance ratio (0.0-1.0)
-    MinRebalanceInterval  time.Duration // Min time between rebalances
-}
-```
-
-**Fields**:
-- `MinRebalanceThreshold`: Minimum partition imbalance ratio that triggers rebalancing (default: 0.15)
-- `MinRebalanceInterval`: Minimum time between rebalancing operations (default: 10s)
 
 ---
 

@@ -101,7 +101,7 @@ type Config struct {
     EmergencyGracePeriod time.Duration // Grace period before emergency (default: 1.5s)
 
     // Assignment Configuration
-    Assignment AssignmentConfig
+    RebalanceCooldown time.Duration // Min time between rebalances (default: 10s)
 
     // Handoff Configuration
     Handoff HandoffConfig

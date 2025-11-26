@@ -24,7 +24,7 @@ func TestDefaultConfig(t *testing.T) {
 	require.Equal(t, 5*time.Second, cfg.ElectionTimeout)
 	require.Equal(t, 30*time.Second, cfg.StartupTimeout)
 	require.Equal(t, 10*time.Second, cfg.ShutdownTimeout)
-	require.Equal(t, 10*time.Second, cfg.Assignment.MinRebalanceInterval)
+	require.Equal(t, 10*time.Second, cfg.RebalanceCooldown)
 }
 
 func TestSetDefaults(t *testing.T) {
@@ -35,7 +35,7 @@ func TestSetDefaults(t *testing.T) {
 		require.Equal(t, "worker", cfg.WorkerIDPrefix)
 		require.Equal(t, 999, cfg.WorkerIDMax)
 		require.Equal(t, 30*time.Second, cfg.WorkerIDTTL)
-		require.Equal(t, 10*time.Second, cfg.Assignment.MinRebalanceInterval)
+		require.Equal(t, 10*time.Second, cfg.RebalanceCooldown)
 	})
 
 	t.Run("preserves custom values", func(t *testing.T) {
@@ -53,9 +53,7 @@ func TestSetDefaults(t *testing.T) {
 			ElectionTimeout:       10 * time.Second,
 			StartupTimeout:        60 * time.Second,
 			ShutdownTimeout:       20 * time.Second,
-			Assignment: AssignmentConfig{
-				MinRebalanceInterval:  15 * time.Second,
-			},
+			RebalanceCooldown:     15 * time.Second,
 		}
 		SetDefaults(&cfg)
 
@@ -73,7 +71,7 @@ func TestSetDefaults(t *testing.T) {
 		require.Equal(t, 10*time.Second, cfg.ElectionTimeout)
 		require.Equal(t, 60*time.Second, cfg.StartupTimeout)
 		require.Equal(t, 20*time.Second, cfg.ShutdownTimeout)
-		require.Equal(t, 15*time.Second, cfg.Assignment.MinRebalanceInterval)
+		require.Equal(t, 15*time.Second, cfg.RebalanceCooldown)
 	})
 
 	t.Run("applies partial defaults", func(t *testing.T) {
@@ -109,8 +107,7 @@ operationTimeout: 15s
 electionTimeout: 8s
 startupTimeout: 45s
 shutdownTimeout: 15s
-assignment:
-  minRebalanceInterval: 12s
+rebalanceCooldown: 12s
 `
 
 	var cfg Config
@@ -130,7 +127,7 @@ assignment:
 	require.Equal(t, 8*time.Second, cfg.ElectionTimeout)
 	require.Equal(t, 45*time.Second, cfg.StartupTimeout)
 	require.Equal(t, 15*time.Second, cfg.ShutdownTimeout)
-	require.Equal(t, 12*time.Second, cfg.Assignment.MinRebalanceInterval)
+	require.Equal(t, 12*time.Second, cfg.RebalanceCooldown)
 }
 
 // TestConfig_DefaultsWithPartialYAML demonstrates using SetDefaults with partial config
@@ -156,7 +153,7 @@ heartbeatInterval: 5s
 	require.Equal(t, 999, cfg.WorkerIDMax)
 	require.Equal(t, 6*time.Second, cfg.HeartbeatTTL)
 	require.Equal(t, 30*time.Second, cfg.WorkerIDTTL)
-	require.Equal(t, 10*time.Second, cfg.Assignment.MinRebalanceInterval)
+	require.Equal(t, 10*time.Second, cfg.RebalanceCooldown)
 }
 
 func TestConfigValidate(t *testing.T) {
@@ -207,23 +204,23 @@ func TestConfigValidate(t *testing.T) {
 		require.Contains(t, err.Error(), "HeartbeatTTL")
 	})
 
-	t.Run("zero MinRebalanceInterval fails validation", func(t *testing.T) {
+	t.Run("zero RebalanceCooldown fails validation", func(t *testing.T) {
 		cfg := DefaultConfig()
-		cfg.Assignment.MinRebalanceInterval = 0
+		cfg.RebalanceCooldown = 0
 
 		err := cfg.Validate()
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "MinRebalanceInterval")
+		require.Contains(t, err.Error(), "RebalanceCooldown")
 		require.Contains(t, err.Error(), "> 0")
 	})
 
-	t.Run("negative MinRebalanceInterval fails validation", func(t *testing.T) {
+	t.Run("negative RebalanceCooldown fails validation", func(t *testing.T) {
 		cfg := DefaultConfig()
-		cfg.Assignment.MinRebalanceInterval = -5 * time.Second
+		cfg.RebalanceCooldown = -5 * time.Second
 
 		err := cfg.Validate()
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "MinRebalanceInterval")
+		require.Contains(t, err.Error(), "RebalanceCooldown")
 	})
 
 	t.Run("ColdStartWindow less than PlannedScaleWindow fails", func(t *testing.T) {
@@ -237,14 +234,14 @@ func TestConfigValidate(t *testing.T) {
 		require.Contains(t, err.Error(), "PlannedScaleWindow")
 	})
 
-	t.Run("MinRebalanceInterval exceeds ColdStartWindow fails", func(t *testing.T) {
+	t.Run("RebalanceCooldown exceeds ColdStartWindow fails", func(t *testing.T) {
 		cfg := DefaultConfig()
-		cfg.Assignment.MinRebalanceInterval = 40 * time.Second
+		cfg.RebalanceCooldown = 40 * time.Second
 		cfg.ColdStartWindow = 30 * time.Second
 
 		err := cfg.Validate()
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "MinRebalanceInterval")
+		require.Contains(t, err.Error(), "RebalanceCooldown")
 		require.Contains(t, err.Error(), "ColdStartWindow")
 	})
 
@@ -263,9 +260,7 @@ func TestConfigValidate(t *testing.T) {
 			StartupTimeout:        30 * time.Second,
 			ShutdownTimeout:       10 * time.Second,
 			RestartDetectionRatio: 0.5,
-			Assignment: AssignmentConfig{
-				MinRebalanceInterval:  5 * time.Second,
-			},
+			RebalanceCooldown:     5 * time.Second,
 			KVBuckets: KVBucketConfig{
 				StableIDBucket:   "parti-stableid",
 				ElectionBucket:   "parti-election",
@@ -297,9 +292,7 @@ func TestConfigValidate(t *testing.T) {
 			StartupTimeout:        30 * time.Second,
 			ShutdownTimeout:       10 * time.Second,
 			RestartDetectionRatio: 0.5,
-			Assignment: AssignmentConfig{
-				MinRebalanceInterval:  15 * time.Second,
-			},
+			RebalanceCooldown:     15 * time.Second,
 			KVBuckets: KVBucketConfig{
 				StableIDBucket:   "parti-stableid",
 				ElectionBucket:   "parti-election",
@@ -321,7 +314,7 @@ func TestTestConfig(t *testing.T) {
 	cfg := TestConfig()
 
 	// Verify fast timings
-	require.Equal(t, 100*time.Millisecond, cfg.Assignment.MinRebalanceInterval)
+	require.Equal(t, 100*time.Millisecond, cfg.RebalanceCooldown)
 	require.Equal(t, 1*time.Second, cfg.ColdStartWindow)
 	require.Equal(t, 500*time.Millisecond, cfg.PlannedScaleWindow)
 	require.Equal(t, 500*time.Millisecond, cfg.HeartbeatInterval)
