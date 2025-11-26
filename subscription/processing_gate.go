@@ -2,11 +2,13 @@ package subscription
 
 import (
 	"context"
+	"fmt"
 	"math/rand/v2"
 	"strings"
 	"time"
 
 	"github.com/arloliu/parti/types"
+	"github.com/creasty/defaults"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -16,17 +18,18 @@ type ProcessingGateConfig struct {
 	// Default: false (gate disabled).
 	Enabled bool
 
-	// AllowedStates defines which handoff states allow processing by the current owner.
-	// Default: [Stable].
+	// AllowedStates defines which handoff states permit message processing.
+	// If empty, defaults to [StateStable].
 	//
-	// Recommendation: Keep as [Stable] for strict exclusivity. Adding [Commit] improves
-	// throughput during handoffs but increases the risk of brief split-brain scenarios.
-	AllowedStates []types.HandoffState
+	// Common configurations:
+	//  - [StateStable]: Strict consistency (default). Messages only processed when ownership is stable.
+	//  - [StateStable, StateHandoff]: Higher availability. Allows processing during handoff.
+	AllowedStates []types.HandoffState `validate:"omitempty,min=1"` //nolint:revive
 
 	// WarmupDuration, when >0, enables a warm-up phase during which only
 	// WarmupAllowedStates are permitted. After the duration elapses, AllowedStates
 	// take effect for steady-state processing.
-	WarmupDuration time.Duration
+	WarmupDuration time.Duration `validate:"gte=0"`
 
 	// WarmupAllowedStates defines which states are permitted during the warm-up phase.
 	// If empty and WarmupDuration>0, defaults to Stable-only.
@@ -35,11 +38,11 @@ type ProcessingGateConfig struct {
 	// NakDelay is the base delay for NAK when the worker is not the owner or
 	// the state is disallowed.
 	// Default: 100ms.
-	NakDelay time.Duration
+	NakDelay time.Duration `default:"100ms" validate:"gte=0"`
 
 	// NakJitter is a fractional jitter in [0.0, 1.0] applied to NakDelay.
 	// Default: 0.0 (no jitter).
-	NakJitter float64
+	NakJitter float64 `validate:"gte=0,lte=1"`
 
 	// Debug enables verbose logging for NAK decisions (non-owner, disallowed state,
 	// unknown ownership). Only effective when a logger is configured.
@@ -50,28 +53,22 @@ type ProcessingGateConfig struct {
 	Metrics GateMetrics
 }
 
-// applyDefaults sets default values for unset fields. Does not modify AllowedStates if already provided.
-func (c *ProcessingGateConfig) applyDefaults() {
-	if c == nil {
-		return
+// applyDefaults sets default values for the configuration.
+func (c *ProcessingGateConfig) applyDefaults() error {
+	if err := defaults.Set(c); err != nil {
+		return fmt.Errorf("failed to set defaults: %w", err)
 	}
-	if c.NakDelay <= 0 {
-		c.NakDelay = 100 * time.Millisecond
-	}
-	if c.NakJitter < 0 {
-		c.NakJitter = 0
-	}
-	if c.NakJitter > 1 {
-		c.NakJitter = 1
-	}
+
 	if len(c.AllowedStates) == 0 {
-		// Default to Stable only for safety. Commit is disallowed by default to ensure
-		// strict exclusivity until the handoff is fully stabilized.
 		c.AllowedStates = []types.HandoffState{types.HandoffStateStable}
 	}
+
+	// Handle complex defaults that cannot be expressed as tags
 	if c.WarmupDuration > 0 && len(c.WarmupAllowedStates) == 0 {
 		c.WarmupAllowedStates = []types.HandoffState{types.HandoffStateStable}
 	}
+
+	return nil
 }
 
 // processingGate wraps a MessageHandler and enforces exclusive processing based on ownership.
@@ -97,10 +94,12 @@ func newProcessingGate(
 	resolver types.OwnershipResolver,
 	cfg ProcessingGateConfig,
 	logger types.Logger,
-) *processingGate {
+) (*processingGate, error) {
 	prefix, suffix, _ := parseSubjectTemplateParts(subjectTemplate)
 	// Apply defaults via method (copy since cfg passed by value)
-	cfg.applyDefaults()
+	if err := cfg.applyDefaults(); err != nil {
+		return nil, fmt.Errorf("apply defaults: %w", err)
+	}
 
 	// Build allowed-state maps for O(1) lookups
 	allowedWarmup := make(map[types.HandoffState]struct{}, len(cfg.WarmupAllowedStates))
@@ -126,7 +125,7 @@ func newProcessingGate(
 		g.warmupUntil = time.Now().Add(cfg.WarmupDuration)
 	}
 
-	return g
+	return g, nil
 }
 
 // Wrap returns a MessageHandler that applies gate policy before calling the base handler.

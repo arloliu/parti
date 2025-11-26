@@ -42,7 +42,7 @@ func TestWorkerConsumer_ConcurrentAddRemove(t *testing.T) {
 		SubjectTemplate: "conc.{{.PartitionID}}",
 		BatchSize:       1,
 	}
-	SetDefaults(&cfg)
+	require.NoError(t, cfg.SetDefaults())
 
 	wc := &WorkerConsumer{
 		js:          js,
@@ -112,7 +112,7 @@ func TestWorkerConsumer_FlipSetsWithClose(t *testing.T) {
 		SubjectTemplate: "flip.{{.PartitionID}}",
 		BatchSize:       1,
 	}
-	SetDefaults(&cfg)
+	require.NoError(t, cfg.SetDefaults())
 
 	wc := &WorkerConsumer{
 		js:          js,

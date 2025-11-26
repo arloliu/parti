@@ -74,25 +74,17 @@ func NewWorkerConsumer(js jetstream.JetStream, cfg WorkerConsumerConfig, handler
 	if js == nil {
 		return nil, errors.New("JetStream context is required")
 	}
-	if cfg.StreamName == "" {
-		return nil, errors.New("stream name is required")
-	}
-	if cfg.ConsumerPrefix == "" {
-		return nil, errors.New("consumer prefix is required")
-	}
-	for _, r := range cfg.ConsumerPrefix {
-		if !isAllowedConsumerRune(r) {
-			return nil, fmt.Errorf("consumer prefix %q contains invalid characters (allowed: a-z, A-Z, 0-9, -, _)", cfg.ConsumerPrefix)
-		}
-	}
-	if cfg.SubjectTemplate == "" {
-		return nil, errors.New("subject template is required")
-	}
 	if handler == nil {
 		return nil, errors.New("message handler is required")
 	}
 
-	SetDefaults(&cfg)
+	if err := cfg.SetDefaults(); err != nil {
+		return nil, fmt.Errorf("failed to set defaults: %w", err)
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
 
 	// parse subject template
 	tmpl, err := template.New("subject").Parse(cfg.SubjectTemplate)
@@ -216,8 +208,8 @@ func (wc *WorkerConsumer) runSubjectLoop(ctx context.Context, subject, partition
 		wc.logger.Debug("subject loop stopped", "subject", subject)
 		close(done)
 	}()
-	batch := defaultInt(wc.config.BatchSize, DefaultBatchSize)
-	expiry := defaultDuration(wc.config.FetchTimeout, DefaultFetchTimeout)
+	batch := wc.config.BatchSize
+	expiry := wc.config.FetchTimeout
 
 	for {
 		if ctx.Err() != nil {
@@ -439,7 +431,10 @@ func (wc *WorkerConsumer) addSubjectLoop(ctx context.Context, workerID string, s
 	)
 	effectiveHandler := wc.handler
 	if resolver := wc.getEffectiveResolver(); wc.config.ProcessingGate != nil && wc.config.ProcessingGate.Enabled && resolver != nil {
-		g := newProcessingGate(workerID, wc.config.SubjectTemplate, resolver, *wc.config.ProcessingGate, wc.logger)
+		g, err := newProcessingGate(workerID, wc.config.SubjectTemplate, resolver, *wc.config.ProcessingGate, wc.logger)
+		if err != nil {
+			return fmt.Errorf("create processing gate: %w", err)
+		}
 		effectiveHandler = g.Wrap(wc.handler)
 	}
 
@@ -565,7 +560,7 @@ func (wc *WorkerConsumer) ensurePerSubjectConsumer(ctx context.Context, durable 
 		AckWait:           wc.config.AckWait,
 		MaxDeliver:        wc.config.MaxDeliver,
 		InactiveThreshold: wc.config.InactiveThreshold,
-		MaxWaiting:        defaultInt(wc.config.MaxWaiting, DefaultMaxWaiting),
+		MaxWaiting:        wc.config.MaxWaiting,
 		MaxAckPending:     wc.config.MaxAckPending,
 	}
 

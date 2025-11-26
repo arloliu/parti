@@ -48,7 +48,7 @@ func TestWorkerConsumer_UpdateAndPullLoop_ProcessesMessages(t *testing.T) {
 		SubjectTemplate: "events.{{.PartitionID}}",
 		BatchSize:       2,
 	}
-	SetDefaults(&cfg)
+	require.NoError(t, cfg.SetDefaults())
 
 	// Parse template for direct construction path (avoid New helper dependencies)
 	tmpl, err := template.New("subject").Parse(cfg.SubjectTemplate)
@@ -146,7 +146,7 @@ func TestWorkerConsumer_PullGating_SuppressesUntilOwnerStable(t *testing.T) {
 			BatchMaxItems:       64,
 		},
 	}
-	SetDefaults(&cfg)
+	require.NoError(t, cfg.SetDefaults())
 	tmpl, err := template.New("subject").Parse(cfg.SubjectTemplate)
 	require.NoError(t, err)
 
@@ -245,7 +245,7 @@ func TestWorkerConsumer_IteratorEscalation_BurstTriggersMetric(t *testing.T) {
 	cfg.IteratorEscalationWindow = 200 * time.Millisecond
 	cfg.IteratorEscalationThreshold = 3
 	cfg.Metrics = &m
-	SetDefaults(&cfg)
+	require.NoError(t, cfg.SetDefaults())
 	tmpl, _ := template.New("subject").Parse(cfg.SubjectTemplate)
 	wc := &WorkerConsumer{js: js, config: cfg, logger: cfg.Logger, handler: MessageHandlerFunc(func(context.Context, jetstream.Msg) error { return nil }), subjects: make(map[string]*subjectLoop), iterFactory: iterFactory, subjectTemplate: tmpl}
 
@@ -277,7 +277,7 @@ func TestWorkerConsumer_SubjectRemoval_InactiveGCGarbageCollects(t *testing.T) {
 
 	cfg := WorkerConsumerConfig{StreamName: "GC", ConsumerPrefix: "wc2", SubjectTemplate: "gc.{{.PartitionID}}"}
 	cfg.InactiveThreshold = 300 * time.Millisecond
-	SetDefaults(&cfg)
+	require.NoError(t, cfg.SetDefaults())
 	tmpl, _ := template.New("subject").Parse(cfg.SubjectTemplate)
 	wc := &WorkerConsumer{js: js, config: cfg, logger: cfg.Logger, handler: MessageHandlerFunc(func(context.Context, jetstream.Msg) error { return nil }), subjects: make(map[string]*subjectLoop), iterFactory: defaultIterFactory, subjectTemplate: tmpl}
 
@@ -331,7 +331,7 @@ func TestWorkerConsumer_DualWorkerPullGating_OnlyOwnerPulls(t *testing.T) {
 			BatchMaxItems:       64,
 		},
 	}
-	SetDefaults(&cfg)
+	require.NoError(t, cfg.SetDefaults())
 
 	tmpl, err := template.New("subject").Parse(cfg.SubjectTemplate)
 	require.NoError(t, err)
@@ -431,7 +431,7 @@ func TestWorkerConsumer_SubscribesAllPartitions_AfterAssignment(t *testing.T) {
 	require.NoError(t, err)
 
 	cfg := WorkerConsumerConfig{StreamName: "SUBALL", ConsumerPrefix: "wc2", SubjectTemplate: "suball.{{.PartitionID}}", BatchSize: 2}
-	SetDefaults(&cfg)
+	require.NoError(t, cfg.SetDefaults())
 	tmpl, err := template.New("subject").Parse(cfg.SubjectTemplate)
 	require.NoError(t, err)
 
@@ -515,7 +515,7 @@ func TestWorkerConsumer_ManualAck_MaxAckPending_ThrottlesDelivery(t *testing.T) 
 		BatchSize:             1,
 		FetchTimeout:          500 * time.Millisecond,
 	}
-	SetDefaults(&cfg)
+	require.NoError(t, cfg.SetDefaults())
 
 	tmpl, err := template.New("subject").Parse(cfg.SubjectTemplate)
 	require.NoError(t, err)
@@ -639,7 +639,7 @@ func TestWorkerConsumer_UpdateRemovesSubject_StopsLoopKeepsDurable(t *testing.T)
 	require.NoError(t, err)
 
 	cfg := WorkerConsumerConfig{StreamName: "STOP", ConsumerPrefix: "wc2", SubjectTemplate: "stop.{{.PartitionID}}"}
-	SetDefaults(&cfg)
+	require.NoError(t, cfg.SetDefaults())
 	tmpl, err := template.New("subject").Parse(cfg.SubjectTemplate)
 	require.NoError(t, err)
 

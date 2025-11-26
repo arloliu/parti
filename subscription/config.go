@@ -1,11 +1,14 @@
 package subscription
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/arloliu/parti/internal/logging"
 	"github.com/arloliu/parti/internal/metrics"
 	"github.com/arloliu/parti/types"
+	"github.com/creasty/defaults"
+	"github.com/go-playground/validator/v10"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -13,19 +16,19 @@ import (
 type RetryConfig struct {
 	// Backoff is the delay between retries for control-plane operations.
 	// Default: DefaultRetryBackoff (100ms).
-	Backoff time.Duration
+	Backoff time.Duration `default:"100ms" validate:"gte=0"`
 
 	// Max caps the jittered backoff.
 	// Default: DefaultRetryMax (5s).
-	Max time.Duration
+	Max time.Duration `default:"5s" validate:"gte=0,gtefield=Backoff"`
 
 	// Multiplier grows the backoff window for decorrelated jitter.
 	// Default: DefaultRetryMultiplier (1.6).
-	Multiplier float64
+	Multiplier float64 `default:"1.6" validate:"gte=1"`
 
 	// Base is the base backoff used for decorrelated jitter retries for control-plane ops.
 	// Default: DefaultRetryBase (200ms). If zero and Backoff is set, Base falls back to Backoff.
-	Base time.Duration
+	Base time.Duration `default:"200ms" validate:"gte=0"`
 
 	// Seed optionally seeds the jitter RNG for deterministic tests; when zero, a random seed is used.
 	Seed int64
@@ -44,21 +47,21 @@ type ResolverConfig struct {
 	// will automatically get/create the KV bucket and start a claim resolver.
 	// Defaults to "parti-handoff" if empty and gate is enabled.
 	// Should match the HandoffBucket in parti.Config.KVBuckets for consistency.
-	HandoffBucketName string
+	HandoffBucketName string `default:"parti-handoff"`
 
 	// HandoffClaimsPrefix is the key prefix for handoff claims in the KV bucket.
 	// Defaults to "claims/" if empty and gate is enabled.
-	HandoffClaimsPrefix string
+	HandoffClaimsPrefix string `default:"claims/"`
 
 	// BatchWindow sets the resolver KV watch coalescing window for the
 	// auto-created claim-based resolver when ProcessingGate is enabled.
 	// If zero, a default (5ms) is used. Ignored when a custom OwnershipResolver is provided.
-	BatchWindow time.Duration
+	BatchWindow time.Duration `default:"5ms" validate:"gte=0"`
 
 	// BatchMaxItems caps the number of unique partition updates coalesced
 	// into a single apply. If zero, a default (1024) is used. Ignored when a custom
 	// OwnershipResolver is provided.
-	BatchMaxItems int
+	BatchMaxItems int `default:"1024" validate:"gt=0"`
 }
 
 // WorkerConsumerConfig configures the single durable per-worker consumer helper.
@@ -72,18 +75,18 @@ type ResolverConfig struct {
 // sensible defaults via SetDefaults().
 type WorkerConsumerConfig struct {
 	// StreamName is the JetStream stream name where subjects live. Required.
-	StreamName string
+	StreamName string `validate:"required"`
 
 	// ConsumerPrefix is the prefix for the durable consumer name.
 	// It must contain only alphanumeric characters, dashes, or underscores.
 	// Required.
-	ConsumerPrefix string
+	ConsumerPrefix string `validate:"required,alphanum"`
 
 	// SubjectTemplate is a text/template used to build subjects from a
 	// partition. Available field: {{.PartitionID}} which equals partition.SubjectKey().
 	// Example: "work.{{.PartitionID}}" => work.source.us-east-1
 	// Required.
-	SubjectTemplate string
+	SubjectTemplate string `validate:"required"`
 
 	// Logger provides structured logging. Defaults to a no-op logger when nil.
 	Logger types.Logger
@@ -110,7 +113,7 @@ type WorkerConsumerConfig struct {
 	// exclusivity is required. Without this, ownership transitions may be "loose",
 	// resulting in brief periods where a partition is processed by a worker that
 	// is no longer the assigned owner (though duplicates are rare).
-	ProcessingGate *ProcessingGateConfig
+	ProcessingGate *ProcessingGateConfig `validate:"omitempty"` //nolint:revive
 
 	// Resolver configures the ownership resolver when ProcessingGate is enabled.
 	Resolver ResolverConfig
@@ -130,48 +133,48 @@ type WorkerConsumerConfig struct {
 
 	// DrainOnRemoveTimeout caps the drain wait per subject when DrainOnRemove is enabled.
 	// Default: 10s when zero.
-	DrainOnRemoveTimeout time.Duration
+	DrainOnRemoveTimeout time.Duration `default:"10s" validate:"gte=0"`
 
 	// AckWait is the time allowed for processing before redelivery.
 	// Default: DefaultAckWait (30s).
-	AckWait time.Duration
+	AckWait time.Duration `default:"30s" validate:"gt=0"`
 
 	// MaxDeliver is the maximum redelivery attempts before moving to DLQ (if configured).
 	// Default: DefaultMaxDeliver (-1 = unlimited attempts; relies on server default/unlimited behavior).
-	MaxDeliver int
+	MaxDeliver int `default:"-1" validate:"gte=-1"`
 
 	// BatchSize is the max number of messages to pull per iterator request.
 	// Default: DefaultBatchSize (1).
-	BatchSize int
+	BatchSize int `default:"1" validate:"gt=0"`
 
 	// FetchTimeout is the max time to wait when pulling a batch.
 	// Default: DefaultFetchTimeout (5s).
-	FetchTimeout time.Duration
+	FetchTimeout time.Duration `default:"5s" validate:"gt=0"`
 
 	// MaxWaiting caps outstanding pull requests for each per-subject durable.
 	// Default: DefaultMaxWaiting (2).
-	MaxWaiting int
+	MaxWaiting int `default:"2" validate:"gt=0"`
 
 	// MaxAckPending limits the number of in-flight unacknowledged messages the server will allow
 	// for each per-subject durable. If zero, the server default is used. This is most useful when using
 	// ManualAck and background processing to cap concurrent in-flight work at the server layer.
-	MaxAckPending int
+	MaxAckPending int `validate:"gte=0"`
 
 	// MaxConcurrentSubjects caps the total number of per-subject consumers/loops.
 	// When exceeded, additional subjects are skipped with a warning and metric increment.
-	MaxConcurrentSubjects int
+	MaxConcurrentSubjects int `validate:"gte=0"`
 
 	// AckPolicy controls JetStream ack policy. Defaults to AckExplicitPolicy.
 	AckPolicy jetstream.AckPolicy
 
 	// InactiveThreshold is how long an idle consumer is kept by the server before cleanup.
 	// Default: DefaultInactiveThreshold (24h).
-	InactiveThreshold time.Duration
+	InactiveThreshold time.Duration `default:"24h" validate:"gt=0"`
 
 	// PartitionRefreshMinInterval sets the minimum interval between forced claim refreshes
 	// per partition when pull gating is enabled. This throttles KV hits when many
 	// subjects are suppressed. Default: 500ms when zero.
-	PartitionRefreshMinInterval time.Duration
+	PartitionRefreshMinInterval time.Duration `default:"500ms" validate:"gt=0"`
 
 	// Retry configures backoff behavior for control-plane operations.
 	Retry RetryConfig
@@ -179,12 +182,12 @@ type WorkerConsumerConfig struct {
 	// IteratorEscalationWindow defines the sliding time window used to aggregate
 	// iterator failures for escalation detection. If zero, defaults to
 	// DefaultIteratorEscalationWindow.
-	IteratorEscalationWindow time.Duration
+	IteratorEscalationWindow time.Duration `default:"60s" validate:"gt=0"`
 
 	// IteratorEscalationThreshold is the number of iterator failures within the
 	// escalation window that triggers a single escalation (consumer refresh).
 	// If zero, defaults to DefaultIteratorEscalationThreshold.
-	IteratorEscalationThreshold int
+	IteratorEscalationThreshold int `default:"3" validate:"gt=0"`
 
 	// AllowWorkerIDChange controls whether workerID changes are allowed after initialization.
 	// Default: false (immutable once set). Intended for controlled migrations only.
@@ -224,112 +227,47 @@ func DefaultWorkerConsumerConfig() WorkerConsumerConfig {
 	}
 }
 
-// SetDefaults applies default values to zero-valued configuration fields.
-func SetDefaults(cfg *WorkerConsumerConfig) {
-	defaults := DefaultWorkerConsumerConfig()
-
-	cfg.AckPolicy = defaultAckPolicy(cfg.AckPolicy)
-	cfg.AckWait = defaultDuration(cfg.AckWait, defaults.AckWait)
-	cfg.MaxDeliver = defaultInt(cfg.MaxDeliver, defaults.MaxDeliver)
-	cfg.InactiveThreshold = defaultDuration(cfg.InactiveThreshold, defaults.InactiveThreshold)
-	cfg.BatchSize = defaultInt(cfg.BatchSize, defaults.BatchSize)
-	cfg.MaxWaiting = defaultInt(cfg.MaxWaiting, defaults.MaxWaiting)
-	cfg.FetchTimeout = defaultDuration(cfg.FetchTimeout, defaults.FetchTimeout)
-
-	// Retry defaults
-	cfg.Retry.Backoff = defaultDuration(cfg.Retry.Backoff, defaults.Retry.Backoff)
-	cfg.Retry.Base = defaultRetryBase(cfg.Retry.Base, cfg.Retry.Backoff, defaults.Retry.Base)
-	cfg.Retry.Multiplier = defaultFloat(cfg.Retry.Multiplier, defaults.Retry.Multiplier)
-	cfg.Retry.Max = defaultDuration(cfg.Retry.Max, defaults.Retry.Max)
-
-	cfg.IteratorEscalationWindow = defaultDuration(cfg.IteratorEscalationWindow, defaults.IteratorEscalationWindow)
-	cfg.IteratorEscalationThreshold = defaultInt(cfg.IteratorEscalationThreshold, defaults.IteratorEscalationThreshold)
-
-	// Throttle default for resolver refreshes
-	if cfg.PartitionRefreshMinInterval <= 0 {
-		cfg.PartitionRefreshMinInterval = defaults.PartitionRefreshMinInterval
+// SetDefaults sets default values for the configuration.
+func (c *WorkerConsumerConfig) SetDefaults() error {
+	if err := defaults.Set(c); err != nil {
+		return fmt.Errorf("failed to set defaults: %w", err)
 	}
 
-	if cfg.Logger == nil {
-		cfg.Logger = logging.NewNop()
+	if c.Logger == nil {
+		c.Logger = logging.NewNop()
 	}
-	if cfg.Metrics == nil {
-		cfg.Metrics = metrics.NewNop()
+	if c.Metrics == nil {
+		c.Metrics = metrics.NewNop()
 	}
 
-	cfg.applyProcessingGateDefaults()
-}
-
-func (cfg *WorkerConsumerConfig) applyProcessingGateDefaults() {
-	// ProcessingGate defaults when provided
-	if cfg.ProcessingGate != nil {
-		cfg.ProcessingGate.applyDefaults()
-
-		// Apply bucket and prefix defaults when gate is enabled and no custom resolver
-		if cfg.ProcessingGate.Enabled && cfg.Resolver.OwnershipResolver == nil {
-			defaults := DefaultWorkerConsumerConfig()
-			if cfg.Resolver.HandoffBucketName == "" {
-				cfg.Resolver.HandoffBucketName = defaults.Resolver.HandoffBucketName
-			}
-			if cfg.Resolver.HandoffClaimsPrefix == "" {
-				cfg.Resolver.HandoffClaimsPrefix = defaults.Resolver.HandoffClaimsPrefix
-			}
+	// Apply defaults for nested structs
+	if c.ProcessingGate != nil {
+		if err := c.ProcessingGate.applyDefaults(); err != nil {
+			return err
 		}
 
 		// Enable pull gating by default to ensure exclusivity with per-subject durables,
 		// regardless of resolver type, unless explicitly disabled by the caller.
-		if cfg.ProcessingGate.Enabled && !cfg.PullGatingEnabled {
-			cfg.PullGatingEnabled = true
-		}
-
-		// Drain defaults
-		if cfg.DrainOnRemoveTimeout == 0 {
-			cfg.DrainOnRemoveTimeout = 10 * time.Second
+		if c.ProcessingGate.Enabled && !c.PullGatingEnabled {
+			c.PullGatingEnabled = true
 		}
 	}
+
+	return nil
 }
 
-// helper defaults (unexported)
-func defaultAckPolicy(p jetstream.AckPolicy) jetstream.AckPolicy {
-	if p == 0 {
-		return jetstream.AckExplicitPolicy
+// Validate checks configuration constraints.
+func (c *WorkerConsumerConfig) Validate() error {
+	validate := validator.New(validator.WithRequiredStructEnabled())
+	if err := validate.Struct(c); err != nil {
+		return fmt.Errorf("configuration validation failed: %w", err)
 	}
 
-	return p
-}
-
-func defaultDuration(v, def time.Duration) time.Duration {
-	if v == 0 {
-		return def
-	}
-
-	return v
-}
-
-func defaultInt(v, def int) int {
-	if v == 0 {
-		return def
-	}
-
-	return v
-}
-
-func defaultFloat(v, def float64) float64 {
-	if v == 0 {
-		return def
-	}
-
-	return v
-}
-
-func defaultRetryBase(base, backoff, def time.Duration) time.Duration {
-	if base == 0 {
-		if backoff > 0 {
-			return backoff
+	for _, r := range c.ConsumerPrefix {
+		if !isAllowedConsumerRune(r) {
+			return fmt.Errorf("consumer prefix %q contains invalid characters (allowed: a-z, A-Z, 0-9, -, _)", c.ConsumerPrefix)
 		}
-
-		return def
 	}
 
-	return base
+	return nil
 }

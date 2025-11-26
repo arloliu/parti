@@ -173,6 +173,7 @@ func TestConfigValidate(t *testing.T) {
 		cfg := DefaultConfig()
 		cfg.HeartbeatTTL = 1 * time.Second
 		cfg.HeartbeatInterval = 2 * time.Second
+		cfg.EmergencyGracePeriod = 500 * time.Millisecond // Ensure this passes validation
 
 		err := cfg.Validate()
 		require.Error(t, err)
@@ -183,8 +184,8 @@ func TestConfigValidate(t *testing.T) {
 	t.Run("WorkerIDTTL less than 3x HeartbeatInterval fails", func(t *testing.T) {
 		cfg := DefaultConfig()
 		cfg.HeartbeatInterval = 5 * time.Second
-		cfg.WorkerIDTTL = 10 * time.Second // Less than 3x (15s)
-		cfg.HeartbeatTTL = 15 * time.Second
+		cfg.WorkerIDTTL = 12 * time.Second  // Less than 3x (15s)
+		cfg.HeartbeatTTL = 10 * time.Second // Ensure WorkerIDTTL >= HeartbeatTTL
 
 		err := cfg.Validate()
 		require.Error(t, err)
@@ -201,7 +202,7 @@ func TestConfigValidate(t *testing.T) {
 		err := cfg.Validate()
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "WorkerIDTTL")
-		require.Contains(t, err.Error(), "HeartbeatTTL")
+		require.Contains(t, err.Error(), "gtefield")
 	})
 
 	t.Run("zero RebalanceCooldown fails validation", func(t *testing.T) {
@@ -211,7 +212,7 @@ func TestConfigValidate(t *testing.T) {
 		err := cfg.Validate()
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "RebalanceCooldown")
-		require.Contains(t, err.Error(), "> 0")
+		require.Contains(t, err.Error(), "gt")
 	})
 
 	t.Run("negative RebalanceCooldown fails validation", func(t *testing.T) {
@@ -221,6 +222,7 @@ func TestConfigValidate(t *testing.T) {
 		err := cfg.Validate()
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "RebalanceCooldown")
+		require.Contains(t, err.Error(), "gt")
 	})
 
 	t.Run("ColdStartWindow less than PlannedScaleWindow fails", func(t *testing.T) {
@@ -231,18 +233,53 @@ func TestConfigValidate(t *testing.T) {
 		err := cfg.Validate()
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "ColdStartWindow")
-		require.Contains(t, err.Error(), "PlannedScaleWindow")
+		require.Contains(t, err.Error(), "gtefield")
 	})
 
 	t.Run("RebalanceCooldown exceeds ColdStartWindow fails", func(t *testing.T) {
 		cfg := DefaultConfig()
 		cfg.RebalanceCooldown = 40 * time.Second
 		cfg.ColdStartWindow = 30 * time.Second
+		// Note: RebalanceCooldown also has ltefield=PlannedScaleWindow, which is 10s default.
+		// So 40s > 10s will fail on PlannedScaleWindow first or as well.
+		// But here we want to test ColdStartWindow constraint?
+		// Actually, RebalanceCooldown has `ltefield=PlannedScaleWindow`.
+		// It does NOT have `ltefield=ColdStartWindow` in the tags I added?
+		// Let's check config.go.
+		// RebalanceCooldown time.Duration `yaml:"rebalanceCooldown" default:"10s" validate:"gt=0,ltefield=PlannedScaleWindow"`
+		// It does NOT have ltefield=ColdStartWindow.
+		// So this test case might fail because I removed the manual check for ColdStartWindow?
+		// Wait, Rule 6 in manual validation had:
+		// if cfg.RebalanceCooldown > cfg.ColdStartWindow { ... }
+		// I removed this manual check.
+		// And I didn't add a tag for it.
+		// I should add `ltefield=ColdStartWindow`?
+		// But `validator` only supports one `ltefield`? No, it supports multiple tags.
+		// But `ltefield` takes one field. Can I chain them? `ltefield=PlannedScaleWindow,ltefield=ColdStartWindow`?
+		// I don't think so.
+		// So I should probably restore the manual check for ColdStartWindow if it's important.
+		// Or maybe `PlannedScaleWindow` is always <= `ColdStartWindow` (enforced by another rule), so `ltefield=PlannedScaleWindow` implies `ltefield=ColdStartWindow`.
+		// Yes, `ColdStartWindow >= PlannedScaleWindow`.
+		// So if `RebalanceCooldown <= PlannedScaleWindow`, then `RebalanceCooldown <= ColdStartWindow` is automatically true.
+		// So the check `RebalanceCooldown <= ColdStartWindow` is redundant if `RebalanceCooldown <= PlannedScaleWindow` is enforced.
+		// However, the test sets `RebalanceCooldown = 40s`, `ColdStartWindow = 30s`.
+		// `PlannedScaleWindow` is default 10s.
+		// So 40s > 10s. It fails on `PlannedScaleWindow`.
+		// The test expects failure on `ColdStartWindow`.
+		// But since the constraint is redundant, maybe I should just update the test to expect failure on `PlannedScaleWindow` or just failure.
+		// Or I can remove this test case as redundant.
+		// But wait, what if `PlannedScaleWindow` is large?
+		// If `PlannedScaleWindow` = 50s, `ColdStartWindow` = 60s. `RebalanceCooldown` = 55s.
+		// `RebalanceCooldown <= PlannedScaleWindow` (55 <= 50) -> False. Fails.
+		// So `RebalanceCooldown` must be <= `PlannedScaleWindow`.
+		// So it is always <= `ColdStartWindow`.
+		// So the manual check was indeed redundant if the other check is present.
+		// So I will update the test to expect failure, but maybe not specifically on "ColdStartWindow".
+		// Actually, I'll just remove the specific error message check for "ColdStartWindow" and check for "RebalanceCooldown".
 
 		err := cfg.Validate()
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "RebalanceCooldown")
-		require.Contains(t, err.Error(), "ColdStartWindow")
 	})
 
 	t.Run("valid custom config with tight timings", func(t *testing.T) {
@@ -353,8 +390,8 @@ func TestConfig_ValidateDegradedAlerts(t *testing.T) {
 
 		err := cfg.Validate()
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "warn threshold")
-		require.Contains(t, err.Error(), "info threshold")
+		require.Contains(t, err.Error(), "WarnThreshold")
+		require.Contains(t, err.Error(), "gtefield")
 	})
 
 	t.Run("error when error < warn", func(t *testing.T) {
@@ -364,8 +401,8 @@ func TestConfig_ValidateDegradedAlerts(t *testing.T) {
 
 		err := cfg.Validate()
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "error threshold")
-		require.Contains(t, err.Error(), "warn threshold")
+		require.Contains(t, err.Error(), "ErrorThreshold")
+		require.Contains(t, err.Error(), "gtefield")
 	})
 
 	t.Run("error when critical < error", func(t *testing.T) {
@@ -375,8 +412,8 @@ func TestConfig_ValidateDegradedAlerts(t *testing.T) {
 
 		err := cfg.Validate()
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "critical threshold")
-		require.Contains(t, err.Error(), "error threshold")
+		require.Contains(t, err.Error(), "CriticalThreshold")
+		require.Contains(t, err.Error(), "gtefield")
 	})
 
 	t.Run("error when alert interval is zero", func(t *testing.T) {
@@ -385,7 +422,8 @@ func TestConfig_ValidateDegradedAlerts(t *testing.T) {
 
 		err := cfg.Validate()
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "alert interval")
+		require.Contains(t, err.Error(), "AlertInterval")
+		require.Contains(t, err.Error(), "gt")
 	})
 
 	t.Run("error when alert interval is negative", func(t *testing.T) {
@@ -394,7 +432,8 @@ func TestConfig_ValidateDegradedAlerts(t *testing.T) {
 
 		err := cfg.Validate()
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "alert interval")
+		require.Contains(t, err.Error(), "AlertInterval")
+		require.Contains(t, err.Error(), "gt")
 	})
 }
 
@@ -419,7 +458,8 @@ func TestConfig_ValidateDegradedBehavior(t *testing.T) {
 
 		err := cfg.Validate()
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "enter threshold")
+		require.Contains(t, err.Error(), "EnterThreshold")
+		require.Contains(t, err.Error(), "gte")
 	})
 
 	t.Run("error when exit threshold is negative", func(t *testing.T) {
@@ -428,7 +468,8 @@ func TestConfig_ValidateDegradedBehavior(t *testing.T) {
 
 		err := cfg.Validate()
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "exit threshold")
+		require.Contains(t, err.Error(), "ExitThreshold")
+		require.Contains(t, err.Error(), "gte")
 	})
 
 	t.Run("error when recovery grace period is negative", func(t *testing.T) {
@@ -437,7 +478,8 @@ func TestConfig_ValidateDegradedBehavior(t *testing.T) {
 
 		err := cfg.Validate()
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "recovery grace period")
+		require.Contains(t, err.Error(), "RecoveryGracePeriod")
+		require.Contains(t, err.Error(), "gte")
 	})
 
 	t.Run("error when KV error threshold is negative", func(t *testing.T) {
@@ -446,7 +488,8 @@ func TestConfig_ValidateDegradedBehavior(t *testing.T) {
 
 		err := cfg.Validate()
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "KV error threshold")
+		require.Contains(t, err.Error(), "KVErrorThreshold")
+		require.Contains(t, err.Error(), "gte")
 	})
 
 	t.Run("error when KV error window is negative", func(t *testing.T) {
@@ -455,7 +498,8 @@ func TestConfig_ValidateDegradedBehavior(t *testing.T) {
 
 		err := cfg.Validate()
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "KV error window")
+		require.Contains(t, err.Error(), "KVErrorWindow")
+		require.Contains(t, err.Error(), "gte")
 	})
 
 	t.Run("zero values are valid", func(t *testing.T) {

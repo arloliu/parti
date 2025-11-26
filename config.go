@@ -6,26 +6,27 @@ import (
 	"time"
 
 	"github.com/creasty/defaults"
+	"github.com/go-playground/validator/v10"
 )
 
 // KVBucketConfig configures NATS JetStream KV bucket names and TTLs.
 type KVBucketConfig struct {
 	// StableIDBucket is the bucket name for stable worker ID claims.
-	StableIDBucket string `yaml:"stableIdBucket" default:"parti-stableid"`
+	StableIDBucket string `yaml:"stableIdBucket" default:"parti-stableid" validate:"required"`
 
 	// ElectionBucket is the bucket name for leader election.
-	ElectionBucket string `yaml:"electionBucket" default:"parti-election"`
+	ElectionBucket string `yaml:"electionBucket" default:"parti-election" validate:"required"`
 
 	// HeartbeatBucket is the bucket name for worker heartbeats.
-	HeartbeatBucket string `yaml:"heartbeatBucket" default:"parti-heartbeat"`
+	HeartbeatBucket string `yaml:"heartbeatBucket" default:"parti-heartbeat" validate:"required"`
 
 	// AssignmentBucket is the bucket name for partition assignments.
-	AssignmentBucket string `yaml:"assignmentBucket" default:"parti-assignment"`
+	AssignmentBucket string `yaml:"assignmentBucket" default:"parti-assignment" validate:"required"`
 
 	// AssignmentTTL is how long assignments remain in KV (0 = no expiration).
 	// Assignments should persist across leader changes for version continuity.
 	// Recommended: 0 (no TTL) or very long (e.g., 1 hour).
-	AssignmentTTL time.Duration `yaml:"assignmentTtl" default:"0"`
+	AssignmentTTL time.Duration `yaml:"assignmentTtl" default:"0" validate:"gte=0"`
 
 	// HandoffBucket is the bucket name for two-phase handoff ownership claims.
 	// Used only when EnableTwoPhaseHandoff is true. Stores per-partition claim
@@ -50,29 +51,29 @@ type KVBucketConfig struct {
 type HandoffConfig struct {
 	// SweepInterval controls how often stale/expired claims are opportunistically
 	// swept during Apply calls. If zero or negative, a sweep is attempted on every Apply.
-	SweepInterval time.Duration `yaml:"sweepInterval" default:"30s"`
+	SweepInterval time.Duration `yaml:"sweepInterval" default:"30s" validate:"gte=0"`
 
 	// MaxRetries controls bounded CAS retries for claim updates. Zero uses default (3).
-	MaxRetries int `yaml:"maxRetries" default:"3"`
+	MaxRetries int `yaml:"maxRetries" default:"3" validate:"gte=0"`
 
 	// BaseBackoff is the initial backoff for CAS retry with exponential backoff.
-	BaseBackoff time.Duration `yaml:"baseBackoff" default:"50ms"`
+	BaseBackoff time.Duration `yaml:"baseBackoff" default:"50ms" validate:"gte=0"`
 
 	// MaxBackoff caps the exponential backoff duration.
-	MaxBackoff time.Duration `yaml:"maxBackoff" default:"500ms"`
+	MaxBackoff time.Duration `yaml:"maxBackoff" default:"500ms" validate:"gte=0,gtefield=BaseBackoff"`
 
 	// Jitter is a fractional value [0.0, 1.0] to randomize backoff durations.
-	Jitter float64 `yaml:"jitter" default:"0.2"`
+	Jitter float64 `yaml:"jitter" default:"0.2" validate:"gte=0,lte=1"`
 
 	// DelayAfterPrepare introduces an artificial delay after the prepare phase completes
 	// and before the consumer updater is invoked. Useful for making intermediate states
 	// observable in tests and demonstrations. Ignored if <= 0.
-	DelayAfterPrepare time.Duration `yaml:"delayAfterPrepare" default:"0"`
+	DelayAfterPrepare time.Duration `yaml:"delayAfterPrepare" default:"0" validate:"gte=0"`
 
 	// DelayBeforeStable introduces an artificial delay after entering the commit state
 	// and before finalizing to stable. Useful for external observation of the commit state.
 	// Ignored if <= 0.
-	DelayBeforeStable time.Duration `yaml:"delayBeforeStable" default:"0"`
+	DelayBeforeStable time.Duration `yaml:"delayBeforeStable" default:"0" validate:"gte=0"`
 }
 
 // AlertLevel represents the severity level of degraded mode alerts.
@@ -112,23 +113,23 @@ func (l AlertLevel) String() string {
 type DegradedAlertConfig struct {
 	// InfoThreshold is the duration in degraded mode before emitting Info-level alerts.
 	// Default: 30 seconds.
-	InfoThreshold time.Duration `yaml:"infoThreshold" default:"30s"`
+	InfoThreshold time.Duration `yaml:"infoThreshold" default:"30s" validate:"gt=0"`
 
 	// WarnThreshold is the duration in degraded mode before emitting Warn-level alerts.
 	// Default: 2 minutes.
-	WarnThreshold time.Duration `yaml:"warnThreshold" default:"2m"`
+	WarnThreshold time.Duration `yaml:"warnThreshold" default:"2m" validate:"gt=0,gtefield=InfoThreshold"`
 
 	// ErrorThreshold is the duration in degraded mode before emitting Error-level alerts.
 	// Default: 5 minutes.
-	ErrorThreshold time.Duration `yaml:"errorThreshold" default:"5m"`
+	ErrorThreshold time.Duration `yaml:"errorThreshold" default:"5m" validate:"gt=0,gtefield=WarnThreshold"`
 
 	// CriticalThreshold is the duration in degraded mode before emitting Critical-level alerts.
 	// Default: 10 minutes.
-	CriticalThreshold time.Duration `yaml:"criticalThreshold" default:"10m"`
+	CriticalThreshold time.Duration `yaml:"criticalThreshold" default:"10m" validate:"gt=0,gtefield=ErrorThreshold"`
 
 	// AlertInterval is the time between repeated alerts at the same severity level.
 	// Default: 1 minute.
-	AlertInterval time.Duration `yaml:"alertInterval" default:"1m"`
+	AlertInterval time.Duration `yaml:"alertInterval" default:"1m" validate:"gt=0"`
 }
 
 // DefaultDegradedAlertConfig returns default alert configuration for degraded mode.
@@ -150,27 +151,27 @@ type DegradedBehaviorConfig struct {
 	// EnterThreshold is how long NATS connectivity errors must persist before entering degraded mode.
 	// Provides hysteresis to prevent flapping during transient issues.
 	// Default: 10 seconds.
-	EnterThreshold time.Duration `yaml:"enterThreshold" default:"10s"`
+	EnterThreshold time.Duration `yaml:"enterThreshold" default:"10s" validate:"gte=0"`
 
 	// ExitThreshold is how long NATS connectivity must be stable before exiting degraded mode.
 	// Should be shorter than EnterThreshold to recover quickly.
 	// Default: 5 seconds.
-	ExitThreshold time.Duration `yaml:"exitThreshold" default:"5s"`
+	ExitThreshold time.Duration `yaml:"exitThreshold" default:"5s" validate:"gte=0"`
 
 	// KVErrorThreshold is the number of consecutive KV operation errors that trigger degraded mode.
 	// Default: 5 errors.
-	KVErrorThreshold int `yaml:"kvErrorThreshold" default:"5"`
+	KVErrorThreshold int `yaml:"kvErrorThreshold" default:"5" validate:"gte=0"`
 
 	// KVErrorWindow is the time window for counting consecutive KV errors.
 	// Errors outside this window are not counted.
 	// Default: 30 seconds.
-	KVErrorWindow time.Duration `yaml:"kvErrorWindow" default:"30s"`
+	KVErrorWindow time.Duration `yaml:"kvErrorWindow" default:"30s" validate:"gte=0"`
 
 	// RecoveryGracePeriod is the minimum time the leader must wait after recovering from
 	// degraded mode before declaring missing workers as failed (emergency rebalance).
 	// Prevents false emergencies when workers recover slightly slower than the leader.
 	// Default: 15 seconds.
-	RecoveryGracePeriod time.Duration `yaml:"recoveryGracePeriod" default:"15s"`
+	RecoveryGracePeriod time.Duration `yaml:"recoveryGracePeriod" default:"15s" validate:"gte=0"`
 }
 
 // DefaultDegradedBehaviorConfig returns default behavior configuration for degraded mode.
@@ -302,41 +303,41 @@ func DegradedBehaviorPreset(preset string) (DegradedBehaviorConfig, error) {
 // All duration fields accept standard Go duration strings like "30s", "5m", "1h".
 type Config struct {
 	// WorkerIDPrefix is the prefix for worker IDs (e.g., "worker" produces "worker-0", "worker-1").
-	WorkerIDPrefix string `yaml:"workerIdPrefix" default:"worker"`
+	WorkerIDPrefix string `yaml:"workerIdPrefix" default:"worker" validate:"required"`
 
 	// WorkerIDMin is the minimum stable ID number (inclusive).
 	// Set to 0 for most use cases.
-	WorkerIDMin int `yaml:"workerIdMin" default:"0"`
+	WorkerIDMin int `yaml:"workerIdMin" default:"0" validate:"gte=0"`
 
 	// WorkerIDMax is the maximum stable ID number (inclusive).
 	// Determines the maximum number of concurrent workers: (WorkerIDMax - WorkerIDMin + 1).
 	// For example, WorkerIDMin=0 and WorkerIDMax=999 allows up to 1000 workers.
-	WorkerIDMax int `yaml:"workerIdMax" default:"999"`
+	WorkerIDMax int `yaml:"workerIdMax" default:"999" validate:"gtefield=WorkerIDMin"`
 
 	// WorkerIDTTL is how long a worker ID claim remains valid in the key-value store.
 	// Must be greater than HeartbeatInterval to prevent premature expiration.
 	// Recommended: 3-5x HeartbeatInterval.
-	WorkerIDTTL time.Duration `yaml:"workerIdTtl" default:"30s"`
+	WorkerIDTTL time.Duration `yaml:"workerIdTtl" default:"30s" validate:"gt=0,gtefield=HeartbeatTTL"`
 
 	// HeartbeatInterval is how often workers publish heartbeat messages.
 	// Shorter intervals provide faster failure detection but increase network traffic.
 	// Recommended: 2-5 seconds.
-	HeartbeatInterval time.Duration `yaml:"heartbeatInterval" default:"2s"`
+	HeartbeatInterval time.Duration `yaml:"heartbeatInterval" default:"2s" validate:"gt=0"`
 
 	// HeartbeatTTL is how long heartbeat messages remain valid before a worker is considered failed.
 	// Must be greater than HeartbeatInterval.
 	// Recommended: 3x HeartbeatInterval.
-	HeartbeatTTL time.Duration `yaml:"heartbeatTtl" default:"6s"`
+	HeartbeatTTL time.Duration `yaml:"heartbeatTtl" default:"6s" validate:"gt=0"`
 
 	// ColdStartWindow is the stabilization period when starting workers from zero.
 	// During this window, partition assignment is delayed to allow all initial workers to join.
 	// Recommended: 30 seconds.
-	ColdStartWindow time.Duration `yaml:"coldStartWindow" default:"30s"`
+	ColdStartWindow time.Duration `yaml:"coldStartWindow" default:"30s" validate:"gt=0,gtefield=PlannedScaleWindow"`
 
 	// PlannedScaleWindow is the stabilization period during rolling updates or planned scaling.
 	// Shorter than ColdStartWindow to minimize disruption during controlled changes.
 	// Recommended: 10 seconds.
-	PlannedScaleWindow time.Duration `yaml:"plannedScaleWindow" default:"10s"`
+	PlannedScaleWindow time.Duration `yaml:"plannedScaleWindow" default:"10s" validate:"gt=0"`
 
 	// EmergencyGracePeriod is the minimum time a worker must be missing before
 	// triggering emergency rebalance. Prevents false positives from transient
@@ -345,31 +346,31 @@ type Config struct {
 	// Default: 0 (auto-calculated as 1.5 * HeartbeatInterval)
 	// Recommended: 1.5-2.0 * HeartbeatInterval
 	// Constraint: Must be <= HeartbeatTTL
-	EmergencyGracePeriod time.Duration `yaml:"emergencyGracePeriod"`
+	EmergencyGracePeriod time.Duration `yaml:"emergencyGracePeriod" validate:"ltefield=HeartbeatTTL"`
 
 	// RestartDetectionRatio determines when a restart is classified as cold start vs planned.
 	// If (failed workers / total workers) > ratio, it's treated as a cold start.
 	// For example, 0.5 means if >50% of workers fail simultaneously, use ColdStartWindow.
 	// Recommended: 0.5.
-	RestartDetectionRatio float64 `yaml:"restartDetectionRatio" default:"0.5"`
+	RestartDetectionRatio float64 `yaml:"restartDetectionRatio" default:"0.5" validate:"gte=0,lte=1"`
 
 	// OperationTimeout is the timeout for KV operations (get, put, delete).
 	// Recommended: 10 seconds.
-	OperationTimeout time.Duration `yaml:"operationTimeout" default:"10s"`
+	OperationTimeout time.Duration `yaml:"operationTimeout" default:"10s" validate:"gt=0"`
 
 	// ElectionTimeout is the maximum time to wait for leader election to complete.
 	// Recommended: 5 seconds.
-	ElectionTimeout time.Duration `yaml:"electionTimeout" default:"5s"`
+	ElectionTimeout time.Duration `yaml:"electionTimeout" default:"5s" validate:"gt=0"`
 
 	// StartupTimeout is the maximum time to wait for the manager to fully start.
 	// Includes worker ID claiming, leader election, and initial partition assignment.
 	// Recommended: 30 seconds.
-	StartupTimeout time.Duration `yaml:"startupTimeout" default:"30s"`
+	StartupTimeout time.Duration `yaml:"startupTimeout" default:"30s" validate:"gt=0"`
 
 	// ShutdownTimeout is the maximum time to wait for graceful shutdown.
 	// Includes releasing worker ID, stopping heartbeats, and cleanup operations.
 	// Recommended: 10 seconds.
-	ShutdownTimeout time.Duration `yaml:"shutdownTimeout" default:"10s"`
+	ShutdownTimeout time.Duration `yaml:"shutdownTimeout" default:"10s" validate:"gt=0"`
 
 	// RebalanceCooldown is the minimum time between rebalancing operations.
 	//
@@ -381,7 +382,7 @@ type Config struct {
 	// Recommendation: Should be <= PlannedScaleWindow for proper coordination
 	//
 	// Note: This was renamed from MinRebalanceInterval in v0.x for semantic clarity.
-	RebalanceCooldown time.Duration `yaml:"rebalanceCooldown" default:"10s"`
+	RebalanceCooldown time.Duration `yaml:"rebalanceCooldown" default:"10s" validate:"gt=0,ltefield=PlannedScaleWindow"`
 
 	// KVBuckets controls NATS JetStream KV bucket configuration.
 	KVBuckets KVBucketConfig `yaml:"kvBuckets"`
@@ -423,8 +424,6 @@ func DefaultConfig() Config {
 
 // SetDefaults applies default values to zero-valued configuration fields.
 // If a field is zero-valued, it will be set to the corresponding default value.
-//
-//nolint:cyclop,gocyclo
 func SetDefaults(cfg *Config) {
 	if err := defaults.Set(cfg); err != nil {
 		panic(fmt.Errorf("failed to set defaults: %w", err))
@@ -436,8 +435,6 @@ func SetDefaults(cfg *Config) {
 		cfg.EmergencyGracePeriod = time.Duration(float64(cfg.HeartbeatInterval) * 1.5)
 	}
 }
-
-
 
 // TTL Configuration Guide
 // =======================
@@ -496,7 +493,13 @@ func SetDefaults(cfg *Config) {
 //
 // Returns:
 //   - error: Validation error with clear explanation, nil if valid
-func (cfg *Config) Validate() error { //nolint:cyclop
+func (cfg *Config) Validate() error {
+	validate := validator.New(validator.WithRequiredStructEnabled())
+	if err := validate.Struct(cfg); err != nil {
+		return fmt.Errorf("configuration validation failed: %w", err)
+	}
+
+	// Custom validation logic that cannot be expressed with tags
 	// Rule 1: HeartbeatTTL sanity
 	if cfg.HeartbeatTTL < 2*cfg.HeartbeatInterval {
 		return fmt.Errorf(
@@ -513,60 +516,6 @@ func (cfg *Config) Validate() error { //nolint:cyclop
 		)
 	}
 
-	// Rule 3: WorkerIDTTL vs HeartbeatTTL hierarchy
-	if cfg.WorkerIDTTL < cfg.HeartbeatTTL {
-		return fmt.Errorf(
-			"WorkerIDTTL (%v) must be >= HeartbeatTTL (%v) to prevent ID expiry before heartbeat",
-			cfg.WorkerIDTTL, cfg.HeartbeatTTL,
-		)
-	}
-
-	// Rule 4: RebalanceCooldown sanity
-	if cfg.RebalanceCooldown <= 0 {
-		return fmt.Errorf("RebalanceCooldown must be > 0, got %v", cfg.RebalanceCooldown)
-	}
-
-	// Rule 5: Stabilization windows
-	if cfg.ColdStartWindow < cfg.PlannedScaleWindow {
-		return fmt.Errorf(
-			"ColdStartWindow (%v) should be >= PlannedScaleWindow (%v)",
-			cfg.ColdStartWindow, cfg.PlannedScaleWindow,
-		)
-	}
-
-	// Rule 6: RebalanceCooldown vs windows (recommended)
-	if cfg.RebalanceCooldown > cfg.ColdStartWindow {
-		return fmt.Errorf(
-			"RebalanceCooldown (%v) should not exceed ColdStartWindow (%v)",
-			cfg.RebalanceCooldown, cfg.ColdStartWindow,
-		)
-	}
-
-	if cfg.RebalanceCooldown > cfg.PlannedScaleWindow {
-		return fmt.Errorf(
-			"RebalanceCooldown (%v) should not exceed PlannedScaleWindow (%v) for proper coordination",
-			cfg.RebalanceCooldown, cfg.PlannedScaleWindow,
-		)
-	}
-
-	// Rule 7: EmergencyGracePeriod sanity
-	if cfg.EmergencyGracePeriod > cfg.HeartbeatTTL {
-		return fmt.Errorf(
-			"EmergencyGracePeriod (%v) must be <= HeartbeatTTL (%v)",
-			cfg.EmergencyGracePeriod, cfg.HeartbeatTTL,
-		)
-	}
-
-	// Rule 8: Validate degraded alert configuration
-	if err := cfg.validateDegradedAlerts(); err != nil {
-		return fmt.Errorf("invalid degraded alerts config: %w", err)
-	}
-
-	// Rule 9: Validate degraded behavior configuration
-	if err := cfg.validateDegradedBehavior(); err != nil {
-		return fmt.Errorf("invalid degraded behavior config: %w", err)
-	}
-
 	// Rule 10: Validate two-phase handoff KV configuration when enabled
 	if cfg.EnableTwoPhaseHandoff {
 		if cfg.KVBuckets.HandoffBucket == "" {
@@ -575,78 +524,6 @@ func (cfg *Config) Validate() error { //nolint:cyclop
 		if cfg.KVBuckets.HandoffTTL <= 0 {
 			return errors.New("HandoffTTL must be > 0 when EnableTwoPhaseHandoff is true")
 		}
-		// Validate handoff tuning values
-		if cfg.Handoff.MaxRetries < 0 {
-			return fmt.Errorf("handoff.maxRetries must be >= 0, got %d", cfg.Handoff.MaxRetries)
-		}
-		if cfg.Handoff.BaseBackoff < 0 {
-			return fmt.Errorf("handoff.baseBackoff must be >= 0, got %v", cfg.Handoff.BaseBackoff)
-		}
-		if cfg.Handoff.MaxBackoff < 0 {
-			return fmt.Errorf("handoff.maxBackoff must be >= 0, got %v", cfg.Handoff.MaxBackoff)
-		}
-		if cfg.Handoff.MaxBackoff > 0 && cfg.Handoff.BaseBackoff > cfg.Handoff.MaxBackoff {
-			return fmt.Errorf("handoff.baseBackoff (%v) must be <= handoff.maxBackoff (%v)", cfg.Handoff.BaseBackoff, cfg.Handoff.MaxBackoff)
-		}
-		if cfg.Handoff.Jitter < 0 || cfg.Handoff.Jitter > 1 {
-			return fmt.Errorf("handoff.jitter must be in [0,1], got %v", cfg.Handoff.Jitter)
-		}
-		if cfg.Handoff.SweepInterval < 0 {
-			return fmt.Errorf("handoff.sweepInterval must be >= 0, got %v", cfg.Handoff.SweepInterval)
-		}
-		if cfg.Handoff.DelayAfterPrepare < 0 {
-			return fmt.Errorf("handoff.delayAfterPrepare must be >= 0, got %v", cfg.Handoff.DelayAfterPrepare)
-		}
-		if cfg.Handoff.DelayBeforeStable < 0 {
-			return fmt.Errorf("handoff.delayBeforeStable must be >= 0, got %v", cfg.Handoff.DelayBeforeStable)
-		}
-	}
-
-	return nil
-}
-
-// validateDegradedAlerts ensures alert thresholds are sensible.
-func (cfg *Config) validateDegradedAlerts() error {
-	da := &cfg.DegradedAlert
-
-	// Ensure thresholds are in ascending order
-	if da.WarnThreshold > 0 && da.WarnThreshold < da.InfoThreshold {
-		return fmt.Errorf("warn threshold (%v) must be >= info threshold (%v)", da.WarnThreshold, da.InfoThreshold)
-	}
-	if da.ErrorThreshold > 0 && da.ErrorThreshold < da.WarnThreshold {
-		return fmt.Errorf("error threshold (%v) must be >= warn threshold (%v)", da.ErrorThreshold, da.WarnThreshold)
-	}
-	if da.CriticalThreshold > 0 && da.CriticalThreshold < da.ErrorThreshold {
-		return fmt.Errorf("critical threshold (%v) must be >= error threshold (%v)", da.CriticalThreshold, da.ErrorThreshold)
-	}
-
-	// Ensure alert interval is positive
-	if da.AlertInterval <= 0 {
-		return fmt.Errorf("alert interval must be > 0, got %v", da.AlertInterval)
-	}
-
-	return nil
-}
-
-// validateDegradedBehavior ensures behavior config values are sensible.
-func (cfg *Config) validateDegradedBehavior() error {
-	db := &cfg.DegradedBehavior
-
-	// Validate thresholds are positive
-	if db.EnterThreshold < 0 {
-		return fmt.Errorf("enter threshold must be >= 0, got %v", db.EnterThreshold)
-	}
-	if db.ExitThreshold < 0 {
-		return fmt.Errorf("exit threshold must be >= 0, got %v", db.ExitThreshold)
-	}
-	if db.RecoveryGracePeriod < 0 {
-		return fmt.Errorf("recovery grace period must be >= 0, got %v", db.RecoveryGracePeriod)
-	}
-	if db.KVErrorThreshold < 0 {
-		return fmt.Errorf("KV error threshold must be >= 0, got %d", db.KVErrorThreshold)
-	}
-	if db.KVErrorWindow < 0 {
-		return fmt.Errorf("KV error window must be >= 0, got %v", db.KVErrorWindow)
 	}
 
 	return nil
@@ -716,13 +593,13 @@ func TestConfig() Config {
 	cfg := DefaultConfig()
 
 	// Fast timings for test execution (10-100x faster)
-	cfg.RebalanceCooldown = 100 * time.Millisecond  // 100x faster
-	cfg.ColdStartWindow = 1 * time.Second           // 30x faster
-	cfg.PlannedScaleWindow = 500 * time.Millisecond // 20x faster
-	cfg.HeartbeatInterval = 500 * time.Millisecond  // 4x faster
-	cfg.HeartbeatTTL = 1500 * time.Millisecond      // 4x faster
+	cfg.RebalanceCooldown = 100 * time.Millisecond    // 100x faster
+	cfg.ColdStartWindow = 1 * time.Second             // 30x faster
+	cfg.PlannedScaleWindow = 500 * time.Millisecond   // 20x faster
+	cfg.HeartbeatInterval = 500 * time.Millisecond    // 4x faster
+	cfg.HeartbeatTTL = 1500 * time.Millisecond        // 4x faster
 	cfg.EmergencyGracePeriod = 750 * time.Millisecond // Scaled with HeartbeatInterval
-	cfg.WorkerIDTTL = 5 * time.Second               // 6x faster
+	cfg.WorkerIDTTL = 5 * time.Second                 // 6x faster
 
 	return cfg
 }

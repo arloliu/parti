@@ -52,7 +52,8 @@ func (r fakeResolver) ForceRefreshPartition(ctx context.Context, partitionID str
 // TestProcessingGate_AllowsOwner tests that the owner in an allowed state processes the message.
 func TestProcessingGate_AllowsOwner(t *testing.T) {
 	resolver := fakeResolver{owner: "w1", state: types.HandoffStateStable, ok: true}
-	g := newProcessingGate("w1", "events.{{.PartitionID}}", resolver, ProcessingGateConfig{Enabled: true}, nil)
+	g, err := newProcessingGate("w1", "events.{{.PartitionID}}", resolver, ProcessingGateConfig{Enabled: true}, nil)
+	require.NoError(t, err)
 
 	processed := false
 	base := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
@@ -61,7 +62,7 @@ func TestProcessingGate_AllowsOwner(t *testing.T) {
 	})
 	wrapped := g.Wrap(base)
 	msg := &fakeMsg{subj: "events.partition-7"}
-	err := wrapped.Handle(t.Context(), msg)
+	err = wrapped.Handle(t.Context(), msg)
 	require.NoError(t, err)
 	require.True(t, processed, "owner with stable state should process")
 	require.Equal(t, 0, msg.nakCount)
@@ -70,7 +71,8 @@ func TestProcessingGate_AllowsOwner(t *testing.T) {
 // TestProcessingGate_NaksNonOwner tests that a different owner causes a NAK with delay.
 func TestProcessingGate_NaksNonOwner(t *testing.T) {
 	resolver := fakeResolver{owner: "w2", state: types.HandoffStateStable, ok: true}
-	g := newProcessingGate("w1", "events.{{.PartitionID}}", resolver, ProcessingGateConfig{Enabled: true, NakDelay: 150 * time.Millisecond}, nil)
+	g, err := newProcessingGate("w1", "events.{{.PartitionID}}", resolver, ProcessingGateConfig{Enabled: true, NakDelay: 150 * time.Millisecond}, nil)
+	require.NoError(t, err)
 	base := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error { return nil })
 	wrapped := g.Wrap(base)
 	msg := &fakeMsg{subj: "events.partition-7"}
@@ -82,7 +84,8 @@ func TestProcessingGate_NaksNonOwner(t *testing.T) {
 // TestProcessingGate_DisallowedState tests that owner in a disallowed state is NAKed.
 func TestProcessingGate_DisallowedState(t *testing.T) {
 	resolver := fakeResolver{owner: "w1", state: types.HandoffStatePrepare, ok: true}
-	g := newProcessingGate("w1", "events.{{.PartitionID}}", resolver, ProcessingGateConfig{Enabled: true}, nil)
+	g, err := newProcessingGate("w1", "events.{{.PartitionID}}", resolver, ProcessingGateConfig{Enabled: true}, nil)
+	require.NoError(t, err)
 	base := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error { return nil })
 	wrapped := g.Wrap(base)
 	msg := &fakeMsg{subj: "events.partition-7"}
@@ -103,7 +106,8 @@ func TestProcessingGate_Warmup(t *testing.T) {
 
 	// Case 1: Owner in Prepare state (Allowed during warmup)
 	resolver := fakeResolver{owner: "w1", state: types.HandoffStatePrepare, ok: true}
-	g := newProcessingGate("w1", "events.{{.PartitionID}}", resolver, cfg, nil)
+	g, err := newProcessingGate("w1", "events.{{.PartitionID}}", resolver, cfg, nil)
+	require.NoError(t, err)
 
 	processed := false
 	base := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
@@ -112,13 +116,14 @@ func TestProcessingGate_Warmup(t *testing.T) {
 	})
 	wrapped := g.Wrap(base)
 	msg := &fakeMsg{subj: "events.partition-7"}
-	err := wrapped.Handle(t.Context(), msg)
+	err = wrapped.Handle(t.Context(), msg)
 	require.NoError(t, err)
 	require.True(t, processed, "should process Prepare state during warmup")
 
 	// Case 2: Owner in Stable state (Disallowed during warmup)
 	resolver2 := fakeResolver{owner: "w1", state: types.HandoffStateStable, ok: true}
-	g2 := newProcessingGate("w1", "events.{{.PartitionID}}", resolver2, cfg, nil)
+	g2, err := newProcessingGate("w1", "events.{{.PartitionID}}", resolver2, cfg, nil)
+	require.NoError(t, err)
 	processed = false
 	wrapped2 := g2.Wrap(base)
 	msg2 := &fakeMsg{subj: "events.partition-7"}
@@ -130,7 +135,8 @@ func TestProcessingGate_Warmup(t *testing.T) {
 // TestProcessingGate_SubjectParsingFailure tests fail-open behavior when subject doesn't match template.
 func TestProcessingGate_SubjectParsingFailure(t *testing.T) {
 	resolver := fakeResolver{owner: "w1", state: types.HandoffStateStable, ok: true}
-	g := newProcessingGate("w1", "events.{{.PartitionID}}", resolver, ProcessingGateConfig{Enabled: true}, nil)
+	g, err := newProcessingGate("w1", "events.{{.PartitionID}}", resolver, ProcessingGateConfig{Enabled: true}, nil)
+	require.NoError(t, err)
 
 	processed := false
 	base := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
@@ -141,7 +147,7 @@ func TestProcessingGate_SubjectParsingFailure(t *testing.T) {
 
 	// Subject mismatch
 	msg := &fakeMsg{subj: "other.topic"}
-	err := wrapped.Handle(t.Context(), msg)
+	err = wrapped.Handle(t.Context(), msg)
 	require.NoError(t, err)
 	require.True(t, processed, "should fail open (process) when subject parsing fails")
 }
@@ -166,7 +172,8 @@ func (r *refreshResolver) ForceRefreshPartition(ctx context.Context, partitionID
 // TestProcessingGate_UnknownOwnership_Refresh tests the force refresh logic.
 func TestProcessingGate_UnknownOwnership_Refresh(t *testing.T) {
 	r := &refreshResolver{}
-	g := newProcessingGate("w1", "events.{{.PartitionID}}", r, ProcessingGateConfig{Enabled: true}, nil)
+	g, err := newProcessingGate("w1", "events.{{.PartitionID}}", r, ProcessingGateConfig{Enabled: true}, nil)
+	require.NoError(t, err)
 
 	processed := false
 	base := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
@@ -176,7 +183,7 @@ func TestProcessingGate_UnknownOwnership_Refresh(t *testing.T) {
 	wrapped := g.Wrap(base)
 
 	msg := &fakeMsg{subj: "events.partition-7"}
-	err := wrapped.Handle(t.Context(), msg)
+	err = wrapped.Handle(t.Context(), msg)
 	require.NoError(t, err)
 	require.True(t, processed, "should process after refresh finds owner")
 	require.True(t, r.refreshed, "ForceRefreshPartition should have been called")
@@ -186,7 +193,8 @@ func TestProcessingGate_UnknownOwnership_Refresh(t *testing.T) {
 func TestProcessingGate_Disabled(t *testing.T) {
 	// Resolver says "not owner", but gate is disabled.
 	resolver := fakeResolver{owner: "w2", state: types.HandoffStateStable, ok: true}
-	g := newProcessingGate("w1", "events.{{.PartitionID}}", resolver, ProcessingGateConfig{Enabled: false}, nil)
+	g, err := newProcessingGate("w1", "events.{{.PartitionID}}", resolver, ProcessingGateConfig{Enabled: false}, nil)
+	require.NoError(t, err)
 
 	processed := false
 	base := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
@@ -196,7 +204,7 @@ func TestProcessingGate_Disabled(t *testing.T) {
 	wrapped := g.Wrap(base)
 
 	msg := &fakeMsg{subj: "events.partition-7"}
-	err := wrapped.Handle(t.Context(), msg)
+	err = wrapped.Handle(t.Context(), msg)
 	require.NoError(t, err)
 	require.True(t, processed, "should process when gate is disabled")
 	require.Equal(t, 0, msg.nakCount)
@@ -222,10 +230,11 @@ func (m *mockMetrics) ObserveGateNakDelay(d time.Duration) {
 func TestProcessingGate_Metrics(t *testing.T) {
 	resolver := fakeResolver{owner: "w2", state: types.HandoffStateStable, ok: true}
 	metrics := &mockMetrics{}
-	g := newProcessingGate("w1", "events.{{.PartitionID}}", resolver, ProcessingGateConfig{
+	g, err := newProcessingGate("w1", "events.{{.PartitionID}}", resolver, ProcessingGateConfig{
 		Enabled: true,
 		Metrics: metrics,
 	}, nil)
+	require.NoError(t, err)
 
 	base := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error { return nil })
 	wrapped := g.Wrap(base)
