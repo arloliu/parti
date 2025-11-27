@@ -53,7 +53,7 @@ func (s *Static) Start(_ context.Context) error {
 
 // Stop implements PartitionSource.Stop.
 // For Static source, this is a no-op.
-func (s *Static) Stop() error {
+func (s *Static) Stop(_ context.Context) error {
 	return nil
 }
 

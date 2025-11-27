@@ -40,9 +40,12 @@ type PartitionSource interface {
 
 	// Stop cleans up resources (e.g., stops watchers).
 	//
+	// Parameters:
+	//   - ctx: Context for cancellation and timeout
+	//
 	// Returns:
 	//   - error: Cleanup error
-	Stop() error
+	Stop(ctx context.Context) error
 }
 
 // PartitionUpdater allows updating the partition definition in the backend.

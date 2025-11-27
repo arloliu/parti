@@ -30,7 +30,7 @@ func TestNatsKV(t *testing.T) {
 	// Start
 	err = src.Start(ctx)
 	require.NoError(t, err)
-	defer func() { _ = src.Stop() }()
+	defer func() { _ = src.Stop(ctx) }()
 
 	// Initial list should be empty
 	partitions, err := src.List(ctx)

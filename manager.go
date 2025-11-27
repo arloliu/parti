@@ -432,7 +432,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 	}
 
 	// Step 1.6: Stop partition source
-	if err := m.source.Stop(); err != nil {
+	if err := m.source.Stop(ctx); err != nil {
 		m.logError("failed to stop partition source", "error", err)
 		shutdownErr = fmt.Errorf("partition source stop failed: %w", err)
 	}

@@ -20,7 +20,7 @@ func (m *mockSource) Start(_ context.Context) error {
 }
 
 // Stop implements PartitionSource.Stop.
-func (m *mockSource) Stop() error {
+func (m *mockSource) Stop(_ context.Context) error {
 	return nil
 }
 

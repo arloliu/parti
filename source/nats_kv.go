@@ -90,7 +90,7 @@ func (s *NatsKV) Start(ctx context.Context) error {
 }
 
 // Stop stops the watcher.
-func (s *NatsKV) Stop() error {
+func (s *NatsKV) Stop(_ context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
