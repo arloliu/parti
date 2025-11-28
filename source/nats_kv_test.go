@@ -77,3 +77,87 @@ func TestNatsKV(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "p2", partitions[0].Keys[0])
 }
+
+func TestNatsKV_Lifecycle(t *testing.T) {
+	_, nc := partitest.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "partitions_lifecycle"})
+	require.NoError(t, err)
+
+	src := NewNatsKV(kv, "config", nil)
+
+	// 1. Start
+	err = src.Start(ctx)
+	require.NoError(t, err)
+	require.True(t, src.running)
+	require.NotNil(t, src.ctx)
+	require.NoError(t, src.ctx.Err(), "context should not be cancelled after Start")
+
+	// 2. Stop
+	err = src.Stop(ctx)
+	require.NoError(t, err)
+	require.False(t, src.running)
+	require.ErrorIs(t, src.ctx.Err(), context.Canceled, "context should be cancelled after Stop")
+
+	// 3. Restart (should be allowed)
+	err = src.Start(ctx)
+	require.NoError(t, err)
+	require.True(t, src.running)
+	require.NotNil(t, src.ctx)
+	require.NoError(t, src.ctx.Err(), "new context should not be cancelled after Restart")
+
+	// Cleanup
+	_ = src.Stop(ctx)
+}
+
+func TestNatsKV_WatcherUpdate(t *testing.T) {
+	_, nc := partitest.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Create KV bucket
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{
+		Bucket: "partitions_watcher",
+	})
+	require.NoError(t, err)
+
+	key := "config"
+	src := NewNatsKV(kv, key, nil)
+
+	// Start source - key does not exist yet
+	err = src.Start(ctx)
+	require.NoError(t, err)
+	defer func() { _ = src.Stop(ctx) }()
+
+	// Verify initial state is empty
+	partitions, err := src.List(ctx)
+	require.NoError(t, err)
+	require.Empty(t, partitions)
+
+	// Update partitions via Update method
+	expected := []types.Partition{
+		{Keys: []string{"p1"}, Weight: 10},
+		{Keys: []string{"p2"}, Weight: 20},
+	}
+	err = src.Update(ctx, expected)
+	require.NoError(t, err)
+
+	// Verify watcher picks up the change
+	require.Eventually(t, func() bool {
+		p, err := src.List(ctx)
+		if err != nil {
+			return false
+		}
+		return len(p) == 2
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Verify content matches
+	partitions, err = src.List(ctx)
+	require.NoError(t, err)
+	require.Equal(t, expected, partitions)
+}

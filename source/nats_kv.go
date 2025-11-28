@@ -26,7 +26,8 @@ type NatsKV struct {
 	mu         sync.RWMutex
 	partitions []types.Partition
 	watcher    jetstream.KeyWatcher
-	stopCh     chan struct{}
+	ctx        context.Context
+	cancel     context.CancelFunc
 	running    bool
 }
 
@@ -46,7 +47,6 @@ func NewNatsKV(kv jetstream.KeyValue, key string, logger types.Logger) *NatsKV {
 		kv:     kv,
 		key:    key,
 		logger: logger,
-		stopCh: make(chan struct{}),
 	}
 }
 
@@ -76,13 +76,15 @@ func (s *NatsKV) Start(ctx context.Context) error {
 	}
 
 	// Start watcher
-	watcher, err := s.kv.Watch(ctx, s.key)
+	// Use object-level context for watcher lifecycle
+	s.ctx, s.cancel = context.WithCancel(context.Background())
+	watcher, err := s.kv.Watch(s.ctx, s.key)
 	if err != nil {
+		s.cancel()
 		return fmt.Errorf("failed to start watcher: %w", err)
 	}
 	s.watcher = watcher
 	s.running = true
-	s.stopCh = make(chan struct{})
 
 	go s.watchLoop()
 
@@ -98,13 +100,17 @@ func (s *NatsKV) Stop(_ context.Context) error {
 		return nil
 	}
 
-	close(s.stopCh)
+	if s.cancel != nil {
+		s.cancel()
+	}
+
+	var err error
 	if s.watcher != nil {
-		return s.watcher.Stop()
+		err = s.watcher.Stop()
 	}
 	s.running = false
 
-	return nil
+	return err
 }
 
 // List returns the current list of partitions.
@@ -158,7 +164,7 @@ func (s *NatsKV) Update(ctx context.Context, partitions []types.Partition) error
 func (s *NatsKV) watchLoop() {
 	for {
 		select {
-		case <-s.stopCh:
+		case <-s.ctx.Done():
 			return
 		case entry := <-s.watcher.Updates():
 			if entry == nil {
