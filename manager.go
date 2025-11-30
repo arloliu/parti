@@ -246,6 +246,7 @@ func NewManager(cfg *Config, js jetstream.JetStream, source PartitionSource, str
 		handoff.Config{
 			ConsumerUpdater: m.consumerUpdater,
 			Metrics:         m.handoffMetrics,
+			Logger:          m.logger,
 		},
 		cfg.EnableTwoPhaseHandoff,
 	)

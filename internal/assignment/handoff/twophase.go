@@ -177,7 +177,7 @@ func (t *twoPhaseCoordinator) preparePhase(ctx context.Context, workerID string,
 				}
 
 				if t.cfg.Logger != nil {
-					t.cfg.Logger.Info("handoff_prepare",
+					t.cfg.Logger.Debug("handoff_prepare",
 						"partition_id", pid,
 						"worker_id", workerID,
 						"prev_owner", "",
@@ -200,7 +200,7 @@ func (t *twoPhaseCoordinator) preparePhase(ctx context.Context, workerID string,
 				}
 
 				if t.cfg.Logger != nil {
-					t.cfg.Logger.Info("handoff_prepare",
+					t.cfg.Logger.Debug("handoff_prepare",
 						"partition_id", pid,
 						"worker_id", workerID,
 						"prev_owner", cur.Owner,
