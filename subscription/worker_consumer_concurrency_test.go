@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"text/template"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -44,13 +45,17 @@ func TestWorkerConsumer_ConcurrentAddRemove(t *testing.T) {
 	}
 	require.NoError(t, cfg.SetDefaults())
 
+	tmpl, err := template.New("subject").Parse(cfg.SubjectTemplate)
+	require.NoError(t, err)
+
 	wc := &WorkerConsumer{
-		js:          js,
-		config:      cfg,
-		logger:      cfg.Logger,
-		handler:     MessageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error { return nil }),
-		subjects:    make(map[string]*subjectLoop),
-		iterFactory: defaultIterFactory,
+		js:              js,
+		config:          cfg,
+		logger:          cfg.Logger,
+		handler:         MessageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error { return nil }),
+		subjects:        make(map[string]*subjectLoop),
+		iterFactory:     defaultIterFactory,
+		subjectTemplate: tmpl,
 	}
 	t.Cleanup(func() { _ = wc.Close(context.Background()) })
 
@@ -114,13 +119,17 @@ func TestWorkerConsumer_FlipSetsWithClose(t *testing.T) {
 	}
 	require.NoError(t, cfg.SetDefaults())
 
+	tmpl, err := template.New("subject").Parse(cfg.SubjectTemplate)
+	require.NoError(t, err)
+
 	wc := &WorkerConsumer{
-		js:          js,
-		config:      cfg,
-		logger:      cfg.Logger,
-		handler:     MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error { return nil }),
-		subjects:    make(map[string]*subjectLoop),
-		iterFactory: defaultIterFactory,
+		js:              js,
+		config:          cfg,
+		logger:          cfg.Logger,
+		handler:         MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error { return nil }),
+		subjects:        make(map[string]*subjectLoop),
+		iterFactory:     defaultIterFactory,
+		subjectTemplate: tmpl,
 	}
 	// Ensure cleanup even if the test fails earlier
 	t.Cleanup(func() { _ = wc.Close(context.Background()) })
