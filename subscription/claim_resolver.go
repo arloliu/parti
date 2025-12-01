@@ -45,6 +45,10 @@ type ClaimBasedResolver struct {
 	batchMaxItems int
 	// mu serializes cache updates between watcher and force-refresh
 	mu sync.Mutex
+	// lastRefresh tracks the last time a partition was force-refreshed to prevent storms
+	lastRefresh map[string]time.Time
+	// refreshCooldown is the minimum time between force refreshes for a partition
+	refreshCooldown time.Duration
 }
 
 // Compile-time assertion that ClaimBasedResolver implements OwnershipResolver.
@@ -59,11 +63,13 @@ func NewClaimBasedResolver(kv jetstream.KeyValue, prefix string, logger types.Lo
 	}
 
 	r := &ClaimBasedResolver{
-		kv:            kv,
-		claimsPref:    p,
-		logger:        logger,
-		batchWindow:   5 * time.Millisecond,
-		batchMaxItems: 1024,
+		kv:              kv,
+		claimsPref:      p,
+		logger:          logger,
+		batchWindow:     5 * time.Millisecond,
+		batchMaxItems:   1024,
+		lastRefresh:     make(map[string]time.Time),
+		refreshCooldown: 1 * time.Second,
 	}
 
 	// Initialize empty cache
@@ -139,6 +145,16 @@ func (r *ClaimBasedResolver) GetOwner(partitionID string) (string, types.Handoff
 // It fetches the claim directly from KV and updates the local cache immediately.
 // Errors are returned but safe to ignore by callers that treat this as an optimization.
 func (r *ClaimBasedResolver) ForceRefreshPartition(ctx context.Context, partitionID string) error {
+	// Rate limit checks to prevent storms on unknown partitions
+	r.mu.Lock()
+	if !r.lastRefresh[partitionID].IsZero() && time.Since(r.lastRefresh[partitionID]) < r.refreshCooldown {
+		r.mu.Unlock()
+		return nil
+	}
+	// Optimistically update timestamp to block other concurrent refreshes
+	r.lastRefresh[partitionID] = time.Now()
+	r.mu.Unlock()
+
 	key := partitionID
 	if r.claimsPref != "" {
 		key = r.claimsPref + partitionID

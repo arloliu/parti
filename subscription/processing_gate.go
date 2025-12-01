@@ -95,7 +95,11 @@ func newProcessingGate(
 	cfg ProcessingGateConfig,
 	logger types.Logger,
 ) (*processingGate, error) {
-	prefix, suffix, _ := parseSubjectTemplateParts(subjectTemplate)
+	prefix, suffix, ok := parseSubjectTemplateParts(subjectTemplate)
+	if !ok {
+		return nil, fmt.Errorf("invalid subject template: %q (must contain %s)", subjectTemplate, partitionPlaceholder)
+	}
+
 	// Apply defaults via method (copy since cfg passed by value)
 	if err := cfg.applyDefaults(); err != nil {
 		return nil, fmt.Errorf("apply defaults: %w", err)
@@ -181,16 +185,6 @@ func (g *processingGate) Wrap(base MessageHandler) MessageHandler {
 }
 
 func (g *processingGate) extractPartitionID(subject string) (string, bool) {
-	if g.subjPrefix == "" && g.subjSuffix == "" {
-		// Template not parseable; best-effort fallback: everything after first '.'
-		// This handles common "prefix.{{.PartitionID}}" forms. If subject has no dot, fail.
-		i := strings.IndexByte(subject, '.')
-		if i < 0 || i+1 >= len(subject) {
-			return "", false
-		}
-
-		return subject[i+1:], true
-	}
 	if !strings.HasPrefix(subject, g.subjPrefix) || !strings.HasSuffix(subject, g.subjSuffix) {
 		return "", false
 	}

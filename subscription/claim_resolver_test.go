@@ -186,6 +186,10 @@ func TestClaimBasedResolver_Concurrency_ForceRefreshAndWatcher(t *testing.T) {
 		// Reset cache
 		empty := make(map[string]claimEntry)
 		r.cache.Store(&empty)
+		// Reset rate limiter
+		r.mu.Lock()
+		clear(r.lastRefresh)
+		r.mu.Unlock()
 
 		// Create a fresh batch for this iteration because applyPendingBatch clears it
 		batch := map[string]pending{

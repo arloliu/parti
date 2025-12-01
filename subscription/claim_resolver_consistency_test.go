@@ -50,6 +50,8 @@ func TestClaimBasedResolver_Consistency_StaleRefresh(t *testing.T) {
 	}
 
 	r := NewClaimBasedResolver(mockKV, "claims/", nil)
+	// Disable rate limiting for this test to allow immediate refreshes
+	r.refreshCooldown = 0
 
 	// 1. Seed the cache with a "newer" entry (Rev 10)
 	// We can do this by simulating a watcher update.
