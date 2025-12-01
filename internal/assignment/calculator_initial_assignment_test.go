@@ -468,12 +468,12 @@ func TestCalculator_InitialAssignment_Metrics(t *testing.T) {
 	// Verify two rebalance attempts recorded
 	require.Equal(t, 1, metrics.GetRebalanceAttempt("cold_start_immediate"),
 		"immediate assignment should be recorded exactly once")
-	require.Equal(t, 1, metrics.GetRebalanceAttempt("cold_start_final"),
+	require.Equal(t, 1, metrics.GetRebalanceAttempt("cold_start"),
 		"final assignment should run exactly once")
 
 	t.Logf("✅ Metrics correctly recorded: immediate=%d, final=%d",
 		metrics.GetRebalanceAttempt("cold_start_immediate"),
-		metrics.GetRebalanceAttempt("cold_start_final"))
+		metrics.GetRebalanceAttempt("cold_start"))
 }
 
 // mockMetricsCollector for testing

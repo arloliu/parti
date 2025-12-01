@@ -182,23 +182,12 @@ func (c *Calculator) Start(ctx context.Context) error {
 		c.Logger.Warn("failed to discover existing versions, starting from 0", "error", err)
 	}
 
-	// Start worker monitoring component FIRST (before initial assignment)
-	// This ensures the monitor is ready to detect worker changes during stabilization window
-	if err := c.monitor.Start(ctx); err != nil {
-		c.started.Store(false)
-		return fmt.Errorf("failed to start worker monitor: %w", err)
-	}
-
 	// Step 1: Immediate assignment to whoever is available NOW
 	// This ensures zero-downtime - partitions are covered from T=0
 	// We do this synchronously to ensure Start() returns error if initial assignment fails.
 	c.Logger.Info("performing immediate initial assignment to current workers")
 
 	if err := c.rebalance(ctx, "cold_start_immediate"); err != nil {
-		// If immediate assignment fails, we must stop the monitor and clear started flag
-		if stopErr := c.monitor.Stop(); stopErr != nil {
-			c.Logger.Error("failed to stop monitor after assignment failure", "error", stopErr)
-		}
 		c.started.Store(false)
 		return fmt.Errorf("immediate initial assignment failed: %w", err)
 	}
@@ -212,17 +201,17 @@ func (c *Calculator) Start(ctx context.Context) error {
 	c.Logger.Info("immediate initial assignment complete - partitions now covered",
 		"workers", immediateWorkerCount)
 
-	// Perform stabilization and final assignment in background goroutine
-	// This allows Start() to return while stabilization window runs
-	go func() {
-		c.Logger.Info("performing stabilization in background")
+	// Start worker monitoring component AFTER establishing baseline
+	// This ensures the monitor doesn't see the initial workers as "new" additions
+	if err := c.monitor.Start(ctx); err != nil {
+		c.started.Store(false)
+		return fmt.Errorf("failed to start worker monitor: %w", err)
+	}
 
-		if err := c.finalizeInitialAssignment(ctx, immediateWorkerCount); err != nil {
-			c.Logger.Error("final initial assignment failed", "error", err)
-			// Note: Don't set started=false here as monitor is already running
-			// Manager will handle this via timeout in waitForAssignment() if needed
-		}
-	}()
+	// Step 2: Enter scaling state for stabilization
+	// The StateMachine will handle the wait window and trigger the final rebalance
+	c.Logger.Info("entering stabilization phase", "window", c.ColdStartWindow)
+	c.enterScalingState(ctx, "cold_start", c.ColdStartWindow)
 
 	return nil
 }
@@ -310,41 +299,6 @@ func (c *Calculator) TriggerRebalance(ctx context.Context) error {
 	c.Logger.Info("manual rebalance triggered")
 
 	return c.rebalance(ctx, "manual-refresh")
-}
-
-// finalizeInitialAssignment performs the stabilization and final assignment phases.
-// It is called by Start() in a background goroutine after immediate assignment succeeds.
-func (c *Calculator) finalizeInitialAssignment(ctx context.Context, immediateWorkerCount int) error {
-	// Step 2: Wait for stabilization window to let more workers join
-	window := c.selectStabilizationWindow(ctx)
-	c.Logger.Info("waiting for stabilization to detect additional workers", "window", window)
-
-	select {
-	case <-time.After(window):
-		// Proceed to final assignment
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-
-	// Step 3: Final rebalance with complete worker set
-	c.Logger.Info("performing final initial assignment with all detected workers")
-
-	if err := c.rebalance(ctx, "cold_start_final"); err != nil {
-		return fmt.Errorf("final initial assignment failed: %w", err)
-	}
-
-	// Initialize lastWorkers with the workers from final assignment
-	// This prevents immediately re-entering scaling when monitorWorkers starts
-	c.mu.Lock()
-	finalWorkerCount := c.setLastWorkersLocked(c.currentWorkers)
-	c.mu.Unlock()
-
-	c.Logger.Info("initial assignment complete",
-		"immediate_workers", immediateWorkerCount,
-		"final_workers", finalWorkerCount,
-		"additional_workers_joined", finalWorkerCount-immediateWorkerCount)
-
-	return nil
 }
 
 // discoverHighestVersion scans existing assignments in KV to find the highest version.
