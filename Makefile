@@ -2,9 +2,9 @@
 # Usage: make [target]
 
 # Configuration
-TEST_TIMEOUT    := 6m
-STRESS_TIMEOUT  := 20m
-LINT_TIMEOUT    := 3m
+TEST_TIMEOUT    ?= 6m
+STRESS_TIMEOUT  ?= 20m
+LINT_TIMEOUT    ?= 3m
 COVERAGE_DIR    := ./.coverage
 COVERAGE_OUT    := $(COVERAGE_DIR)/coverage.out
 COVERAGE_HTML   := $(COVERAGE_DIR)/coverage.html
