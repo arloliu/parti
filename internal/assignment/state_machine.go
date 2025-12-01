@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/arloliu/parti/types"
-	"github.com/puzpuzpuz/xsync/v4"
 )
 
 // StateMachine manages calculator state transitions.
@@ -30,7 +29,7 @@ type StateMachine struct {
 	metrics types.CalculatorMetrics
 
 	// Fan-out to subscribers
-	subscribers      *xsync.Map[uint64, *stateSubscriber]
+	subscribers      sync.Map
 	nextSubscriberID atomic.Uint64
 
 	// Callback invoked when rebalancing needs to occur
@@ -67,7 +66,6 @@ func NewStateMachine(
 		logger:        logger,
 		metrics:       metrics,
 		onRebalanceCb: onRebalance,
-		subscribers:   xsync.NewMap[uint64, *stateSubscriber](),
 		stopCh:        stopCh,
 	}
 	sm.current.Store(int32(types.CalcStateIdle))
@@ -133,8 +131,10 @@ func (sm *StateMachine) Subscribe() (<-chan types.CalculatorState, func()) {
 
 // removeSubscriber removes a subscriber and closes its channel.
 func (sm *StateMachine) removeSubscriber(id uint64) {
-	if sub, ok := sm.subscribers.LoadAndDelete(id); ok {
-		sub.close()
+	if val, ok := sm.subscribers.LoadAndDelete(id); ok {
+		if sub, ok := val.(*stateSubscriber); ok {
+			sub.close()
+		}
 	}
 }
 
@@ -322,8 +322,10 @@ func (sm *StateMachine) emitStateChange(state types.CalculatorState) {
 		if sm.current.CompareAndSwap(int32(old), int32(state)) { //nolint:gosec // G115: enum to int32 is safe
 			sm.logger.Info("state transition", "from", old, "to", state)
 
-			sm.subscribers.Range(func(_ uint64, sub *stateSubscriber) bool {
-				sub.trySend(state, sm.metrics)
+			sm.subscribers.Range(func(_ any, value any) bool {
+				if sub, ok := value.(*stateSubscriber); ok {
+					sub.trySend(state, sm.metrics)
+				}
 				return true
 			})
 
