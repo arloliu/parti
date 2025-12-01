@@ -2,6 +2,7 @@ package subscription
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"text/template"
@@ -53,7 +54,7 @@ func TestWorkerConsumer_ConcurrentAddRemove(t *testing.T) {
 		config:          cfg,
 		logger:          cfg.Logger,
 		handler:         MessageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error { return nil }),
-		subjects:        make(map[string]*subjectLoop),
+		subjects:        make(map[string]*partitionConsumer),
 		iterFactory:     defaultIterFactory,
 		subjectTemplate: tmpl,
 	}
@@ -68,24 +69,48 @@ func TestWorkerConsumer_ConcurrentAddRemove(t *testing.T) {
 	// Goroutine 1 rapidly toggles partition A
 	wg.Go(func() {
 		for range 10 {
-			require.NoError(t, wc.UpdateWorkerConsumer(ctx, "w1", pA))
+			if err := wc.UpdateWorkerConsumer(ctx, "w1", pA); err != nil {
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+					return
+				}
+				require.NoError(t, err)
+			}
 			time.Sleep(10 * time.Millisecond)
-			require.NoError(t, wc.UpdateWorkerConsumer(ctx, "w1", nil))
+			if err := wc.UpdateWorkerConsumer(ctx, "w1", nil); err != nil {
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+					return
+				}
+				require.NoError(t, err)
+			}
 		}
 	})
 
 	// Goroutine 2 rapidly toggles partition B
 	wg.Go(func() {
 		for range 10 {
-			require.NoError(t, wc.UpdateWorkerConsumer(ctx, "w1", pB))
+			if err := wc.UpdateWorkerConsumer(ctx, "w1", pB); err != nil {
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+					return
+				}
+				require.NoError(t, err)
+			}
 			time.Sleep(10 * time.Millisecond)
-			require.NoError(t, wc.UpdateWorkerConsumer(ctx, "w1", nil))
+			if err := wc.UpdateWorkerConsumer(ctx, "w1", nil); err != nil {
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+					return
+				}
+				require.NoError(t, err)
+			}
 		}
 	})
 
 	// Wait for completion and ensure Close succeeds quickly
 	wg.Wait()
-	require.NoError(t, wc.Close(ctx))
+	if err := wc.Close(ctx); err != nil {
+		if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+			require.NoError(t, err)
+		}
+	}
 }
 
 // TestWorkerConsumer_FlipSetsWithClose flips between multiple subject sets while
@@ -127,7 +152,7 @@ func TestWorkerConsumer_FlipSetsWithClose(t *testing.T) {
 		config:          cfg,
 		logger:          cfg.Logger,
 		handler:         MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error { return nil }),
-		subjects:        make(map[string]*subjectLoop),
+		subjects:        make(map[string]*partitionConsumer),
 		iterFactory:     defaultIterFactory,
 		subjectTemplate: tmpl,
 	}

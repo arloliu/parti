@@ -38,13 +38,11 @@ func (wc *WorkerConsumer) WorkerConsumerInfo(ctx context.Context, subject string
 
 	// Try fast path: use in-memory consumer if present
 	wc.mu.RLock()
-	sl := wc.subjects[subject]
+	pc := wc.subjects[subject]
 	wc.mu.RUnlock()
 
-	if sl != nil {
-		sl.consInfoMu.Lock()
-		defer sl.consInfoMu.Unlock()
-		return sl.consumer.Info(ctx)
+	if pc != nil {
+		return pc.Info(ctx)
 	}
 
 	// Bind or create durable for info retrieval
@@ -82,16 +80,14 @@ func (wc *WorkerConsumer) SubjectConsumerInfos(ctx context.Context, subjects []s
 	for _, subject := range order {
 		// Use in-memory consumer if available
 		wc.mu.RLock()
-		sl := wc.subjects[subject]
+		pc := wc.subjects[subject]
 		wc.mu.RUnlock()
 
 		var info *jetstream.ConsumerInfo
 		var err error
 
-		if sl != nil {
-			sl.consInfoMu.Lock()
-			info, err = sl.consumer.Info(ctx)
-			sl.consInfoMu.Unlock()
+		if pc != nil {
+			info, err = pc.Info(ctx)
 		} else {
 			durable := wc.perSubjectDurableName(wc.config.ConsumerPrefix, subject)
 			c, bindErr := wc.ensurePerSubjectConsumer(ctx, durable, subject)

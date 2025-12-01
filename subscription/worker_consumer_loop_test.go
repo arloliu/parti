@@ -66,7 +66,7 @@ func TestWorkerConsumer_UpdateAndPullLoop_ProcessesMessages(t *testing.T) {
 		config:          cfg,
 		logger:          cfg.Logger,
 		handler:         handler,
-		subjects:        make(map[string]*subjectLoop),
+		subjects:        make(map[string]*partitionConsumer),
 		iterFactory:     defaultIterFactory,
 		subjectTemplate: tmpl,
 	}
@@ -161,10 +161,14 @@ func TestWorkerConsumer_PullGating_SuppressesUntilOwnerStable(t *testing.T) {
 		config:          cfg,
 		logger:          cfg.Logger,
 		handler:         h,
-		subjects:        make(map[string]*subjectLoop),
+		subjects:        make(map[string]*partitionConsumer),
 		iterFactory:     defaultIterFactory,
 		subjectTemplate: tmpl,
 	}
+	// Configure partition prefix/suffix for extraction (since we bypassed constructor)
+	wc.partitionPrefix = "pg."
+	wc.partitionSuffix = ""
+
 	// init resolver
 	require.NoError(t, wc.ensureGateResolver(ctx))
 
@@ -183,9 +187,6 @@ func TestWorkerConsumer_PullGating_SuppressesUntilOwnerStable(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	// Configure partition prefix/suffix for extraction (since we bypassed constructor)
-	wc.partitionPrefix = "pg."
-	wc.partitionSuffix = ""
 	// Sanity: extraction should produce correct partition id
 	require.Equal(t, "a.1", wc.extractPartitionID("pg.a.1"))
 
@@ -247,7 +248,7 @@ func TestWorkerConsumer_IteratorEscalation_BurstTriggersMetric(t *testing.T) {
 	cfg.Metrics = &m
 	require.NoError(t, cfg.SetDefaults())
 	tmpl, _ := template.New("subject").Parse(cfg.SubjectTemplate)
-	wc := &WorkerConsumer{js: js, config: cfg, logger: cfg.Logger, handler: MessageHandlerFunc(func(context.Context, jetstream.Msg) error { return nil }), subjects: make(map[string]*subjectLoop), iterFactory: iterFactory, subjectTemplate: tmpl}
+	wc := &WorkerConsumer{js: js, config: cfg, logger: cfg.Logger, handler: MessageHandlerFunc(func(context.Context, jetstream.Msg) error { return nil }), subjects: make(map[string]*partitionConsumer), iterFactory: iterFactory, subjectTemplate: tmpl}
 
 	require.NoError(t, wc.UpdateWorkerConsumer(ctx, "w1", []types.Partition{{Keys: []string{"x"}}}))
 	t.Cleanup(func() { _ = wc.Close(context.Background()) })
@@ -279,7 +280,7 @@ func TestWorkerConsumer_SubjectRemoval_InactiveGCGarbageCollects(t *testing.T) {
 	cfg.InactiveThreshold = 300 * time.Millisecond
 	require.NoError(t, cfg.SetDefaults())
 	tmpl, _ := template.New("subject").Parse(cfg.SubjectTemplate)
-	wc := &WorkerConsumer{js: js, config: cfg, logger: cfg.Logger, handler: MessageHandlerFunc(func(context.Context, jetstream.Msg) error { return nil }), subjects: make(map[string]*subjectLoop), iterFactory: defaultIterFactory, subjectTemplate: tmpl}
+	wc := &WorkerConsumer{js: js, config: cfg, logger: cfg.Logger, handler: MessageHandlerFunc(func(context.Context, jetstream.Msg) error { return nil }), subjects: make(map[string]*partitionConsumer), iterFactory: defaultIterFactory, subjectTemplate: tmpl}
 
 	subj := "gc.a.1"
 	part := []types.Partition{{Keys: []string{"a", "1"}}}
@@ -358,8 +359,10 @@ func TestWorkerConsumer_DualWorkerPullGating_OnlyOwnerPulls(t *testing.T) {
 		return nil
 	})
 
-	wc1 := &WorkerConsumer{js: js, config: cfg, logger: cfg.Logger, handler: h1, subjects: make(map[string]*subjectLoop), iterFactory: defaultIterFactory, subjectTemplate: tmpl}
-	wc2 := &WorkerConsumer{js: js, config: cfg, logger: cfg.Logger, handler: h2, subjects: make(map[string]*subjectLoop), iterFactory: defaultIterFactory, subjectTemplate: tmpl}
+	wc1 := &WorkerConsumer{js: js, config: cfg, logger: cfg.Logger, handler: h1, subjects: make(map[string]*partitionConsumer), iterFactory: defaultIterFactory, subjectTemplate: tmpl}
+	wc2 := &WorkerConsumer{js: js, config: cfg, logger: cfg.Logger, handler: h2, subjects: make(map[string]*partitionConsumer), iterFactory: defaultIterFactory, subjectTemplate: tmpl}
+	wc1.partitionPrefix = "pg2."
+	wc2.partitionPrefix = "pg2."
 
 	// Initialize resolvers
 	require.NoError(t, wc1.ensureGateResolver(ctx))
@@ -449,7 +452,7 @@ func TestWorkerConsumer_SubscribesAllPartitions_AfterAssignment(t *testing.T) {
 		return nil
 	})
 
-	wc := &WorkerConsumer{js: js, config: cfg, logger: cfg.Logger, handler: h, subjects: make(map[string]*subjectLoop), iterFactory: defaultIterFactory, subjectTemplate: tmpl}
+	wc := &WorkerConsumer{js: js, config: cfg, logger: cfg.Logger, handler: h, subjects: make(map[string]*partitionConsumer), iterFactory: defaultIterFactory, subjectTemplate: tmpl}
 	parts := []types.Partition{{Keys: []string{"a", "1"}}, {Keys: []string{"a", "2"}}, {Keys: []string{"b", "1"}}}
 	require.NoError(t, wc.UpdateWorkerConsumer(ctx, "w1", parts))
 	t.Cleanup(func() { _ = wc.Close(context.Background()) })
@@ -513,7 +516,7 @@ func TestWorkerConsumer_ManualAck_MaxAckPending_ThrottlesDelivery(t *testing.T) 
 		MaxAckPending:         2,
 		MaxConcurrentSubjects: 10,
 		BatchSize:             1,
-		FetchTimeout:          500 * time.Millisecond,
+		FetchTimeout:          1 * time.Second,
 	}
 	require.NoError(t, cfg.SetDefaults())
 
@@ -537,10 +540,11 @@ func TestWorkerConsumer_ManualAck_MaxAckPending_ThrottlesDelivery(t *testing.T) 
 		config:          cfg,
 		logger:          cfg.Logger,
 		handler:         handler,
-		subjects:        make(map[string]*subjectLoop),
+		subjects:        make(map[string]*partitionConsumer),
 		iterFactory:     defaultIterFactory,
 		subjectTemplate: tmpl,
 	}
+	wc.partitionPrefix = "mack."
 	require.NoError(t, wc.UpdateWorkerConsumer(ctx, "worker-1", []types.Partition{{Keys: []string{"a", "1"}}}))
 	t.Cleanup(func() { _ = wc.Close(context.Background()) })
 
@@ -654,7 +658,7 @@ func TestWorkerConsumer_UpdateRemovesSubject_StopsLoopKeepsDurable(t *testing.T)
 		config:          cfg,
 		logger:          cfg.Logger,
 		handler:         h,
-		subjects:        make(map[string]*subjectLoop),
+		subjects:        make(map[string]*partitionConsumer),
 		iterFactory:     defaultIterFactory,
 		subjectTemplate: tmpl,
 	}
@@ -689,4 +693,71 @@ func TestWorkerConsumer_UpdateRemovesSubject_StopsLoopKeepsDurable(t *testing.T)
 	// wait a bit; handled should stay the same
 	time.Sleep(300 * time.Millisecond)
 	require.Equal(t, int32(1), atomic.LoadInt32(&handled))
+}
+
+func TestWorkerConsumer_Close_RespectsTimeout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	ctx := context.Background()
+	_, nc := partitesting.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	_, err = js.CreateStream(ctx, jetstream.StreamConfig{
+		Name:      "CLOSE",
+		Subjects:  []string{"close.*.*"},
+		Retention: jetstream.LimitsPolicy,
+		Storage:   jetstream.MemoryStorage,
+		MaxMsgs:   -1,
+	})
+	require.NoError(t, err)
+
+	cfg := WorkerConsumerConfig{
+		StreamName:           "CLOSE",
+		ConsumerPrefix:       "wc2",
+		SubjectTemplate:      "close.{{.PartitionID}}",
+		DrainOnRemoveTimeout: 500 * time.Millisecond, // Short timeout for test
+	}
+	require.NoError(t, cfg.SetDefaults())
+	tmpl, err := template.New("subject").Parse(cfg.SubjectTemplate)
+	require.NoError(t, err)
+
+	// Handler that blocks until signaled
+	blockCh := make(chan struct{})
+	handler := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+		<-blockCh
+		return nil
+	})
+
+	wc := &WorkerConsumer{
+		js:              js,
+		config:          cfg,
+		logger:          cfg.Logger,
+		handler:         handler,
+		subjects:        make(map[string]*partitionConsumer),
+		iterFactory:     defaultIterFactory,
+		subjectTemplate: tmpl,
+	}
+
+	// Start consumer
+	part := []types.Partition{{Keys: []string{"a", "1"}}}
+	require.NoError(t, wc.UpdateWorkerConsumer(ctx, "worker-1", part))
+
+	// Publish message to trigger blocking handler
+	require.NoError(t, nc.Publish("close.a.1", []byte("msg")))
+	_ = nc.Flush()
+
+	// Give it a moment to pick up the message and block
+	time.Sleep(100 * time.Millisecond)
+
+	// Attempt to close with a timeout shorter than the block
+	closeCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancel()
+
+	err = wc.Close(closeCtx)
+	require.ErrorIs(t, err, context.DeadlineExceeded, "Close should return DeadlineExceeded when handler blocks")
+
+	// Unblock handler to allow clean teardown
+	close(blockCh)
 }

@@ -91,7 +91,7 @@ func TestWorkerConsumer_WorkerIDMutationGuard_EarlyReturn(t *testing.T) {
 	require.NoError(t, err)
 	wc := &WorkerConsumer{
 		config:          cfg,
-		subjects:        make(map[string]*subjectLoop),
+		subjects:        make(map[string]*partitionConsumer),
 		subjectTemplate: tmpl,
 	}
 	wc.workerID = "w1"

@@ -33,12 +33,13 @@ type WorkerConsumer struct {
 
 	// template for deriving subject strings lives in config; we reuse the same SubjectTemplate
 
-	mu sync.RWMutex
+	mu       sync.RWMutex
+	updateMu sync.Mutex // Serializes UpdateWorkerConsumer calls
 
 	workerID string
 
 	// per-subject state
-	subjects map[string]*subjectLoop
+	subjects map[string]*partitionConsumer
 
 	// optional processing gate (claim-based resolver)
 	gateResolver       types.OwnershipResolver
@@ -52,21 +53,6 @@ type WorkerConsumer struct {
 	// reverse subject template components for partitionID extraction (prefix/suffix around {{.PartitionID}})
 	partitionPrefix string
 	partitionSuffix string
-}
-
-type subjectLoop struct {
-	consumer    jetstream.Consumer
-	partitionID string
-	cancel      context.CancelFunc
-	done        chan struct{}
-
-	// iterator failure tracking for escalation logic
-	iterFailureTimes []time.Time
-	lastEscalation   time.Time
-	iterEscMu        sync.Mutex
-
-	// serialize Consumer.Info calls across goroutines to avoid races in underlying client
-	consInfoMu sync.Mutex
 }
 
 // NewWorkerConsumer creates a new per-subject durable consumer helper.
@@ -100,7 +86,7 @@ func NewWorkerConsumer(js jetstream.JetStream, cfg WorkerConsumerConfig, handler
 		config:          cfg,
 		logger:          cfg.Logger,
 		handler:         handler,
-		subjects:        make(map[string]*subjectLoop, 64),
+		subjects:        make(map[string]*partitionConsumer, 64),
 		iterFactory:     defaultIterFactory,
 		subjectTemplate: tmpl,
 		partitionPrefix: prefix,
@@ -124,6 +110,10 @@ func NewWorkerConsumer(js jetstream.JetStream, cfg WorkerConsumerConfig, handler
 // It creates/binds durables for added subjects and starts pull loops; it cancels loops
 // for removed subjects but does not delete the underlying consumer (server will GC by inactivity).
 func (wc *WorkerConsumer) UpdateWorkerConsumer(ctx context.Context, workerID string, partitions []types.Partition) error {
+	// Serialize updates to prevent race conditions (e.g. lost assignments or zombie consumers)
+	wc.updateMu.Lock()
+	defer wc.updateMu.Unlock()
+
 	if err := wc.validateUpdateParams(workerID); err != nil {
 		return err
 	}
@@ -167,12 +157,17 @@ func (wc *WorkerConsumer) UpdateWorkerConsumer(ctx context.Context, workerID str
 
 // Close cancels all subject loops. Consumers are left intact for server GC.
 func (wc *WorkerConsumer) Close(ctx context.Context) error {
+	// Serialize updates to prevent race conditions during shutdown
+	wc.updateMu.Lock()
+	defer wc.updateMu.Unlock()
+
 	wc.stopGateResolver()
+
 	// Snapshot current loops under lock
 	wc.mu.Lock()
 	type kv struct {
 		s string
-		l *subjectLoop
+		l *partitionConsumer
 	}
 	loops := make([]kv, 0, len(wc.subjects))
 	for s, loop := range wc.subjects {
@@ -184,85 +179,34 @@ func (wc *WorkerConsumer) Close(ctx context.Context) error {
 
 	// Cancel outside lock to avoid holding lock during waits
 	for _, it := range loops {
-		it.l.cancel()
-	}
-	// Wait for all to finish
-	for _, it := range loops {
-		<-it.l.done
+		it.l.Stop()
 	}
 
-	// Clean map entries under lock
+	// Wait for all to finish with context respect
+	doneCh := make(chan struct{})
+	go func() {
+		for _, it := range loops {
+			it.l.Wait()
+		}
+		close(doneCh)
+	}()
+
+	var err error
+	select {
+	case <-doneCh:
+		// All loops stopped successfully
+	case <-ctx.Done():
+		err = ctx.Err()
+	}
+
+	// Clean map entries under lock regardless of wait outcome
 	wc.mu.Lock()
 	for _, it := range loops {
 		delete(wc.subjects, it.s)
 	}
 	wc.mu.Unlock()
 
-	return nil
-}
-
-// runSubjectLoop pulls and processes messages for a single subject durable.
-func (wc *WorkerConsumer) runSubjectLoop(ctx context.Context, subject string, sl *subjectLoop, handler MessageHandler) {
-	wc.logger.Debug("subject loop starting", "subject", subject)
-	defer func() {
-		wc.logger.Debug("subject loop stopped", "subject", subject)
-		close(sl.done)
-	}()
-	batch := wc.config.BatchSize
-	expiry := wc.config.FetchTimeout
-
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-
-		if suppressed, reason := wc.shouldSuppressPull(ctx, sl.partitionID); suppressed {
-			wc.logger.Debug("pull suppressed", "subject", subject, "reason", reason)
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(150 * time.Millisecond):
-				continue
-			}
-		}
-
-		// Create iterator and enter message processing loop.
-		iter, err := wc.iterFactory(sl.consumer, batch, expiry)
-		if err != nil {
-			wc.logger.Warn("iterator creation failed", "subject", subject, "error", err)
-			if wc.config.Metrics != nil {
-				wc.config.Metrics.IncrementWorkerConsumerIteratorRestart("transient")
-			}
-
-			wc.maybeEscalateIteratorFailures(ctx, subject, sl)
-
-			if wc.delayWithBackoffOrExit(ctx, "iterate") {
-				return
-			}
-
-			continue
-		}
-
-		exit, iterErr := wc.processIterator(ctx, iter, subject, handler)
-		if exit {
-			return
-		}
-		if iterErr != nil {
-			// Classify restart reason for metrics parity
-			if wc.config.Metrics != nil {
-				if errors.Is(iterErr, jetstream.ErrNoHeartbeat) {
-					wc.config.Metrics.IncrementWorkerConsumerIteratorRestart("heartbeat")
-				} else {
-					wc.config.Metrics.IncrementWorkerConsumerIteratorRestart("transient")
-				}
-			}
-			wc.maybeEscalateIteratorFailures(ctx, subject, sl)
-			if wc.delayWithBackoffOrExit(ctx, "iterate") {
-				return
-			}
-		}
-		// loop continues to recreate iterator on next iteration
-	}
+	return err
 }
 
 func (wc *WorkerConsumer) validateUpdateParams(workerID string) error {
@@ -325,7 +269,7 @@ func (wc *WorkerConsumer) removeSubjectLoops(ctx context.Context, toRemove []str
 
 	// Snapshot loops to stop under lock
 	wc.mu.Lock()
-	loops := make([]*subjectLoop, 0, len(toRemove))
+	loops := make([]*partitionConsumer, 0, len(toRemove))
 	for _, s := range toRemove {
 		if loop := wc.subjects[s]; loop != nil {
 			loops = append(loops, loop)
@@ -343,56 +287,52 @@ func (wc *WorkerConsumer) removeSubjectLoops(ctx context.Context, toRemove []str
 		defer cancel()
 
 		for _, l := range loops {
-			wc.drainPerSubject(dctx, l)
+			l.Drain(dctx)
 		}
 	}
 
-	// Cancel outside lock after optional drain
+	// Cancel outside lock after optional drain, and wait with a safety timeout per loop
 	for _, l := range loops {
-		l.cancel()
-	}
-	// Wait for completion
-	for _, l := range loops {
-		<-l.done
+		l.Stop()
 	}
 
-	// Delete keys under lock
+	// Wait for completion with a bounded timeout per loop to avoid deadlocks
+	waitTimeout := wc.config.DrainOnRemoveTimeout
+	if waitTimeout <= 0 {
+		waitTimeout = 10 * time.Second
+	}
+
+	var err error
+	doneCh := make(chan struct{})
+	go func() {
+		for _, l := range loops {
+			l.Wait()
+		}
+		close(doneCh)
+	}()
+
+	select {
+	case <-doneCh:
+		// loops finished normally
+	case <-ctx.Done():
+		// caller's context canceled; stop waiting
+		err = ctx.Err()
+	case <-time.After(waitTimeout):
+		// give up waiting on this loop but continue cleanup for others
+		wc.logger.Warn("timeout waiting for subject loops to stop",
+			"count", len(loops),
+			"timeout", waitTimeout,
+		)
+	}
+
+	// Delete keys under lock regardless of wait outcome to prevent zombie entries
 	wc.mu.Lock()
 	for _, s := range toRemove {
 		delete(wc.subjects, s)
 	}
 	wc.mu.Unlock()
 
-	return nil
-}
-
-// drainPerSubject waits until the server reports no pending acknowledgements for the given consumer
-// or the context times out. This is a best-effort drain used during subject removal to minimize
-// redeliveries caused by abrupt cancellation.
-func (wc *WorkerConsumer) drainPerSubject(ctx context.Context, sl *subjectLoop) {
-	if sl == nil || sl.consumer == nil {
-		return
-	}
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			// Serialize Info calls to avoid underlying client races
-			sl.consInfoMu.Lock()
-			info, err := sl.consumer.Info(ctx)
-			sl.consInfoMu.Unlock()
-			if err != nil {
-				// If info fails, break drain early to avoid blocking removals
-				return
-			}
-			if info.NumAckPending == 0 {
-				return
-			}
-		}
-	}
+	return err
 }
 
 func (wc *WorkerConsumer) addSubjectLoop(ctx context.Context, workerID string, subject string) error {
@@ -435,114 +375,54 @@ func (wc *WorkerConsumer) addSubjectLoop(ctx context.Context, workerID string, s
 	}
 
 	partitionID := wc.extractPartitionID(subject)
-	loopCtx, cancel := context.WithCancel(context.Background())
-	sl := &subjectLoop{
-		consumer:    cons,
-		partitionID: partitionID,
-		cancel:      cancel,
-		done:        make(chan struct{}),
+
+	pcConfig := partitionConsumerConfig{
+		BatchSize:                   wc.config.BatchSize,
+		FetchTimeout:                wc.config.FetchTimeout,
+		ManualAck:                   wc.config.ManualAck,
+		Retry:                       wc.config.Retry,
+		IteratorEscalationWindow:    wc.config.IteratorEscalationWindow,
+		IteratorEscalationThreshold: wc.config.IteratorEscalationThreshold,
+		Metrics:                     wc.config.Metrics,
 	}
+
+	consumerConfig := jetstream.ConsumerConfig{
+		Name:              durable,
+		Durable:           durable,
+		FilterSubject:     subject,
+		AckPolicy:         wc.config.AckPolicy,
+		AckWait:           wc.config.AckWait,
+		MaxDeliver:        wc.config.MaxDeliver,
+		InactiveThreshold: wc.config.InactiveThreshold,
+		MaxWaiting:        wc.config.MaxWaiting,
+		MaxAckPending:     wc.config.MaxAckPending,
+	}
+
+	pc := newPartitionConsumer(
+		wc.logger,
+		wc.js,
+		pcConfig,
+		partitionConsumerOpts{
+			streamName:     wc.config.StreamName,
+			durableName:    durable,
+			subject:        subject,
+			partitionID:    partitionID,
+			consumerConfig: consumerConfig,
+			consumer:       cons,
+			iterFactory:    wc.iterFactory,
+			checkPullSuppression: func(ctx context.Context) (bool, string) {
+				return wc.shouldSuppressPull(partitionID)
+			},
+		},
+	)
 
 	wc.mu.Lock()
-	wc.subjects[subject] = sl
+	wc.subjects[subject] = pc
 	wc.mu.Unlock()
 
-	go wc.runSubjectLoop(loopCtx, subject, sl, effectiveHandler)
+	go pc.Run(context.Background(), effectiveHandler)
 
 	return nil
-}
-
-func (wc *WorkerConsumer) shouldSuppressPull(ctx context.Context, partitionID string) (bool, string) {
-	if !wc.config.PullGatingEnabled {
-		return false, ""
-	}
-	resolver := wc.getEffectiveResolver()
-	if resolver == nil {
-		return false, ""
-	}
-	if partitionID == "" {
-		return false, ""
-	}
-
-	owner, state, _, ok := resolver.GetOwner(partitionID)
-	allowedState := state == types.HandoffStateCommit || state == types.HandoffStateStable || state == types.HandoffStatePrepare
-	if ok && owner == wc.workerID && allowedState {
-		return false, ""
-	}
-
-	// Aggressive refresh when we are suppressed due to ownership/state. This accelerates
-	// visibility of claim flips during handoff without waiting for the periodic cooldown.
-	_ = resolver.ForceRefreshPartition(ctx, partitionID)
-
-	reason := "not_owner"
-	if ok && owner == wc.workerID && !allowedState {
-		reason = "state_blocked"
-	}
-	if wc.config.Metrics != nil {
-		wc.config.Metrics.IncrementWorkerConsumerPullSuppressed(reason)
-	}
-
-	return true, reason
-}
-
-func (wc *WorkerConsumer) processIterator(
-	ctx context.Context,
-	iter jetstream.MessagesContext,
-	subject string,
-	handler MessageHandler,
-) (exit bool, iterErr error) {
-	stopperCh := wc.startIterStopper(ctx, iter)
-	defer func() {
-		select {
-		case <-stopperCh:
-		default:
-			close(stopperCh)
-		}
-	}()
-
-	for {
-		if ctx.Err() != nil {
-			iter.Stop()
-			return true, nil
-		}
-
-		msg, err := iter.Next()
-		if err != nil {
-			iter.Stop()
-			wc.logger.Debug("iterator next error", "subject", subject, "error", err)
-			return false, err
-		}
-
-		if handler == nil {
-			_ = msg.Nak()
-			continue
-		}
-
-		if wc.config.ManualAck {
-			_ = handler.Handle(ctx, msg)
-			continue
-		}
-
-		if err := handler.Handle(ctx, msg); err != nil {
-			_ = msg.Nak()
-		} else {
-			_ = msg.Ack()
-		}
-	}
-}
-
-func (wc *WorkerConsumer) startIterStopper(ctx context.Context, iter jetstream.MessagesContext) chan struct{} {
-	stopperCh := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			iter.Stop()
-		case <-stopperCh:
-			return
-		}
-	}()
-
-	return stopperCh
 }
 
 // ensurePerSubjectConsumer creates or updates a per-subject durable with FilterSubject.
@@ -766,7 +646,6 @@ func (wc *WorkerConsumer) stopGateResolver() {
 
 	if wc.gateResolver != nil {
 		if wc.gateResolverCancel != nil {
-			wc.gateResolverCancel()
 			wc.gateResolverCancel = nil
 		}
 		if resolver, ok := wc.gateResolver.(*ClaimBasedResolver); ok {
@@ -780,6 +659,10 @@ func (wc *WorkerConsumer) getEffectiveResolver() types.OwnershipResolver {
 	if wc.config.Resolver.OwnershipResolver != nil {
 		return wc.config.Resolver.OwnershipResolver
 	}
+
+	wc.gateResolverMu.Lock()
+	defer wc.gateResolverMu.Unlock()
+
 	return wc.gateResolver
 }
 
@@ -794,22 +677,6 @@ func (wc *WorkerConsumer) SetResolverMetrics(m ResolverMetrics) {
 	}
 }
 
-// delayWithBackoffOrExit applies jittered exponential backoff according to config.
-// It returns true if the context is done during the wait.
-func (wc *WorkerConsumer) delayWithBackoffOrExit(ctx context.Context, purpose string) bool {
-	delay := jitterBackoff(0, wc.config.Retry.Base, wc.config.Retry.Multiplier, wc.config.Retry.Max, nil)
-	wc.logger.Debug("backoff", "purpose", purpose, "delay_ms", delay.Milliseconds())
-	emitControlRetry(wc.config.Metrics, purpose)
-	emitRetryBackoff(wc.config.Metrics, purpose, delay.Seconds())
-
-	select {
-	case <-ctx.Done():
-		return true
-	case <-time.After(delay):
-		return false
-	}
-}
-
 // extractPartitionID returns the partition id parsed from subject using the configured
 // template parts. It returns an empty string when parsing fails.
 // Note: retained for test compatibility and internal usage; delegates to shared helper.
@@ -821,90 +688,41 @@ func (wc *WorkerConsumer) extractPartitionID(subject string) string {
 	return pid
 }
 
-// maybeEscalateIteratorFailures records an iterator failure timestamp and attempts per-subject
-// remediation (recreate/bind the durable) when a burst occurs within the configured window.
-func (wc *WorkerConsumer) maybeEscalateIteratorFailures(ctx context.Context, subject string, sl *subjectLoop) {
-	sl.iterEscMu.Lock()
-	defer sl.iterEscMu.Unlock()
-
-	window := wc.config.IteratorEscalationWindow
-	if window <= 0 {
-		window = DefaultIteratorEscalationWindow
-	}
-	threshold := wc.config.IteratorEscalationThreshold
-	if threshold <= 0 {
-		threshold = DefaultIteratorEscalationThreshold
+// shouldSuppressPull checks if pulling should be suppressed for a partition.
+func (wc *WorkerConsumer) shouldSuppressPull(partitionID string) (bool, string) {
+	if !wc.config.PullGatingEnabled {
+		return false, ""
 	}
 
-	now := time.Now()
-	sl.iterFailureTimes = append(sl.iterFailureTimes, now)
-	cutoff := now.Add(-window)
-	i := 0
-	for ; i < len(sl.iterFailureTimes); i++ {
-		if sl.iterFailureTimes[i].After(cutoff) {
-			break
-		}
-	}
-	if i > 0 && i <= len(sl.iterFailureTimes) {
-		sl.iterFailureTimes = append([]time.Time(nil), sl.iterFailureTimes[i:]...)
-	}
-	count := len(sl.iterFailureTimes)
-	lastEsc := sl.lastEscalation
-	canEscalate := count >= threshold && (lastEsc.IsZero() || now.Sub(lastEsc) >= window)
-	if !canEscalate {
-		return
+	resolver := wc.getEffectiveResolver()
+	if resolver == nil {
+		return false, ""
 	}
 
-	if wc.config.Metrics != nil {
-		wc.config.Metrics.IncrementWorkerConsumerIteratorEscalation("burst")
+	wc.mu.RLock()
+	currentWorkerID := wc.workerID
+	wc.mu.RUnlock()
+
+	// Check ownership status
+	owner, state, _, ok := resolver.GetOwner(partitionID)
+	if !ok {
+		wc.logger.Warn("pull gating resolve failed: partition not found", "partition", partitionID)
+		return true, "resolve_error"
 	}
 
-	sl.lastEscalation = now
-	wc.logger.Info("iterator escalation triggered",
-		"op", "iterator_escalation",
-		"subject", subject,
-		"count_in_window", count,
-		"threshold", threshold,
-		"window_ms", window.Milliseconds(),
-	)
-
-	// Attempt remediation: check consumer info; if missing or error, recreate/rebind.
-	if sl.consumer != nil {
-		if _, err := sl.consumer.Info(ctx); err == nil {
-			return
-		}
+	// Only pull if we are the owner and state is Stable
+	if owner != currentWorkerID {
+		return true, fmt.Sprintf("not_owner(owner=%s)", owner)
 	}
 
-	durable := wc.perSubjectDurableName(wc.config.ConsumerPrefix, subject)
-	newCons, err := wc.ensurePerSubjectConsumer(ctx, durable, subject)
-	if err != nil {
-		wc.logger.Warn("per-subject consumer remediation failed", "subject", subject, "durable", durable, "error", err)
-		return
+	if state != types.HandoffStateStable {
+		return true, fmt.Sprintf("state_not_stable(%v)", state)
 	}
 
-	// Update loop reference under lock (best-effort; loop may be shutting down)
-	wc.mu.Lock()
-	if currentSl := wc.subjects[subject]; currentSl == sl {
-		sl.consumer = newCons
-	}
-	wc.mu.Unlock()
-
-	wc.logger.Info("per-subject consumer remediated", "subject", subject, "durable", durable)
+	return false, ""
 }
 
 // defaultIterFactory provides the default messages iterator factory.
 func defaultIterFactory(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error) {
-	if cons == nil {
-		return nil, errors.New("consumer not initialized")
-	}
-	// JetStream requires PullExpiry to be at least 1s.
-	if expiry > 0 && expiry < time.Second {
-		expiry = time.Second
-	}
-
-	return cons.Messages(
-		jetstream.PullMaxMessages(batch),
-		jetstream.PullExpiry(expiry),
-		jetstream.PullHeartbeat(expiry/2),
-	)
+	return cons.Messages(jetstream.PullMaxMessages(batch), jetstream.PullExpiry(expiry))
 }
