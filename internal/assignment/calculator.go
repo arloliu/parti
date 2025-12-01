@@ -203,10 +203,11 @@ func (c *Calculator) Start(ctx context.Context) error {
 		return fmt.Errorf("immediate initial assignment failed: %w", err)
 	}
 
-	// Get worker count after immediate assignment
-	c.mu.RLock()
-	immediateWorkerCount := len(c.currentWorkers)
-	c.mu.RUnlock()
+	// Get worker count after immediate assignment and update lastWorkers
+	// to prevent monitor from triggering a duplicate "cold_start" rebalance.
+	c.mu.Lock()
+	immediateWorkerCount := c.setLastWorkersLocked(c.currentWorkers)
+	c.mu.Unlock()
 
 	c.Logger.Info("immediate initial assignment complete - partitions now covered",
 		"workers", immediateWorkerCount)
@@ -335,11 +336,7 @@ func (c *Calculator) finalizeInitialAssignment(ctx context.Context, immediateWor
 	// Initialize lastWorkers with the workers from final assignment
 	// This prevents immediately re-entering scaling when monitorWorkers starts
 	c.mu.Lock()
-	clear(c.lastWorkers)
-	for w := range c.currentWorkers {
-		c.lastWorkers[w] = true
-	}
-	finalWorkerCount := len(c.lastWorkers)
+	finalWorkerCount := c.setLastWorkersLocked(c.currentWorkers)
 	c.mu.Unlock()
 
 	c.Logger.Info("initial assignment complete",
@@ -508,7 +505,7 @@ func (c *Calculator) pollForChanges(ctx context.Context) error {
 	}
 
 	c.mu.RLock()
-	changed := c.hasWorkersChangedMap(currentWorkers)
+	changed := c.hasWorkersChangedLocked(currentWorkers)
 	c.mu.RUnlock()
 
 	if !changed {
@@ -563,16 +560,13 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 	}
 
 	c.mu.RLock()
-	changed := c.hasWorkersChangedMap(workers)
+	changed := c.hasWorkersChangedLocked(workers)
+	lastWorkersCopy := c.cloneLastWorkersLocked()
+	c.mu.RUnlock()
+
 	cooldownActive := time.Since(c.publisher.LastRebalanceTime()) < c.Cooldown
 	currentState := c.GetState()
-	lastWorkerCount := len(c.lastWorkers)
-	// Make a copy of lastWorkers to avoid race in detectRebalanceType
-	lastWorkersCopy := make(map[string]bool, len(c.lastWorkers))
-	for w := range c.lastWorkers {
-		lastWorkersCopy[w] = true
-	}
-	c.mu.RUnlock()
+	lastWorkerCount := len(lastWorkersCopy)
 
 	c.Logger.Debug("checkForChanges",
 		"current_workers", len(workers),
@@ -642,10 +636,7 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 
 	// Update lastWorkers for next comparison
 	c.mu.Lock()
-	clear(c.lastWorkers)
-	for w := range workers {
-		c.lastWorkers[w] = true
-	}
+	c.setLastWorkersLocked(workers)
 	c.mu.Unlock()
 
 	// Trigger appropriate state transition based on reason
@@ -660,8 +651,29 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 	return nil
 }
 
-// hasWorkersChangedMap checks if the worker set has changed using map comparison.
-func (c *Calculator) hasWorkersChangedMap(workers map[string]bool) bool {
+// setLastWorkersLocked replaces lastWorkers with the provided worker set.
+// Caller must hold c.mu.Lock(). Returns the total worker count after the update.
+func (c *Calculator) setLastWorkersLocked(workers map[string]bool) int {
+	clear(c.lastWorkers)
+	for w := range workers {
+		c.lastWorkers[w] = true
+	}
+
+	return len(c.lastWorkers)
+}
+
+// cloneLastWorkersLocked returns a copy of lastWorkers. Caller must hold c.mu.RLock().
+func (c *Calculator) cloneLastWorkersLocked() map[string]bool {
+	cloned := make(map[string]bool, len(c.lastWorkers))
+	for w := range c.lastWorkers {
+		cloned[w] = true
+	}
+
+	return cloned
+}
+
+// hasWorkersChangedLocked checks if the worker set has changed. Caller must hold c.mu.RLock().
+func (c *Calculator) hasWorkersChangedLocked(workers map[string]bool) bool {
 	if len(workers) != len(c.lastWorkers) {
 		return true
 	}
@@ -793,10 +805,7 @@ func (c *Calculator) handleRebalance(ctx context.Context, reason string) error {
 	// After successful rebalance, update lastWorkers to match currentWorkers
 	// This prevents immediately re-entering scaling on the next poll
 	c.mu.Lock()
-	clear(c.lastWorkers)
-	for w := range c.currentWorkers {
-		c.lastWorkers[w] = true
-	}
+	c.setLastWorkersLocked(c.currentWorkers)
 	c.mu.Unlock()
 
 	// Reset emergency detector after successful emergency rebalance

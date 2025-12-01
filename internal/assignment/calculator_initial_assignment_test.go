@@ -447,14 +447,29 @@ func TestCalculator_InitialAssignment_Metrics(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = calc.Stop(ctx) }()
 
+	// Ensure the lone leader claims all partitions immediately.
+	require.Eventually(t, func() bool {
+		entry, err := assignmentKV.Get(ctx, "assignment.worker-0")
+		if err != nil {
+			return false
+		}
+
+		var assignment types.Assignment
+		if json.Unmarshal(entry.Value(), &assignment) != nil {
+			return false
+		}
+
+		return len(assignment.Partitions) == 1
+	}, 150*time.Millisecond, 10*time.Millisecond, "leader should get all partitions immediately")
+
 	// Wait for both phases
 	time.Sleep(200 * time.Millisecond)
 
 	// Verify two rebalance attempts recorded
-	require.GreaterOrEqual(t, metrics.GetRebalanceAttempt("cold_start_immediate"), 1,
-		"immediate assignment should be recorded")
-	require.GreaterOrEqual(t, metrics.GetRebalanceAttempt("cold_start_final"), 1,
-		"final assignment should be recorded")
+	require.Equal(t, 1, metrics.GetRebalanceAttempt("cold_start_immediate"),
+		"immediate assignment should be recorded exactly once")
+	require.Equal(t, 1, metrics.GetRebalanceAttempt("cold_start_final"),
+		"final assignment should run exactly once")
 
 	t.Logf("✅ Metrics correctly recorded: immediate=%d, final=%d",
 		metrics.GetRebalanceAttempt("cold_start_immediate"),
