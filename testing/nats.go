@@ -1,7 +1,9 @@
 package testing
 
 import (
+	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"testing"
 	"time"
@@ -118,38 +120,55 @@ func StartEmbeddedNATSCluster(t *testing.T) ([]*server.Server, *nats.Conn) {
 
 	const clusterSize = 3
 	servers := make([]*server.Server, clusterSize)
-	clientURLs := make([]string, clusterSize)
-	clusterPorts := make([]int, clusterSize)
 
-	// Start each server in the cluster
-	for i := range clusterSize {
-		ns := startClusterNode(t, i, clusterPorts, servers)
-		servers[i] = ns
-		clientURLs[i] = ns.ClientURL()
-		clusterPorts[i] = getClusterPort(t, ns, i, servers)
+	// Pre-allocate ports to avoid chicken-and-egg problem with routes
+	clusterPorts := make([]int, clusterSize)
+	clientPorts := make([]int, clusterSize)
+	var err error
+	for i := 0; i < clusterSize; i++ {
+		clusterPorts[i], err = getFreePort()
+		if err != nil {
+			t.Fatalf("Failed to get free port: %v", err)
+		}
+		clientPorts[i], err = getFreePort()
+		if err != nil {
+			t.Fatalf("Failed to get free port: %v", err)
+		}
+	}
+
+	// Build full mesh routes
+	routes := buildClusterRoutes(clusterSize, clusterPorts)
+
+	// Start all nodes
+	for i := 0; i < clusterSize; i++ {
+		servers[i] = startClusterNode(t, i, clientPorts[i], clusterPorts[i], routes, servers)
 	}
 
 	// Wait for cluster formation
 	waitForClusterFormation(t, servers, clusterSize)
 
 	// Connect client and register cleanup
+	clientURLs := make([]string, clusterSize)
+	for i, s := range servers {
+		clientURLs[i] = s.ClientURL()
+	}
 	nc := connectToCluster(t, clientURLs, servers)
 
 	return servers, nc
 }
 
 // startClusterNode creates and starts a single NATS server node in the cluster.
-func startClusterNode(t *testing.T, index int, clusterPorts []int, servers []*server.Server) *server.Server {
+func startClusterNode(t *testing.T, index int, clientPort, clusterPort int, routes []*url.URL, servers []*server.Server) *server.Server {
 	t.Helper()
 
 	opts := &server.Options{
 		ServerName: fmt.Sprintf("test-server-%d", index),
 		Host:       "127.0.0.1",
-		Port:       -1,
+		Port:       clientPort,
 		Cluster: server.ClusterOpts{
 			Name: "test-cluster",
 			Host: "127.0.0.1",
-			Port: -1,
+			Port: clusterPort,
 		},
 		JetStream: true,
 		StoreDir:  t.TempDir(),
@@ -157,11 +176,7 @@ func startClusterNode(t *testing.T, index int, clusterPorts []int, servers []*se
 		Debug:     false,
 		Trace:     false,
 		NoLog:     true,
-	}
-
-	// Add routes to previously started servers
-	if index > 0 {
-		opts.Routes = buildClusterRoutes(index, clusterPorts)
+		Routes:    routes,
 	}
 
 	ns, err := server.NewServer(opts)
@@ -191,17 +206,30 @@ func buildClusterRoutes(count int, clusterPorts []int) []*url.URL {
 	return routes
 }
 
-// getClusterPort extracts the cluster port from a server.
-func getClusterPort(t *testing.T, ns *server.Server, index int, servers []*server.Server) int {
-	t.Helper()
-
-	addr := ns.ClusterAddr()
-	if addr == nil {
-		shutdownServers(servers[:index+1])
-		t.Fatalf("NATS server %d cluster address not available", index)
+// getFreePort returns a free TCP port.
+func getFreePort() (int, error) {
+	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
+	if err != nil {
+		return 0, err
 	}
 
-	return addr.Port
+	l, err := net.ListenTCP("tcp", addr)
+	if err != nil {
+		return 0, err
+	}
+
+	tcpAddr, ok := l.Addr().(*net.TCPAddr)
+	if !ok {
+		_ = l.Close()
+		return 0, errors.New("failed to obtain TCP address")
+	}
+	port := tcpAddr.Port
+
+	if err := l.Close(); err != nil {
+		return 0, err
+	}
+
+	return port, nil
 }
 
 // waitForClusterFormation waits for all servers to connect to each other.
