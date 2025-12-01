@@ -38,30 +38,23 @@ func (wc *WorkerConsumer) WorkerConsumerInfo(ctx context.Context, subject string
 
 	// Try fast path: use in-memory consumer if present
 	wc.mu.RLock()
-	var cons jetstream.Consumer
-	if sl := wc.subjects[subject]; sl != nil {
-		cons = sl.consumer
-	}
+	sl := wc.subjects[subject]
 	wc.mu.RUnlock()
 
-	if cons == nil {
-		// Bind or create durable for info retrieval
-		durable := wc.perSubjectDurableName(wc.config.ConsumerPrefix, subject)
-		c, err := wc.ensurePerSubjectConsumer(ctx, durable, subject)
-		if err != nil {
-			return nil, err
-		}
-		cons = c
+	if sl != nil {
+		sl.consInfoMu.Lock()
+		defer sl.consInfoMu.Unlock()
+		return sl.consumer.Info(ctx)
 	}
 
-	wc.consInfoMu.Lock()
-	info, err := cons.Info(ctx)
-	wc.consInfoMu.Unlock()
+	// Bind or create durable for info retrieval
+	durable := wc.perSubjectDurableName(wc.config.ConsumerPrefix, subject)
+	c, err := wc.ensurePerSubjectConsumer(ctx, durable, subject)
 	if err != nil {
 		return nil, err
 	}
 
-	return info, nil
+	return c.Info(ctx)
 }
 
 // SubjectConsumerInfos returns ConsumerInfo for each provided subject's durable.
@@ -89,24 +82,25 @@ func (wc *WorkerConsumer) SubjectConsumerInfos(ctx context.Context, subjects []s
 	for _, subject := range order {
 		// Use in-memory consumer if available
 		wc.mu.RLock()
-		var cons jetstream.Consumer
-		if sl := wc.subjects[subject]; sl != nil {
-			cons = sl.consumer
-		}
+		sl := wc.subjects[subject]
 		wc.mu.RUnlock()
 
-		if cons == nil {
+		var info *jetstream.ConsumerInfo
+		var err error
+
+		if sl != nil {
+			sl.consInfoMu.Lock()
+			info, err = sl.consumer.Info(ctx)
+			sl.consInfoMu.Unlock()
+		} else {
 			durable := wc.perSubjectDurableName(wc.config.ConsumerPrefix, subject)
-			c, err := wc.ensurePerSubjectConsumer(ctx, durable, subject)
-			if err != nil {
-				return nil, fmt.Errorf("bind durable for %q: %w", subject, err)
+			c, bindErr := wc.ensurePerSubjectConsumer(ctx, durable, subject)
+			if bindErr != nil {
+				return nil, fmt.Errorf("bind durable for %q: %w", subject, bindErr)
 			}
-			cons = c
+			info, err = c.Info(ctx)
 		}
 
-		wc.consInfoMu.Lock()
-		info, err := cons.Info(ctx)
-		wc.consInfoMu.Unlock()
 		if err != nil {
 			return nil, fmt.Errorf("consumer info for %q: %w", subject, err)
 		}

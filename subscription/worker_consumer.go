@@ -49,17 +49,9 @@ type WorkerConsumer struct {
 	// iterator factory
 	iterFactory func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error)
 
-	// iterator failure tracking for escalation logic
-	iterFailureTimes []time.Time
-	lastEscalation   time.Time
-	iterEscMu        sync.Mutex
-
 	// reverse subject template components for partitionID extraction (prefix/suffix around {{.PartitionID}})
 	partitionPrefix string
 	partitionSuffix string
-
-	// serialize Consumer.Info calls across goroutines to avoid races in underlying client
-	consInfoMu sync.Mutex
 }
 
 type subjectLoop struct {
@@ -67,6 +59,14 @@ type subjectLoop struct {
 	partitionID string
 	cancel      context.CancelFunc
 	done        chan struct{}
+
+	// iterator failure tracking for escalation logic
+	iterFailureTimes []time.Time
+	lastEscalation   time.Time
+	iterEscMu        sync.Mutex
+
+	// serialize Consumer.Info calls across goroutines to avoid races in underlying client
+	consInfoMu sync.Mutex
 }
 
 // NewWorkerConsumer creates a new per-subject durable consumer helper.
@@ -202,11 +202,11 @@ func (wc *WorkerConsumer) Close(ctx context.Context) error {
 }
 
 // runSubjectLoop pulls and processes messages for a single subject durable.
-func (wc *WorkerConsumer) runSubjectLoop(ctx context.Context, subject, partitionID string, cons jetstream.Consumer, handler MessageHandler, done chan struct{}) {
+func (wc *WorkerConsumer) runSubjectLoop(ctx context.Context, subject string, sl *subjectLoop, handler MessageHandler) {
 	wc.logger.Debug("subject loop starting", "subject", subject)
 	defer func() {
 		wc.logger.Debug("subject loop stopped", "subject", subject)
-		close(done)
+		close(sl.done)
 	}()
 	batch := wc.config.BatchSize
 	expiry := wc.config.FetchTimeout
@@ -216,7 +216,7 @@ func (wc *WorkerConsumer) runSubjectLoop(ctx context.Context, subject, partition
 			return
 		}
 
-		if suppressed, reason := wc.shouldSuppressPull(ctx, partitionID); suppressed {
+		if suppressed, reason := wc.shouldSuppressPull(ctx, sl.partitionID); suppressed {
 			wc.logger.Debug("pull suppressed", "subject", subject, "reason", reason)
 			select {
 			case <-ctx.Done():
@@ -227,16 +227,14 @@ func (wc *WorkerConsumer) runSubjectLoop(ctx context.Context, subject, partition
 		}
 
 		// Create iterator and enter message processing loop.
-		iter, err := wc.iterFactory(cons, batch, expiry)
+		iter, err := wc.iterFactory(sl.consumer, batch, expiry)
 		if err != nil {
 			wc.logger.Warn("iterator creation failed", "subject", subject, "error", err)
 			if wc.config.Metrics != nil {
 				wc.config.Metrics.IncrementWorkerConsumerIteratorRestart("transient")
 			}
 
-			if newCons := wc.maybeEscalateIteratorFailures(ctx, subject, cons); newCons != nil {
-				cons = newCons
-			}
+			wc.maybeEscalateIteratorFailures(ctx, subject, sl)
 
 			if wc.delayWithBackoffOrExit(ctx, "iterate") {
 				return
@@ -258,9 +256,7 @@ func (wc *WorkerConsumer) runSubjectLoop(ctx context.Context, subject, partition
 					wc.config.Metrics.IncrementWorkerConsumerIteratorRestart("transient")
 				}
 			}
-			if newCons := wc.maybeEscalateIteratorFailures(ctx, subject, cons); newCons != nil {
-				cons = newCons
-			}
+			wc.maybeEscalateIteratorFailures(ctx, subject, sl)
 			if wc.delayWithBackoffOrExit(ctx, "iterate") {
 				return
 			}
@@ -347,7 +343,7 @@ func (wc *WorkerConsumer) removeSubjectLoops(ctx context.Context, toRemove []str
 		defer cancel()
 
 		for _, l := range loops {
-			wc.drainPerSubject(dctx, l.consumer)
+			wc.drainPerSubject(dctx, l)
 		}
 	}
 
@@ -373,8 +369,8 @@ func (wc *WorkerConsumer) removeSubjectLoops(ctx context.Context, toRemove []str
 // drainPerSubject waits until the server reports no pending acknowledgements for the given consumer
 // or the context times out. This is a best-effort drain used during subject removal to minimize
 // redeliveries caused by abrupt cancellation.
-func (wc *WorkerConsumer) drainPerSubject(ctx context.Context, cons jetstream.Consumer) {
-	if cons == nil {
+func (wc *WorkerConsumer) drainPerSubject(ctx context.Context, sl *subjectLoop) {
+	if sl == nil || sl.consumer == nil {
 		return
 	}
 	ticker := time.NewTicker(50 * time.Millisecond)
@@ -385,9 +381,9 @@ func (wc *WorkerConsumer) drainPerSubject(ctx context.Context, cons jetstream.Co
 			return
 		case <-ticker.C:
 			// Serialize Info calls to avoid underlying client races
-			wc.consInfoMu.Lock()
-			info, err := cons.Info(ctx)
-			wc.consInfoMu.Unlock()
+			sl.consInfoMu.Lock()
+			info, err := sl.consumer.Info(ctx)
+			sl.consInfoMu.Unlock()
 			if err != nil {
 				// If info fails, break drain early to avoid blocking removals
 				return
@@ -451,7 +447,7 @@ func (wc *WorkerConsumer) addSubjectLoop(ctx context.Context, workerID string, s
 	wc.subjects[subject] = sl
 	wc.mu.Unlock()
 
-	go wc.runSubjectLoop(loopCtx, subject, partitionID, cons, effectiveHandler, sl.done)
+	go wc.runSubjectLoop(loopCtx, subject, sl, effectiveHandler)
 
 	return nil
 }
@@ -827,10 +823,9 @@ func (wc *WorkerConsumer) extractPartitionID(subject string) string {
 
 // maybeEscalateIteratorFailures records an iterator failure timestamp and attempts per-subject
 // remediation (recreate/bind the durable) when a burst occurs within the configured window.
-// Returns a new consumer when remediation performed successfully; otherwise returns nil.
-func (wc *WorkerConsumer) maybeEscalateIteratorFailures(ctx context.Context, subject string, cons jetstream.Consumer) jetstream.Consumer {
-	wc.iterEscMu.Lock()
-	defer wc.iterEscMu.Unlock()
+func (wc *WorkerConsumer) maybeEscalateIteratorFailures(ctx context.Context, subject string, sl *subjectLoop) {
+	sl.iterEscMu.Lock()
+	defer sl.iterEscMu.Unlock()
 
 	window := wc.config.IteratorEscalationWindow
 	if window <= 0 {
@@ -842,29 +837,29 @@ func (wc *WorkerConsumer) maybeEscalateIteratorFailures(ctx context.Context, sub
 	}
 
 	now := time.Now()
-	wc.iterFailureTimes = append(wc.iterFailureTimes, now)
+	sl.iterFailureTimes = append(sl.iterFailureTimes, now)
 	cutoff := now.Add(-window)
 	i := 0
-	for ; i < len(wc.iterFailureTimes); i++ {
-		if wc.iterFailureTimes[i].After(cutoff) {
+	for ; i < len(sl.iterFailureTimes); i++ {
+		if sl.iterFailureTimes[i].After(cutoff) {
 			break
 		}
 	}
-	if i > 0 && i <= len(wc.iterFailureTimes) {
-		wc.iterFailureTimes = append([]time.Time(nil), wc.iterFailureTimes[i:]...)
+	if i > 0 && i <= len(sl.iterFailureTimes) {
+		sl.iterFailureTimes = append([]time.Time(nil), sl.iterFailureTimes[i:]...)
 	}
-	count := len(wc.iterFailureTimes)
-	lastEsc := wc.lastEscalation
+	count := len(sl.iterFailureTimes)
+	lastEsc := sl.lastEscalation
 	canEscalate := count >= threshold && (lastEsc.IsZero() || now.Sub(lastEsc) >= window)
 	if !canEscalate {
-		return nil
+		return
 	}
 
 	if wc.config.Metrics != nil {
 		wc.config.Metrics.IncrementWorkerConsumerIteratorEscalation("burst")
 	}
 
-	wc.lastEscalation = now
+	sl.lastEscalation = now
 	wc.logger.Info("iterator escalation triggered",
 		"op", "iterator_escalation",
 		"subject", subject,
@@ -874,9 +869,9 @@ func (wc *WorkerConsumer) maybeEscalateIteratorFailures(ctx context.Context, sub
 	)
 
 	// Attempt remediation: check consumer info; if missing or error, recreate/rebind.
-	if cons != nil {
-		if _, err := cons.Info(ctx); err == nil {
-			return nil
+	if sl.consumer != nil {
+		if _, err := sl.consumer.Info(ctx); err == nil {
+			return
 		}
 	}
 
@@ -884,19 +879,17 @@ func (wc *WorkerConsumer) maybeEscalateIteratorFailures(ctx context.Context, sub
 	newCons, err := wc.ensurePerSubjectConsumer(ctx, durable, subject)
 	if err != nil {
 		wc.logger.Warn("per-subject consumer remediation failed", "subject", subject, "durable", durable, "error", err)
-		return nil
+		return
 	}
 
 	// Update loop reference under lock (best-effort; loop may be shutting down)
 	wc.mu.Lock()
-	if sl := wc.subjects[subject]; sl != nil {
+	if currentSl := wc.subjects[subject]; currentSl == sl {
 		sl.consumer = newCons
 	}
 	wc.mu.Unlock()
 
 	wc.logger.Info("per-subject consumer remediated", "subject", subject, "durable", durable)
-
-	return newCons
 }
 
 // defaultIterFactory provides the default messages iterator factory.
