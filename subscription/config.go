@@ -80,7 +80,7 @@ type WorkerConsumerConfig struct {
 	// ConsumerPrefix is the prefix for the durable consumer name.
 	// It must contain only alphanumeric characters, dashes, or underscores.
 	// Required.
-	ConsumerPrefix string `validate:"required,alphanum"`
+	ConsumerPrefix string `validate:"required"`
 
 	// SubjectTemplate is a text/template used to build subjects from a
 	// partition. Available field: {{.PartitionID}} which equals partition.SubjectKey().
