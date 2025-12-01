@@ -86,7 +86,7 @@ func (s *NatsKV) Start(ctx context.Context) error {
 	s.watcher = watcher
 	s.running = true
 
-	go s.watchLoop()
+	go s.watchLoop(s.ctx, s.watcher)
 
 	return nil
 }
@@ -161,12 +161,12 @@ func (s *NatsKV) Update(ctx context.Context, partitions []types.Partition) error
 	return nil
 }
 
-func (s *NatsKV) watchLoop() {
+func (s *NatsKV) watchLoop(ctx context.Context, watcher jetstream.KeyWatcher) {
 	for {
 		select {
-		case <-s.ctx.Done():
+		case <-ctx.Done():
 			return
-		case entry := <-s.watcher.Updates():
+		case entry := <-watcher.Updates():
 			if entry == nil {
 				continue
 			}
