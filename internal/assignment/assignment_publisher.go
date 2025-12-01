@@ -238,7 +238,13 @@ func (p *AssignmentPublisher) Publish(
 		for wid, parts := range assignments {
 			counts = append(counts, wid, len(parts))
 		}
-		p.logger.Info("assignment distribution", append([]any{"version", p.currentVersion, "lifecycle", lifecycle}, counts...)...)
+
+		logArgs := append([]any{"version", p.currentVersion, "lifecycle", lifecycle}, counts...)
+		if len(assignments) <= 5 {
+			p.logger.Info("assignment distribution", logArgs...)
+		} else {
+			p.logger.Debug("assignment distribution (suppressed)", append(logArgs, "worker_count", len(assignments))...)
+		}
 	}
 
 	// Update last rebalance time

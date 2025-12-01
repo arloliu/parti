@@ -164,10 +164,15 @@ func (m *Manager) monitorCalculatorState() {
 	}
 }
 
-// stopCalculator stops the assignment calculator.
-func (m *Manager) stopCalculator() {
+// stopCalculator stops the assignment calculator, returning true if it was running.
+func (m *Manager) stopCalculator() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	calc, ok := m.calculator.(*assignment.Calculator)
+	if !ok {
+		return false
+	}
 
 	// Before stopping, check if we need to transition state
 	// If we're in a leader-only state (Scaling/Rebalancing/Emergency),
@@ -202,13 +207,13 @@ func (m *Manager) stopCalculator() {
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer stopCancel()
 
-	if err := m.calculator.Stop(stopCtx); err != nil {
+	if err := calc.Stop(stopCtx); err != nil {
 		m.logError("failed to stop calculator", "error", err)
 	}
 
 	m.calculator = assignment.NewNopCalculator()
 
-	m.logger.Info("assignment calculator stopped", "worker_id", m.WorkerID())
+	return true
 }
 
 // calculateAndPublish calculates and publishes assignments.

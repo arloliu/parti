@@ -581,7 +581,7 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 
 	// Don't trigger rebalance if already scaling/rebalancing
 	if currentState != types.CalcStateIdle {
-		c.Logger.Info("worker change detected but calculator not idle",
+		c.Logger.Debug("worker change detected but calculator not idle",
 			"state", currentState.String(),
 		)
 
@@ -594,7 +594,7 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 		lastRebalanceTime := c.publisher.LastRebalanceTime()
 		timeSinceLastRebalance := time.Since(lastRebalanceTime)
 		remaining := c.Cooldown - timeSinceLastRebalance
-		c.Logger.Info("worker change detected but rate limit active",
+		c.Logger.Debug("worker change detected but rate limit active",
 			"min_rebalance_interval", c.Cooldown,
 			"time_since_last", timeSinceLastRebalance,
 			"remaining", remaining,
@@ -604,7 +604,7 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 		return nil // Defer - will be checked again by next poll/watcher event
 	}
 
-	c.Logger.Info("worker change detected", "workers", len(workers))
+	c.Logger.Debug("worker change detected", "workers", len(workers))
 
 	// Calculate worker changes for metrics
 	added := 0
@@ -629,7 +629,7 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 
 	// Handle grace period for worker disappearance
 	if reason == "" {
-		c.Logger.Info("worker change in grace period - waiting for confirmation")
+		c.Logger.Debug("worker change in grace period - waiting for confirmation")
 		// Don't update lastWorkers - keep tracking the disappeared workers
 		return nil
 	}

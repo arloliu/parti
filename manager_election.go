@@ -117,7 +117,7 @@ func (m *Manager) monitorLeadership() {
 					// Leadership lost
 					m.isLeader.Store(false)
 					m.logger.Info("lost leadership", "worker_id", m.WorkerID())
-					m.stopCalculator()
+					_ = m.stopCalculator()
 
 					continue
 				}

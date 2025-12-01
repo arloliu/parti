@@ -421,9 +421,11 @@ func (m *Manager) Stop(ctx context.Context) error {
 	var shutdownErr error
 
 	// Step 1: Stop calculator if running (leader only)
-	m.logger.Info("stopping calculator", "worker_id", m.WorkerID())
-	m.stopCalculator()
-	m.logger.Info("calculator stopped", "worker_id", m.WorkerID())
+	if stopped := m.stopCalculator(); stopped {
+		m.logger.Info("calculator stopped", "worker_id", m.WorkerID())
+	} else {
+		m.logger.Debug("calculator stop skipped: not running", "worker_id", m.WorkerID())
+	}
 
 	// Step 1.5: Stop degraded mode connection monitor
 	select {
