@@ -2,9 +2,11 @@ package coordinator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"sync"
 	"time"
 
@@ -73,6 +75,11 @@ type Coordinator struct {
 	catchUpLatencyMax       time.Duration
 	catchUpLatencyMin       time.Duration
 	catchUpMaxInitialHoles  int
+
+	// failure handling
+	stopOnFailure     bool
+	failureReportPath string
+	failureOnce       sync.Once
 }
 
 // workerRecoveryContext tracks a single worker's backlog healing progress.
@@ -135,10 +142,12 @@ type AssignmentReport struct {
 //   - totalPartitions: Total number of partitions expected (0 disables assignment completeness metrics)
 //   - metricsCollector: Optional metrics collector (can be nil)
 //   - dupCfg: Duplicate tracing configuration
+//   - stopOnFailure: Halt simulation on gap detection
+//   - failureReportPath: Path to write failure report JSON
 //
 // Returns:
 //   - *Coordinator: Initialized coordinator
-func NewCoordinator(totalPartitions int, metricsCollector *metrics.Collector, dupCfg DupTraceSettings) *Coordinator {
+func NewCoordinator(totalPartitions int, metricsCollector *metrics.Collector, dupCfg DupTraceSettings, stopOnFailure bool, failureReportPath string) *Coordinator {
 	c := &Coordinator{
 		tracker:             NewMessageTracker(),
 		metricsCollector:    metricsCollector,
@@ -156,6 +165,8 @@ func NewCoordinator(totalPartitions int, metricsCollector *metrics.Collector, du
 		stableQuietWindow:   10 * time.Second,
 		workerLastSeen:      make(map[string]time.Time),
 		workerRecovery:      make(map[string]*workerRecoveryContext),
+		stopOnFailure:       stopOnFailure,
+		failureReportPath:   failureReportPath,
 	}
 	c.dup = NewDupTracer(dupCfg)
 	// Suppress verbose out-of-order logs by default; metrics capture disorder depth.
@@ -666,10 +677,62 @@ func (c *Coordinator) processSentMessages(ctx context.Context) {
 	}
 }
 
+// FailureReport represents the structured failure output.
+type FailureReport struct {
+	Timestamp    time.Time    `json:"timestamp"`
+	Reason       string       `json:"reason"`
+	Stats        TrackerStats `json:"stats"`
+	GapErrors    []string     `json:"gap_errors,omitempty"`
+	ActiveGaps   int          `json:"active_gaps"`
+	PendingHoles int64        `json:"pending_holes"`
+}
+
+func (c *Coordinator) triggerFailure(reason string, err error) {
+	c.failureOnce.Do(func() {
+		log.Printf("[Coordinator] CRITICAL FAILURE: %s (%v). Stopping simulation.", reason, err)
+		c.writeFailureReport(reason, err)
+		close(c.stopCh) // Signal global stop
+	})
+}
+
+func (c *Coordinator) writeFailureReport(reason string, err error) {
+	path := c.failureReportPath
+	if path == "" {
+		path = "failure_report.json"
+	}
+
+	report := FailureReport{
+		Timestamp:    time.Now(),
+		Reason:       fmt.Sprintf("%s: %v", reason, err),
+		Stats:        c.tracker.GetStats(),
+		ActiveGaps:   c.tracker.GetStats().GapCount,
+		PendingHoles: c.tracker.GetPendingHoles(),
+	}
+
+	// Include specific error details if available
+	if err != nil {
+		report.GapErrors = append(report.GapErrors, err.Error())
+	}
+
+	data, marshalErr := json.MarshalIndent(report, "", "  ")
+	if marshalErr != nil {
+		log.Printf("[Coordinator] Failed to marshal failure report: %v", marshalErr)
+		return
+	}
+
+	if writeErr := os.WriteFile(path, data, 0o600); writeErr != nil {
+		log.Printf("[Coordinator] Failed to write failure report to %s: %v", path, writeErr)
+		return
+	}
+	log.Printf("[Coordinator] Failure report written to %s", path)
+}
+
 func (c *Coordinator) processReceivedMessages(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-c.stopCh:
 			return
 		case msg := <-c.receivedCh:
 			// Record received and handle potential catch-up lifecycle transitions.
@@ -706,6 +769,12 @@ func (c *Coordinator) processReceivedMessages(ctx context.Context) {
 				// Trace duplicates into sliding window for analysis
 				if errors.Is(err, ErrMessageDuplicate) {
 					c.dup.RecordDuplicate(msg.PartitionID, msg.WorkerID, msg.PartitionSequence, time.Now())
+				}
+
+				// Trigger stop-on-failure if enabled and it's a gap
+				if c.stopOnFailure && errors.Is(err, ErrMessageGap) {
+					c.triggerFailure("Gap detected", err)
+					return
 				}
 			}
 

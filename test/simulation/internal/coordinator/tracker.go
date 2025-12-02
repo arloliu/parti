@@ -449,12 +449,12 @@ func (t *MessageTracker) GetStats() TrackerStats {
 
 // TrackerStats represents tracker statistics.
 type TrackerStats struct {
-	TotalPartitions int
-	TotalSent       int64
-	TotalReceived   int64
-	InFlight        int64 // Messages sent but not yet received
-	GapCount        int
-	DuplicateCount  int
+	TotalPartitions int   `json:"total_partitions"`
+	TotalSent       int64 `json:"total_sent"`
+	TotalReceived   int64 `json:"total_received"`
+	InFlight        int64 `json:"in_flight"` // Messages sent but not yet received
+	GapCount        int   `json:"gap_count"`
+	DuplicateCount  int   `json:"duplicate_count"`
 }
 
 // GetPendingHoles returns the total number of currently missing sequences across all partitions.

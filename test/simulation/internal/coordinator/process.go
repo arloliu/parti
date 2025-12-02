@@ -269,6 +269,36 @@ func (pm *ProcessManager) KillProcess(id string) error {
 	return nil
 }
 
+// SignalProcess sends a signal to a process.
+//
+// Parameters:
+//   - id: Process ID
+//   - sig: Signal to send
+//
+// Returns:
+//   - error: Error if signal fails
+func (pm *ProcessManager) SignalProcess(id string, sig syscall.Signal) error {
+	pm.mu.RLock()
+	info, exists := pm.processes[id]
+	pm.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("process %s not found", id)
+	}
+
+	if info.Status != StatusRunning {
+		return fmt.Errorf("process %s is not running (status: %s)", id, info.Status)
+	}
+
+	log.Printf("[ProcessManager] Sending signal %s to %s %s", sig, info.Type, id)
+
+	if err := info.Cmd.Process.Signal(sig); err != nil {
+		return fmt.Errorf("failed to send signal %s to %s: %w", sig, id, err)
+	}
+
+	return nil
+}
+
 // GetProcessInfo returns information about a process.
 //
 // Parameters:

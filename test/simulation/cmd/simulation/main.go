@@ -75,6 +75,8 @@ func main() {
 	durationOverride := flag.Duration("duration", 0, "Override simulation duration (e.g., 30s, 2m). 0 uses config value")
 	// Cooldown period to stop chaos & producers before end to allow healing
 	cooldown := flag.Duration("cooldown", 0, "Stop chaos and producers this long before end to allow healing (e.g., 30s). 0 disables")
+	// Stop on failure override
+	stopOnFailure := flag.Bool("stop-on-failure", false, "Stop simulation immediately on failure")
 	flag.Parse()
 
 	// Load config
@@ -93,6 +95,12 @@ func main() {
 	if durationOverride != nil && *durationOverride > 0 {
 		cfg.Simulation.Duration = *durationOverride
 		log.Printf("Overriding simulation duration from CLI flag: %v", cfg.Simulation.Duration)
+	}
+
+	// Apply CLI override for stop-on-failure if provided
+	if *stopOnFailure {
+		cfg.Coordinator.StopOnFailure = true
+		log.Println("Overriding stop-on-failure from CLI flag: true")
 	}
 
 	log.Printf("Starting simulation in %s mode", cfg.Simulation.Mode)
@@ -278,7 +286,7 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 		ThresholdPerMin: cfg.Coordinator.DupTrace.ThresholdPerMin,
 		TopN:            cfg.Coordinator.DupTrace.TopN,
 	}
-	coord := coordinator.NewCoordinator(cfg.Partitions.Count, metricsCollector, dupCfg)
+	coord := coordinator.NewCoordinator(cfg.Partitions.Count, metricsCollector, dupCfg, cfg.Coordinator.StopOnFailure, cfg.Coordinator.FailureReportPath)
 	// Configure optional SLO threshold for oldest pending hole age
 	coord.SetSLOHoleMaxAge(cfg.Coordinator.SLO.HoleMaxAge)
 	// Wire catch-up SLO (healing latency after absence)
@@ -836,10 +844,16 @@ func runWorker(ctx context.Context, cfg *config.Config) error {
 func runCoordinator(ctx context.Context, cfg *config.Config) error {
 	// In standalone coordinator mode, use config values where helpful but avoid starting metrics server, etc.
 	partCount := 0
-	if cfg != nil && cfg.Partitions.Count > 0 {
-		partCount = cfg.Partitions.Count
+	stopOnFailure := false
+	failureReportPath := ""
+	if cfg != nil {
+		if cfg.Partitions.Count > 0 {
+			partCount = cfg.Partitions.Count
+		}
+		stopOnFailure = cfg.Coordinator.StopOnFailure
+		failureReportPath = cfg.Coordinator.FailureReportPath
 	}
-	coord := coordinator.NewCoordinator(partCount, nil, coordinator.DupTraceSettings{})
+	coord := coordinator.NewCoordinator(partCount, nil, coordinator.DupTraceSettings{}, stopOnFailure, failureReportPath)
 	// Configure optional SLO threshold for oldest pending hole age
 	if cfg != nil {
 		coord.SetSLOHoleMaxAge(cfg.Coordinator.SLO.HoleMaxAge)
@@ -956,7 +970,13 @@ func handleChaosEvent(
 		handleNetworkDisconnect(duration, processMgr, metricsCollector)
 
 	case coordinator.WorkerPauseEvent:
-		log.Println("[Chaos] Worker pause not supported in process mode")
+		// Simulate worker pause
+		duration, ok := params["duration"].(time.Duration)
+		if !ok {
+			log.Println("[Chaos] Invalid duration parameter for worker_pause event")
+			return
+		}
+		handleWorkerPause(duration, processMgr)
 
 	default:
 		log.Printf("[Chaos] Unknown event type: %s", event)
@@ -1482,40 +1502,62 @@ func handleLeaderFailure(processMgr *coordinator.ProcessManager, metricsCollecto
 func handleNetworkDisconnect(duration time.Duration, processMgr *coordinator.ProcessManager, metricsCollector *metrics.Collector) {
 	log.Printf("[Chaos] Simulating network disconnect for %v", duration)
 
-	// Get all running workers
-	allProcesses := processMgr.ListProcesses()
-	var workers []*coordinator.ProcessInfo
-	for _, info := range allProcesses {
-		if info.Type == coordinator.WorkerProcess && info.Status == coordinator.StatusRunning {
-			workers = append(workers, info)
-		}
-	}
-
-	if len(workers) == 0 {
+	targetID := processMgr.SelectRandomWorker()
+	if targetID == "" {
 		log.Println("[Chaos] No running workers for network disconnect")
 		return
 	}
 
-	// Select random worker
-	target := workers[time.Now().UnixNano()%int64(len(workers))]
+	log.Printf("[Chaos] Disconnecting worker: %s for %v (SIGSTOP)", targetID, duration)
 
-	log.Printf("[Chaos] Disconnecting worker: %s for %v", target.ID, duration)
-
-	// Kill the process (simulating network disconnect)
-	if err := processMgr.KillProcess(target.ID); err != nil {
-		log.Printf("[Chaos] Failed to disconnect worker %s: %v", target.ID, err)
+	// Use SIGSTOP to simulate network isolation (process hangs, heartbeats fail)
+	if err := processMgr.SignalProcess(targetID, syscall.SIGSTOP); err != nil {
+		log.Printf("[Chaos] Failed to disconnect worker %s: %v", targetID, err)
 		return
 	}
 
-	// Update worker count metric
+	// Update worker count metric to reflect the loss of an active worker
 	if metricsCollector != nil {
-		workerCount := processMgr.GetWorkerCount()
-		metricsCollector.SetWorkersActive(workerCount)
-		log.Printf("Updated worker count after network disconnect: %d", workerCount)
+		count := processMgr.GetWorkerCount() - 1
+		metricsCollector.SetWorkersActive(count)
+		log.Printf("Updated worker count after network disconnect: %d", count)
 	}
 
-	// TODO: In a real implementation, we would reconnect after duration
-	// For now, the worker stays disconnected
+	time.AfterFunc(duration, func() {
+		log.Printf("[Chaos] Reconnecting worker %s (SIGCONT)", targetID)
+		if err := processMgr.SignalProcess(targetID, syscall.SIGCONT); err != nil {
+			log.Printf("[Chaos] Failed to reconnect worker %s: %v", targetID, err)
+		}
+		// Restore metric
+		if metricsCollector != nil {
+			count := processMgr.GetWorkerCount()
+			metricsCollector.SetWorkersActive(count)
+		}
+	})
+}
+
+// handleWorkerPause pauses a random worker process using SIGSTOP/SIGCONT.
+func handleWorkerPause(duration time.Duration, processMgr *coordinator.ProcessManager) {
+	log.Printf("[Chaos] Simulating worker pause for %v", duration)
+
+	targetID := processMgr.SelectRandomWorker()
+	if targetID == "" {
+		log.Println("[Chaos] No running workers to pause")
+		return
+	}
+
+	log.Printf("[Chaos] Pausing worker %s (SIGSTOP)", targetID)
+	if err := processMgr.SignalProcess(targetID, syscall.SIGSTOP); err != nil {
+		log.Printf("[Chaos] Failed to pause worker %s: %v", targetID, err)
+		return
+	}
+
+	time.AfterFunc(duration, func() {
+		log.Printf("[Chaos] Resuming worker %s (SIGCONT)", targetID)
+		if err := processMgr.SignalProcess(targetID, syscall.SIGCONT); err != nil {
+			log.Printf("[Chaos] Failed to resume worker %s: %v", targetID, err)
+		}
+	})
 }
 
 // handleLeaderGoroutineFailure finds the leader worker, crashes it, and restarts it.

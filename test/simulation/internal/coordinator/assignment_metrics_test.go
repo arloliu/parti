@@ -12,7 +12,7 @@ import (
 // TestCoordinatorAssignmentMetrics verifies unassigned partition calculation and locality progression.
 func TestCoordinatorAssignmentMetrics(t *testing.T) {
 	collector := metrics.NewCollectorWithRegistry(prometheus.NewRegistry())
-	coord := NewCoordinator(10, collector, DupTraceSettings{})
+	coord := NewCoordinator(10, collector, DupTraceSettings{}, false, "")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go coord.Start(ctx)

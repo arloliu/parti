@@ -8,7 +8,7 @@ import (
 // TestPruneStaleRecoveries verifies that stale recovery contexts are pruned.
 func TestPruneStaleRecoveries(t *testing.T) {
 	t.Parallel()
-	coord := NewCoordinator(10, nil, DupTraceSettings{})
+	coord := NewCoordinator(10, nil, DupTraceSettings{}, false, "")
 	coord.ConfigureCatchUpSLO(true, 1*time.Second, 100, 0)
 
 	// Manually inject a stale recovery

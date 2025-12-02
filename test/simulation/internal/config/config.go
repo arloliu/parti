@@ -119,6 +119,11 @@ type CoordinatorConfig struct {
 	GapAging time.Duration `yaml:"gap_aging"`
 	// SLO defines optional service-level objectives for reporting.
 	SLO SLOConfig `yaml:"slo"`
+	// StopOnFailure halts the simulation immediately when a gap is detected.
+	StopOnFailure bool `yaml:"stop_on_failure"`
+	// FailureReportPath defines where to write the JSON failure report.
+	// Defaults to "failure_report.json" if empty.
+	FailureReportPath string `yaml:"failure_report_path"`
 }
 
 // SLOConfig holds optional SLO thresholds for simulation reporting.

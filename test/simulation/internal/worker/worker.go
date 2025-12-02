@@ -225,7 +225,7 @@ func NewWorker(cfg Config) (*Worker, error) { //nolint:cyclop
 		BatchSize: worker.consumerBatchSize,
 		// Short fetch timeout so goroutines blocked in Next() exit rapidly after cancellation,
 		// reducing apparent goroutine leak in simulation leak tests.
-		FetchTimeout: 350 * time.Millisecond,
+		FetchTimeout: 1 * time.Second,
 		// Drain per-subject on removal to reduce NAK churn during chaos scale-down.
 		DrainOnRemove: true,
 		// Under exclusivity gating and chaos, messages can be NAKed multiple times.
