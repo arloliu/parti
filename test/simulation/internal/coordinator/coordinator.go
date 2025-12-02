@@ -679,20 +679,26 @@ func (c *Coordinator) processSentMessages(ctx context.Context) {
 
 // FailureReport represents the structured failure output.
 type FailureReport struct {
-	Timestamp    time.Time    `json:"timestamp"`
-	Reason       string       `json:"reason"`
-	Stats        TrackerStats `json:"stats"`
-	GapErrors    []string     `json:"gap_errors,omitempty"`
-	ActiveGaps   int          `json:"active_gaps"`
-	PendingHoles int64        `json:"pending_holes"`
+	Timestamp    time.Time         `json:"timestamp"`
+	Reason       string            `json:"reason"`
+	Stats        TrackerStats      `json:"stats"`
+	GapErrors    []string          `json:"gap_errors,omitempty"`
+	DetailedGaps []MessageGapError `json:"detailed_gaps,omitempty"`
+	ActiveGaps   int               `json:"active_gaps"`
+	PendingHoles int64             `json:"pending_holes"`
 }
 
-func (c *Coordinator) triggerFailure(reason string, err error) {
+// TriggerFailure triggers a failure report and stops the simulation.
+func (c *Coordinator) TriggerFailure(reason string, err error) {
 	c.failureOnce.Do(func() {
 		log.Printf("[Coordinator] CRITICAL FAILURE: %s (%v). Stopping simulation.", reason, err)
 		c.writeFailureReport(reason, err)
 		close(c.stopCh) // Signal global stop
 	})
+}
+
+func (c *Coordinator) triggerFailure(reason string, err error) {
+	c.TriggerFailure(reason, err)
 }
 
 func (c *Coordinator) writeFailureReport(reason string, err error) {
@@ -712,6 +718,10 @@ func (c *Coordinator) writeFailureReport(reason string, err error) {
 	// Include specific error details if available
 	if err != nil {
 		report.GapErrors = append(report.GapErrors, err.Error())
+		var gapErr *MessageGapError
+		if errors.As(err, &gapErr) {
+			report.DetailedGaps = append(report.DetailedGaps, *gapErr)
+		}
 	}
 
 	data, marshalErr := json.MarshalIndent(report, "", "  ")

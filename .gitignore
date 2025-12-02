@@ -19,4 +19,4 @@ checkpoints/
 /*.html
 /*.pprof
 
-simulation
+/simulation

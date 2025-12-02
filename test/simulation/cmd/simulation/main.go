@@ -632,6 +632,10 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 						metricsCollector.RecordGap()
 					}
 				}
+				// If gaps are found at the end, trigger failure report if configured
+				if cfg.Coordinator.StopOnFailure {
+					coord.TriggerFailure("Gap detected (final scan)", escalations[0])
+				}
 			}
 			coord.PrintReport()
 			// Evaluate stability audit results via metrics (workers logged pass/fail individually)
@@ -691,6 +695,10 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 						if metricsCollector != nil {
 							metricsCollector.RecordGap()
 						}
+					}
+					if cfg.Coordinator.StopOnFailure {
+						coord.TriggerFailure("Gap detected (aged out)", escalations[0])
+						return fmt.Errorf("simulation stopped due to gap detection")
 					}
 				}
 			} else {
