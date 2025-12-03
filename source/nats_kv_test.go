@@ -161,3 +161,37 @@ func TestNatsKV_WatcherUpdate(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, expected, partitions)
 }
+
+func TestNatsKV_Watch(t *testing.T) {
+	_, nc := partitest.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "partitions_watch"})
+	require.NoError(t, err)
+
+	src := NewNatsKV(kv, "config", nil)
+	err = src.Start(ctx)
+	require.NoError(t, err)
+	defer func() { _ = src.Stop(ctx) }()
+
+	ch := src.Watch(ctx)
+
+	// Update partitions
+	err = src.Update(ctx, []types.Partition{{Keys: []string{"p1"}}})
+	require.NoError(t, err)
+
+	// Should receive signal
+	select {
+	case <-ch:
+		// Success
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for watch signal")
+	}
+
+	// Verify list updated
+	partitions, err := src.List(ctx)
+	require.NoError(t, err)
+	require.Len(t, partitions, 1)
+}

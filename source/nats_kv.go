@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sync"
 
 	"github.com/arloliu/parti/types"
@@ -29,11 +30,13 @@ type NatsKV struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 	running    bool
+	listeners  []chan struct{}
 }
 
 var (
-	_ types.PartitionSource  = (*NatsKV)(nil)
-	_ types.PartitionUpdater = (*NatsKV)(nil)
+	_ types.PartitionSource          = (*NatsKV)(nil)
+	_ types.PartitionUpdater         = (*NatsKV)(nil)
+	_ types.WatchablePartitionSource = (*NatsKV)(nil)
 )
 
 // NewNatsKV creates a new NATS KV-based partition source.
@@ -72,6 +75,10 @@ func (s *NatsKV) Start(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to decode partitions: %w", err)
 		}
+		// Sort for canonical ordering
+		slices.SortFunc(partitions, func(a, b types.Partition) int {
+			return a.Compare(b)
+		})
 		s.partitions = partitions
 	}
 
@@ -110,7 +117,36 @@ func (s *NatsKV) Stop(_ context.Context) error {
 	}
 	s.running = false
 
+	// Close all listeners
+	for _, ch := range s.listeners {
+		close(ch)
+	}
+	s.listeners = nil
+
 	return err
+}
+
+// Watch returns a channel that emits a signal when the partition list changes.
+func (s *NatsKV) Watch(ctx context.Context) <-chan struct{} {
+	ch := make(chan struct{}, 1)
+	s.mu.Lock()
+	s.listeners = append(s.listeners, ch)
+	s.mu.Unlock()
+
+	go func() {
+		<-ctx.Done()
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for i, listener := range s.listeners {
+			if listener == ch {
+				s.listeners = append(s.listeners[:i], s.listeners[i+1:]...)
+				close(ch)
+				break
+			}
+		}
+	}()
+
+	return ch
 }
 
 // List returns the current list of partitions.
@@ -189,11 +225,52 @@ func (s *NatsKV) watchLoop(ctx context.Context, watcher jetstream.KeyWatcher) {
 				continue
 			}
 
+			// Sort for canonical ordering
+			slices.SortFunc(partitions, func(a, b types.Partition) int {
+				return a.Compare(b)
+			})
+
 			s.mu.Lock()
+			// Check if partitions have actually changed
+			if partitionsEqual(s.partitions, partitions) {
+				s.mu.Unlock()
+				continue
+			}
+
 			s.partitions = partitions
+			// Notify listeners
+			for _, ch := range s.listeners {
+				select {
+				case ch <- struct{}{}:
+				default:
+					// Skip if full
+				}
+			}
 			s.mu.Unlock()
 		}
 	}
+}
+
+// partitionsEqual checks if two partition slices are identical.
+func partitionsEqual(a, b []types.Partition) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Weight != b[i].Weight {
+			return false
+		}
+		if len(a[i].Keys) != len(b[i].Keys) {
+			return false
+		}
+		for j := range a[i].Keys {
+			if a[i].Keys[j] != b[i].Keys[j] {
+				return false
+			}
+		}
+	}
+
+	return true
 }
 
 // decodePartitions decodes partition data, handling both compressed (Gzip) and uncompressed (JSON) formats.

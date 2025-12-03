@@ -208,6 +208,12 @@ func (c *Calculator) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to start worker monitor: %w", err)
 	}
 
+	// Start partition monitoring if supported
+	if watchable, ok := c.Source.(types.WatchablePartitionSource); ok {
+		c.Logger.Info("starting partition monitor")
+		go c.monitorPartitions(ctx, watchable)
+	}
+
 	// Step 2: Enter scaling state for stabilization
 	// The StateMachine will handle the wait window and trigger the final rebalance
 	c.Logger.Info("entering stabilization phase", "window", c.ColdStartWindow)
@@ -470,6 +476,32 @@ func (c *Calculator) pollForChanges(ctx context.Context) error {
 
 	// Trigger rebalancing
 	return c.checkForChanges(ctx, currentWorkers)
+}
+
+func (c *Calculator) monitorPartitions(ctx context.Context, source types.WatchablePartitionSource) {
+	ch := source.Watch(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-c.stopCh:
+			return
+		case _, ok := <-ch:
+			if !ok {
+				return // Channel closed
+			}
+			c.Logger.Info("partition change detected")
+
+			// Trigger rebalance with timeout
+			// We use a detached context with timeout because the rebalance
+			// should complete even if the watcher loop is busy, but shouldn't hang forever.
+			reqCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			if err := c.rebalance(reqCtx, "partition_update"); err != nil {
+				c.Logger.Error("failed to rebalance after partition update", "error", err)
+			}
+			cancel()
+		}
+	}
 }
 
 // Parameters:

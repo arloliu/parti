@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -599,4 +600,96 @@ func TestCalculator_Stop_PreserveAssignments(t *testing.T) {
 	}
 
 	t.Log("Verified: Calculator.Stop() preserves assignments for new leader (version continuity)")
+}
+
+type mockWatchableSource struct {
+	mu         sync.Mutex
+	partitions []types.Partition
+	listeners  []chan struct{}
+}
+
+func (m *mockWatchableSource) Start(ctx context.Context) error { return nil }
+func (m *mockWatchableSource) Stop(ctx context.Context) error  { return nil }
+
+func (m *mockWatchableSource) List(ctx context.Context) ([]types.Partition, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.partitions, nil
+}
+
+func (m *mockWatchableSource) Watch(ctx context.Context) <-chan struct{} {
+	ch := make(chan struct{}, 1)
+	m.mu.Lock()
+	m.listeners = append(m.listeners, ch)
+	m.mu.Unlock()
+	return ch
+}
+
+func (m *mockWatchableSource) Update(partitions []types.Partition) {
+	m.mu.Lock()
+	m.partitions = partitions
+	listeners := m.listeners
+	m.mu.Unlock()
+
+	for _, ch := range listeners {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func TestCalculator_WatchableSource(t *testing.T) {
+	ctx := t.Context()
+
+	_, nc := partitest.StartEmbeddedNATS(t)
+	assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-watch-assignment")
+	heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-watch-heartbeat")
+
+	// Create a heartbeat for worker-1
+	_, err := heartbeatKV.Put(ctx, "worker-hb.worker-1", []byte(time.Now().Format(time.RFC3339Nano)))
+	require.NoError(t, err)
+
+	source := &mockWatchableSource{
+		partitions: []types.Partition{
+			{Keys: []string{"p1"}},
+		},
+	}
+	strategy := &mockStrategy{}
+
+	calc, err := NewCalculator(&Config{
+		AssignmentKV:         assignmentKV,
+		HeartbeatKV:          heartbeatKV,
+		AssignmentPrefix:     "assignment",
+		Source:               source,
+		Strategy:             strategy,
+		HeartbeatPrefix:      "worker-hb",
+		HeartbeatTTL:         6 * time.Second,
+		EmergencyGracePeriod: 3 * time.Second,
+		ColdStartWindow:      50 * time.Millisecond,
+		PlannedScaleWindow:   50 * time.Millisecond,
+	})
+	require.NoError(t, err)
+
+	err = calc.Start(ctx)
+	require.NoError(t, err)
+	defer func() { _ = calc.Stop(ctx) }()
+
+	// Wait for initial assignment
+	require.Eventually(t, func() bool {
+		return calc.CurrentVersion() > 0
+	}, 1*time.Second, 10*time.Millisecond)
+
+	initialVersion := calc.CurrentVersion()
+
+	// Update partitions
+	source.Update([]types.Partition{
+		{Keys: []string{"p1"}},
+		{Keys: []string{"p2"}},
+	})
+
+	// Verify rebalance triggered and version incremented
+	require.Eventually(t, func() bool {
+		return calc.CurrentVersion() > initialVersion
+	}, 1*time.Second, 10*time.Millisecond, "calculator should rebalance on partition update")
 }
