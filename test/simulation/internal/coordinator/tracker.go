@@ -16,10 +16,10 @@ var (
 
 // MessageGapError wraps message gap details.
 type MessageGapError struct {
-	PartitionID int
-	ExpectedSeq int64
-	ReceivedSeq int64
-	LastSent    int64
+	PartitionID int   `json:"partition_id"`
+	ExpectedSeq int64 `json:"expected_seq"`
+	ReceivedSeq int64 `json:"received_seq"`
+	LastSent    int64 `json:"last_sent"`
 }
 
 func (e *MessageGapError) Error() string {

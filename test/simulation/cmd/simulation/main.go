@@ -698,7 +698,7 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 					}
 					if cfg.Coordinator.StopOnFailure {
 						coord.TriggerFailure("Gap detected (aged out)", escalations[0])
-						return fmt.Errorf("simulation stopped due to gap detection")
+						return errors.New("simulation stopped due to gap detection")
 					}
 				}
 			} else {

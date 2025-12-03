@@ -697,7 +697,7 @@ func (c *Coordinator) TriggerFailure(reason string, err error) {
 	})
 }
 
-func (c *Coordinator) triggerFailure(reason string, err error) {
+func (c *Coordinator) internalTriggerFailure(reason string, err error) {
 	c.TriggerFailure(reason, err)
 }
 
@@ -783,7 +783,7 @@ func (c *Coordinator) processReceivedMessages(ctx context.Context) {
 
 				// Trigger stop-on-failure if enabled and it's a gap
 				if c.stopOnFailure && errors.Is(err, ErrMessageGap) {
-					c.triggerFailure("Gap detected", err)
+					c.internalTriggerFailure("Gap detected", err)
 					return
 				}
 			}

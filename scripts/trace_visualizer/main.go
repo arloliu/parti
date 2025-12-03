@@ -103,14 +103,14 @@ func parseLog(path string, partitionID int) ([]LogEvent, error) {
 
 	var events []LogEvent
 	scanner := bufio.NewScanner(f)
-	
+
 	// Regex to match partition ID in logs (e.g., "partition=123" or "p=123" or just "123")
 	// This is a heuristic.
 	partRegex := regexp.MustCompile(fmt.Sprintf(`\b(partition|p)=?%d\b`, partitionID))
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		
+
 		// Extract timestamp
 		matches := logTsRegex.FindStringSubmatch(line)
 		if len(matches) < 2 {
@@ -123,29 +123,30 @@ func parseLog(path string, partitionID int) ([]LogEvent, error) {
 		}
 
 		msg := line[len(tsStr):]
-		
+
 		// Filter logic:
 		// 1. Always include CHAOS events
 		// 2. Always include WORKER start/stop events
 		// 3. Include ASSIGNMENT events
 		// 4. Include specific partition logs
-		
+
 		isRelevant := false
 		eventType := "INFO"
 
-		if strings.Contains(msg, "[Chaos]") {
+		switch {
+		case strings.Contains(msg, "[Chaos]"):
 			isRelevant = true
 			eventType = "CHAOS"
-		} else if strings.Contains(msg, "Starting worker") || strings.Contains(msg, "Stopping worker") {
+		case strings.Contains(msg, "Starting worker") || strings.Contains(msg, "Stopping worker"):
 			isRelevant = true
 			eventType = "WORKER"
-		} else if strings.Contains(msg, "Assignment change") {
+		case strings.Contains(msg, "Assignment change"):
 			isRelevant = true
 			eventType = "ASSIGN"
-		} else if strings.Contains(msg, "ERROR") || strings.Contains(msg, "panic") {
+		case strings.Contains(msg, "ERROR") || strings.Contains(msg, "panic"):
 			isRelevant = true
 			eventType = "ERROR"
-		} else if partRegex.MatchString(msg) {
+		case partRegex.MatchString(msg):
 			isRelevant = true
 			eventType = "PARTITION"
 		}
@@ -187,7 +188,7 @@ func generateHTML(path string, data VisualizationData) error {
 </head>
 <body>
 	<h1>Trace Visualization</h1>
-	
+
 	<div class="gap-info">
 		<h2>Gap Analysis: Partition {{.Partition}}</h2>
 		<p><strong>Reason:</strong> {{.Report.Reason}}</p>
