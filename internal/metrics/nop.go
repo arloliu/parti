@@ -100,6 +100,11 @@ func (n *NopMetrics) RecordWorkerChange(_ /* added */, _ /* removed */ int) {
 	// No-op
 }
 
+// RecordOrphanedPartitions discards the orphaned partitions metric.
+func (n *NopMetrics) RecordOrphanedPartitions(_ /* count */ int) {
+	// No-op
+}
+
 // RecordActiveWorkers discards the active workers metric.
 func (n *NopMetrics) RecordActiveWorkers(_ /* count */ int) {
 	// No-op

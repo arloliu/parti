@@ -862,6 +862,23 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 		return fmt.Errorf("assignment calculation failed: %w", err)
 	}
 
+	// Check for orphaned partitions
+	assignedCount := 0
+	for _, parts := range assignments {
+		assignedCount += len(parts)
+	}
+
+	if assignedCount != len(partitions) {
+		orphaned := len(partitions) - assignedCount
+		c.Logger.Error("orphaned partitions detected",
+			"total", len(partitions),
+			"assigned", assignedCount,
+			"orphaned", orphaned)
+		c.Metrics.RecordOrphanedPartitions(orphaned)
+	} else {
+		c.Metrics.RecordOrphanedPartitions(0)
+	}
+
 	c.Logger.Debug("assignments calculated", "worker_count", len(assignments))
 
 	// Calculate removed workers for cleanup

@@ -530,3 +530,4 @@ func (m *mockMetricsCollector) IncrementWorkerConsumerRecreationAttempt(reason s
 func (m *mockMetricsCollector) RecordWorkerConsumerRecreation(result string, reason string)  {}
 func (m *mockMetricsCollector) ObserveWorkerConsumerRecreationDuration(seconds float64)      {}
 func (m *mockMetricsCollector) IncrementWorkerConsumerPullSuppressed(reason string)          {}
+func (m *mockMetricsCollector) RecordOrphanedPartitions(count int)                           {}

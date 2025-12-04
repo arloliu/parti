@@ -78,6 +78,7 @@ func (m *transientCaptureMetrics) RecordPartitionCount(int)                     
 func (m *transientCaptureMetrics) RecordKVOperationDuration(string, float64)         {}
 func (m *transientCaptureMetrics) RecordStateChangeDropped()                         {}
 func (m *transientCaptureMetrics) RecordEmergencyRebalance(int)                      {}
+func (m *transientCaptureMetrics) RecordOrphanedPartitions(int)                      {}
 func (m *transientCaptureMetrics) RecordWorkerChange(int, int)                       {}
 func (m *transientCaptureMetrics) RecordActiveWorkers(int)                           {}
 func (m *transientCaptureMetrics) RecordCacheUsage(string, float64)                  {}

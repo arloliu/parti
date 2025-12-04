@@ -59,6 +59,7 @@ type PrometheusCollector struct {
 	cActiveWorkers        prometheus.Gauge
 	cCacheUsageAge        *prometheus.HistogramVec
 	cCacheFallback        *prometheus.CounterVec
+	cOrphanedPartitions   prometheus.Gauge
 
 	// Worker metrics
 	wHeartbeats *prometheus.CounterVec
@@ -342,6 +343,12 @@ func (p *PrometheusCollector) ensureRegistered() {
 			Name:      "cache_fallback_total",
 			Help:      "Total cache fallback events by reason.",
 		}, []string{"reason"})
+		p.cOrphanedPartitions = prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: p.namespace,
+			Subsystem: "calculator",
+			Name:      "orphaned_partitions",
+			Help:      "Current number of orphaned partitions (unassigned).",
+		})
 
 		// Worker metrics
 		p.wHeartbeats = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -393,6 +400,7 @@ func (p *PrometheusCollector) ensureRegistered() {
 		p.reg.MustRegister(p.cActiveWorkers)
 		p.reg.MustRegister(p.cCacheUsageAge)
 		p.reg.MustRegister(p.cCacheFallback)
+		p.reg.MustRegister(p.cOrphanedPartitions)
 
 		p.reg.MustRegister(p.wHeartbeats)
 
@@ -581,6 +589,12 @@ func (p *PrometheusCollector) RecordWorkerChange(added, removed int) {
 	if removed > 0 {
 		p.cWorkerRemoved.Add(float64(removed))
 	}
+}
+
+// RecordOrphanedPartitions records the number of orphaned partitions.
+func (p *PrometheusCollector) RecordOrphanedPartitions(count int) {
+	p.ensureRegistered()
+	p.cOrphanedPartitions.Set(float64(count))
 }
 
 func (p *PrometheusCollector) RecordActiveWorkers(count int) {

@@ -98,6 +98,12 @@ type CalculatorMetrics interface {
 	//   - removed: Number of workers removed (0 if none)
 	RecordWorkerChange(added, removed int)
 
+	// RecordOrphanedPartitions records the number of partitions that were not assigned to any worker.
+	//
+	// Parameters:
+	//   - count: Number of orphaned partitions
+	RecordOrphanedPartitions(count int)
+
 	// RecordActiveWorkers sets the current active worker count (gauge metric).
 	//
 	// Parameters:
