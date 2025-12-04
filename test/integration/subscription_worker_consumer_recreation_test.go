@@ -40,7 +40,7 @@ func TestWorkerConsumer_AutoRecreateOnExternalDeletion(t *testing.T) {
 		ConsumerPrefix:  "wkr",
 		SubjectTemplate: "autorec.test.{{.PartitionID}}",
 		BatchSize:       10,
-		FetchTimeout:    200 * time.Millisecond,
+		FetchTimeout:    1 * time.Second,
 	}, mh)
 	require.NoError(t, err)
 	defer helper.Close(context.Background())

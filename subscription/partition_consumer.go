@@ -168,6 +168,7 @@ func (pc *partitionConsumer) Run(ctx context.Context, handler MessageHandler) {
 			return
 		}
 		if iterErr != nil {
+			pc.logger.Warn("iterator error", "subject", pc.subject, "error", iterErr)
 			// Classify restart reason for metrics parity
 			if pc.config.Metrics != nil {
 				if errors.Is(iterErr, jetstream.ErrNoHeartbeat) {

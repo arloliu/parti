@@ -710,13 +710,26 @@ func (wc *WorkerConsumer) shouldSuppressPull(partitionID string) (bool, string) 
 		return true, "resolve_error"
 	}
 
-	// Only pull if we are the owner and state is Stable
+	// Only pull if we are the owner and state is allowed
 	if owner != currentWorkerID {
 		return true, fmt.Sprintf("not_owner(owner=%s)", owner)
 	}
 
-	if state != types.HandoffStateStable {
-		return true, fmt.Sprintf("state_not_stable(%v)", state)
+	allowed := false
+	if wc.config.ProcessingGate != nil {
+		for _, s := range wc.config.ProcessingGate.AllowedStates {
+			if state == s {
+				allowed = true
+				break
+			}
+		}
+	} else {
+		// Fallback if ProcessingGate is not configured but PullGatingEnabled is true
+		allowed = (state == types.HandoffStateStable)
+	}
+
+	if !allowed {
+		return true, fmt.Sprintf("state_not_allowed(%v)", state)
 	}
 
 	return false, ""

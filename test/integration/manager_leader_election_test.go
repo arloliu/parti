@@ -90,6 +90,9 @@ func TestLeaderElection_BasicFailover(t *testing.T) {
 	// Verify it's a different leader
 	require.NotEqual(t, originalLeaderID, newLeaderID, "new leader should be different from original")
 
+	// Wait for stabilization after leader election
+	cluster.WaitForStableState(10 * time.Second)
+
 	// Verify remaining workers are stable
 	activeWorkers := cluster.GetActiveWorkers()
 	require.Equal(t, 2, len(activeWorkers), "should have 2 active workers")
