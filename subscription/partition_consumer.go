@@ -52,8 +52,10 @@ type partitionConsumer struct {
 	consumerMu sync.RWMutex // Protects consumer replacement
 
 	// Loop control
-	cancel func()
-	done   chan struct{}
+	lifecycleMu sync.Mutex
+	cancel      func()
+	stopped     bool
+	done        chan struct{}
 
 	// Failure tracking
 	iterFailureTimes []time.Time
@@ -101,9 +103,17 @@ func newPartitionConsumer(
 
 // Run starts the consumption loop. It blocks until the context is canceled.
 func (pc *partitionConsumer) Run(ctx context.Context, handler MessageHandler) {
+	pc.lifecycleMu.Lock()
+	if pc.stopped {
+		pc.lifecycleMu.Unlock()
+		close(pc.done)
+		return
+	}
+
 	// Create a child context for cancellation if not already provided
 	ctx, cancel := context.WithCancel(ctx)
 	pc.cancel = cancel
+	pc.lifecycleMu.Unlock()
 
 	pc.logger.Debug("partition consumer loop starting", "subject", pc.subject)
 	defer func() {
@@ -177,6 +187,10 @@ func (pc *partitionConsumer) Run(ctx context.Context, handler MessageHandler) {
 
 // Stop cancels the consumption loop.
 func (pc *partitionConsumer) Stop() {
+	pc.lifecycleMu.Lock()
+	defer pc.lifecycleMu.Unlock()
+
+	pc.stopped = true
 	if pc.cancel != nil {
 		pc.cancel()
 	}

@@ -36,6 +36,7 @@ type Calculator struct {
 	// State management
 	started            atomic.Bool
 	mu                 sync.RWMutex
+	rebalanceMu        sync.Mutex // Serializes rebalance operations
 	currentWorkers     map[string]bool
 	currentAssignments map[string][]types.Partition
 
@@ -804,6 +805,10 @@ func (c *Calculator) handleRebalance(ctx context.Context, reason string) error {
 
 // rebalance calculates and publishes new assignments.
 func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
+	// Serialize rebalance operations to prevent race conditions
+	c.rebalanceMu.Lock()
+	defer c.rebalanceMu.Unlock()
+
 	start := time.Now()
 
 	c.mu.Lock()
@@ -862,17 +867,17 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 	// Calculate removed workers for cleanup
 	// We need to explicitly tell the publisher which workers to remove
 	// because we're moving away from scanning all keys in the bucket.
+	//
+	// Optimization: Use map for O(1) lookups instead of O(N) slice scans
+	activeWorkersMap := make(map[string]bool, len(workers))
+	for _, w := range workers {
+		activeWorkersMap[w] = true
+	}
+
 	var workersToRemove []string
 	c.mu.RLock()
 	for w := range c.currentWorkers {
-		found := false
-		for _, active := range workers {
-			if w == active {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !activeWorkersMap[w] {
 			workersToRemove = append(workersToRemove, w)
 		}
 	}
