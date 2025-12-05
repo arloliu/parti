@@ -19,12 +19,15 @@ type (
 
 // Re-export interfaces from the internal types package for convenience.
 type (
-	AssignmentStrategy = types.AssignmentStrategy
-	PartitionSource    = types.PartitionSource
-	ElectionAgent      = types.ElectionAgent
-	MetricsCollector   = types.MetricsCollector
-	Logger             = types.Logger
-	Hooks              = types.Hooks
+	AssignmentStrategy       = types.AssignmentStrategy
+	PartitionSource          = types.PartitionSource
+	PartitionUpdater         = types.PartitionUpdater
+	WatchablePartitionSource = types.WatchablePartitionSource
+	PartitionSourceUpdater   = types.PartitionSourceUpdater
+	ElectionAgent            = types.ElectionAgent
+	MetricsCollector         = types.MetricsCollector
+	Logger                   = types.Logger
+	Hooks                    = types.Hooks
 )
 
 // Re-export State constants from the internal types package.

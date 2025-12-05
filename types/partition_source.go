@@ -85,7 +85,7 @@ type WatchablePartitionSource interface {
 }
 
 // PartitionSourceUpdater combines PartitionSource and PartitionUpdater.
-type PartitionSourceUpdter interface {
+type PartitionSourceUpdater interface {
 	PartitionSource
 	PartitionUpdater
 }
