@@ -283,7 +283,6 @@ func (m *WorkerMonitor) processWatcherEvents(ctx context.Context) {
 		case entry := <-watcher.Updates():
 			if entry == nil {
 				// Watcher stopped or initial replay done
-				m.logger.Debug("watcher: nil entry (replay done or stopped)")
 				continue
 			}
 

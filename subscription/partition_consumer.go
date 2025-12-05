@@ -147,7 +147,9 @@ func (pc *partitionConsumer) Run(ctx context.Context, handler MessageHandler) {
 		pc.consumerMu.RUnlock()
 
 		// Create iterator and enter message processing loop.
+		pc.consInfoMu.Lock()
 		iter, err := pc.iterFactory(cons, batch, expiry)
+		pc.consInfoMu.Unlock()
 		if err != nil {
 			pc.logger.Warn("iterator creation failed", "subject", pc.subject, "error", err)
 			if pc.config.Metrics != nil {
@@ -369,7 +371,10 @@ func (pc *partitionConsumer) maybeEscalateIteratorFailures(ctx context.Context) 
 	pc.consumerMu.RUnlock()
 
 	if cons != nil {
-		if _, err := cons.Info(ctx); err == nil {
+		pc.consInfoMu.Lock()
+		_, err := cons.Info(ctx)
+		pc.consInfoMu.Unlock()
+		if err == nil {
 			return
 		}
 	}
