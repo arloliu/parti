@@ -466,6 +466,8 @@ func (c *Calculator) pollForChanges(ctx context.Context) error {
 	}
 
 	c.mu.RLock()
+	// Optimization: Check for changes before proceeding to avoid log noise
+	// and unnecessary processing.
 	changed := c.hasWorkersChangedLocked(currentWorkers)
 	c.mu.RUnlock()
 
@@ -511,15 +513,14 @@ func (c *Calculator) monitorPartitions(ctx context.Context, source types.Watchab
 //
 // checkForChanges evaluates worker topology changes and triggers rebalancing if needed.
 //
-// Implements three-tier timing model:
-//  1. Detection Speed (Tier 1) - Watcher/polling notices changes quickly
-//  2. Rate Limiting (Tier 3) - Check RebalanceCooldown FIRST to prevent thrashing
-//  3. Stabilization (Tier 2) - Apply window AFTER rate limit passes
+// Implements "Emergency-First" priority model:
+//  1. Detection (Tier 1) - Identify change type immediately
+//  2. Emergency (Tier 0) - If emergency, BYPASS cooldown and stabilization
+//  3. Rate Limiting (Tier 3) - If normal change, enforce RebalanceCooldown
+//  4. Stabilization (Tier 2) - If passed cooldown, apply stabilization window
 //
-// Tier ordering is critical:
-//   - Rate limit (Tier 3) takes precedence over stabilization (Tier 2)
-//   - If rate limit is active, defer rebalance regardless of stabilization window
-//   - Only after rate limit expires do we enter stabilization windows
+// This ensures worker crashes are handled immediately while normal scaling
+// is smoothed out to prevent thrashing.
 //
 // Parameters:
 //   - ctx: Context for cancellation
@@ -547,41 +548,48 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 	}
 
 	c.mu.RLock()
+	// We must re-check for changes here because lastWorkers might have been updated
+	// by a concurrent rebalance (e.g., from the scaling timer) since the caller's check.
 	changed := c.hasWorkersChangedLocked(workers)
 	lastWorkersCopy := c.cloneLastWorkersLocked()
 	c.mu.RUnlock()
-
-	cooldownActive := time.Since(c.publisher.LastRebalanceTime()) < c.Cooldown
-	currentState := c.GetState()
-	lastWorkerCount := len(lastWorkersCopy)
-
-	c.Logger.Debug("checkForChanges",
-		"current_workers", len(workers),
-		"last_workers", lastWorkerCount,
-		"changed", changed,
-		"cooldown_active", cooldownActive,
-		"state", currentState.String())
 
 	if !changed {
 		return nil
 	}
 
-	// Don't trigger rebalance if already scaling/rebalancing
-	if currentState != types.CalcStateIdle {
-		c.Logger.Debug("worker change detected but calculator not idle",
-			"state", currentState.String(),
-		)
+	// TIER 1: Detect Rebalance Type immediately
+	// We do this BEFORE rate limiting to identify emergencies that must bypass checks
+	reason, window := c.detectRebalanceType(lastWorkersCopy, workers)
+
+	// Handle Grace Period (wait for confirmation)
+	if reason == "" {
+		c.Logger.Debug("worker change in grace period - waiting for confirmation")
+		return nil
+	}
+
+	// TIER 0: Emergency Handling - Bypass Cooldown & State Checks
+	if reason == "emergency" {
+		c.Logger.Warn("emergency detected - bypassing cooldown and stabilization",
+			"reason", reason,
+			"workers", len(workers))
+
+		// Trigger immediate emergency rebalance
+		// This will force-transition the state machine even if Scaling/Rebalancing
+		c.enterEmergencyState(ctx)
 
 		return nil
 	}
 
-	// TIER 3: Rate limiting - Enforce RebalanceCooldown FIRST
-	// This prevents thrashing during rapid successive changes
-	if cooldownActive {
+	// TIER 3: Rate limiting - Enforce RebalanceCooldown for NON-EMERGENCY changes
+	// This prevents thrashing during rapid successive changes (flapping)
+	if time.Since(c.publisher.LastRebalanceTime()) < c.Cooldown {
 		lastRebalanceTime := c.publisher.LastRebalanceTime()
 		timeSinceLastRebalance := time.Since(lastRebalanceTime)
 		remaining := c.Cooldown - timeSinceLastRebalance
+
 		c.Logger.Debug("worker change detected but rate limit active",
+			"reason", reason,
 			"min_rebalance_interval", c.Cooldown,
 			"time_since_last", timeSinceLastRebalance,
 			"remaining", remaining,
@@ -591,49 +599,22 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 		return nil // Defer - will be checked again by next poll/watcher event
 	}
 
-	c.Logger.Debug("worker change detected", "workers", len(workers))
+	// Check if we can enter scaling state (must be Idle)
+	currentState := c.GetState()
+	if currentState != types.CalcStateIdle {
+		c.Logger.Debug("worker change detected but calculator not idle",
+			"state", currentState.String(),
+			"reason", reason,
+		)
 
-	// Calculate worker changes for metrics
-	added := 0
-	removed := 0
-	for w := range workers {
-		if !lastWorkersCopy[w] {
-			added++
-		}
-	}
-	for w := range lastWorkersCopy {
-		if !workers[w] {
-			removed++
-		}
+		return nil // Defer
 	}
 
-	// Record worker topology change
-	c.Metrics.RecordWorkerChange(added, removed)
-	c.Metrics.RecordActiveWorkers(len(workers))
+	c.Logger.Debug("worker change detected", "workers", len(workers), "reason", reason)
 
-	// TIER 2: Determine rebalance type and stabilization window
-	reason, window := c.detectRebalanceType(lastWorkersCopy, workers)
-
-	// Handle grace period for worker disappearance
-	if reason == "" {
-		c.Logger.Debug("worker change in grace period - waiting for confirmation")
-		// Don't update lastWorkers - keep tracking the disappeared workers
-		return nil
-	}
-
-	// Update lastWorkers for next comparison
-	c.mu.Lock()
-	c.setLastWorkersLocked(workers)
-	c.mu.Unlock()
-
-	// Trigger appropriate state transition based on reason
-	if reason == "emergency" {
-		// Emergency: immediate rebalance with no window
-		c.enterEmergencyState(ctx)
-	} else {
-		// Cold start or planned scale: use stabilization window (Tier 2)
-		c.enterScalingState(ctx, reason, window)
-	}
+	// TIER 2: Stabilization - Enter Scaling State
+	// Cold start or planned scale: use stabilization window
+	c.enterScalingState(ctx, reason, window)
 
 	return nil
 }
@@ -892,13 +873,28 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 	}
 
 	var workersToRemove []string
+	added := 0
+
 	c.mu.RLock()
+	// Calculate removed
 	for w := range c.currentWorkers {
 		if !activeWorkersMap[w] {
 			workersToRemove = append(workersToRemove, w)
 		}
 	}
+	// Calculate added
+	for _, w := range workers {
+		if !c.currentWorkers[w] {
+			added++
+		}
+	}
 	c.mu.RUnlock()
+
+	// Record worker topology changes
+	if added > 0 || len(workersToRemove) > 0 {
+		c.Metrics.RecordWorkerChange(added, len(workersToRemove))
+	}
+	c.Metrics.RecordActiveWorkers(len(workers))
 
 	// Publish assignments via publisher component
 	if err := c.publisher.Publish(ctx, workers, assignments, workersToRemove, lifecycle); err != nil {

@@ -224,9 +224,23 @@ func (sm *StateMachine) EnterScaling(ctx context.Context, reason string, window 
 // On success, it automatically transitions back to Idle. On error, it also returns to Idle
 // to allow retry on the next worker change detection.
 //
+// This method should only be called from Scaling state (by the stabilization timer).
+// If an emergency occurred during scaling, the state will have changed and this
+// call becomes a no-op to prevent redundant rebalances.
+//
 // Parameters:
 //   - ctx: Context for the rebalance operation
 func (sm *StateMachine) EnterRebalancing(ctx context.Context) {
+	// Guard: Only transition from Scaling state
+	// If emergency occurred during scaling, we're no longer in Scaling
+	// and should skip this (emergency already handled it)
+	currentState := types.CalculatorState(sm.current.Load())
+	if currentState != types.CalcStateScaling {
+		sm.logger.Info("skipping rebalancing: not in scaling state",
+			"current_state", currentState.String())
+		return
+	}
+
 	sm.logger.Info("entering rebalancing state")
 
 	// Notify subscribers of state change
@@ -257,14 +271,29 @@ func (sm *StateMachine) EnterRebalancing(ctx context.Context) {
 // Emergency rebalancing has no stabilization window and happens immediately
 // when a worker crash is detected.
 //
+// This method can be called from Idle or Scaling states. If already in
+// Rebalancing or Emergency state, the call is deferred to prevent cascading
+// rebalances - the next poll cycle will detect the change.
+//
 // Parameters:
 //   - ctx: Context for the rebalance operation
 func (sm *StateMachine) EnterEmergency(ctx context.Context) {
+	// Check if we can enter emergency state
+	// Allow from Idle or Scaling (interrupts stabilization window)
+	// Reject from Rebalancing or Emergency (already handling changes)
+	currentState := types.CalculatorState(sm.current.Load())
+	if currentState == types.CalcStateRebalancing || currentState == types.CalcStateEmergency {
+		sm.logger.Warn("emergency detected but rebalance already in progress - deferring",
+			"current_state", currentState.String())
+		return
+	}
+
 	sm.mu.Lock()
 	sm.scalingReason = "emergency"
 	sm.mu.Unlock()
 
-	sm.logger.Warn("entering emergency state - immediate rebalance")
+	sm.logger.Warn("entering emergency state - immediate rebalance",
+		"from_state", currentState.String())
 
 	// Notify subscribers of state change
 	sm.emitStateChange(types.CalcStateEmergency)
