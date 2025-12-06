@@ -1,7 +1,7 @@
 # Parti API Reference
 
-**Version**: 1.0.0
-**Last Updated**: November 2, 2025
+**Version**: 1.3.0
+**Last Updated**: December 6, 2025
 **Library**: `github.com/arloliu/parti`
 
 ---
@@ -614,10 +614,13 @@ Defines callbacks for Manager lifecycle events.
 
 ```go
 type Hooks struct {
-    OnAssignmentChanged func(ctx context.Context, added, removed []Partition) error
-    OnStateChanged      func(ctx context.Context, from, to State) error
-    OnError             func(ctx context.Context, err error) error
-    OnDegradedAlert     func(ctx context.Context, level string, duration time.Duration) error // NEW
+    OnAssignmentChanged  func(ctx context.Context, oldPartitions, newPartitions []Partition) error
+    OnStateChanged       func(ctx context.Context, from, to State) error
+    OnError              func(ctx context.Context, err error) error
+    OnLeadershipChanged  func(ctx context.Context, isLeader bool) error
+    OnPartitionsAssigned func(ctx context.Context, partitions []Partition) error
+    OnPartitionsRevoked  func(ctx context.Context, partitions []Partition) error
+    OnDegraded           func(ctx context.Context, reason string) error
 }
 ```
 
@@ -625,12 +628,12 @@ type Hooks struct {
 
 #### OnAssignmentChanged
 
-Called when partition assignment changes.
+Called when this worker's partition assignment changes.
 
 **Parameters**:
 - `ctx`: Lifecycle context (cancelled during shutdown)
-- `added`: Partitions newly assigned to this worker
-- `removed`: Partitions no longer assigned to this worker
+- `oldPartitions`: Previous complete assignment set
+- `newPartitions`: New complete assignment set
 
 **Returns**:
 - `error`: Error for logging (doesn't fail manager operation)
@@ -664,14 +667,52 @@ Called when a recoverable error occurs.
 
 **Execution**: Asynchronous in background goroutine.
 
-#### OnDegradedAlert
+#### OnLeadershipChanged
 
-**NEW**: Called when degraded mode alert threshold is exceeded.
+Called when the worker acquires or loses leadership.
 
 **Parameters**:
 - `ctx`: Lifecycle context (cancelled during shutdown)
-- `level`: Alert level - "Info", "Warn", "Error", or "Critical"
-- `duration`: How long the manager has been in degraded mode
+- `isLeader`: true if the worker is now the leader, false otherwise
+
+**Returns**:
+- `error`: Error for logging (doesn't fail manager operation)
+
+**Execution**: Asynchronous in background goroutine.
+
+#### OnPartitionsAssigned
+
+Called when new partitions are assigned to this worker. Convenience hook derived from OnAssignmentChanged.
+
+**Parameters**:
+- `ctx`: Lifecycle context (cancelled during shutdown)
+- `partitions`: List of newly assigned partitions
+
+**Returns**:
+- `error`: Error for logging (doesn't fail manager operation)
+
+**Execution**: Asynchronous in background goroutine.
+
+#### OnPartitionsRevoked
+
+Called when partitions are removed from this worker. Convenience hook derived from OnAssignmentChanged.
+
+**Parameters**:
+- `ctx`: Lifecycle context (cancelled during shutdown)
+- `partitions`: List of removed partitions
+
+**Returns**:
+- `error`: Error for logging (doesn't fail manager operation)
+
+**Execution**: Asynchronous in background goroutine.
+
+#### OnDegraded
+
+Called when the manager enters degraded mode.
+
+**Parameters**:
+- `ctx`: Lifecycle context (cancelled during shutdown)
+- `reason`: Description of the cause (e.g., "NATS connection lost")
 
 **Returns**:
 - `error`: Error for logging (doesn't fail manager operation)
@@ -681,16 +722,11 @@ Called when a recoverable error occurs.
 **Example**:
 ```go
 hooks := &parti.Hooks{
-    OnDegradedAlert: func(ctx context.Context, level string, duration time.Duration) error {
-        switch level {
-        case "Critical":
-            pagerDuty.Alert("Parti degraded for %v", duration)
-        case "Error":
-            slack.Notify("#ops", "Parti degraded for %v", duration)
-        case "Warn":
-            log.Warn("Parti degraded for %v", duration)
-        default:
-            log.Info("Parti degraded for %v", duration)
+    OnLeadershipChanged: func(ctx context.Context, isLeader bool) error {
+        if isLeader {
+            log.Info("I am the leader now")
+        } else {
+            log.Info("I am no longer the leader")
         }
         return nil
     },
@@ -708,38 +744,40 @@ Main configuration structure.
 ```go
 type Config struct {
     // Worker Identity
-    WorkerIDPrefix string
-    WorkerIDMin    int
-    WorkerIDMax    int
-    WorkerIDTTL    time.Duration
+    WorkerIDPrefix string        // Prefix for worker IDs (default: "worker")
+    WorkerIDMin    int           // Minimum ID number (default: 0)
+    WorkerIDMax    int           // Maximum ID number (default: 999)
+    WorkerIDTTL    time.Duration // TTL for ID claims (default: 30s)
 
     // Heartbeat Configuration
-    HeartbeatInterval time.Duration
-    HeartbeatTTL      time.Duration
+    HeartbeatInterval time.Duration // Heartbeat publish interval (default: 2s)
+    HeartbeatTTL      time.Duration // Heartbeat validity duration (default: 6s)
 
     // Stabilization Windows
-    ColdStartWindow      time.Duration
-    PlannedScaleWindow   time.Duration
-    EmergencyGracePeriod time.Duration
+    ColdStartWindow       time.Duration // Window for cold start (default: 30s)
+    PlannedScaleWindow    time.Duration // Window for planned scale (default: 10s)
+    EmergencyGracePeriod  time.Duration // Grace period before emergency (default: 0 = auto = 1.5 * HeartbeatInterval)
+    RestartDetectionRatio float64       // Ratio for restart classification (default: 0.5)
 
     // Timeouts
-    OperationTimeout time.Duration
-    ElectionTimeout  time.Duration
-    StartupTimeout   time.Duration
-    ShutdownTimeout  time.Duration
+    OperationTimeout time.Duration // Timeout for KV operations (default: 10s)
+    ElectionTimeout  time.Duration // Timeout for leader election (default: 5s)
+    StartupTimeout   time.Duration // Timeout for manager startup (default: 30s)
+    ShutdownTimeout  time.Duration // Timeout for graceful shutdown (default: 10s)
 
     // Assignment Configuration
-    RebalanceCooldown time.Duration
+    RebalanceCooldown time.Duration // Min time between rebalances (default: 10s)
 
     // Handoff Configuration
-    Handoff HandoffConfig
+    EnableTwoPhaseHandoff bool          // Enable prepare/commit protocol (default: false)
+    Handoff               HandoffConfig // Tuning for handoff process
 
     // Degraded Mode Configuration
-    DegradedBehavior DegradedBehaviorConfig
-    DegradedAlert    DegradedAlertConfig
+    DegradedBehavior DegradedBehaviorConfig // Degraded mode behavior
+    DegradedAlert    DegradedAlertConfig    // Degraded mode alerts
 
     // KV Bucket Configuration
-    KVBucket KVBucketConfig
+    KVBuckets KVBucketConfig // KV bucket names and TTLs
 }
 ```
 
@@ -786,18 +824,24 @@ Controls the two-phase handoff process.
 
 ```go
 type HandoffConfig struct {
-    EnableTwoPhaseHandoff bool          // Enable prepare/commit protocol
-    PrepareTimeout        time.Duration // Max time to wait for prepare ack
-    CommitTimeout         time.Duration // Max time to wait for commit ack
-    StateCheckInterval    time.Duration // Interval to check handoff state
+    SweepInterval     time.Duration // Interval to sweep stale claims
+    MaxRetries        int           // Max CAS retries for claims
+    BaseBackoff       time.Duration // Initial backoff for retries
+    MaxBackoff        time.Duration // Max backoff for retries
+    Jitter            float64       // Jitter factor
+    DelayAfterPrepare time.Duration // Artificial delay after prepare
+    DelayBeforeStable time.Duration // Artificial delay before stable
 }
 ```
 
 **Fields**:
-- `EnableTwoPhaseHandoff`: Enables the Prepare/Commit protocol for safer transitions (default: false)
-- `PrepareTimeout`: Maximum time to wait for workers to acknowledge Prepare phase (default: 10s)
-- `CommitTimeout`: Maximum time to wait for workers to acknowledge Commit phase (default: 10s)
-- `StateCheckInterval`: How often the leader checks handoff progress (default: 500ms)
+- `SweepInterval`: Interval to sweep stale claims (default: 30s)
+- `MaxRetries`: Max CAS retries for claims (default: 3)
+- `BaseBackoff`: Initial backoff for retries (default: 50ms)
+- `MaxBackoff`: Max backoff for retries (default: 500ms)
+- `Jitter`: Jitter factor (default: 0.2)
+- `DelayAfterPrepare`: Artificial delay after prepare (default: 0)
+- `DelayBeforeStable`: Artificial delay before stable (default: 0)
 
 ---
 
@@ -839,11 +883,11 @@ type DegradedAlertConfig struct {
 ```
 
 **Fields**:
-- `InfoThreshold`: Duration in degraded mode before Info alert (default: 1m)
-- `WarnThreshold`: Duration before Warn alert (default: 5m)
-- `ErrorThreshold`: Duration before Error alert (default: 15m)
-- `CriticalThreshold`: Duration before Critical alert (default: 30m)
-- `AlertInterval`: Minimum time between repeated alerts (default: 30s)
+- `InfoThreshold`: Duration in degraded mode before Info alert (default: 30s)
+- `WarnThreshold`: Duration before Warn alert (default: 2m)
+- `ErrorThreshold`: Duration before Error alert (default: 5m)
+- `CriticalThreshold`: Duration before Critical alert (default: 10m)
+- `AlertInterval`: Minimum time between repeated alerts (default: 1m)
 
 ---
 

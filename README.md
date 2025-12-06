@@ -87,7 +87,7 @@ func main() {
         StreamName:      "ORDERS",
         ConsumerPrefix:  "processor",
         SubjectTemplate: "orders.{{.PartitionID}}.complete", // e.g., orders.0.complete
-        ProcessingGate: subscription.ProcessingGateConfig{
+        ProcessingGate: &subscription.ProcessingGateConfig{
             Enabled: true, // Block processing if partition is revoked
         },
     }, handleMessage)
