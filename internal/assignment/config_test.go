@@ -233,7 +233,6 @@ func TestNewCalculator(t *testing.T) {
 	require.NotNil(t, calc.Logger)
 
 	// Check cached patterns were computed
-	require.Equal(t, "heartbeat.*", calc.hbWatchPattern)
 	require.Equal(t, "assignment.", calc.assignmentKeyPrefix)
 
 	// Check emergency detector was initialized

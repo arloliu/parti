@@ -30,7 +30,6 @@ type Calculator struct {
 	emergencyDetector *EmergencyDetector // Hysteresis-based emergency detection
 
 	// Cached string patterns (for performance)
-	hbWatchPattern      string // "HeartbeatPrefix.*" - cached for Watch() calls
 	assignmentKeyPrefix string // "AssignmentPrefix." - cached for key construction
 
 	// State management
@@ -104,7 +103,6 @@ func NewCalculator(cfg *Config) (*Calculator, error) {
 
 	c := &Calculator{
 		Config:              *cfg, // Anonymous embedding - copy config
-		hbWatchPattern:      fmt.Sprintf("%s.*", cfg.HeartbeatPrefix),
 		assignmentKeyPrefix: fmt.Sprintf("%s.", cfg.AssignmentPrefix),
 		currentWorkers:      make(map[string]bool),
 		currentAssignments:  make(map[string][]types.Partition),
@@ -495,6 +493,14 @@ func (c *Calculator) monitorPartitions(ctx context.Context, source types.Watchab
 			}
 			c.Logger.Info("partition change detected")
 
+			// Check if shutdown is in progress before triggering rebalance
+			select {
+			case <-c.stopCh:
+				c.Logger.Info("skipping partition rebalance: shutdown in progress")
+				return
+			default:
+			}
+
 			// Trigger rebalance with timeout
 			// We use a detached context with timeout because the rebalance
 			// should complete even if the watcher loop is busy, but shouldn't hang forever.
@@ -507,10 +513,6 @@ func (c *Calculator) monitorPartitions(ctx context.Context, source types.Watchab
 	}
 }
 
-// Parameters:
-//   - ctx: Context for cancellation
-//   - currentWorkers: Optional map of current workers (if nil, fetches from KV)
-//
 // checkForChanges evaluates worker topology changes and triggers rebalancing if needed.
 //
 // Implements "Emergency-First" priority model:
