@@ -231,8 +231,9 @@ func NewWorker(cfg Config) (*Worker, error) { //nolint:cyclop
 		// Under exclusivity gating and chaos, messages can be NAKed multiple times.
 		// Increase MaxDeliver to avoid premature drop and false gap escalations.
 		MaxDeliver: 50,
-		// Give messages more time before redelivery to allow drains/healing during cooldown.
-		AckWait: 90 * time.Second,
+		// AckWait must be shorter than Coordinator.GapAging (default 45s) to avoid false positives
+		// during worker crashes where messages are held by the dead consumer.
+		AckWait: 30 * time.Second,
 		// Caps to bound per-subject concurrency and reduce disorder.
 		MaxWaiting:    2,
 		MaxAckPending: perSubMaxAckPending,
