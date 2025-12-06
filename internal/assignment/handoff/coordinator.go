@@ -123,6 +123,10 @@ func New(cfg Config, enableTwoPhase bool) Coordinator {
 	if cfg.SweepInterval == 0 {
 		cfg.SweepInterval = 30 * time.Second
 	}
+	// Default TTL if store is enabled but TTL is missing
+	if cfg.Store != nil && cfg.TTL == 0 {
+		cfg.TTL = 1 * time.Minute
+	}
 	if enableTwoPhase {
 		return &twoPhaseCoordinator{cfg: cfg}
 	}

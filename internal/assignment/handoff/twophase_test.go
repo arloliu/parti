@@ -41,6 +41,8 @@ type flakyStore struct {
 
 func (f *flakyStore) Get(ctx context.Context, partitionID string) (Claim, uint64, error) {
 	// Simulate no existing claim to exercise create path first.
+	// For updateClaim retry logic, we need to return a valid claim if we want to test updates.
+	// But for the current test cases (create path), returning empty is fine.
 	return Claim{}, 0, nil
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	rand "math/rand/v2"
+	"sync"
 	"time"
 
 	"github.com/arloliu/parti/types"
@@ -18,6 +19,7 @@ import (
 // All latency / retries are internal; Apply should return quickly.
 type twoPhaseCoordinator struct {
 	cfg       Config
+	sweepMu   sync.Mutex
 	lastSweep time.Time
 }
 
@@ -89,31 +91,76 @@ func (t *twoPhaseCoordinator) Apply(ctx context.Context, workerID string, previo
 	return nil
 }
 
-// retryCAS performs bounded retries with backoff and jitter for CAS operations.
-func (t *twoPhaseCoordinator) retryCAS(ctx context.Context, op func() error) error {
+// updateClaim performs a read-modify-write cycle with retries on CAS failure.
+// It fetches the latest claim, applies the transform function, and attempts to save.
+// If the transform returns nil, the update is skipped.
+// updateClaim is the central contention-aware read/modify/write helper.
+//
+// Callers provide a pure transformation from the current claim (or nil if
+// no claim exists yet) to the desired next claim. updateClaim then:
+//  1. Reads the latest claim from the store on each attempt.
+//  2. Invokes the transform with that snapshot.
+//  3. Attempts a CAS via PutIfEpoch.
+//  4. On CAS conflict, backs off with jitter and retries from step 1.
+//
+// This design guarantees we never write based on stale epochs while still
+// allowing all higher-level phase logic (prepare/commit/stabilize/sweep) to
+// remain simple and expressed in terms of claim state transitions.
+func (t *twoPhaseCoordinator) updateClaim(ctx context.Context, pid string, transform func(*Claim) (*Claim, error)) error {
 	var err error
 	for attempt := 0; attempt <= t.cfg.MaxRetries; attempt++ {
-		err = op()
-		if err == nil {
-			return nil
+		// 1. Get latest state
+		cur, rev, getErr := t.cfg.Store.Get(ctx, pid)
+		if getErr != nil {
+			return fmt.Errorf("claim get: %w", getErr)
 		}
+
+		// 2. Apply transformation
+		var input *Claim
+		if rev > 0 {
+			input = &cur
+		}
+		next, transErr := transform(input)
+		if transErr != nil {
+			return transErr // Permanent error from logic
+		}
+		if next == nil {
+			return nil // No update needed
+		}
+
+		// 3. Attempt CAS
+		var casErr error
+		if rev == 0 {
+			_, casErr = t.cfg.Store.PutIfEpoch(ctx, pid, 0, *next)
+		} else {
+			_, casErr = t.cfg.Store.PutIfEpoch(ctx, pid, cur.Epoch, *next)
+		}
+
+		if casErr == nil {
+			return nil // Success
+		}
+
+		// 4. Handle CAS failure (contention)
 		if attempt == t.cfg.MaxRetries {
+			err = casErr
 			break
 		}
 
-		// Policy: allow one immediate retry without delay, then backoff with jitter from the second failure onward.
-		if attempt == 0 {
-			// immediate retry
-			continue
+		if t.cfg.Metrics != nil {
+			t.cfg.Metrics.IncCASConflicts()
 		}
 
-		// compute backoff with jitter; use (attempt-1) to keep schedule roughly equivalent to previous behavior
+		// Backoff logic
+		if attempt == 0 {
+			continue // Immediate retry
+		}
+
 		effAttempt := attempt - 1
 		backoff := min(t.cfg.BaseBackoff<<effAttempt, t.cfg.MaxBackoff)
 		d := backoff
 		if t.cfg.Jitter > 0 {
-			// random factor in [1-jitter, 1+jitter] using math/rand/v2
-			f := rand.Float64() //nolint:gosec // Jitter does not require cryptographic randomness
+			//nolint:gosec // jitter does not require crypto secure random
+			f := rand.Float64()
 			low := 1 - t.cfg.Jitter
 			high := 1 + t.cfg.Jitter
 			d = time.Duration(float64(backoff) * (low + f*(high-low)))
@@ -126,7 +173,7 @@ func (t *twoPhaseCoordinator) retryCAS(ctx context.Context, op func() error) err
 		}
 	}
 
-	return err
+	return fmt.Errorf("update claim failed after retries: %w", err)
 }
 
 // preparePhase writes/updates claims for partitions newly acquired in 'next' relative to 'previous'.
@@ -163,55 +210,42 @@ func (t *twoPhaseCoordinator) preparePhase(ctx context.Context, workerID string,
 		g.Go(func() error {
 			// Create or transition claim for new partition
 			pid := p.ID()
-			cur, rev, err := t.cfg.Store.Get(gCtx, pid)
-			if err != nil {
-				return fmt.Errorf("claim get: %w", err)
-			}
-			if rev == 0 { // create initial claim
-				init := NewInitialClaim(pid, workerID, now, t.cfg.TTL)
-				if err := t.retryCAS(gCtx, func() error { _, e := t.cfg.Store.PutIfEpoch(gCtx, pid, 0, init); return e }); err != nil {
-					if t.cfg.Metrics != nil {
-						t.cfg.Metrics.IncCASConflicts()
+			return t.updateClaim(gCtx, pid, func(cur *Claim) (*Claim, error) {
+				if cur == nil { // create initial claim
+					init := NewInitialClaim(pid, workerID, now, t.cfg.TTL)
+					if t.cfg.Logger != nil {
+						t.cfg.Logger.Debug("handoff_prepare",
+							"partition_id", pid,
+							"worker_id", workerID,
+							"prev_owner", "",
+							"next_owner", workerID,
+							"state", string(ClaimStateStable),
+							"epoch", init.Epoch,
+						)
 					}
-					return fmt.Errorf("claim create: %w", err)
+
+					return &init, nil
 				}
 
-				if t.cfg.Logger != nil {
-					t.cfg.Logger.Debug("handoff_prepare",
-						"partition_id", pid,
-						"worker_id", workerID,
-						"prev_owner", "",
-						"next_owner", workerID,
-						"state", string(ClaimStateStable),
-						"epoch", init.Epoch,
-					)
-				}
-
-				return nil
-			}
-			// Existing claim; if stable and owned by someone else, enter prepare
-			if cur.Owner != workerID {
-				prepared := cur.NextPrepare(workerID, now)
-				if err := t.retryCAS(gCtx, func() error { _, e := t.cfg.Store.PutIfEpoch(gCtx, pid, cur.Epoch, prepared); return e }); err != nil {
-					if t.cfg.Metrics != nil {
-						t.cfg.Metrics.IncCASConflicts()
+				// Existing claim; if stable and owned by someone else, enter prepare
+				if cur.Owner != workerID {
+					prepared := cur.NextPrepare(workerID, now)
+					if t.cfg.Logger != nil {
+						t.cfg.Logger.Debug("handoff_prepare",
+							"partition_id", pid,
+							"worker_id", workerID,
+							"prev_owner", cur.Owner,
+							"next_owner", workerID,
+							"state", string(ClaimStatePrepare),
+							"epoch", prepared.Epoch,
+						)
 					}
-					return fmt.Errorf("claim prepare: %w", err)
+
+					return &prepared, nil
 				}
 
-				if t.cfg.Logger != nil {
-					t.cfg.Logger.Debug("handoff_prepare",
-						"partition_id", pid,
-						"worker_id", workerID,
-						"prev_owner", cur.Owner,
-						"next_owner", workerID,
-						"state", string(ClaimStatePrepare),
-						"epoch", prepared.Epoch,
-					)
-				}
-			}
-
-			return nil
+				return nil, nil
+			})
 		})
 	}
 
@@ -233,43 +267,37 @@ func (t *twoPhaseCoordinator) commitPhase(ctx context.Context, workerID string, 
 	for _, p := range next.Partitions {
 		g.Go(func() error {
 			pid := p.ID()
-			cur, rev, err := t.cfg.Store.Get(gCtx, pid)
-			if err != nil {
-				return fmt.Errorf("claim get (commit): %w", err)
-			}
-			if rev == 0 {
-				return nil
-			}
-			if cur.Owner == workerID && cur.State == ClaimStateStable {
-				return nil // already finalized
-			}
-
-			// If we're pending owner or current owner differs, move to commit.
-			if cur.PendingOwner == workerID || cur.Owner != workerID {
-				committed := cur
-				if cur.State != ClaimStateCommit {
-					committed = cur.NextCommit(now)
+			return t.updateClaim(gCtx, pid, func(cur *Claim) (*Claim, error) {
+				if cur == nil {
+					return nil, nil
 				}
-				if err := t.retryCAS(gCtx, func() error { _, e := t.cfg.Store.PutIfEpoch(gCtx, pid, cur.Epoch, committed); return e }); err != nil {
-					if t.cfg.Metrics != nil {
-						t.cfg.Metrics.IncCASConflicts()
+				if cur.Owner == workerID && cur.State == ClaimStateStable {
+					return nil, nil // already finalized
+				}
+
+				// If we're pending owner or current owner differs, move to commit.
+				if cur.PendingOwner == workerID || cur.Owner != workerID {
+					committed := *cur
+					if cur.State != ClaimStateCommit {
+						committed = cur.NextCommit(now)
 					}
-					return fmt.Errorf("claim commit: %w", err)
+
+					if t.cfg.Logger != nil {
+						t.cfg.Logger.Info("handoff_commit",
+							"partition_id", pid,
+							"worker_id", workerID,
+							"prev_owner", cur.Owner,
+							"next_owner", committed.Owner,
+							"state", string(ClaimStateCommit),
+							"epoch", committed.Epoch,
+						)
+					}
+
+					return &committed, nil
 				}
 
-				if t.cfg.Logger != nil {
-					t.cfg.Logger.Info("handoff_commit",
-						"partition_id", pid,
-						"worker_id", workerID,
-						"prev_owner", cur.Owner,
-						"next_owner", committed.Owner,
-						"state", string(ClaimStateCommit),
-						"epoch", committed.Epoch,
-					)
-				}
-			}
-
-			return nil
+				return nil, nil
+			})
 		})
 	}
 
@@ -291,27 +319,20 @@ func (t *twoPhaseCoordinator) stabilizePhase(ctx context.Context, workerID strin
 	for _, p := range next.Partitions {
 		g.Go(func() error {
 			pid := p.ID()
-			cur, rev, err := t.cfg.Store.Get(gCtx, pid)
-			if err != nil {
-				return fmt.Errorf("claim get (stabilize): %w", err)
-			}
-			if rev == 0 {
-				return nil
-			}
-			if cur.Owner != workerID {
-				return nil // not ours yet
-			}
-			if cur.State != ClaimStateCommit {
-				return nil // only finalize from commit
-			}
-
-			stabilized := cur.NextStable(now)
-			if err := t.retryCAS(gCtx, func() error { _, e := t.cfg.Store.PutIfEpoch(gCtx, pid, cur.Epoch, stabilized); return e }); err != nil {
-				if t.cfg.Metrics != nil {
-					t.cfg.Metrics.IncCASConflicts()
+			return t.updateClaim(gCtx, pid, func(cur *Claim) (*Claim, error) {
+				if cur == nil {
+					return nil, nil
 				}
+				if cur.Owner != workerID {
+					return nil, nil // not ours yet
+				}
+				if cur.State != ClaimStateCommit {
+					return nil, nil // only finalize from commit
+				}
+
+				stabilized := cur.NextStable(now)
 				if t.cfg.Logger != nil {
-					t.cfg.Logger.Warn("handoff_stable_conflict",
+					t.cfg.Logger.Info("handoff_stable",
 						"partition_id", pid,
 						"worker_id", workerID,
 						"owner", stabilized.Owner,
@@ -319,19 +340,8 @@ func (t *twoPhaseCoordinator) stabilizePhase(ctx context.Context, workerID strin
 					)
 				}
 
-				return fmt.Errorf("claim stabilize: %w", err)
-			}
-
-			if t.cfg.Logger != nil {
-				t.cfg.Logger.Info("handoff_stable",
-					"partition_id", pid,
-					"worker_id", workerID,
-					"owner", stabilized.Owner,
-					"epoch", stabilized.Epoch,
-				)
-			}
-
-			return nil
+				return &stabilized, nil
+			})
 		})
 	}
 
@@ -345,12 +355,16 @@ func (t *twoPhaseCoordinator) maybeSweepClaims(ctx context.Context) {
 		return
 	}
 	now := t.cfg.Now()
+
+	// Check sweep interval with lock
+	t.sweepMu.Lock()
 	if t.cfg.SweepInterval > 0 && !t.lastSweep.IsZero() && now.Sub(t.lastSweep) < t.cfg.SweepInterval {
+		t.sweepMu.Unlock()
 		return
 	}
-
-	// Guard the sweep execution window and proceed best-effort.
+	// Update last sweep time and release lock immediately to avoid blocking Apply
 	t.lastSweep = now
+	t.sweepMu.Unlock()
 
 	keys, err := t.cfg.Store.ListKeys(ctx)
 	if err != nil || len(keys) == 0 {
@@ -372,13 +386,25 @@ func (t *twoPhaseCoordinator) maybeSweepClaims(ctx context.Context) {
 			continue
 		}
 		// Reset to stable and clear any pending owner.
-		next := cur.Copy()
-		next.State = ClaimStateStable
-		next.PendingOwner = ""
-		next.LastUpdated = now.UTC()
-		if err := t.retryCAS(ctx, func() error {
-			_, e := t.cfg.Store.PutIfEpoch(ctx, pid, cur.Epoch, next)
-			return e
+		if err := t.updateClaim(ctx, pid, func(cur *Claim) (*Claim, error) {
+			if cur == nil {
+				//nolint:nilnil // nil, nil indicates no update needed
+				return nil, nil
+			}
+			if !cur.IsExpired(now) {
+				//nolint:nilnil // nil, nil indicates no update needed
+				return nil, nil
+			}
+			if cur.State == ClaimStateStable {
+				//nolint:nilnil // nil, nil indicates no update needed
+				return nil, nil
+			}
+			next := cur.Copy()
+			next.State = ClaimStateStable
+			next.PendingOwner = ""
+			next.LastUpdated = now.UTC()
+
+			return &next, nil
 		}); err == nil {
 			if t.cfg.Metrics != nil {
 				t.cfg.Metrics.IncClaimStoreStale()
