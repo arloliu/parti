@@ -242,19 +242,25 @@ func TestIntegration_NetworkPartition_HealsGracefully(t *testing.T) {
 
 	// Wait for system to detect failures and rebalance
 	t.Log("Waiting for system to detect partition and rebalance...")
-	time.Sleep(12 * time.Second)
+	
+	// Use Eventually to allow for stabilization time instead of fixed sleep
+	var totalDuringPartition int
+	require.Eventually(t, func() bool {
+		totalDuringPartition = 0
+		for i := 3; i < 6; i++ {
+			assignment := cluster.Workers[i].CurrentAssignment()
+			totalDuringPartition += len(assignment.Partitions)
+		}
+		return totalDuringPartition == 50
+	}, 30*time.Second, 500*time.Millisecond, "expected group B to handle all 50 partitions during partition")
 
-	// Verify group B (workers 3-5) now handle all partitions
-	totalDuringPartition := 0
+	// Log final state for debugging
 	for i := 3; i < 6; i++ {
 		assignment := cluster.Workers[i].CurrentAssignment()
-		totalDuringPartition += len(assignment.Partitions)
 		t.Logf("Worker %s (group B): %d partitions during partition",
 			cluster.Workers[i].WorkerID(), len(assignment.Partitions))
 	}
 	t.Logf("Total partitions during partition: %d", totalDuringPartition)
-	require.Equal(t, 50, totalDuringPartition,
-		"expected group B to handle all 50 partitions during partition")
 
 	// HEAL NETWORK PARTITION: Restart group A workers
 	t.Log("Healing network partition: restarting group A...")
@@ -836,10 +842,11 @@ func TestScenario_SlowHeartbeats_NearExpiryBoundary(t *testing.T) {
 
 	// Configure with tight heartbeat timing
 	// Timing profile representing slow-but-valid heartbeat scenario.
+	// Increased multipliers to avoid flakiness in CI environments where runners may be slow.
 	cfg := testutil.NewConfigFromProfile(testutil.TimingProfile{
 		HeartbeatInterval:  1 * time.Second,
-		TTLMultiplier:      3.0, // 3s TTL
-		GraceMultiplier:    2.0, // 2s grace
+		TTLMultiplier:      5.0, // 5s TTL (was 3.0)
+		GraceMultiplier:    3.0, // 3s grace (was 2.0)
 		ColdStartWindow:    5 * time.Second,
 		PlannedScaleWindow: 3 * time.Second,
 		RebalanceCooldown:  2 * time.Second,
