@@ -3,6 +3,7 @@ package natsutil
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats-server/v2/server"
@@ -104,6 +105,10 @@ func cleanupKVBuckets(js nats.JetStreamContext) error {
 	for _, bucket := range buckets {
 		// Delete bucket (ignore error if it doesn't exist)
 		if err := js.DeleteKeyValue(bucket); err != nil {
+			// Ignore if bucket doesn't exist
+			if errors.Is(err, nats.ErrStreamNotFound) || strings.Contains(err.Error(), "stream not found") {
+				continue
+			}
 			errs = append(errs, fmt.Errorf("failed to delete KV bucket %q: %w", bucket, err))
 		}
 	}
