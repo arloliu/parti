@@ -242,7 +242,7 @@ func TestIntegration_NetworkPartition_HealsGracefully(t *testing.T) {
 
 	// Wait for system to detect failures and rebalance
 	t.Log("Waiting for system to detect partition and rebalance...")
-	
+
 	// Use Eventually to allow for stabilization time instead of fixed sleep
 	var totalDuringPartition int
 	require.Eventually(t, func() bool {
