@@ -529,6 +529,20 @@ func (m *Manager) State() State {
 	return State(m.state.Load())
 }
 
+// invokeHook executes a hook function asynchronously with error logging.
+// It handles nil checks, WaitGroup management, and error reporting.
+func (m *Manager) invokeHook(name string, hook func() error) {
+	if hook == nil {
+		return
+	}
+
+	m.wg.Go(func() {
+		if err := hook(); err != nil {
+			m.logError(name+" hook error", "error", err)
+		}
+	})
+}
+
 // logError logs an error with consistent formatting and invokes OnError hook.
 func (m *Manager) logError(msg string, keysAndValues ...any) {
 	m.logger.Error(msg, keysAndValues...)

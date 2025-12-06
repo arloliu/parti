@@ -150,6 +150,15 @@ func (m *Manager) enterDegraded(reason string) {
 		}()
 	}
 
+	// Trigger degraded hook
+	if m.hooks.OnDegraded != nil {
+		go func() {
+			if err := m.hooks.OnDegraded(m.ctx, reason); err != nil {
+				m.logError("degraded hook error", "error", err)
+			}
+		}()
+	}
+
 	// Record metrics
 	m.metrics.RecordStateTransition(oldState, types.StateDegraded, 0)
 	m.metrics.SetDegradedMode(1.0)

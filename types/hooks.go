@@ -51,4 +51,16 @@ type Hooks struct {
 	// OnLeadershipChanged is called when the worker acquires or loses leadership.
 	// isLeader: true if the worker is now the leader, false otherwise.
 	OnLeadershipChanged func(ctx context.Context, isLeader bool) error
+
+	// OnPartitionsAssigned is called when new partitions are assigned to this worker.
+	// This is a convenience hook derived from OnAssignmentChanged.
+	OnPartitionsAssigned func(ctx context.Context, partitions []Partition) error
+
+	// OnPartitionsRevoked is called when partitions are removed from this worker.
+	// This is a convenience hook derived from OnAssignmentChanged.
+	OnPartitionsRevoked func(ctx context.Context, partitions []Partition) error
+
+	// OnDegraded is called when the manager enters degraded mode.
+	// reason: description of the cause (e.g., "NATS connection lost").
+	OnDegraded func(ctx context.Context, reason string) error
 }

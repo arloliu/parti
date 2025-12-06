@@ -309,22 +309,41 @@ func (m *Manager) monitorAssignmentChanges(ctx context.Context, kv jetstream.Key
 				"new_partitions", len(newAssignment.Partitions),
 			)
 
-			// Trigger assignment change hook
+			// Trigger assignment change hooks
 			// Run callbacks in background to avoid blocking
-			m.wg.Go(func() {
-				// 1) Invoke consumer updater if provided
-				// Apply assignment via coordinator (handles flag internally).
-				if err := m.handoffCoordinator.Apply(m.ctx, workerID, oldAssignment, newAssignment); err != nil {
-					m.logError("handoff apply error", "error", err)
-				}
 
-				// 2) Invoke OnAssignmentChanged hook if provided (old, new semantics)
-				if m.hooks.OnAssignmentChanged != nil {
-					if err := m.hooks.OnAssignmentChanged(m.ctx, oldAssignment.Partitions, newAssignment.Partitions); err != nil {
-						m.logError("assignment change hook error", "error", err)
-					}
-				}
+			// 1) Invoke consumer updater
+			m.invokeHook("handoff apply", func() error {
+				return m.handoffCoordinator.Apply(m.ctx, workerID, oldAssignment, newAssignment)
 			})
+
+			// 2) Invoke OnAssignmentChanged hook
+			if m.hooks.OnAssignmentChanged != nil {
+				m.invokeHook("assignment change", func() error {
+					return m.hooks.OnAssignmentChanged(m.ctx, oldAssignment.Partitions, newAssignment.Partitions)
+				})
+			}
+
+			// 3) Invoke convenience hooks (Assigned/Revoked)
+			if m.hooks.OnPartitionsAssigned != nil || m.hooks.OnPartitionsRevoked != nil {
+				m.invokeHook("partition hooks", func() error {
+					added, removed := diffPartitions(oldAssignment.Partitions, newAssignment.Partitions)
+
+					if len(added) > 0 && m.hooks.OnPartitionsAssigned != nil {
+						if err := m.hooks.OnPartitionsAssigned(m.ctx, added); err != nil {
+							m.logError("partitions assigned hook error", "error", err)
+						}
+					}
+
+					if len(removed) > 0 && m.hooks.OnPartitionsRevoked != nil {
+						if err := m.hooks.OnPartitionsRevoked(m.ctx, removed); err != nil {
+							m.logError("partitions revoked hook error", "error", err)
+						}
+					}
+
+					return nil
+				})
+			}
 
 			// Record metrics
 			added := len(newAssignment.Partitions) - len(oldAssignment.Partitions)
@@ -386,4 +405,31 @@ func (m *Manager) clonePartitions(partitions []Partition) []Partition {
 	}
 
 	return cloned
+}
+
+// diffPartitions calculates added and removed partitions between two sets.
+func diffPartitions(oldPartitions, newPartitions []Partition) (added, removed []Partition) {
+	oldMap := make(map[string]Partition, len(oldPartitions))
+	for _, p := range oldPartitions {
+		oldMap[p.ID()] = p
+	}
+
+	newMap := make(map[string]Partition, len(newPartitions))
+	for _, p := range newPartitions {
+		newMap[p.ID()] = p
+	}
+
+	for _, p := range newPartitions {
+		if _, exists := oldMap[p.ID()]; !exists {
+			added = append(added, p)
+		}
+	}
+
+	for _, p := range oldPartitions {
+		if _, exists := newMap[p.ID()]; !exists {
+			removed = append(removed, p)
+		}
+	}
+
+	return added, removed
 }
