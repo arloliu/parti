@@ -47,4 +47,8 @@ type Hooks struct {
 
 	// OnError is called when a recoverable error occurs.
 	OnError func(ctx context.Context, err error) error
+
+	// OnLeadershipChanged is called when the worker acquires or loses leadership.
+	// isLeader: true if the worker is now the leader, false otherwise.
+	OnLeadershipChanged func(ctx context.Context, isLeader bool) error
 }
