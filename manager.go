@@ -529,7 +529,36 @@ func (m *Manager) State() State {
 	return State(m.state.Load())
 }
 
-// logError logs an error with consistent formatting.
+// logError logs an error with consistent formatting and invokes OnError hook.
 func (m *Manager) logError(msg string, keysAndValues ...any) {
 	m.logger.Error(msg, keysAndValues...)
+
+	// Invoke OnError hook if configured
+	if m.hooks != nil && m.hooks.OnError != nil {
+		// Find the error in keysAndValues
+		var err error
+		for _, v := range keysAndValues {
+			if e, ok := v.(error); ok {
+				err = e
+				break
+			}
+		}
+
+		if err != nil {
+			// Use manager context if available, otherwise background
+			// Note: m.ctx is set in Start() and safe to read here as background
+			// goroutines are only started after m.ctx is initialized.
+			ctx := m.ctx
+			if ctx == nil {
+				ctx = context.Background()
+			}
+
+			// Run hook asynchronously to avoid blocking
+			go func() {
+				if hookErr := m.hooks.OnError(ctx, err); hookErr != nil {
+					m.logger.Warn("hook_error", "hook", "OnError", "error", hookErr)
+				}
+			}()
+		}
+	}
 }
