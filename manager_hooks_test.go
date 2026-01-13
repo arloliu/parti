@@ -236,7 +236,7 @@ func TestManager_HandoffCompletesBeforeHooks(t *testing.T) {
 	// Track when OnAssignmentChanged is called
 	hookSeq := &atomic.Int64{}
 	hooks := &types.Hooks{
-		OnAssignmentChanged: func(ctx context.Context, old, new []types.Partition) error {
+		OnAssignmentChanged: func(ctx context.Context, old, newParts []types.Partition) error {
 			// Record sequence number when hook starts
 			seq := seqCtr.Add(1)
 			hookSeq.Store(seq)
