@@ -196,3 +196,105 @@ func TestManager_DegradedHook(t *testing.T) {
 	require.True(t, ok, "expected string reason")
 	require.Contains(t, reason, "NATS connection down")
 }
+
+// orderingUpdater tracks the order in which UpdateWorkerConsumer is called
+// relative to other operations using an atomic sequence counter.
+type orderingUpdater struct {
+	updateSeq *atomic.Int64 // sequence number when UpdateWorkerConsumer completes
+	seqCtr    *atomic.Int64 // shared counter
+}
+
+func (u *orderingUpdater) UpdateWorkerConsumer(ctx context.Context, workerID string, partitions []types.Partition) error {
+	// Increment and record our sequence number
+	seq := u.seqCtr.Add(1)
+	u.updateSeq.Store(seq)
+	return nil
+}
+
+// TestManager_HandoffCompletesBeforeHooks verifies that the handoff coordinator's
+// Apply method (which updates the consumer) completes BEFORE user hooks are invoked.
+//
+// This prevents the race condition where user code in OnAssignmentChanged expects
+// to receive messages for new partitions, but the consumer subscription isn't
+// updated yet.
+func TestManager_HandoffCompletesBeforeHooks(t *testing.T) {
+	t.Parallel()
+
+	nc, cleanup := testutil.StartEmbeddedNATS(t)
+	defer cleanup()
+
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	// Shared sequence counter
+	seqCtr := &atomic.Int64{}
+
+	// Track when UpdateWorkerConsumer completes
+	updateSeq := &atomic.Int64{}
+	updater := &orderingUpdater{updateSeq: updateSeq, seqCtr: seqCtr}
+
+	// Track when OnAssignmentChanged is called
+	hookSeq := &atomic.Int64{}
+	hooks := &types.Hooks{
+		OnAssignmentChanged: func(ctx context.Context, old, new []types.Partition) error {
+			// Record sequence number when hook starts
+			seq := seqCtr.Add(1)
+			hookSeq.Store(seq)
+			return nil
+		},
+	}
+
+	cfg := parti.DefaultConfig()
+	cfg.StartupTimeout = 5 * time.Second
+	cfg.WorkerIDTTL = 2 * time.Second
+	cfg.HeartbeatTTL = 1 * time.Second
+	cfg.HeartbeatInterval = 500 * time.Millisecond
+	cfg.EmergencyGracePeriod = 750 * time.Millisecond
+
+	src := &mockSource{}
+	assignStrategy := strategy.NewRoundRobin()
+
+	mgr, err := parti.NewManager(
+		&cfg,
+		js,
+		src,
+		assignStrategy,
+		parti.WithHooks(hooks),
+		parti.WithWorkerConsumerUpdater(updater),
+	)
+	require.NoError(t, err)
+	defer func() { _ = mgr.Stop(context.Background()) }()
+
+	err = mgr.Start(context.Background())
+	require.NoError(t, err)
+
+	// Wait for manager to be ready
+	require.Eventually(t, func() bool {
+		s := mgr.State()
+		return s == parti.StateStable || s == parti.StateWaitingAssignment
+	}, 5*time.Second, 100*time.Millisecond)
+
+	// Update source with partitions to trigger an assignment change
+	src.partitions = []types.Partition{
+		{Keys: []string{"p1"}},
+		{Keys: []string{"p2"}},
+	}
+
+	// Trigger refresh
+	err = mgr.RefreshPartitions(context.Background())
+	require.NoError(t, err)
+
+	// Wait for hook to be called
+	require.Eventually(t, func() bool {
+		return hookSeq.Load() > 0
+	}, 5*time.Second, 100*time.Millisecond)
+
+	// Verify ordering: UpdateWorkerConsumer must complete BEFORE OnAssignmentChanged
+	consumerSeq := updateSeq.Load()
+	changeHookSeq := hookSeq.Load()
+
+	t.Logf("UpdateWorkerConsumer completed at seq %d, OnAssignmentChanged called at seq %d", consumerSeq, changeHookSeq)
+	require.Greater(t, changeHookSeq, consumerSeq,
+		"OnAssignmentChanged (seq %d) should be called AFTER UpdateWorkerConsumer completes (seq %d)",
+		changeHookSeq, consumerSeq)
+}

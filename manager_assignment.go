@@ -310,14 +310,19 @@ func (m *Manager) monitorAssignmentChanges(ctx context.Context, kv jetstream.Key
 			)
 
 			// Trigger assignment change hooks
-			// Run callbacks in background to avoid blocking
 
-			// 1) Invoke consumer updater
-			m.invokeHook("handoff apply", func() error {
-				return m.handoffCoordinator.Apply(m.ctx, workerID, oldAssignment, newAssignment)
-			})
+			// 1) Apply consumer update SYNCHRONOUSLY before invoking user hooks.
+			// This ensures the NATS consumer filter subjects are updated before
+			// application code in OnAssignmentChanged runs, preventing a race
+			// condition where the app expects to receive messages for new partitions
+			// but the subscription isn't active yet.
+			if err := m.handoffCoordinator.Apply(m.ctx, workerID, oldAssignment, newAssignment); err != nil {
+				m.logError("handoff apply failed", "error", err)
+				// Continue to invoke user hooks even on failure - the assignment
+				// is already stored, and hooks may need to react to it.
+			}
 
-			// 2) Invoke OnAssignmentChanged hook
+			// 2) Invoke OnAssignmentChanged hook (async to avoid blocking monitor)
 			if m.hooks.OnAssignmentChanged != nil {
 				m.invokeHook("assignment change", func() error {
 					return m.hooks.OnAssignmentChanged(m.ctx, oldAssignment.Partitions, newAssignment.Partitions)
