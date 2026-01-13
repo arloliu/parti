@@ -20,3 +20,4 @@ checkpoints/
 /*.pprof
 
 /simulation
+failure_report.json
