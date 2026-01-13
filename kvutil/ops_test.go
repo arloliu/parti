@@ -47,6 +47,47 @@ func TestJSONHelpers(t *testing.T) {
 		require.Nil(t, gotNil)
 		require.Equal(t, uint64(0), revNil)
 	})
+
+	t.Run("UpdateJSON CAS success", func(t *testing.T) {
+		obj := testStruct{Name: "cas-test", Value: 1}
+		key := "cas-key"
+
+		// Put initial value
+		rev1, err := PutJSON(ctx, kv, key, obj)
+		require.NoError(t, err)
+
+		// Update with correct revision
+		obj.Value = 2
+		rev2, err := UpdateJSON(ctx, kv, key, obj, rev1)
+		require.NoError(t, err)
+		require.Greater(t, rev2, rev1)
+
+		// Verify update
+		got, _, err := GetJSON[testStruct](ctx, kv, key)
+		require.NoError(t, err)
+		require.Equal(t, 2, got.Value)
+	})
+
+	t.Run("UpdateJSON CAS conflict", func(t *testing.T) {
+		obj := testStruct{Name: "conflict-test", Value: 1}
+		key := "conflict-key"
+
+		// Put initial value
+		rev1, err := PutJSON(ctx, kv, key, obj)
+		require.NoError(t, err)
+
+		// Simulate concurrent update (put with new value)
+		obj.Value = 100
+		_, err = PutJSON(ctx, kv, key, obj)
+		require.NoError(t, err)
+
+		// Try to update with stale revision - should fail
+		obj.Value = 2
+		_, err = UpdateJSON(ctx, kv, key, obj, rev1)
+		require.Error(t, err)
+		// NATS returns jetstream.ErrKeyExists when revision doesn't match
+		require.ErrorIs(t, err, jetstream.ErrKeyExists)
+	})
 }
 
 func TestListKeys(t *testing.T) {

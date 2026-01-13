@@ -63,6 +63,51 @@ func PutJSON[T any](ctx context.Context, kv jetstream.KeyValue, key string, valu
 	return rev, nil
 }
 
+// UpdateJSON atomically updates a key using CAS (compare-and-swap) semantics.
+//
+// The update only succeeds if the key's current revision matches the provided
+// revision. This enables optimistic locking patterns where you:
+//  1. Get the current value and revision with GetJSON
+//  2. Modify the value
+//  3. Update with UpdateJSON using the original revision
+//
+// If another process modified the key between steps 1 and 3, the update fails
+// and you should retry the read-modify-write cycle.
+//
+// Parameters:
+//   - ctx: Context for cancellation.
+//   - kv: The KeyValue bucket.
+//   - key: The key to update.
+//   - value: The new value to marshal and store.
+//   - revision: The expected current revision (from a prior GetJSON call).
+//
+// Returns:
+//   - uint64: The new revision of the key.
+//   - error: Error if revision doesn't match (CAS failure), or other errors.
+//
+// Example:
+//
+//	// Read-modify-write pattern
+//	val, rev, _ := kvutil.GetJSON[MyStruct](ctx, kv, "key")
+//	val.Counter++
+//	newRev, err := kvutil.UpdateJSON(ctx, kv, "key", val, rev)
+//	if errors.Is(err, jetstream.ErrWrongLastSequence) {
+//	    // Retry: another process modified the key
+//	}
+func UpdateJSON[T any](ctx context.Context, kv jetstream.KeyValue, key string, value T, revision uint64) (uint64, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return 0, fmt.Errorf("kv marshal %q: %w", key, err)
+	}
+
+	rev, err := kv.Update(ctx, key, data, revision)
+	if err != nil {
+		return 0, fmt.Errorf("kv update %q: %w", key, err)
+	}
+
+	return rev, nil
+}
+
 // ListKeys returns all keys in the bucket that match the given prefix.
 //
 // Parameters:

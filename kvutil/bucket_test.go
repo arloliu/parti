@@ -298,4 +298,99 @@ func TestEnsureKVBucketWithRetry(t *testing.T) {
 
 		t.Logf("Failed gracefully with context timeout: %v", err)
 	})
+
+	t.Run("opens pre-existing bucket via get-first path", func(t *testing.T) {
+		bucketName := "test-preexisting-bucket"
+
+		// Pre-create bucket directly
+		cfg := jetstream.KeyValueConfig{
+			Bucket:  bucketName,
+			History: 1,
+			TTL:     5 * time.Second,
+		}
+
+		_, err := js.CreateKeyValue(ctx, cfg)
+		require.NoError(t, err)
+
+		// Call EnsureKVBucketWithRetry with minimal retries
+		// Should succeed via KeyValue() path without attempting create
+		kv, err := EnsureKVBucketWithRetry(ctx, js, cfg, 1)
+		require.NoError(t, err)
+		require.NotNil(t, kv)
+		require.Equal(t, bucketName, kv.Bucket())
+
+		t.Log("Successfully opened pre-existing bucket via get-first path")
+	})
+}
+
+// TestOpenKVBucket tests the get-only function.
+func TestOpenKVBucket(t *testing.T) {
+	_, nc := partitest.StartEmbeddedNATS(t)
+
+	ctx := context.Background()
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	t.Run("opens existing bucket", func(t *testing.T) {
+		bucketName := "test-open-existing"
+
+		// Pre-create bucket
+		_, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{
+			Bucket: bucketName,
+			TTL:    5 * time.Second,
+		})
+		require.NoError(t, err)
+
+		// Open it
+		kv, err := OpenKVBucket(ctx, js, bucketName)
+		require.NoError(t, err)
+		require.NotNil(t, kv)
+		require.Equal(t, bucketName, kv.Bucket())
+	})
+
+	t.Run("returns error for non-existent bucket", func(t *testing.T) {
+		_, err := OpenKVBucket(ctx, js, "non-existent-bucket")
+		require.Error(t, err)
+		require.True(t, errors.Is(err, jetstream.ErrBucketNotFound))
+	})
+}
+
+// TestCreateKVBucket tests the create-only function.
+func TestCreateKVBucket(t *testing.T) {
+	_, nc := partitest.StartEmbeddedNATS(t)
+
+	ctx := context.Background()
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	t.Run("creates new bucket", func(t *testing.T) {
+		cfg := jetstream.KeyValueConfig{
+			Bucket: "test-create-new",
+			TTL:    5 * time.Second,
+		}
+
+		kv, err := CreateKVBucket(ctx, js, cfg, 3)
+		require.NoError(t, err)
+		require.NotNil(t, kv)
+		require.Equal(t, cfg.Bucket, kv.Bucket())
+	})
+
+	t.Run("returns error if bucket exists with different config", func(t *testing.T) {
+		bucketName := "test-create-exists"
+
+		// Pre-create bucket with one TTL
+		_, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{
+			Bucket: bucketName,
+			TTL:    5 * time.Second,
+		})
+		require.NoError(t, err)
+
+		// Try to create again with different TTL - should fail
+		_, err = CreateKVBucket(ctx, js, jetstream.KeyValueConfig{
+			Bucket: bucketName,
+			TTL:    10 * time.Second, // Different TTL triggers ErrBucketExists
+		}, 3)
+		require.Error(t, err)
+		require.True(t, errors.Is(err, jetstream.ErrBucketExists))
+	})
 }
