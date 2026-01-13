@@ -155,25 +155,31 @@ func main() {
 	}()
 
 	// Wait for either completion, timeout, or signal
+	var runErr error
 	select {
-	case runErr := <-errCh:
-		if runErr != nil {
-			log.Fatalf("Simulation failed: %v", runErr) //nolint:gocritic
-		}
-		log.Println("Simulation completed successfully")
+	case runErr = <-errCh:
+		// runAllInOne completed (either success or error)
 	case <-ctx.Done():
 		if cfg.Simulation.Duration > 0 {
 			log.Printf("Simulation duration (%v) reached, shutting down...", cfg.Simulation.Duration)
 		} else {
 			log.Println("Context cancelled, shutting down...")
 		}
+		// Wait for runAllInOne to complete and get its error
+		runErr = <-errCh
 	case sig := <-sigCh:
 		log.Printf("Received signal %v, shutting down...", sig)
 		cancel()
+		// Wait for runAllInOne to complete and get its error
+		runErr = <-errCh
 	}
 
 	// Give components time to shut down gracefully
 	time.Sleep(2 * time.Second)
+	if runErr != nil {
+		log.Printf("Simulation failed: %v", runErr)
+		os.Exit(1) //nolint:gocritic // Intentional: defer cancel() not running is acceptable on exit
+	}
 	log.Println("Shutdown complete")
 }
 
@@ -676,6 +682,15 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 				embeddedServer.Shutdown()
 			}
 			// Return success or failure based on invariants (re-evaluate to be safe)
+			// Option A safety net: check for unresolved gaps (gaps that were never healed)
+			stats := coord.GetStats()
+			gapsHealed := coord.GetTracker().GetGapsHealedCount()
+			unresolvedGaps := int64(stats.GapCount) - gapsHealed
+			if unresolvedGaps > 0 {
+				return fmt.Errorf("unresolved gaps at shutdown: detected=%d healed=%d unresolved=%d", stats.GapCount, gapsHealed, unresolvedGaps)
+			}
+			log.Printf("Gap resolution check passed: detected=%d healed=%d", stats.GapCount, gapsHealed)
+
 			if metricsCollector != nil {
 				late := metricsCollector.GetLateMessagesTotal()
 				lost := metricsCollector.GetLostMessagesTotal()
