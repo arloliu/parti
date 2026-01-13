@@ -34,7 +34,7 @@ chaos:
     - network_disconnect
 
 coordinator:
-  gap_aging: 120s
+  gap_aging: 180s
   slo:
     enable_catch_up: true
     catch_up_deadline: 30s
