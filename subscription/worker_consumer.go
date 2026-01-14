@@ -646,6 +646,7 @@ func (wc *WorkerConsumer) stopGateResolver() {
 
 	if wc.gateResolver != nil {
 		if wc.gateResolverCancel != nil {
+			wc.gateResolverCancel()
 			wc.gateResolverCancel = nil
 		}
 		if resolver, ok := wc.gateResolver.(*ClaimBasedResolver); ok {
