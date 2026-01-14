@@ -349,10 +349,12 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 		}
 
 		chaosConfig := coordinator.ChaosConfig{
-			Enabled:     cfg.Chaos.Enabled,
-			Events:      cfg.Chaos.Events,
-			MinInterval: minInterval,
-			MaxInterval: maxInterval,
+			Enabled:          cfg.Chaos.Enabled,
+			Events:           cfg.Chaos.Events,
+			MinInterval:      minInterval,
+			MaxInterval:      maxInterval,
+			BurstEnabled:     cfg.Chaos.BurstEnabled,
+			BurstProbability: cfg.Chaos.BurstProbability,
 			EventCallback: func(event coordinator.ChaosEvent, params map[string]any) {
 				handleChaosEvent(ctx, coord, event, params, processMgr, metricsCollector, checkpointMgr, goroutineRegistry)
 			},
@@ -1001,13 +1003,17 @@ func handleChaosEvent(
 		}
 		handleWorkerPause(duration, processMgr)
 
+	case coordinator.SlowConsumerEvent:
+		// SlowConsumer only works in all-in-one (goroutine) mode - skip in process mode
+		log.Println("[Chaos] slow_consumer event only supported in all-in-one mode")
+
 	default:
 		log.Printf("[Chaos] Unknown event type: %s", event)
 	}
 }
 
 // handleGoroutineChaos handles chaos events for goroutine-level (all-in-one mode).
-func handleGoroutineChaos( //nolint:cyclop
+func handleGoroutineChaos( //nolint:cyclop,gocyclo
 	ctx context.Context,
 	event coordinator.ChaosEvent,
 	params map[string]any,
@@ -1018,7 +1024,7 @@ func handleGoroutineChaos( //nolint:cyclop
 	// Guard: skip worker-related events when no active workers
 	activeWorkers := registry.GetActiveCount(coordinator.WorkerGoroutine)
 	switch event {
-	case coordinator.WorkerCrashEvent, coordinator.WorkerRestartEvent, coordinator.LeaderFailureEvent, coordinator.ScaleDownEvent, coordinator.NetworkDisconnectEvent, coordinator.WorkerPauseEvent:
+	case coordinator.WorkerCrashEvent, coordinator.WorkerRestartEvent, coordinator.LeaderFailureEvent, coordinator.ScaleDownEvent, coordinator.NetworkDisconnectEvent, coordinator.WorkerPauseEvent, coordinator.SlowConsumerEvent:
 		if activeWorkers == 0 {
 			log.Printf("[Chaos] Skipping %s: no active workers", event)
 			return
@@ -1115,6 +1121,37 @@ func handleGoroutineChaos( //nolint:cyclop
 			})
 		} else {
 			log.Printf("[Chaos] Worker %s missing underlying object; cannot disconnect", target.ID)
+		}
+
+	case coordinator.SlowConsumerEvent:
+		// Slow down a random worker's processing
+		workers := registry.GetByType(coordinator.WorkerGoroutine)
+		if len(workers) == 0 {
+			log.Println("[Chaos] No active workers for slow_consumer")
+			return
+		}
+		target := workers[time.Now().UnixNano()%int64(len(workers))]
+		multiplier, ok := params["multiplier"].(int)
+		if !ok || multiplier <= 0 {
+			multiplier = 10 // default 10x slowdown
+		}
+		dur, ok := params["duration"].(time.Duration)
+		if !ok || dur <= 0 {
+			dur = 15 * time.Second
+		}
+		// Type assert to slowable interface
+		type slowable interface {
+			SetProcessingMultiplier(int)
+		}
+		if wobj, ok := target.Obj.(slowable); ok {
+			log.Printf("[Chaos] Slowing consumer %s: %dx for %v", target.ID, multiplier, dur)
+			wobj.SetProcessingMultiplier(multiplier)
+			time.AfterFunc(dur, func() {
+				log.Printf("[Chaos] Ending slow consumer on %s", target.ID)
+				wobj.SetProcessingMultiplier(1)
+			})
+		} else {
+			log.Printf("[Chaos] Worker %s missing underlying object; cannot slow", target.ID)
 		}
 
 	default:

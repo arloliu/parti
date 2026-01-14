@@ -23,6 +23,8 @@ workers:
 chaos:
   enabled: true
   interval: "15s-25s"
+  burst_enabled: true
+  burst_probability: 0.3
   events:
     - worker_crash
     - worker_restart
@@ -32,6 +34,7 @@ chaos:
     - scale_up
     - worker_pause
     - network_disconnect
+    - slow_consumer
 
 coordinator:
   gap_aging: 180s

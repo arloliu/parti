@@ -36,6 +36,9 @@ const (
 
 	// WorkerPauseEvent temporarily pauses a worker's processing without removing it.
 	WorkerPauseEvent ChaosEvent = "worker_pause"
+
+	// SlowConsumerEvent slows down message processing to simulate backpressure.
+	SlowConsumerEvent ChaosEvent = "slow_consumer"
 )
 
 // ChaosController manages chaos event injection.
@@ -47,6 +50,12 @@ type ChaosController struct {
 	eventCallback func(ChaosEvent, map[string]any)
 	rng           *rand.Rand
 	started       atomic.Bool // Prevents multiple Start() calls
+
+	// Burst mode: rapid-fire events followed by quiet periods
+	burstEnabled     bool
+	burstProbability float64 // probability to enter burst (0.0-1.0)
+	burstMode        bool    // currently in burst?
+	burstRemaining   int     // events left in current burst
 }
 
 // ChaosConfig configures the chaos controller.
@@ -56,6 +65,10 @@ type ChaosConfig struct {
 	MinInterval   time.Duration
 	MaxInterval   time.Duration
 	EventCallback func(ChaosEvent, map[string]any)
+
+	// Burst mode configuration
+	BurstEnabled     bool    // Enable burst mode for variable intensity
+	BurstProbability float64 // Probability to enter burst (0.0-1.0), default 0.2
 }
 
 // NewChaosController creates a new chaos controller.
@@ -71,13 +84,21 @@ func NewChaosController(cfg ChaosConfig) *ChaosController {
 		events[i] = ChaosEvent(e)
 	}
 
+	// Default burst probability if not set
+	burstProb := cfg.BurstProbability
+	if burstProb <= 0 {
+		burstProb = 0.2 // 20% default
+	}
+
 	return &ChaosController{
-		enabled:       cfg.Enabled,
-		events:        events,
-		minInterval:   cfg.MinInterval,
-		maxInterval:   cfg.MaxInterval,
-		eventCallback: cfg.EventCallback,
-		rng:           rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec // Weak RNG acceptable for chaos simulation
+		enabled:          cfg.Enabled,
+		events:           events,
+		minInterval:      cfg.MinInterval,
+		maxInterval:      cfg.MaxInterval,
+		eventCallback:    cfg.EventCallback,
+		rng:              rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec // Weak RNG acceptable for chaos simulation
+		burstEnabled:     cfg.BurstEnabled,
+		burstProbability: burstProb,
 	}
 }
 
@@ -183,6 +204,11 @@ func (cc *ChaosController) generateEventParams(event ChaosEvent) map[string]any 
 		// Pause for 5-8 seconds to build backlog
 		params["duration"] = time.Duration(cc.rng.Intn(4)+5) * time.Second
 
+	case SlowConsumerEvent:
+		// Slow down processing by 10x-50x for 10-30 seconds
+		params["multiplier"] = cc.rng.Intn(40) + 10 // 10-50x slowdown
+		params["duration"] = time.Duration(cc.rng.Intn(20)+10) * time.Second
+
 	default:
 		// Unknown event type, return empty params
 	}
@@ -191,7 +217,33 @@ func (cc *ChaosController) generateEventParams(event ChaosEvent) map[string]any 
 }
 
 // randomInterval returns a random interval between min and max.
+// When burst mode is enabled, periodically enters rapid-fire mode with
+// 5-10 events at 1-5s intervals, followed by a quiet period of 60-120s.
 func (cc *ChaosController) randomInterval() time.Duration {
+	// Burst mode logic
+	if cc.burstEnabled {
+		// Check if we should enter burst mode (only when not already in one)
+		if !cc.burstMode && cc.rng.Float64() < cc.burstProbability {
+			cc.burstMode = true
+			cc.burstRemaining = cc.rng.Intn(5) + 5 // 5-10 rapid events
+			log.Println("[Chaos] Entering burst mode")
+		}
+
+		if cc.burstMode {
+			cc.burstRemaining--
+			if cc.burstRemaining <= 0 {
+				cc.burstMode = false
+				// Long quiet period after burst (60-120s)
+				quietDuration := time.Duration(cc.rng.Intn(60)+60) * time.Second
+				log.Printf("[Chaos] Exiting burst mode, quiet period: %v", quietDuration)
+				return quietDuration
+			}
+			// Rapid fire during burst (1-5s)
+			return time.Duration(cc.rng.Intn(4)+1) * time.Second
+		}
+	}
+
+	// Normal interval
 	if cc.minInterval == cc.maxInterval {
 		return cc.minInterval
 	}
@@ -266,6 +318,8 @@ func (e ChaosEvent) String() string {
 		return "Network Disconnect"
 	case WorkerPauseEvent:
 		return "Worker Pause"
+	case SlowConsumerEvent:
+		return "Slow Consumer"
 	default:
 		return fmt.Sprintf("Unknown Event: %s", string(e))
 	}

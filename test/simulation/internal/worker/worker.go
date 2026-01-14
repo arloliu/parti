@@ -70,6 +70,9 @@ type Worker struct {
 
 	// network control
 	netCtrl *NetworkControl
+
+	// slow consumer simulation (processing multiplier)
+	processingMultiplier atomic.Int32
 }
 
 // SetNetworkControl sets the network control for this worker.
@@ -89,6 +92,22 @@ func (w *Worker) Reconnect() {
 	if w.netCtrl != nil {
 		w.netCtrl.Reconnect()
 	}
+}
+
+// SetProcessingMultiplier sets the processing delay multiplier for slow consumer simulation.
+// A value of 1 means normal processing, 10 means 10x slower, etc.
+func (w *Worker) SetProcessingMultiplier(m int) {
+	w.processingMultiplier.Store(int32(m)) //nolint:gosec // m is always small (10-50)
+	log.Printf("[%s] Processing multiplier set to %dx", w.id, m)
+}
+
+// GetProcessingMultiplier returns the current processing delay multiplier.
+func (w *Worker) GetProcessingMultiplier() int {
+	m := w.processingMultiplier.Load()
+	if m <= 0 {
+		return 1 // default
+	}
+	return int(m)
 }
 
 // Config configures a worker.
@@ -555,11 +574,16 @@ func (w *Worker) processAndAck(msg jetstream.Msg) error { //nolint:cyclop
 	// seq == next: we'll report this and then flush any buffered consecutive seqs
 	w.orderMu.Unlock()
 
-	// Simulate processing delay
+	// Simulate processing delay (with optional slow consumer multiplier)
 	delay := w.processingDelayMin
 	if w.processingDelayMax > w.processingDelayMin {
 		delayRange := w.processingDelayMax - w.processingDelayMin
 		delay = w.processingDelayMin + time.Duration(rand.Int63n(int64(delayRange))) //nolint:gosec // Weak RNG acceptable for simulation
+	}
+	// Apply slow consumer multiplier if set
+	multiplier := w.GetProcessingMultiplier()
+	if multiplier > 1 {
+		delay *= time.Duration(multiplier)
 	}
 	time.Sleep(delay)
 

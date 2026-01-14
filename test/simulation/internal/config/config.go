@@ -167,6 +167,10 @@ type ChaosConfig struct {
 	Enabled  bool     `yaml:"enabled"`
 	Events   []string `yaml:"events"`   // ["worker_crash", "worker_restart", ...]
 	Interval string   `yaml:"interval"` // "10-30m" (random between 10-30 minutes)
+
+	// Burst mode: periodic rapid-fire events followed by quiet periods
+	BurstEnabled     bool    `yaml:"burst_enabled"`     // Enable variable intensity
+	BurstProbability float64 `yaml:"burst_probability"` // 0.0-1.0, default 0.2 (20%)
 }
 
 // NATSConfig configures NATS connection.
