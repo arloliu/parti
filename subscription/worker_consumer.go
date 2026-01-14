@@ -21,6 +21,16 @@ import (
 // WorkerConsumer manages one JetStream durable pull consumer per subject (partition).
 // It preserves per-subject cursors across reassignments and never deletes durables; idle
 // consumers are reclaimed by JetStream via InactiveThreshold.
+//
+// Thread Safety:
+//   - UpdateWorkerConsumer is serialized; concurrent calls block on an internal mutex
+//   - Close is safe to call concurrently with UpdateWorkerConsumer
+//   - All other public methods are safe for concurrent use
+//
+// Blocking Behavior:
+//   - UpdateWorkerConsumer may block up to DrainOnRemoveTimeout (default 10s) when
+//     removing subjects with DrainOnRemove enabled
+//   - Close may block up to the context deadline waiting for active pull loops to stop
 type WorkerConsumer struct {
 	conn    *nats.Conn
 	js      jetstream.JetStream

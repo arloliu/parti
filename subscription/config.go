@@ -78,13 +78,22 @@ type WorkerConsumerConfig struct {
 	StreamName string `validate:"required"`
 
 	// ConsumerPrefix is the prefix for the durable consumer name.
-	// It must contain only alphanumeric characters, dashes, or underscores.
+	// It must contain only alphanumeric characters (a-z, A-Z, 0-9), dashes (-), or underscores (_).
 	// Required.
 	ConsumerPrefix string `validate:"required"`
 
-	// SubjectTemplate is a text/template used to build subjects from a
-	// partition. Available field: {{.PartitionID}} which equals partition.SubjectKey().
-	// Example: "work.{{.PartitionID}}" => work.source.us-east-1
+	// SubjectTemplate is a text/template used to build subjects from a partition.
+	// Uses Go's text/template syntax.
+	//
+	// Available template fields:
+	//   - {{.PartitionID}}: Partition keys joined with "." (equals partition.SubjectKey())
+	//
+	// Note: Only PartitionID is available. Other Partition fields (Keys, Weight) are not
+	// directly accessible in the template.
+	//
+	// Example: "orders.{{.PartitionID}}.events" with Keys=["region", "us-east"] produces
+	// "orders.region.us-east.events"
+	//
 	// Required.
 	SubjectTemplate string `validate:"required"`
 
