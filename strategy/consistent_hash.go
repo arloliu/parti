@@ -54,15 +54,18 @@ func NewConsistentHash(opts ...ConsistentHashOption) *ConsistentHash {
 // WithVirtualNodes sets the number of virtual nodes per worker.
 //
 // Higher values provide better distribution but increase memory usage.
-// Recommended range: 100-300 (default: 150).
+// Recommended range: 100-300 (default: 150). Values below 1 are clamped to 1.
 //
 // Parameters:
-//   - nodes: Number of virtual nodes per worker
+//   - nodes: Number of virtual nodes per worker (minimum: 1)
 //
 // Returns:
 //   - consistentHashOption: Configuration option
 func WithVirtualNodes(nodes int) ConsistentHashOption {
 	return func(ch *ConsistentHash) {
+		if nodes < 1 {
+			nodes = 1 // Minimum 1 virtual node per worker
+		}
 		ch.virtualNodes = nodes
 	}
 }
