@@ -1,0 +1,241 @@
+package partition
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"time"
+
+	"github.com/nats-io/nats.go/jetstream"
+)
+
+// PartitionJSConsumer defines the interface for JetStream partition-aware consuming.
+type PartitionJSConsumer interface {
+	// Start begins consuming messages in a background goroutine.
+	Start(ctx context.Context) error
+
+	// Stop gracefully stops the consumer.
+	Stop(ctx context.Context) error
+
+	// Partition returns the partition index this consumer handles.
+	Partition() int
+
+	// Subject returns the NATS subject this consumer subscribes to.
+	Subject() string
+}
+
+// JSConsumer consumes messages from a single static partition using JetStream.
+//
+// This consumer is designed for StatefulSet deployments where each pod
+// handles a fixed partition based on its ordinal index.
+type JSConsumer struct {
+	js      jetstream.JetStream
+	config  ConsumerConfig
+	handler MessageHandler
+
+	partition int
+	subject   string
+
+	consumer jetstream.Consumer
+
+	mu     sync.Mutex
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+// NewJSConsumer creates a JetStream consumer for a specific partition.
+//
+// Parameters:
+//   - js: JetStream context
+//   - config: Consumer configuration
+//   - handler: Message handler
+//
+// Returns:
+//   - *JSConsumer: Configured consumer
+//   - error: Validation or initialization error
+func NewJSConsumer(
+	js jetstream.JetStream,
+	config ConsumerConfig,
+	handler MessageHandler,
+) (*JSConsumer, error) {
+	if js == nil {
+		return nil, errors.New("jetstream context is required")
+	}
+	if handler == nil {
+		return nil, errors.New("message handler is required")
+	}
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
+
+	parts, err := parsePattern(config.SubjectPattern)
+	if err != nil {
+		return nil, err
+	}
+
+	subject := parts.buildFilterSubject(config.Partition)
+	if err := validateSubjectTokens(subject, true); err != nil {
+		return nil, err
+	}
+
+	return &JSConsumer{
+		js:        js,
+		config:    config,
+		handler:   handler,
+		partition: config.Partition,
+		subject:   subject,
+		done:      make(chan struct{}),
+	}, nil
+}
+
+// Start begins consuming messages in a background goroutine.
+//
+// Parameters:
+//   - ctx: Context for lifecycle control
+//
+// Returns:
+//   - error: Startup error
+func (c *JSConsumer) Start(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cancel != nil {
+		return errors.New("consumer already started")
+	}
+
+	cons, err := c.ensureConsumer(ctx)
+	if err != nil {
+		return err
+	}
+	c.consumer = cons
+
+	loopCtx, cancel := context.WithCancel(ctx)
+	c.cancel = cancel
+	c.done = make(chan struct{})
+
+	go c.run(loopCtx)
+
+	return nil
+}
+
+// Stop gracefully stops the consumer and drains pending messages.
+//
+// Parameters:
+//   - ctx: Context with shutdown deadline
+//
+// Returns:
+//   - error: Shutdown error (context cancellation)
+func (c *JSConsumer) Stop(ctx context.Context) error {
+	c.mu.Lock()
+	cancel := c.cancel
+	done := c.done
+	c.cancel = nil
+	c.mu.Unlock()
+
+	if cancel == nil {
+		return nil
+	}
+	cancel()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Partition returns the partition index this consumer handles.
+//
+// Returns:
+//   - int: Partition index
+func (c *JSConsumer) Partition() int {
+	return c.partition
+}
+
+// Subject returns the NATS subject this consumer subscribes to.
+//
+// Returns:
+//   - string: Subject filter for this partition
+func (c *JSConsumer) Subject() string {
+	return c.subject
+}
+
+func (c *JSConsumer) ensureConsumer(ctx context.Context) (jetstream.Consumer, error) {
+	cfg := jetstream.ConsumerConfig{
+		Durable:       c.config.ConsumerName,
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		FilterSubject: c.subject,
+		MaxDeliver:    c.config.MaxDeliver,
+	}
+
+	return c.js.CreateOrUpdateConsumer(ctx, c.config.StreamName, cfg)
+}
+
+func (c *JSConsumer) run(ctx context.Context) {
+	defer close(c.done)
+
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+
+		iter, err := c.consumer.Messages(
+			jetstream.PullMaxMessages(c.config.BatchSize),
+			jetstream.PullExpiry(c.config.FetchTimeout),
+		)
+		if err != nil {
+			c.config.Logger.Warn("partition consumer messages iterator error", "error", err, "subject", c.subject)
+			if !sleepWithContext(ctx, 200*time.Millisecond) {
+				return
+			}
+			continue
+		}
+
+		if !c.processIterator(ctx, iter) {
+			return
+		}
+	}
+}
+
+func (c *JSConsumer) processIterator(ctx context.Context, iter jetstream.MessagesContext) bool {
+	stop := context.AfterFunc(ctx, iter.Stop)
+	defer func() {
+		_ = stop()
+	}()
+
+	for {
+		if ctx.Err() != nil {
+			iter.Stop()
+			return false
+		}
+
+		msg, err := iter.Next()
+		if err != nil {
+			iter.Stop()
+			return sleepWithContext(ctx, 200*time.Millisecond)
+		}
+
+		if c.config.ManualAck {
+			_ = c.handler.Handle(ctx, msg)
+			continue
+		}
+
+		if err := c.handler.Handle(ctx, msg); err != nil {
+			_ = msg.Nak()
+		} else {
+			_ = msg.Ack()
+		}
+	}
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return true
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(d):
+		return true
+	}
+}

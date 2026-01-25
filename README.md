@@ -10,6 +10,8 @@ It is designed for building distributed systems where work needs to be sharded a
 
 ## Key Features
 
+### Dynamic Partitioning (`parti.Manager`)
+
 - **Stable Worker IDs**: Workers claim stable IDs (e.g., `worker-0`, `worker-1`) that persist across restarts, minimizing assignment churn during rolling updates.
 - **Leader-Based Assignment**: A single leader worker calculates assignments, ensuring consistency and preventing split-brain scenarios.
 - **Dynamic Partition Discovery**: Supports dynamic partition updates via NATS KV without restarting workers.
@@ -18,6 +20,18 @@ It is designed for building distributed systems where work needs to be sharded a
 - **Processing Gate**: Controls message processing flow based on assignment status, preventing processing of revoked partitions.
 - **Cache Affinity**: Preserves >80% partition locality during rebalancing using consistent hashing.
 - **Weighted Assignment**: Supports partition weights for uneven workload distribution.
+
+### Static Partitioning (`partition` package)
+
+> Added in v1.5.0
+
+- **Deterministic Routing**: Messages are routed to fixed partitions using xxh3 hashing on partition keys.
+- **StatefulSet Integration**: Designed for Kubernetes StatefulSet deployments where each pod handles a fixed partition based on its ordinal.
+- **Dual Protocol Support**: Works with both core NATS (`Publisher`/`Subscriber`) and JetStream (`JSPublisher`/`JSConsumer`).
+- **Subject Pattern Templates**: Flexible subject patterns with `{{partition}}` and `{{key}}` placeholders.
+- **Zero Coordination**: No leader election or external coordination required—simple and predictable.
+
+See the [partition package README](partition/README.md) for detailed documentation.
 
 ## Installation
 
