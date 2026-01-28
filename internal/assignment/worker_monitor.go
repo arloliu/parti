@@ -280,7 +280,11 @@ func (m *WorkerMonitor) processWatcherEvents(ctx context.Context) {
 			return
 		case <-m.stopCh:
 			return
-		case entry := <-watcher.Updates():
+		case entry, ok := <-watcher.Updates():
+			if !ok {
+				m.logger.Debug("watcher update channel closed")
+				return
+			}
 			if entry == nil {
 				// Watcher stopped or initial replay done
 				continue

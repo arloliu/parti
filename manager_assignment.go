@@ -271,97 +271,117 @@ func (m *Manager) monitorAssignmentChanges(ctx context.Context, kv jetstream.Key
 		case <-ctx.Done():
 			m.logger.Debug("assignment monitor stopping (context cancelled)", "worker_id", workerID)
 			return
-		case entry := <-watcher.Updates():
+		case entry, ok := <-watcher.Updates():
+			if !ok {
+				m.logger.Debug("assignment watcher closed", "worker_id", workerID)
+				return
+			}
 			if entry == nil {
 				// Nil entry indicates end of initial values replay
 				// This is normal - continue watching for future updates
 				continue
 			}
 
-			if entry.Operation() == jetstream.KeyValueDelete {
-				m.logger.Debug("ignoring assignment deletion during leader transition")
-				continue
-			}
-
-			var newAssignment Assignment
-			if err := json.Unmarshal(entry.Value(), &newAssignment); err != nil {
-				m.logError("failed to unmarshal assignment", "error", err)
-
-				continue
-			}
-
-			// Get old assignment
-			oldAssignment := m.CurrentAssignment()
-
-			// Check if assignment actually changed
-			if oldAssignment.Version >= newAssignment.Version {
-				continue // Ignore stale or duplicate assignments
-			}
-
-			// Update stored assignment
-			m.assignment.Store(newAssignment)
-
-			m.logger.Info("assignment updated",
-				"worker_id", workerID,
-				"old_version", oldAssignment.Version,
-				"new_version", newAssignment.Version,
-				"old_partitions", len(oldAssignment.Partitions),
-				"new_partitions", len(newAssignment.Partitions),
-			)
-
-			// Trigger assignment change hooks
-
-			// 1) Apply consumer update SYNCHRONOUSLY before invoking user hooks.
-			// This ensures the NATS consumer filter subjects are updated before
-			// application code in OnAssignmentChanged runs, preventing a race
-			// condition where the app expects to receive messages for new partitions
-			// but the subscription isn't active yet.
-			if err := m.handoffCoordinator.Apply(m.ctx, workerID, oldAssignment, newAssignment); err != nil {
-				m.logError("handoff apply failed", "error", err)
-				// Continue to invoke user hooks even on failure - the assignment
-				// is already stored, and hooks may need to react to it.
-			}
-
-			// 2) Invoke OnAssignmentChanged hook (async to avoid blocking monitor)
-			if m.hooks.OnAssignmentChanged != nil {
-				m.invokeHook("assignment change", func() error {
-					return m.hooks.OnAssignmentChanged(m.ctx, oldAssignment.Partitions, newAssignment.Partitions)
-				})
-			}
-
-			// 3) Invoke convenience hooks (Assigned/Revoked)
-			if m.hooks.OnPartitionsAssigned != nil || m.hooks.OnPartitionsRevoked != nil {
-				m.invokeHook("partition hooks", func() error {
-					added, removed := diffPartitions(oldAssignment.Partitions, newAssignment.Partitions)
-
-					if len(added) > 0 && m.hooks.OnPartitionsAssigned != nil {
-						if err := m.hooks.OnPartitionsAssigned(m.ctx, added); err != nil {
-							m.logError("partitions assigned hook error", "error", err)
-						}
-					}
-
-					if len(removed) > 0 && m.hooks.OnPartitionsRevoked != nil {
-						if err := m.hooks.OnPartitionsRevoked(m.ctx, removed); err != nil {
-							m.logError("partitions revoked hook error", "error", err)
-						}
-					}
-
-					return nil
-				})
-			}
-
-			// Record metrics
-			added := len(newAssignment.Partitions) - len(oldAssignment.Partitions)
-			if added < 0 {
-				added = 0
-			}
-			removed := len(oldAssignment.Partitions) - len(newAssignment.Partitions)
-			if removed < 0 {
-				removed = 0
-			}
-			m.metrics.RecordAssignmentChange(added, removed, newAssignment.Version)
+			m.handleAssignmentEntry(workerID, entry)
 		}
 	}
+}
+
+func (m *Manager) handleAssignmentEntry(workerID string, entry jetstream.KeyValueEntry) {
+	if entry.Operation() == jetstream.KeyValueDelete {
+		m.logger.Debug("ignoring assignment deletion during leader transition")
+		return
+	}
+
+	newAssignment, ok := m.decodeAssignmentEntry(entry)
+	if !ok {
+		return
+	}
+
+	oldAssignment := m.CurrentAssignment()
+	if oldAssignment.Version >= newAssignment.Version {
+		return
+	}
+
+	m.applyAssignmentUpdate(workerID, oldAssignment, newAssignment)
+}
+
+func (m *Manager) decodeAssignmentEntry(entry jetstream.KeyValueEntry) (Assignment, bool) {
+	var newAssignment Assignment
+	if err := json.Unmarshal(entry.Value(), &newAssignment); err != nil {
+		m.logError("failed to unmarshal assignment", "error", err)
+		return Assignment{}, false
+	}
+
+	return newAssignment, true
+}
+
+func (m *Manager) applyAssignmentUpdate(workerID string, oldAssignment, newAssignment Assignment) {
+	m.assignment.Store(newAssignment)
+
+	m.logger.Info("assignment updated",
+		"worker_id", workerID,
+		"old_version", oldAssignment.Version,
+		"new_version", newAssignment.Version,
+		"old_partitions", len(oldAssignment.Partitions),
+		"new_partitions", len(newAssignment.Partitions),
+	)
+
+	m.applyHandoffAndHooks(workerID, oldAssignment, newAssignment)
+	m.recordAssignmentMetrics(oldAssignment, newAssignment)
+}
+
+func (m *Manager) applyHandoffAndHooks(workerID string, oldAssignment, newAssignment Assignment) {
+	// 1) Apply consumer update SYNCHRONOUSLY before invoking user hooks.
+	// This ensures the NATS consumer filter subjects are updated before
+	// application code in OnAssignmentChanged runs, preventing a race
+	// condition where the app expects to receive messages for new partitions
+	// but the subscription isn't active yet.
+	if err := m.handoffCoordinator.Apply(m.ctx, workerID, oldAssignment, newAssignment); err != nil {
+		m.logError("handoff apply failed", "error", err)
+		// Continue to invoke user hooks even on failure - the assignment
+		// is already stored, and hooks may need to react to it.
+	}
+
+	// 2) Invoke OnAssignmentChanged hook (async to avoid blocking monitor)
+	if m.hooks.OnAssignmentChanged != nil {
+		m.invokeHook("assignment change", func() error {
+			return m.hooks.OnAssignmentChanged(m.ctx, oldAssignment.Partitions, newAssignment.Partitions)
+		})
+	}
+
+	// 3) Invoke convenience hooks (Assigned/Revoked)
+	if m.hooks.OnPartitionsAssigned != nil || m.hooks.OnPartitionsRevoked != nil {
+		m.invokeHook("partition hooks", func() error {
+			added, removed := diffPartitions(oldAssignment.Partitions, newAssignment.Partitions)
+
+			if len(added) > 0 && m.hooks.OnPartitionsAssigned != nil {
+				if err := m.hooks.OnPartitionsAssigned(m.ctx, added); err != nil {
+					m.logError("partitions assigned hook error", "error", err)
+				}
+			}
+
+			if len(removed) > 0 && m.hooks.OnPartitionsRevoked != nil {
+				if err := m.hooks.OnPartitionsRevoked(m.ctx, removed); err != nil {
+					m.logError("partitions revoked hook error", "error", err)
+				}
+			}
+
+			return nil
+		})
+	}
+}
+
+func (m *Manager) recordAssignmentMetrics(oldAssignment, newAssignment Assignment) {
+	added := len(newAssignment.Partitions) - len(oldAssignment.Partitions)
+	if added < 0 {
+		added = 0
+	}
+	removed := len(oldAssignment.Partitions) - len(newAssignment.Partitions)
+	if removed < 0 {
+		removed = 0
+	}
+	m.metrics.RecordAssignmentChange(added, removed, newAssignment.Version)
 }
 
 // refreshAssignmentFromNATS attempts to fetch the current assignment from NATS KV.

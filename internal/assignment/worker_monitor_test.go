@@ -10,6 +10,7 @@ import (
 	"github.com/arloliu/parti/internal/logging"
 	partitest "github.com/arloliu/parti/testing"
 	"github.com/arloliu/parti/types"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 )
 
@@ -362,4 +363,61 @@ func TestWorkerMonitor_MultipleWorkerChanges(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return callCount.Load() >= 3
 	}, 5*time.Second, 100*time.Millisecond)
+}
+
+type fakeKeyWatcher struct {
+	ctx     context.Context
+	updates chan jetstream.KeyValueEntry
+	errCh   chan error
+}
+
+func (f *fakeKeyWatcher) Context() context.Context {
+	return f.ctx
+}
+
+func (f *fakeKeyWatcher) Updates() <-chan jetstream.KeyValueEntry {
+	return f.updates
+}
+
+func (f *fakeKeyWatcher) Stop() error {
+	return nil
+}
+
+func (f *fakeKeyWatcher) Error() <-chan error {
+	return f.errCh
+}
+
+func TestWorkerMonitor_ProcessWatcherEvents_ClosedChannel(t *testing.T) {
+	t.Parallel()
+
+	updates := make(chan jetstream.KeyValueEntry)
+	close(updates)
+	errCh := make(chan error)
+	close(errCh)
+
+	monitor := &WorkerMonitor{
+		logger: logging.NewNop(),
+		stopCh: make(chan struct{}),
+	}
+	monitor.watcher = &fakeKeyWatcher{
+		ctx:     context.Background(),
+		updates: updates,
+		errCh:   errCh,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		monitor.processWatcherEvents(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("processWatcherEvents did not exit after channel close")
+	}
 }
