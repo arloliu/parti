@@ -205,6 +205,38 @@ func TestAssignmentStrategy_AllWeightsEqual(t *testing.T) {
 	}
 }
 
+func TestAssignmentStrategy_EmptyPartitionKeys(t *testing.T) {
+	strategies := []struct {
+		name      string
+		strategy  types.AssignmentStrategy
+		expectErr bool
+	}{
+		{name: "ConsistentHash", strategy: NewConsistentHash(), expectErr: true},
+		{name: "RoundRobin", strategy: NewRoundRobin(), expectErr: false},
+		{name: "WeightedConsistentHash", strategy: NewWeightedConsistentHash(), expectErr: true},
+	}
+
+	workers := []string{"worker-0", "worker-1"}
+	partitions := []types.Partition{{Keys: []string{}, Weight: 100}}
+
+	for _, tt := range strategies {
+		t.Run(tt.name, func(t *testing.T) {
+			assignments, err := tt.strategy.Assign(workers, partitions)
+			if tt.expectErr {
+				require.Error(t, err)
+				return
+			}
+
+			require.NoError(t, err)
+			totalAssigned := 0
+			for _, parts := range assignments {
+				totalAssigned += len(parts)
+			}
+			require.Equal(t, len(partitions), totalAssigned)
+		})
+	}
+}
+
 // TestAssignmentStrategy_ExtremeWeights verifies handling of extreme weight differences.
 func TestAssignmentStrategy_ExtremeWeights(t *testing.T) {
 	t.Run("ConsistentHash", func(t *testing.T) {

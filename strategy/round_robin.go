@@ -29,7 +29,7 @@ func NewRoundRobin() *RoundRobin {
 // Assign calculates partition assignments using round-robin distribution.
 //
 // The algorithm:
-//  1. Sort workers and partitions for deterministic assignment
+//  1. Use the provided worker order
 //  2. Distribute partitions evenly in round-robin fashion
 //
 // Parameters:
