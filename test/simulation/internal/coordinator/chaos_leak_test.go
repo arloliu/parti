@@ -88,14 +88,23 @@ func TestChaosController_MultipleStarts(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Should only have 3 goroutines (one per Start call - THIS IS THE BUG!)
-	afterStart := runtime.NumGoroutine()
-	t.Logf("Baseline: %d, After 3 starts: %d, Leaked: %d",
-		baseline, afterStart, afterStart-baseline)
+	// Use Eventually to check for goroutine stability, as previous tests or system
+	// goroutines might take a moment to settle or spin up.
+	require.Eventually(t, func() bool {
+		afterStart := runtime.NumGoroutine()
+		leak := afterStart - baseline
 
-	// This test will FAIL with current implementation because each Start()
-	// creates a new goroutine without checking if one already exists
-	require.LessOrEqual(t, afterStart-baseline, 1,
-		"Multiple Start() calls should not create multiple goroutines")
+		// We expect:
+		// 1. The new chaos controller run loop (1 goroutine)
+		// 2. The assert.Eventually condition checker (1 goroutine, implementation detail of testify)
+		// So a delta of 2 is acceptable. Anything more suggests the extra Start() calls leaked.
+		if leak > 2 {
+			return false
+		}
+
+		return true
+	}, 2*time.Second, 100*time.Millisecond,
+		"Multiple Start() calls should not create multiple goroutines (expected delta <= 2)")
 
 	cancel()
 	time.Sleep(200 * time.Millisecond)
