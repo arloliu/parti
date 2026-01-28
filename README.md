@@ -144,8 +144,20 @@ func handleMessage(ctx context.Context, msg jetstream.Msg) error {
 
 ## Documentation
 
-- [User Guide](docs/USER_GUIDE.md): Detailed guides on configuration, handoff, and degraded mode.
-- [API Reference](docs/API_REFERENCE.md): Comprehensive API documentation.
+- **Guides**
+    - [User Guide](docs/USER_GUIDE.md): Introduction, quick start, and core concepts.
+    - [Configuration](docs/CONFIGURATION.md): Configuration options, presets, and tuning.
+    - [Operations](docs/OPERATIONS.md): Operational guides, metrics, and troubleshooting.
+- **Architecture & Concepts**
+    - [Architecture](docs/ARCHITECTURE.md): System design, components, and data flow.
+    - [Lifecycle](docs/LIFECYCLE.md): Worker states, handoff protocol, and failure handling.
+    - [Strategies](docs/STRATEGIES.md): Assignment strategies (consistent hash, etc.).
+- **Features**
+    - [Consumer Helpers](docs/CONSUMERS.md): JetStream consumer management.
+    - [Static Partitioning](docs/STATIC_PARTITIONING.md): Deterministic partitioning without coordination.
+- **Reference**
+    - [API Reference](docs/API_REFERENCE.md): Detailed API documentation.
+    - [Reference](docs/REFERENCE.md): Hooks, error codes, and glossary.
 
 ## License
 
