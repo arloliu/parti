@@ -22,7 +22,7 @@ Production workloads process partitions whose batch sizes vary by 100×–500×.
 - Rebalancing causes cascading failures (OOM, long GC pauses, uneven latency).
 - Operational teams must intervene manually, nullifying the value of automated partition management.
 
-The library specification already promises `WeightedConsistentHashStrategy(150)` as the default. Missing functionality blocks Phase 4 edge-case testing and prevents users from adopting Parti in heterogeneous workloads.
+Earlier drafts referenced a root-level convenience factory like `WeightedConsistentHashStrategy(150)`. In the current codebase, weighted placement is provided via `strategy.NewWeightedConsistentHash(...)`.
 
 ---
 

@@ -119,11 +119,10 @@ parti/                                  # Root = main public package
 - `Manager` interface and lifecycle management
 - Core interfaces: `PartitionSource`, `AssignmentStrategy`, `ElectionAgent`
 - Configuration types and parsing
-- Functional options pattern (`WithStrategy`, `WithHooks`, etc.)
-- Convenience factory functions wrapping subpackages
+- Functional options (`WithHooks`, `WithLogger`, `WithMetrics`, `WithElectionAgent`, `WithWorkerConsumerUpdater`, etc.)
 - Common types: `Partition`, `Assignment`, `State`
 
-**Import**: `import "github.com/arlolib/parti"`
+**Import**: `import "github.com/arloliu/parti"`
 
 ### Subpackage: `strategy`
 
@@ -133,9 +132,12 @@ parti/                                  # Root = main public package
 - `ConsistentHash` - Weighted consistent hashing with virtual nodes
 - `RoundRobin` - Simple round-robin distribution
 
-**Import**: `import "github.com/arlolib/parti/strategy"` (only for advanced customization)
+**Import**: `import "github.com/arloliu/parti/strategy"`
 
-**Factory Access**: `parti.ConsistentHashStrategy(virtualNodes)` (recommended)
+**Constructors**:
+- `strategy.NewConsistentHash(...)`
+- `strategy.NewWeightedConsistentHash(...)`
+- `strategy.NewRoundRobin()`
 
 ### Subpackage: `source`
 
@@ -144,20 +146,26 @@ parti/                                  # Root = main public package
 **Contents**:
 - `Static` - Fixed list of partitions
 
-**Import**: `import "github.com/arlolib/parti/source"` (only for advanced customization)
+**Import**: `import "github.com/arloliu/parti/source"`
 
-**Factory Access**: `parti.StaticSource(partitions)` (recommended)
+**Constructors**:
+- `source.NewStatic(partitions)`
+- `source.NewNatsKV(js, bucket)`
 
 ### Subpackage: `subscription`
 
 **Purpose**: NATS subscription management utilities.
 
 **Contents**:
-- `Helper` - Automatic subscription reconciliation and retry logic
+- `WorkerConsumer` - Per-worker durable consumer with partition-scoped filters
+- `BroadcastConsumer` - Wildcard consumer for fan-out streams
+- `ProcessingGate` - Optional ownership/state-based processing enforcement
 
-**Import**: `import "github.com/arlolib/parti/subscription"`
+**Import**: `import "github.com/arloliu/parti/subscription"`
 
-**Factory Access**: `parti.NewSubscriptionHelper(conn, cfg)`
+**Constructors**:
+- `subscription.NewWorkerConsumer(js, cfg, handler)`
+- `subscription.NewBroadcastConsumer(js, cfg, handler)`
 
 ### Internal Packages
 
@@ -175,10 +183,15 @@ parti/                                  # Root = main public package
 
 ### Simple Usage (90% Case)
 
-Users import only the root package and use factory functions:
+Users import the root package plus built-in strategy/source packages:
 
 ```go
-import "github.com/arlolib/parti"
+import (
+    "github.com/arloliu/parti"
+    "github.com/arloliu/parti/source"
+    "github.com/arloliu/parti/strategy"
+    "github.com/nats-io/nats.go/jetstream"
+)
 
 cfg := parti.Config{
     WorkerIDPrefix: "defender",
@@ -186,10 +199,14 @@ cfg := parti.Config{
     WorkerIDMax:    63,
 }
 
-// Factory functions hide subpackage details
-src := parti.StaticSource(partitions)
+partitions := []parti.Partition{{ID: "0"}, {ID: "1"}, {ID: "2"}}
+src := source.NewStatic(partitions)
+strat := strategy.NewConsistentHash()
 js, _ := jetstream.New(natsConn)
-mgr := parti.NewManager(&cfg, js, src)
+mgr, err := parti.NewManager(&cfg, js, src, strat)
+if err != nil {
+    log.Fatal(err)
+}
 
 if err := mgr.Start(ctx); err != nil {
     log.Fatal(err)
@@ -202,10 +219,25 @@ Users import subpackages directly for customization:
 
 ```go
 import (
-    "github.com/arlolib/parti"
-    "github.com/arlolib/parti/strategy"
-    "github.com/arlolib/parti/subscription"
+    "context"
+
+    "github.com/arloliu/parti"
+    "github.com/arloliu/parti/source"
+    "github.com/arloliu/parti/strategy"
+    "github.com/arloliu/parti/subscription"
+    "github.com/nats-io/nats.go/jetstream"
 )
+
+cfg := parti.Config{
+    WorkerIDPrefix: "defender",
+    WorkerIDMin:    0,
+    WorkerIDMax:    63,
+}
+
+partitions := []parti.Partition{{ID: "0"}, {ID: "1"}, {ID: "2"}}
+src := source.NewStatic(partitions)
+
+js, _ := jetstream.New(natsConn)
 
 // Direct subpackage access for customization
 strat := strategy.NewConsistentHash(
@@ -213,52 +245,36 @@ strat := strategy.NewConsistentHash(
     strategy.WithHashSeed(12345),
 )
 
-subHelper := subscription.NewHelper(natsConn, subscription.Config{
-    MaxRetries:        5,
-    RetryBackoff:      2 * time.Second,
-    ReconcileInterval: 30 * time.Second,
-})
+// Consumer helper wired to the manager for automatic filter updates.
+wc, _ := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
+    StreamName:      "events",
+    ConsumerPrefix:  "worker",
+    SubjectTemplate: "events.{{.PartitionID}}",
+}, subscription.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+    // Handle message
+    return nil
+}))
 
 hooks := &parti.Hooks{
-    OnAssignmentChanged: func(ctx context.Context, added, removed []parti.Partition) error {
-        return subHelper.UpdateSubscriptions(ctx, added, removed, handler)
+    OnAssignmentChanged: func(ctx context.Context, oldPartitions, newPartitions []parti.Partition) error {
+        // Called with full assignment sets.
+        return nil
     },
 }
 
-js, _ := jetstream.New(natsConn)
-mgr := parti.NewManager(&cfg, js, src,
-    parti.WithStrategy(strat),
+mgr, err := parti.NewManager(&cfg, js, src, strat,
     parti.WithHooks(hooks),
+    parti.WithWorkerConsumerUpdater(wc),
 )
+if err != nil {
+    log.Fatal(err)
+}
 ```
 
 ## Factory Functions Pattern
 
-Root package provides convenience factories that wrap subpackage constructors:
-
-```go
-// parti/options.go
-
-// ConsistentHashStrategy creates a weighted consistent hash strategy.
-func ConsistentHashStrategy(virtualNodes int) AssignmentStrategy {
-    return strategy.NewConsistentHash(strategy.WithVirtualNodes(virtualNodes))
-}
-
-// RoundRobinStrategy creates a round-robin assignment strategy.
-func RoundRobinStrategy() AssignmentStrategy {
-    return strategy.NewRoundRobin()
-}
-
-// StaticSource creates a partition source with a fixed list of partitions.
-func StaticSource(partitions []Partition) PartitionSource {
-    return source.NewStatic(partitions)
-}
-
-// NewSubscriptionHelper creates a subscription helper with automatic reconciliation.
-func NewSubscriptionHelper(conn *nats.Conn, cfg subscription.Config) *subscription.Helper {
-    return subscription.NewHelper(conn, cfg)
-}
-```
+Parti keeps strategy/source implementations in subpackages (`strategy/`, `source/`).
+Use their constructors directly (for example, `strategy.NewConsistentHash()` and `source.NewStatic(...)`).
 
 ## Examples Organization
 
@@ -285,7 +301,7 @@ Each example is self-contained and shows different aspects:
 ### Why Root-Level Package?
 
 **Advantages**:
-- Simpler import path: `import "github.com/arlolib/parti"`
+- Simpler import path: `import "github.com/arloliu/parti"`
 - Matches repository name
 - Common for single-purpose libraries (net/http, database/sql, context)
 - All core interfaces visible in one godoc page
@@ -297,7 +313,7 @@ Each example is self-contained and shows different aspects:
 **Advantages**:
 - Domain separation without polluting root namespace
 - Advanced users can import directly for customization
-- Simple users use factory functions and never see subpackages
+- Built-ins live in subpackages while the root package provides core interfaces and types
 - Allows independent evolution of strategy implementations
 
 **Real-World Examples**:

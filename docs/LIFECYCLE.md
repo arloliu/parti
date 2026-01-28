@@ -3,7 +3,7 @@
 > Worker lifecycle, stable IDs, two-phase handoff, and degraded mode.
 
 **Related Documentation:**
-- [User Guide](USER_GUIDE.md) - Getting started and overview
+- [Docs README](README.md) - Documentation map
 - [Architecture](ARCHITECTURE.md) - System architecture and concepts
 - [Configuration Guide](CONFIGURATION.md) - Configuration options
 - [Consumer Helpers](CONSUMERS.md) - JetStream subscription management
@@ -72,7 +72,7 @@ Workers progress through a defined state machine:
 
 ```go
 // Access current state
-state := mgr.GetState()
+state := mgr.State()
 
 // Monitor state changes via hooks
 hooks := &parti.Hooks{
@@ -96,24 +96,24 @@ The Stable ID lifecycle consists of four key operations managed by an internal `
 1. **Claim(ctx)**: Acquires the first available ID from the pool `[WorkerIDMin, WorkerIDMax]`
    - Uses NATS KV `Create` semantics for atomic claiming
    - Tries each ID sequentially until finding an available one
-   - Returns `ErrNoAvailableID` if the pool is exhausted
+    - Returns an error if the pool is exhausted
    - ID is valid for `WorkerIDTTL` duration
 
 2. **StartRenewal()**: Starts background renewal to keep the ID alive
    - Renews every `ttl/3` (minimum 100ms)
    - Must be called after `Claim()`
-   - Idempotent: subsequent calls return `ErrRenewalAlreadyStarted`
+    - Idempotent: subsequent calls return an error
    - Each renewal uses a short timeout context (100ms–5s)
    - Failures are logged but don't stop the loop
 
 3. **Release(ctx)**: Stops renewal and deletes the KV key
    - Frees the ID for immediate reuse by other workers
-   - Idempotent: subsequent calls return `ErrNotClaimed`
+    - Idempotent: subsequent calls return an error
    - Waits for renewal goroutine to stop before returning
 
 4. **Close()**: Stops renewal but **keeps** the KV key
    - Used for handoff scenarios where the ID should remain claimed
-   - After `Close()`, `StartRenewal()` returns `ErrAlreadyClosed`
+    - After `Close()`, `StartRenewal()` returns an error
 
 ### Manager Integration
 
@@ -149,8 +149,8 @@ _ = claimer.Release(ctx)
 - This preserves partition affinity during rolling updates
 
 **Pool Exhaustion:**
-- If all IDs are in use, new workers return `ErrNoAvailableID`
-- Increase `WorkerIDMax` to allow more concurrent workers
+- If all IDs are in use, new workers will fail to start
+- Increase `WorkerIDMax` (or reduce `WorkerIDTTL`) to allow more concurrent workers
 
 **Thread Safety:**
 - All operations are safe for concurrent use
@@ -341,12 +341,17 @@ cfg := &parti.Config{
 
 ### Monitoring Degraded Mode
 
-Use the `OnDegraded` hook:
+Use `OnStateChanged` (and optionally `OnError`) hooks:
 
 ```go
 hooks := &parti.Hooks{
-    OnDegraded: func(ctx context.Context, reason string) error {
-        alerting.Send(alerting.Warning, "Worker in degraded mode: %s", reason)
+    OnStateChanged: func(ctx context.Context, from, to parti.State) error {
+        if to == parti.StateDegraded {
+            alerting.Send(alerting.Warning, "Worker entered degraded mode")
+        }
+        if from == parti.StateDegraded && to != parti.StateDegraded {
+            alerting.Send(alerting.Info, "Worker recovered from degraded mode")
+        }
         return nil
     },
 }

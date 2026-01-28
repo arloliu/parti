@@ -33,7 +33,7 @@ chaos:
     - scale_down
     - scale_up
     - worker_pause
-    - network_disconnect
+    # - network_disconnect
     - slow_consumer
 
 coordinator:

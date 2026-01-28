@@ -3,7 +3,7 @@
 > The `partition` package for application-level partitioning.
 
 **Related Documentation:**
-- [User Guide](USER_GUIDE.md) - Getting started and overview
+- [Docs README](README.md) - Documentation map
 - [Strategies Guide](STRATEGIES.md) - Assignment strategies
 - [Consumer Helpers](CONSUMERS.md) - JetStream subscription management
 
@@ -50,10 +50,10 @@ import "github.com/arloliu/parti/partition"
     │   ┌─────────────────────────────────────────────────────────┐│
     │   │ parti.Manager                                           ││
     │   │                                                         ││
-    │   │   assignment := mgr.GetAssignment()                     ││
+    │   │   assignment := mgr.CurrentAssignment()                 ││
     │   │   // Worker has partitions: ["5", "6", "7", "8"]        ││
     │   │                                                         ││
-    │   │   if contains(assignment, partitionID) {                ││
+    │   │   if contains(assignment.Partitions, partitionID) {     ││
     │   │       process(orderID)  // This worker handles it       ││
     │   │   }                                                     ││
     │   └─────────────────────────────────────────────────────────┘│
@@ -123,10 +123,8 @@ for i := range partitions {
 }
 src := source.NewStatic(partitions)
 
-// Create manager
-mgr, err := parti.NewManager(cfg,
-    parti.WithPartitionSource(src),
-)
+// Create manager with positional args: (config, jetstream, source, strategy)
+mgr, err := parti.NewManager(cfg, js, src, strategy.NewConsistentHash())
 
 // In message handler: route by partition
 func handleMessage(msg *nats.Msg) {
@@ -134,7 +132,16 @@ func handleMessage(msg *nats.Msg) {
     partitionID := partitioner.Partition(userID)
 
     // Check if this worker owns the partition
-    if mgr.OwnsPartition(partitionID) {
+    assignment := mgr.CurrentAssignment()
+    ownsPartition := false
+    for _, p := range assignment.Partitions {
+        if p.ID == partitionID {
+            ownsPartition = true
+            break
+        }
+    }
+
+    if ownsPartition {
         processMessage(msg)
     } else {
         // Route to correct worker or re-queue
@@ -309,10 +316,9 @@ partitions := make([]parti.Partition, partitionCount)
 for i := range partitions {
     partitions[i] = parti.Partition{ID: strconv.Itoa(i)}
 }
+src := source.NewStatic(partitions)
 
-mgr, _ := parti.NewManager(cfg,
-    parti.WithPartitionSource(source.NewStatic(partitions)),
-)
+mgr, _ := parti.NewManager(cfg, js, src, strategy.NewConsistentHash())
 
 // Now partitioner.Partition(key) returns IDs that manager understands
 ```

@@ -9,7 +9,11 @@
 //
 // Basic usage with default settings:
 //
-//	import "github.com/arlolib/parti"
+//	import (
+//	    "github.com/arloliu/parti"
+//	    "github.com/arloliu/parti/source"
+//	    "github.com/arloliu/parti/strategy"
+//	)
 //
 //	cfg := parti.Config{
 //	    WorkerIDPrefix: "worker",
@@ -17,9 +21,11 @@
 //	    WorkerIDMax:    999,
 //	}
 //
-//	src := parti.StaticSource(partitions)
+//	partitions := []parti.Partition{{ID: "0"}, {ID: "1"}, {ID: "2"}}
+//	src := source.NewStatic(partitions)
 //	js, _ := jetstream.New(natsConn)
-//	mgr := parti.NewManager(&cfg, js, src, strategy.NewConsistentHash())
+//	assignmentStrategy := strategy.NewConsistentHash()
+//	mgr, _ := parti.NewManager(&cfg, js, src, assignmentStrategy)
 //
 //	if err := mgr.Start(ctx); err != nil {
 //	    log.Fatal(err)
@@ -45,27 +51,29 @@
 //
 // # Advanced Usage
 //
-// Custom strategyegy with options:
+// Custom strategy with options:
 //
 //	import (
-//	    "github.com/arlolib/parti"
-//	    "github.com/arlolib/parti/strategyegy"
+//	    "github.com/arloliu/parti"
+//	    "github.com/arloliu/parti/source"
+//	    "github.com/arloliu/parti/strategy"
 //	)
 //
-//	strategy := strategyegy.NewConsistentHash(
-//	    strategyegy.WithVirtualNodes(300),
+//	assignmentStrategy := strategy.NewConsistentHash(
+//	    strategy.WithVirtualNodes(300),
 //	)
 //
 //	hooks := &parti.Hooks{
-//	    OnAssignmentChanged: func(ctx context.Context, old, new []parti.Partition) error {
-//	        // Handle full assignment change; derive added/removed by diffing old vs new if needed
+//	    OnAssignmentChanged: func(ctx context.Context, oldPartitions, newPartitions []parti.Partition) error {
+//	        // Handle full assignment change; derive added/removed by diffing old vs new if needed.
 //	        return nil
 //	    },
 //	}
 //
+//	partitions := []parti.Partition{{ID: "0"}, {ID: "1"}, {ID: "2"}}
+//	src := source.NewStatic(partitions)
 //	js, _ := jetstream.New(natsConn)
-//	mgr := parti.NewManager(&cfg, js, src,
-//	    parti.WithStrategy(strategy),
+//	mgr, _ := parti.NewManager(&cfg, js, src, assignmentStrategy,
 //	    parti.WithHooks(hooks),
 //	)
 //

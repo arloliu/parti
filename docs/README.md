@@ -1,150 +1,80 @@
 # Parti Documentation
 
-**Last Updated**: November 2, 2025
+**Version**: 1.6.0
+**Last Updated**: January 27, 2026
+
+---
 
 ## 📍 Start Here
 
-**New to Parti? Read these first:**
+**New to Parti?** Start with the [Overview](README.md) and then move to the focused guides below.
 
-1. **[USER_GUIDE.md](USER_GUIDE.md)** - Complete user guide with examples and best practices
-2. **[API_REFERENCE.md](API_REFERENCE.md)** - Detailed API documentation
-3. **[OPERATIONS.md](OPERATIONS.md)** - Deployment and operations guide
-### Quick Start (JetStream-based)
+### Quick Start
 
 ```go
 nc, _ := nats.Connect(nats.DefaultURL)
 js, _ := jetstream.New(nc)
 
-cfg := parti.Config{WorkerIDPrefix: "worker", WorkerIDMax: 999}
-partitions := []parti.Partition{{Keys: []string{"p-0"}, Weight: 100}}
+cfg := &parti.Config{
+    ClusterName:    "my-cluster",
+    WorkerIDPrefix: "worker",
+    WorkerIDMax:    99,
+}
+partitions := []parti.Partition{{ID: "0"}, {ID: "1"}, {ID: "2"}}
 src := source.NewStatic(partitions)
-strat := strategy.NewConsistentHash()
 
-mgr, err := parti.NewManager(&cfg, js, src, strat)
-if err != nil { log.Fatal(err) }
-ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second); defer cancel()
-_ = mgr.Start(ctx)
+mgr, _ := parti.NewManager(cfg, js, src, strategy.NewConsistentHash())
+mgr.Start(context.Background())
 ```
 
-Legacy constructor using `*nats.Conn` is deprecated—always pass a JetStream context.
+---
+
+## 📂 Documentation
+
+### Getting Started
+
+| Document                          | Description                                |
+|-----------------------------------|--------------------------------------------|
+| [Reference](REFERENCE.md)         | Hooks, errors, best practices, glossary    |
+| [Architecture](ARCHITECTURE.md)   | System architecture, components, data flow |
+| [Configuration](CONFIGURATION.md) | Configuration options, presets, tuning     |
+
+### Core Features
+
+| Document                                      | Description                                                 |
+|-----------------------------------------------|-------------------------------------------------------------|
+| [Lifecycle](LIFECYCLE.md)                     | Worker states, stable IDs, two-phase handoff, degraded mode |
+| [Consumer Helpers](CONSUMERS.md)              | WorkerConsumer, BroadcastConsumer, ProcessingGate           |
+| [Strategies & Sources](STRATEGIES.md)         | Assignment strategies, partition sources                    |
+| [Static Partitioning](STATIC_PARTITIONING.md) | The partition package for key-based routing                 |
+
+### Reference
+
+| Document                          | Description                                     |
+|-----------------------------------|-------------------------------------------------|
+| [Reference](REFERENCE.md)         | Hooks, error handling, best practices, glossary |
+| [API Reference](API_REFERENCE.md) | Detailed API documentation                      |
+| [Operations Guide](OPERATIONS.md) | Deployment, monitoring, troubleshooting         |
 
 ---
 
-## 📂 Documentation Structure
-
-### User Documentation (NEW - Priority 2 Complete ✅)
-
-#### 🚀 [User Guide](USER_GUIDE.md)
-**For developers integrating Parti into applications**
-- Getting started with quick examples
-- Core concepts and worker lifecycle
-- Configuration guide with templates
-- Assignment strategies comparison
-- Partition source implementations
-- Hooks and callbacks patterns
-- Best practices and troubleshooting
-
-#### � [API Reference](API_REFERENCE.md)
-**For detailed interface documentation**
-- Complete Manager interface documentation
-- All core interfaces (AssignmentStrategy, PartitionSource, ElectionAgent, etc.)
-- Configuration types and validation
-- Data structures (State, Partition, Assignment)
-- Strategy and source packages
-- Error types and handling
-- Thread safety guarantees
-
-#### ⚙️ [Operations Guide](OPERATIONS.md)
-**For deployment and production operations**
-- Prerequisites and requirements
-- Configuration templates (dev, staging, production)
-- Deployment patterns (Kubernetes, Docker, standalone)
-- Health check implementation
-- Observability foundation (logging, metrics)
-- Common operational procedures
-- Troubleshooting guide
-
----
-
-### Performance & Benchmarking
-- **[MEMORY_BENCHMARK_QUICKSTART.md](MEMORY_BENCHMARK_QUICKSTART.md)** - Quick reference guide
-  - 5-minute comparison test
-  - How external NATS isolation works
-  - When to use each approach
-  - Troubleshooting and FAQ
-
-### Design Documentation (Reference)
-Design documents are organized by category in `design/` subdirectories:
-
-- **01-requirements/** - Requirements and constraints
-  - [overview.md](design/01-requirements/overview.md)
-  - [constraints.md](design/01-requirements/constraints.md)
-  - [performance-goals.md](design/01-requirements/performance-goals.md)
-
-- **02-problem-analysis/** - Problem domain analysis
-  - [kafka-limitations.md](design/02-problem-analysis/kafka-limitations.md)
-
-- **03-architecture/** - System architecture
-  - [high-level-design.md](design/03-architecture/high-level-design.md)
-  - [state-machine.md](design/03-architecture/state-machine.md)
-  - [data-flow.md](design/03-architecture/data-flow.md)
-  - [design-decisions.md](design/03-architecture/design-decisions.md)
-
-- **04-components/** - Component details
-  - [README.md](design/04-components/README.md)
-  - [defender/overview.md](design/04-components/defender/overview.md)
-  - [message-broker/](design/04-components/message-broker/)
-
-- **05-operational-scenarios/** - Operational behavior
-  - [cold-start.md](design/05-operational-scenarios/cold-start.md)
-  - [rolling-update.md](design/05-operational-scenarios/rolling-update.md)
-  - [scale-up.md](design/05-operational-scenarios/scale-up.md)
-  - [crash-recovery.md](design/05-operational-scenarios/crash-recovery.md)
-
-- **06-implementation/** - Implementation guidelines
-  - [project-structure.md](design/06-implementation/project-structure.md)
-  - [test-organization.md](design/06-implementation/test-organization.md)
-  - [testing-guidelines.md](design/06-implementation/testing-guidelines.md)
-
----
-
-## 🛠️ Development Workflow
+## 🛠️ Development
 
 ```bash
-# Run unit tests
-make test-unit
-
-# Run integration tests (requires longer time)
-make test-integration
-
-# Run all tests
-make test-all
-
-# Build examples
-cd examples/basic && go build
-
-# Check for errors
-make lint
+make test-unit         # Run unit tests
+make test-integration  # Run integration tests
+make test-all          # Run all tests
+make lint              # Check for errors
 ```
 
 ---
 
-## 📖 Philosophy
+## 📖 Reading Order
 
-**Test first, document later. Be honest about status.**
-
-1. Implementation and verification BEFORE documentation
-2. Integration tests prove distributed behavior
-3. Honest assessment over aspirational claims
-4. Production-ready means thoroughly tested
-5. One phase at a time - don't advance until proven
-
----
-
-## 📝 Document Status Legend
-
-- ✅ **Complete**: Implemented and verified
-- 🟡 **Partial**: Implemented but not fully tested
-- 🔴 **Incomplete**: Missing or not implemented
-- ⏳ **Planned**: On the roadmap
-- ⚪ **Optional**: Nice-to-have
+1. **[Architecture](ARCHITECTURE.md)** - Concepts and data flow
+2. **[Architecture](ARCHITECTURE.md)** - Understand system design
+3. **[Configuration](CONFIGURATION.md)** - Configure for your environment
+4. **[Lifecycle](LIFECYCLE.md)** - Learn worker states and handoff
+5. **[Consumer Helpers](CONSUMERS.md)** - Set up JetStream consumers
+6. **[Strategies](STRATEGIES.md)** - Choose assignment strategy
+7. **[Reference](REFERENCE.md)** - Hooks, errors, best practices

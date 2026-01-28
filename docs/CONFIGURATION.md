@@ -3,7 +3,7 @@
 > Complete configuration reference for the Parti library.
 
 **Related Documentation:**
-- [User Guide](USER_GUIDE.md) - Getting started and overview
+- [Docs README](README.md) - Documentation map
 - [Architecture](ARCHITECTURE.md) - System architecture and concepts
 - [Lifecycle & State Management](LIFECYCLE.md) - Worker states and handoff
 

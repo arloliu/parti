@@ -3,7 +3,7 @@
 > Partition assignment strategies and partition sources.
 
 **Related Documentation:**
-- [User Guide](USER_GUIDE.md) - Getting started and overview
+- [Docs README](README.md) - Documentation map
 - [Architecture](ARCHITECTURE.md) - System architecture and concepts
 - [Configuration Guide](CONFIGURATION.md) - Configuration options
 - [Static Partitioning](STATIC_PARTITIONING.md) - The partition package
@@ -12,16 +12,24 @@
 
 ## Table of Contents
 
-1. [Assignment Strategies](#assignment-strategies)
-   - [ConsistentHash](#consistenthash)
-   - [WeightedConsistentHash](#weightedconsistenthash)
-   - [RoundRobin](#roundrobin)
-   - [Custom Strategies](#custom-strategies)
-2. [Partition Sources](#partition-sources)
-   - [Static Source](#static-source)
-   - [NatsKV Source](#natskv-source)
-   - [Watchable Sources](#watchable-sources)
-   - [Custom Sources](#custom-sources)
+- [Parti Strategies \& Sources](#parti-strategies--sources)
+  - [Table of Contents](#table-of-contents)
+  - [Assignment Strategies](#assignment-strategies)
+    - [Import](#import)
+    - [Strategy Interface](#strategy-interface)
+    - [ConsistentHash](#consistenthash)
+    - [WeightedConsistentHash](#weightedconsistenthash)
+    - [RoundRobin](#roundrobin)
+    - [Custom Strategies](#custom-strategies)
+  - [Partition Sources](#partition-sources)
+    - [Import](#import-1)
+    - [Source Interface](#source-interface)
+    - [Static Source](#static-source)
+    - [NatsKV Source](#natskv-source)
+    - [Watchable Sources](#watchable-sources)
+    - [Custom Sources](#custom-sources)
+  - [Strategy Selection Guide](#strategy-selection-guide)
+  - [Source Selection Guide](#source-selection-guide)
 
 ---
 
@@ -93,10 +101,8 @@ s := strategy.NewConsistentHash()
 // Custom virtual nodes (more = better distribution, more memory)
 s := strategy.NewConsistentHash(strategy.WithVirtualNodes(200))
 
-// Use with manager
-mgr, _ := parti.NewManager(cfg,
-    parti.WithAssignmentStrategy(s),
-)
+// Use with manager (positional args: config, jetstream, source, strategy)
+mgr, _ := parti.NewManager(cfg, js, src, s)
 ```
 
 **Options:**
@@ -163,12 +169,10 @@ partitions := []parti.Partition{
 }
 
 // Use with static source
-source := source.NewStatic(partitions)
+src := source.NewStatic(partitions)
 
-mgr, _ := parti.NewManager(cfg,
-    parti.WithAssignmentStrategy(s),
-    parti.WithPartitionSource(source),
-)
+// Create manager with weighted strategy
+mgr, _ := parti.NewManager(cfg, js, src, s)
 ```
 
 **Options:**
@@ -225,9 +229,8 @@ import "github.com/arloliu/parti/strategy"
 
 s := strategy.NewRoundRobin()
 
-mgr, _ := parti.NewManager(cfg,
-    parti.WithAssignmentStrategy(s),
-)
+// Use with manager (positional args: config, jetstream, source, strategy)
+mgr, _ := parti.NewManager(cfg, js, src, s)
 ```
 
 **When to Use:**
@@ -347,9 +350,7 @@ partitions := []parti.Partition{
 src := source.NewStatic(partitions)
 
 // Use with manager
-mgr, _ := parti.NewManager(cfg,
-    parti.WithPartitionSource(src),
-)
+mgr, _ := parti.NewManager(cfg, js, src, strategy.NewConsistentHash())
 ```
 
 **When to Use:**
@@ -373,9 +374,7 @@ src := source.NewNatsKV(js, "partitions-bucket")
 // Key: "partitions"
 // Value: [{"id":"0","weight":1},{"id":"1","weight":2}]
 
-mgr, _ := parti.NewManager(cfg,
-    parti.WithPartitionSource(src),
-)
+mgr, _ := parti.NewManager(cfg, js, src, strategy.NewConsistentHash())
 ```
 
 **Features:**

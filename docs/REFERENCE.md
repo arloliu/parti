@@ -3,7 +3,7 @@
 > Hooks, error handling, best practices, and glossary.
 
 **Related Documentation:**
-- [User Guide](USER_GUIDE.md) - Getting started and overview
+- [Docs README](README.md) - Documentation map
 - [Architecture](ARCHITECTURE.md) - System architecture and concepts
 - [Configuration Guide](CONFIGURATION.md) - Configuration options
 - [Lifecycle Guide](LIFECYCLE.md) - Worker states and handoff
@@ -27,27 +27,24 @@ Hooks enable integration with external systems for monitoring, alerting, and cus
 
 ```go
 type Hooks struct {
-    // State changes
+    // OnAssignmentChanged is called when this worker's complete assignment changes.
+    OnAssignmentChanged func(ctx context.Context, oldPartitions, newPartitions []Partition) error
+
+    // OnStateChanged is called on all worker state transitions.
     OnStateChanged      func(ctx context.Context, from, to State) error
 
-    // Leadership
-    OnBecameLeader      func(ctx context.Context) error
-    OnLostLeadership    func(ctx context.Context) error
-
-    // Assignment changes
-    OnAssignment        func(ctx context.Context, partitions []Partition) error
-
-    // Two-phase handoff (when enabled)
-    OnPartitionPrepare  func(ctx context.Context, partitions []Partition, incoming bool) error
-    OnPartitionCommit   func(ctx context.Context, partitions []Partition, incoming bool) error
-
-    // Degraded mode
-    OnDegraded          func(ctx context.Context, reason string) error
-    OnDegradedAlert     func(ctx context.Context, level AlertLevel, duration time.Duration) error
-    OnRecovered         func(ctx context.Context) error
-
-    // Errors
+    // OnError is called when a recoverable error occurs.
     OnError             func(ctx context.Context, err error) error
+
+    // OnLeadershipChanged is called when the worker acquires or loses leadership.
+    OnLeadershipChanged func(ctx context.Context, isLeader bool) error
+
+    // Convenience hooks derived from OnAssignmentChanged.
+    OnPartitionsAssigned func(ctx context.Context, partitions []Partition) error
+    OnPartitionsRevoked  func(ctx context.Context, partitions []Partition) error
+
+    // OnDegraded is called once when the manager enters degraded mode.
+    OnDegraded          func(ctx context.Context, reason string) error
 }
 ```
 
@@ -56,14 +53,11 @@ type Hooks struct {
 | Hook                 | When Called                                    | Use Case                    |
 |----------------------|------------------------------------------------|-----------------------------|
 | `OnStateChanged`     | Every state transition                         | Metrics, logging            |
-| `OnBecameLeader`     | Worker wins election                           | Initialize leader resources |
-| `OnLostLeadership`   | Worker loses election                          | Cleanup leader resources    |
-| `OnAssignment`       | Partition assignment changes                   | Update consumers, caches    |
-| `OnPartitionPrepare` | Two-phase: prepare phase                       | Stop processing outgoing    |
-| `OnPartitionCommit`  | Two-phase: commit phase                        | Start processing incoming   |
-| `OnDegraded`         | Entering degraded mode                         | Alert on-call               |
-| `OnDegradedAlert`    | Escalating alerts during degraded              | Escalation workflow         |
-| `OnRecovered`        | Exiting degraded mode                          | Clear alerts                |
+| `OnLeadershipChanged`| Leadership acquired/lost                       | Leader-only initialization  |
+| `OnAssignmentChanged`| This worker's complete assignment changes      | Update consumers, caches    |
+| `OnPartitionsAssigned` | Partitions are added to this worker          | Initialize per-partition resources |
+| `OnPartitionsRevoked`  | Partitions are removed from this worker      | Cleanup per-partition resources    |
+| `OnDegraded`         | Entering degraded mode                         | Alerting / escalation              |
 | `OnError`            | Recoverable errors                             | Error tracking              |
 
 ### Hook Implementation
@@ -75,40 +69,29 @@ hooks := &parti.Hooks{
         log.Info("state transition",
             "from", from,
             "to", to)
+
+        if to == parti.StateDegraded {
+            alerting.SendWarning("worker entered degraded mode")
+        }
         return nil
     },
 
-    OnBecameLeader: func(ctx context.Context) error {
-        log.Info("became leader, initializing leader resources")
-        return initLeaderResources(ctx)
+    OnLeadershipChanged: func(ctx context.Context, isLeader bool) error {
+        if isLeader {
+            log.Info("became leader, initializing leader resources")
+            return initLeaderResources(ctx)
+        }
+        log.Info("lost leadership, cleaning up leader resources")
+        return cleanupLeaderResources(ctx)
     },
 
-    OnAssignment: func(ctx context.Context, partitions []parti.Partition) error {
-        ids := make([]string, len(partitions))
-        for i, p := range partitions {
+    OnAssignmentChanged: func(ctx context.Context, _oldPartitions, newPartitions []parti.Partition) error {
+        ids := make([]string, len(newPartitions))
+        for i, p := range newPartitions {
             ids[i] = p.ID
         }
         log.Info("received assignment", "partitions", ids)
         return updateConsumerFilters(ctx, ids)
-    },
-
-    OnDegraded: func(ctx context.Context, reason string) error {
-        alerting.SendWarning("Worker entered degraded mode: %s", reason)
-        return nil
-    },
-
-    OnDegradedAlert: func(ctx context.Context, level parti.AlertLevel, duration time.Duration) error {
-        switch level {
-        case parti.AlertLevelInfo:
-            log.Info("degraded mode", "duration", duration)
-        case parti.AlertLevelWarn:
-            alerting.SendWarning("Degraded for %v", duration)
-        case parti.AlertLevelError:
-            alerting.SendError("Degraded for %v - action required", duration)
-        case parti.AlertLevelCritical:
-            alerting.PageOnCall("CRITICAL: Degraded for %v", duration)
-        }
-        return nil
     },
 
     OnError: func(ctx context.Context, err error) error {
@@ -118,7 +101,10 @@ hooks := &parti.Hooks{
     },
 }
 
-mgr, err := parti.NewManager(cfg, parti.WithHooks(hooks))
+// Create manager with hooks option
+mgr, err := parti.NewManager(cfg, js, src, strategy.NewConsistentHash(),
+    parti.WithHooks(hooks),
+)
 ```
 
 ### Hook Error Handling
@@ -137,23 +123,21 @@ mgr, err := parti.NewManager(cfg, parti.WithHooks(hooks))
 ```go
 import "github.com/arloliu/parti"
 
-// Manager errors
-parti.ErrNotStarted         // Manager not started
-parti.ErrAlreadyStarted     // Manager already started
-parti.ErrShutdown           // Manager is shutting down
+// Configuration / construction
+parti.ErrInvalidConfig
+parti.ErrNATSConnectionRequired
+parti.ErrPartitionSourceRequired
+parti.ErrAssignmentStrategyRequired
 
-// Stable ID errors
-parti.ErrNoAvailableID      // All worker IDs in pool are claimed
-parti.ErrNotClaimed         // Worker has not claimed an ID
-parti.ErrAlreadyClosed      // Claimer already closed
+// Lifecycle
+parti.ErrAlreadyStarted
+parti.ErrNotStarted
 
-// Election errors
-parti.ErrNoLeader           // No leader elected
-parti.ErrNotLeader          // Worker is not the leader
-
-// Assignment errors
-parti.ErrNoAssignment       // No partition assignment yet
-parti.ErrPartitionNotOwned  // Partition not assigned to this worker
+// Runtime signals
+parti.ErrConnectivity
+parti.ErrDegraded
+parti.ErrElectionFailed
+parti.ErrNoWorkersAvailable
 ```
 
 ### Error Checking
@@ -169,25 +153,18 @@ if err := mgr.Start(ctx); err != nil {
     return fmt.Errorf("start manager: %w", err)
 }
 
-assignment, err := mgr.GetAssignment()
-if err != nil {
-    if errors.Is(err, parti.ErrNoAssignment) {
-        // Wait for assignment
-        time.Sleep(100 * time.Millisecond)
-        continue
-    }
-    return err
-}
+// Prefer hooks (OnAssignmentChanged / OnPartitionsAssigned) for reacting to assignment.
+assignment := mgr.CurrentAssignment()
+_ = assignment
 ```
 
 ### Error Categories
 
 | Category      | Errors                              | Action                     |
 |---------------|-------------------------------------|----------------------------|
-| Startup       | `ErrNoAvailableID`, `ErrNoLeader`   | Check config, retry later  |
-| Runtime       | `ErrNoAssignment`, `ErrNotLeader`   | Wait, normal operation     |
-| Shutdown      | `ErrShutdown`, `ErrAlreadyClosed`   | Expected during shutdown   |
-| Programming   | `ErrNotStarted`, `ErrPartitionNotOwned` | Fix code logic        |
+| Startup       | `ErrInvalidConfig`, `ErrNATSConnectionRequired` | Fix config / wiring |
+| Runtime       | `ErrNotStarted`                     | Start manager first        |
+| Connectivity  | `ErrConnectivity`, `ErrDegraded`    | Investigate NATS/KV health |
 
 ---
 
@@ -278,36 +255,32 @@ if err := mgr.Stop(shutdownCtx); err != nil {
 Key metrics to track:
 
 ```go
-// State transitions
-hooks.OnStateChanged = func(ctx context.Context, from, to State) error {
-    stateTransitions.WithLabelValues(from.String(), to.String()).Inc()
-    return nil
-}
+hooks := &parti.Hooks{
+    OnStateChanged: func(ctx context.Context, from, to parti.State) error {
+        stateTransitions.WithLabelValues(from.String(), to.String()).Inc()
 
-// Partition count per worker
-hooks.OnAssignment = func(ctx context.Context, partitions []Partition) error {
-    assignedPartitions.Set(float64(len(partitions)))
-    return nil
-}
+        if to == parti.StateDegraded {
+            degradedModeGauge.Set(1)
+        }
+        if from == parti.StateDegraded && to != parti.StateDegraded {
+            degradedModeGauge.Set(0)
+        }
+        return nil
+    },
 
-// Leadership changes
-hooks.OnBecameLeader = func(ctx context.Context) error {
-    leadershipGauge.Set(1)
-    return nil
-}
-hooks.OnLostLeadership = func(ctx context.Context) error {
-    leadershipGauge.Set(0)
-    return nil
-}
+    OnAssignmentChanged: func(ctx context.Context, _old, newPartitions []parti.Partition) error {
+        assignedPartitions.Set(float64(len(newPartitions)))
+        return nil
+    },
 
-// Degraded mode duration
-hooks.OnDegraded = func(ctx context.Context, reason string) error {
-    degradedModeGauge.Set(1)
-    return nil
-}
-hooks.OnRecovered = func(ctx context.Context) error {
-    degradedModeGauge.Set(0)
-    return nil
+    OnLeadershipChanged: func(ctx context.Context, isLeader bool) error {
+        if isLeader {
+            leadershipGauge.Set(1)
+        } else {
+            leadershipGauge.Set(0)
+        }
+        return nil
+    },
 }
 ```
 
@@ -315,12 +288,12 @@ hooks.OnRecovered = func(ctx context.Context) error {
 
 ```go
 func TestPartitionProcessing(t *testing.T) {
-    // Use test NATS server
-    ns := natstest.RunServer()
-    defer ns.Shutdown()
+    // Use an embedded NATS server
+    srv, nc := partitesting.StartEmbeddedNATS(t)
+    defer srv.Shutdown()
+    defer nc.Close()
 
-    nc, _ := nats.Connect(ns.ClientURL())
-    js, _ := nc.JetStream()
+    js, _ := jetstream.New(nc)
 
     // Create test config with fast timeouts
     cfg := &parti.Config{
@@ -333,9 +306,12 @@ func TestPartitionProcessing(t *testing.T) {
         ScalingWindow:     500 * time.Millisecond,
     }
 
-    mgr, err := parti.NewManager(cfg,
-        parti.WithJetStream(js),
-    )
+    // Define test partitions
+    partitions := []parti.Partition{{ID: "0"}, {ID: "1"}, {ID: "2"}}
+    src := source.NewStatic(partitions)
+
+    // Create manager with positional args
+    mgr, err := parti.NewManager(cfg, js, src, strategy.NewConsistentHash())
     require.NoError(t, err)
 
     ctx := t.Context()
@@ -344,13 +320,12 @@ func TestPartitionProcessing(t *testing.T) {
 
     // Wait for stable state
     require.Eventually(t, func() bool {
-        return mgr.GetState() == parti.StateStable
+        return mgr.State() == parti.StateStable
     }, 5*time.Second, 100*time.Millisecond)
 
     // Test partition assignment
-    assignment, err := mgr.GetAssignment()
-    require.NoError(t, err)
-    require.NotEmpty(t, assignment)
+    assignment := mgr.CurrentAssignment()
+    require.NotEmpty(t, assignment.Partitions)
 }
 ```
 
@@ -398,17 +373,17 @@ func TestPartitionProcessing(t *testing.T) {
 ```go
 mgr.Start(ctx)           // Start manager
 mgr.Stop(ctx)            // Graceful shutdown
-mgr.GetState()           // Current state
-mgr.GetAssignment()      // Current partition assignment
-mgr.OwnsPartition(id)    // Check partition ownership
+mgr.State()              // Current state
+mgr.CurrentAssignment()  // Current partition assignment
+mgr.RefreshPartitions(ctx) // Leader-only: refresh partitions + trigger rebalance
 mgr.IsLeader()           // Check if this worker is leader
-mgr.GetWorkerID()        // Get stable worker ID
+mgr.WorkerID()           // Get stable worker ID
 ```
 
 ### State Checks
 
 ```go
-switch mgr.GetState() {
+switch mgr.State() {
 case parti.StateStable:      // Normal operation
 case parti.StateScaling:     // Scaling in progress
 case parti.StateRebalancing: // Rebalancing in progress
@@ -421,12 +396,19 @@ case parti.StateShutdown:    // Shutting down
 
 ```go
 // Wait for stable
-for mgr.GetState() != parti.StateStable {
+for mgr.State() != parti.StateStable {
     time.Sleep(100 * time.Millisecond)
 }
 
 // Check ownership before processing
-if !mgr.OwnsPartition(partitionID) {
+owns := false
+for _, p := range mgr.CurrentAssignment().Partitions {
+    if p.ID == partitionID {
+        owns = true
+        break
+    }
+}
+if !owns {
     return ErrNotOwner
 }
 

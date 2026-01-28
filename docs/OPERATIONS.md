@@ -3,7 +3,7 @@
 > Deployment, monitoring, and operational procedures for Parti.
 
 **Related Documentation:**
-- [User Guide](USER_GUIDE.md) - Getting started and overview
+- [Docs README](README.md) - Documentation map
 - [Configuration Guide](CONFIGURATION.md) - Configuration options
 - [Lifecycle Guide](LIFECYCLE.md) - Worker states and degraded mode
 - [Reference](REFERENCE.md) - Hooks, errors, best practices
@@ -270,7 +270,7 @@ func (h *HealthHandler) LivenessHandler(w http.ResponseWriter, r *http.Request) 
 
 // Readiness: Can the worker accept work?
 func (h *HealthHandler) ReadinessHandler(w http.ResponseWriter, r *http.Request) {
-    state := h.mgr.GetState()
+  state := h.mgr.State()
 
     switch state {
     case parti.StateStable, parti.StateScaling, parti.StateRebalancing:
@@ -278,7 +278,7 @@ func (h *HealthHandler) ReadinessHandler(w http.ResponseWriter, r *http.Request)
         json.NewEncoder(w).Encode(map[string]any{
             "status":    "ready",
             "state":     state.String(),
-            "worker_id": h.mgr.GetWorkerID(),
+            "worker_id": h.mgr.WorkerID(),
             "leader":    h.mgr.IsLeader(),
         })
     case parti.StateDegraded:
@@ -299,18 +299,18 @@ func (h *HealthHandler) ReadinessHandler(w http.ResponseWriter, r *http.Request)
 
 // Detailed status for debugging
 func (h *HealthHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
-    assignment, _ := h.mgr.GetAssignment()
+  assignment := h.mgr.CurrentAssignment()
 
-    partitionIDs := make([]string, len(assignment))
-    for i, p := range assignment {
+  partitionIDs := make([]string, len(assignment.Partitions))
+  for i, p := range assignment.Partitions {
         partitionIDs[i] = p.ID
     }
 
     json.NewEncoder(w).Encode(map[string]any{
-        "state":           h.mgr.GetState().String(),
-        "worker_id":       h.mgr.GetWorkerID(),
+      "state":           h.mgr.State().String(),
+      "worker_id":       h.mgr.WorkerID(),
         "is_leader":       h.mgr.IsLeader(),
-        "partition_count": len(assignment),
+      "partition_count": len(assignment.Partitions),
         "partitions":      partitionIDs,
     })
 }
@@ -379,33 +379,29 @@ func metricsHooks() *parti.Hooks {
             }
             stateGauge.WithLabelValues(to.String()).Set(1)
             stateTransitions.WithLabelValues(from.String(), to.String()).Inc()
-            return nil
-        },
 
-        OnAssignment: func(ctx context.Context, partitions []parti.Partition) error {
-            partitionGauge.Set(float64(len(partitions)))
-            return nil
-        },
-
-        OnBecameLeader: func(ctx context.Context) error {
-            leaderGauge.Set(1)
-            return nil
-        },
-
-        OnLostLeadership: func(ctx context.Context) error {
-            leaderGauge.Set(0)
-            return nil
-        },
-
-        OnDegraded: func(ctx context.Context, reason string) error {
-            degradedStart = time.Now()
-            return nil
-        },
-
-        OnRecovered: func(ctx context.Context) error {
-            if !degradedStart.IsZero() {
+            if to == parti.StateDegraded {
+              degradedStart = time.Now()
+            }
+            if from == parti.StateDegraded && to != parti.StateDegraded {
+              if !degradedStart.IsZero() {
                 degradedDuration.Observe(time.Since(degradedStart).Seconds())
                 degradedStart = time.Time{}
+              }
+            }
+            return nil
+        },
+
+          OnAssignmentChanged: func(ctx context.Context, _old, newPartitions []parti.Partition) error {
+            partitionGauge.Set(float64(len(newPartitions)))
+            return nil
+        },
+
+          OnLeadershipChanged: func(ctx context.Context, isLeader bool) error {
+            if isLeader {
+              leaderGauge.Set(1)
+            } else {
+              leaderGauge.Set(0)
             }
             return nil
         },
@@ -433,26 +429,19 @@ hooks := &parti.Hooks{
         slog.Info("state transition",
             "from", from.String(),
             "to", to.String(),
-            "worker_id", mgr.GetWorkerID(),
+      "worker_id", mgr.WorkerID(),
         )
         return nil
     },
 
-    OnAssignment: func(ctx context.Context, partitions []parti.Partition) error {
-        ids := make([]string, len(partitions))
-        for i, p := range partitions {
+  OnAssignmentChanged: func(ctx context.Context, _old, newPartitions []parti.Partition) error {
+    ids := make([]string, len(newPartitions))
+    for i, p := range newPartitions {
             ids[i] = p.ID
         }
         slog.Info("assignment received",
-            "partition_count", len(partitions),
+      "partition_count", len(newPartitions),
             "partitions", ids,
-        )
-        return nil
-    },
-
-    OnDegraded: func(ctx context.Context, reason string) error {
-        slog.Warn("entered degraded mode",
-            "reason", reason,
         )
         return nil
     },
@@ -623,7 +612,7 @@ nats kv info parti-<cluster>-stableid
 
 #### Stable ID Pool Exhaustion
 
-**Symptoms:** New workers fail with `ErrNoAvailableID`
+**Symptoms:** New workers fail to start with an error indicating no available worker IDs
 
 **Causes:**
 - `WorkerIDMax` too low for worker count

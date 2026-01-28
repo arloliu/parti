@@ -39,7 +39,7 @@ func NewManager(
 
 **Parameters**:
 - `cfg`: Runtime configuration with parsed durations
-- `conn`: NATS connection for coordination
+- `js`: JetStream context for KV and messaging coordination
 - `source`: Partition source for discovering partitions
 - `strategy`: Assignment strategy for distributing partitions
 - `opts`: Optional configuration (hooks, metrics, logger, election agent)
@@ -271,8 +271,8 @@ Short version (5 bullets):
 - Close() stops the loop but keeps the key; after Close(), StartRenewal() returns ErrAlreadyClosed.
 - Renewal tick uses an internal short timeout (100ms–5s); failures are logged and retried next tick.
 
-For details and examples, see the User Guide: Stable ID Renewal Lifecycle.
-https://github.com/arloliu/parti/blob/main/docs/USER_GUIDE.md#stable-id-renewal-lifecycle
+> For details and examples, see the User Guide: Stable ID Renewal Lifecycle.
+https://github.com/arloliu/parti/blob/main/docs/LIFECYCLE.md#stable-id-renewal-lifecycle
 
 ## Core Interfaces
 
@@ -601,9 +601,12 @@ logger, _ := zap.NewProduction()
 sugar := logger.Sugar()
 
 js, _ := jetstream.New(nc)
-mgr := parti.NewManager(cfg, js, src, strategy,
+mgr, err := parti.NewManager(cfg, js, src, strategy,
     parti.WithLogger(sugar),
 )
+if err != nil {
+    log.Fatal(err)
+}
 ```
 
 ---
@@ -708,11 +711,11 @@ Called when partitions are removed from this worker. Convenience hook derived fr
 
 #### OnDegraded
 
-Called when the manager enters degraded mode.
+Called once when the manager transitions into degraded mode.
 
 **Parameters**:
 - `ctx`: Lifecycle context (cancelled during shutdown)
-- `reason`: Description of the cause (e.g., "NATS connection lost")
+- `reason`: Description of the cause (e.g., "NATS connection down", "KV error threshold exceeded")
 
 **Returns**:
 - `error`: Error for logging (doesn't fail manager operation)
@@ -1475,6 +1478,154 @@ mgr, _ := parti.NewManager(cfg, js, src, strat,
 
 ---
 
+### BroadcastConsumer
+
+Creates a single durable consumer per worker instance that receives all messages matching a wildcard filter.
+
+```go
+func NewBroadcastConsumer(
+    js jetstream.JetStream,
+    cfg BroadcastConsumerConfig,
+    handler MessageHandler,
+) (*BroadcastConsumer, error)
+```
+
+**Parameters**:
+- `js`: JetStream context
+- `cfg`: Broadcast consumer configuration
+- `handler`: Message handler (same interface as WorkerConsumer)
+
+**Returns**:
+- `*BroadcastConsumer`: Initialized broadcast consumer
+- `error`: Validation error
+
+---
+
+### BroadcastConsumerConfig
+
+Configuration for the BroadcastConsumer.
+
+```go
+type BroadcastConsumerConfig struct {
+    StreamName     string // Required: JetStream stream name
+    ConsumerPrefix string // Required: Prefix for durable name
+    WildcardFilter string // Required: JetStream filter subject (e.g. "events.>")
+    ConsumerID     string // Optional: Consumer identity (see resolution rules)
+
+    // Consumer Configuration
+    AckPolicy        jetstream.AckPolicy
+    AckWait          time.Duration
+    MaxDeliver       int
+    InactiveThreshold time.Duration
+    MaxAckPending    int
+
+    // Pull Configuration
+    BatchSize        int
+    FetchTimeout     time.Duration
+
+    // Dependencies
+    Logger  types.Logger
+    Metrics ConsumerMetrics
+}
+```
+
+**ConsumerID Resolution**:
+
+| Value | Behavior |
+|-------|----------|
+| Empty | Try `HOSTNAME`, then `POD_NAME`, then generate random |
+| `"fixed-value"` | Use literal value |
+| `"env:VAR_NAME"` | Use value of environment variable `VAR_NAME` |
+
+If a name collision occurs during consumer creation, a new random ID is automatically generated.
+
+---
+
+### BroadcastConsumer Methods
+
+#### UpdateWorkerConsumer
+
+Implements `WorkerConsumerUpdater` interface. Ensures the pull loop is running.
+
+```go
+func (bc *BroadcastConsumer) UpdateWorkerConsumer(
+    ctx context.Context,
+    workerID string,
+    partitions []types.Partition,
+) error
+```
+
+**Note**: The `partitions` parameter is **ignored**. The broadcast consumer receives all messages matching its `WildcardFilter`.
+
+#### Close
+
+Stops the pull loop and releases resources.
+
+```go
+func (bc *BroadcastConsumer) Close(ctx context.Context) error
+```
+
+---
+
+### CompositeConsumerUpdater
+
+Combines multiple `WorkerConsumerUpdater` implementations for registration with a single Manager.
+
+```go
+func NewCompositeConsumerUpdater(updaters ...WorkerConsumerUpdater) *CompositeConsumerUpdater
+```
+
+**Parameters**:
+- `updaters`: Variadic list of updaters (nil values are ignored)
+
+**Returns**:
+- `*CompositeConsumerUpdater`: Composite that fans out to all registered updaters
+
+**Example**:
+```go
+wc, _ := subscription.NewWorkerConsumer(js, wcConfig, handler1)
+bc, _ := subscription.NewBroadcastConsumer(js, bcConfig, handler2)
+composite := parti.NewCompositeConsumerUpdater(wc, bc)
+
+mgr, _ := parti.NewManager(cfg, js, src, strat,
+    parti.WithWorkerConsumerUpdater(composite),
+)
+```
+
+---
+
+### CompositeConsumerUpdater Methods
+
+#### UpdateWorkerConsumer
+
+Calls `UpdateWorkerConsumer` on all registered updaters. Errors are aggregated.
+
+```go
+func (c *CompositeConsumerUpdater) UpdateWorkerConsumer(
+    ctx context.Context,
+    workerID string,
+    partitions []types.Partition,
+) error
+```
+
+#### Add
+
+Dynamically registers additional updaters.
+
+```go
+func (c *CompositeConsumerUpdater) Add(updaters ...WorkerConsumerUpdater)
+```
+
+#### Len
+
+Returns the number of registered updaters.
+
+```go
+func (c *CompositeConsumerUpdater) Len() int
+```
+
+---
+
 ## Testing Package
 
 Package `github.com/arloliu/parti/testing` provides utilities for testing.
@@ -1501,16 +1652,25 @@ func TestMyFeature(t *testing.T) {
 
 ## Error Types
 
-Sentinel errors are defined in the `types` package.
+Sentinel errors are defined in the `types` package and re-exported in the root package for convenience.
 
 ### Configuration Errors
 
 ```go
 var (
     ErrInvalidConfig             = errors.New("invalid configuration")
-    ErrNATSConnectionRequired    = errors.New("NATS connection required")
-    ErrPartitionSourceRequired   = errors.New("partition source required")
-    ErrAssignmentStrategyRequired = errors.New("assignment strategy required")
+    ErrNATSConnectionRequired    = errors.New("NATS connection is required")
+    ErrPartitionSourceRequired   = errors.New("partition source is required")
+    ErrAssignmentStrategyRequired = errors.New("assignment strategy is required")
+)
+```
+
+### Lifecycle Errors
+
+```go
+var (
+    ErrAlreadyStarted = errors.New("manager already started")
+    ErrNotStarted     = errors.New("manager not started")
 )
 ```
 
@@ -1518,72 +1678,31 @@ var (
 
 ```go
 var (
-    ErrStableIDExhausted       = errors.New("all stable IDs in range are claimed")
-    ErrNATSConnectionLost      = errors.New("NATS connection lost")
-    ErrAssignmentVersionMismatch = errors.New("assignment version mismatch")
-    ErrElectionFailed          = errors.New("leader election failed")
-    ErrDegradedMode            = errors.New("manager in degraded mode") // NEW
-    ErrDegradedAlert           = errors.New("degraded mode alert")      // NEW
+    ErrElectionFailed    = errors.New("leader election failed")
+    ErrConnectivity      = errors.New("connectivity issue")
+    ErrDegraded          = errors.New("degraded operation: using cached data")
+    ErrIDClaimFailed     = errors.New("failed to claim stable worker ID")
+    ErrAssignmentFailed  = errors.New("assignment failed")
 )
 ```
 
-**New Degraded Mode Errors**:
+Degraded mode can be observed via `mgr.State() == parti.StateDegraded`, `Hooks.OnStateChanged` transitions, and `Hooks.OnDegraded`.
 
-#### ErrDegradedMode
-
-Returned by operations that cannot proceed while the manager is in degraded mode.
-
-```go
-assignment, err := mgr.CurrentAssignment()
-if errors.Is(err, types.ErrDegradedMode) {
-    log.Warn("Using stale assignment from cache")
-}
-```
-
-#### ErrDegradedAlert
-
-Wrapped error returned by `OnDegradedAlert` hook when alerting about prolonged degraded mode.
-Contains alert level and duration information.
-
-```go
-hooks := &parti.Hooks{
-    OnDegradedAlert: func(ctx context.Context, level string, duration time.Duration) error {
-        log.Printf("DEGRADED ALERT [%s]: Cache age %v", level, duration)
-        return nil
-    },
-}
-```
+Some operations may return sentinel errors like `parti.ErrConnectivity` or `parti.ErrDegraded` for `errors.Is()` checks.
 
 ### Error Checking
 
 Use `errors.Is()` for error checking:
 
 ```go
-if errors.Is(err, types.ErrStableIDExhausted) {
-    log.Fatal("Increase WorkerIDMax in configuration")
+if errors.Is(err, parti.ErrInvalidConfig) {
+    log.Fatal("Fix configuration")
 }
 ```
 
 ---
 
 ## Functional Options
-
-### WithStrategy
-
-Sets the assignment strategy (deprecated - use positional parameter).
-
-```go
-func WithStrategy(strategy AssignmentStrategy) Option
-```
-
-**Example**:
-```go
-strategy := strategy.NewConsistentHash()
-js, _ := jetstream.New(nc)
-mgr := parti.NewManager(cfg, js, src, strategy)
-```
-
----
 
 ### WithElectionAgent
 
@@ -1597,9 +1716,12 @@ func WithElectionAgent(agent ElectionAgent) Option
 ```go
 agent := NewConsulElectionAgent(consulClient)
 js, _ := jetstream.New(nc)
-mgr := parti.NewManager(cfg, js, src, strategy,
+mgr, err := parti.NewManager(cfg, js, src, strategy,
     parti.WithElectionAgent(agent),
 )
+if err != nil {
+    log.Fatal(err)
+}
 ```
 
 ---
@@ -1621,9 +1743,12 @@ hooks := &parti.Hooks{
     },
 }
 js, _ := jetstream.New(nc)
-mgr := parti.NewManager(cfg, js, src, strategy,
+mgr, err := parti.NewManager(cfg, js, src, strategy,
     parti.WithHooks(hooks),
 )
+if err != nil {
+    log.Fatal(err)
+}
 ```
 
 ---
@@ -1640,9 +1765,12 @@ func WithMetrics(metrics MetricsCollector) Option
 ```go
 collector := NewPrometheusCollector()
 js, _ := jetstream.New(nc)
-mgr := parti.NewManager(cfg, js, src, strategy,
+mgr, err := parti.NewManager(cfg, js, src, strategy,
     parti.WithMetrics(collector),
 )
+if err != nil {
+    log.Fatal(err)
+}
 ```
 
 ---
@@ -1659,9 +1787,12 @@ func WithLogger(logger Logger) Option
 ```go
 logger, _ := zap.NewProduction()
 js, _ := jetstream.New(nc)
-mgr := parti.NewManager(cfg, js, src, strategy,
+mgr, err := parti.NewManager(cfg, js, src, strategy,
     parti.WithLogger(logger.Sugar()),
 )
+if err != nil {
+    log.Fatal(err)
+}
 ```
 
 ---
