@@ -1,44 +1,43 @@
 name: Simulation Stress Test
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-  workflow_dispatch:
+    push:
+        branches: [main]
+    pull_request:
+        branches: [main]
+    workflow_dispatch:
 
 permissions:
-  contents: read
+    contents: read
 
 jobs:
-  chaos-simulation:
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    chaos-simulation:
+        runs-on: ubuntu-latest
+        timeout-minutes: 25
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v6
+            - name: Setup Go
+              uses: actions/setup-go@v6
+              with:
+                  go-version-file: go.mod
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
+            - name: Build Simulation
+              run: go build -o simulation ./test/simulation/cmd/simulation
 
-      - name: Build Simulation
-        run: go build -o simulation ./test/simulation/cmd/simulation
+            - name: Run Chaos Simulation
+              run: |
+                  # Run for 15 minutes with comprehensive chaos
+                  ./simulation \
+                    --config test/simulation/configs/chaos_comprehensive.yaml \
+                    --duration 15m \
+                    --stop-on-failure=false
 
-      - name: Run Chaos Simulation
-        run: |
-          # Run for 15 minutes with comprehensive chaos
-          ./simulation \
-            --config test/simulation/configs/chaos_comprehensive.yaml \
-            --duration 15m \
-            --stop-on-failure=false
-
-      - name: Upload Failure Report
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: failure-report
-          path: |
-            failure_report.json
-            *.log
+            - name: Upload Failure Report
+              if: failure()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: failure-report
+                  path: |
+                      failure_report.json
+                      *.log
