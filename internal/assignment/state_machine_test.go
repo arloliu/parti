@@ -129,6 +129,51 @@ func TestStateMachine_EnterEmergency(t *testing.T) {
 	}, 100*time.Millisecond, 10*time.Millisecond)
 }
 
+func TestStateMachine_EnterEmergency_DuringRebalancing_Ignored(t *testing.T) {
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	rebalanceCount := atomic.Int32{}
+
+	sm := NewStateMachine(
+		logging.NewNop(),
+		metrics.NewNop(),
+		func(ctx context.Context, _ string) error {
+			rebalanceCount.Add(1)
+			close(started)
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+		stopCh,
+	)
+
+	sm.EnterScaling(context.Background(), "planned_scale", 10*time.Millisecond)
+
+	select {
+	case <-started:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("rebalance did not start")
+	}
+
+	require.Equal(t, types.CalcStateRebalancing, sm.GetState())
+
+	// Emergency should be ignored while rebalancing.
+	sm.EnterEmergency(context.Background())
+	require.Equal(t, types.CalcStateRebalancing, sm.GetState())
+
+	close(release)
+	require.Eventually(t, func() bool {
+		return sm.GetState() == types.CalcStateIdle
+	}, 200*time.Millisecond, 10*time.Millisecond)
+	require.Equal(t, int32(1), rebalanceCount.Load())
+}
+
 func TestStateMachine_ReturnToIdle(t *testing.T) {
 	stopCh := make(chan struct{})
 	defer close(stopCh)
