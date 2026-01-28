@@ -51,4 +51,35 @@ func TestRoundRobin_Assign(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "no workers")
 	})
+
+	t.Run("sorts workers and partitions deterministically", func(t *testing.T) {
+		strategy := NewRoundRobin()
+		workersA := []string{"worker-2", "worker-0", "worker-1"}
+		workersB := []string{"worker-1", "worker-2", "worker-0"}
+
+		partitionsA := []types.Partition{
+			{Keys: []string{"b"}, Weight: 100},
+			{Keys: []string{"a"}, Weight: 100},
+			{Keys: []string{"c"}, Weight: 100},
+		}
+		partitionsB := []types.Partition{
+			{Keys: []string{"c"}, Weight: 100},
+			{Keys: []string{"a"}, Weight: 100},
+			{Keys: []string{"b"}, Weight: 100},
+		}
+
+		assignA, err := strategy.Assign(workersA, partitionsA)
+		require.NoError(t, err)
+		assignB, err := strategy.Assign(workersB, partitionsB)
+		require.NoError(t, err)
+
+		expected := map[string][]types.Partition{
+			"worker-0": {{Keys: []string{"a"}, Weight: 100}},
+			"worker-1": {{Keys: []string{"b"}, Weight: 100}},
+			"worker-2": {{Keys: []string{"c"}, Weight: 100}},
+		}
+
+		require.Equal(t, expected, assignA)
+		require.Equal(t, expected, assignB)
+	})
 }

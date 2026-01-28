@@ -1,6 +1,10 @@
 package strategy
 
-import "github.com/arloliu/parti/types"
+import (
+	"slices"
+
+	"github.com/arloliu/parti/types"
+)
 
 // RoundRobin implements simple round-robin partition assignment.
 type RoundRobin struct{}
@@ -29,7 +33,7 @@ func NewRoundRobin() *RoundRobin {
 // Assign calculates partition assignments using round-robin distribution.
 //
 // The algorithm:
-//  1. Use the provided worker order
+//  1. Sort workers and partitions for deterministic assignment
 //  2. Distribute partitions evenly in round-robin fashion
 //
 // Parameters:
@@ -51,16 +55,24 @@ func (rr *RoundRobin) Assign(workers []string, partitions []types.Partition) (ma
 		return nil, ErrNoWorkers
 	}
 
+	sortedWorkers := append([]string(nil), workers...)
+	slices.Sort(sortedWorkers)
+
+	sortedPartitions := append([]types.Partition(nil), partitions...)
+	slices.SortFunc(sortedPartitions, func(a, b types.Partition) int {
+		return a.Compare(b)
+	})
+
 	// Initialize assignments map
 	assignments := make(map[string][]types.Partition)
-	for _, w := range workers {
+	for _, w := range sortedWorkers {
 		assignments[w] = []types.Partition{}
 	}
 
 	// Distribute partitions round-robin across workers
-	for i, p := range partitions {
-		workerIdx := i % len(workers)
-		worker := workers[workerIdx]
+	for i, p := range sortedPartitions {
+		workerIdx := i % len(sortedWorkers)
+		worker := sortedWorkers[workerIdx]
 		assignments[worker] = append(assignments[worker], p)
 	}
 
