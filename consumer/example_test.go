@@ -218,3 +218,81 @@ func processMessage(_ jetstream.Msg) error {
 	// Placeholder for message processing logic
 	return nil
 }
+
+// This example demonstrates how to wrap a message handler with automatic
+// heartbeats for long-running processing using WIPHandler.
+//
+// WIPHandler periodically calls msg.InProgress() to extend the AckWait deadline,
+// preventing JetStream from redelivering messages while processing is still active.
+func Example_wipHandler() {
+	// Base handler that performs long-running processing
+	slowHandler := consumer.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+		// Simulate long-running work (e.g., ML inference, large file processing)
+		// This could take 30+ seconds
+		fmt.Println("Starting long-running processing...")
+
+		// Normally this would timeout and redeliver, but WIPHandler
+		// sends InProgress() every 10 seconds to keep it alive
+		// time.Sleep(45 * time.Second)
+
+		fmt.Println("Processing complete")
+
+		return nil
+	})
+
+	// Wrap with WIPHandler for automatic heartbeats
+	// Interval should be < AckWait/2 (e.g., AckWait=30s, Interval=10s)
+	wrappedHandler := consumer.NewWIPHandler(slowHandler, consumer.WIPConfig{
+		Interval: 10 * time.Second,
+		// Logger: myLogger, // Optional: log heartbeat errors
+	})
+
+	// Use with any consumer type
+	var js jetstream.JetStream
+	_, err := consumer.NewQueue(
+		js,
+		"LONG-JOBS",
+		"slow-processor",
+		"jobs.slow.>",
+		wrappedHandler,
+		consumer.WithAckWait(30*time.Second), // Heartbeat at 10s < 30s/2
+	)
+	if err != nil {
+		fmt.Printf("Failed to create queue: %v\n", err)
+		return
+	}
+
+	// Output: Failed to create queue: JetStream context is required
+}
+
+// This example demonstrates using WIPHandler with Dynamic consumer
+// for partition-aware long-running processing.
+func Example_wipHandlerWithDynamic() {
+	// Handler that processes large datasets per partition
+	handler := consumer.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+		fmt.Printf("Processing batch for subject: %s\n", msg.Subject())
+		// Long-running batch processing...
+		return nil
+	})
+
+	// Wrap with heartbeats
+	wrapped := consumer.NewWIPHandler(handler, consumer.WIPConfig{
+		Interval: 15 * time.Second, // AckWait is 60s, so 15s is safe (< 30s)
+	})
+
+	var js jetstream.JetStream
+	_, err := consumer.NewDynamic(
+		js,
+		"BATCH-EVENTS",
+		"batch-worker",
+		"batch.{{.PartitionID}}.events",
+		wrapped,
+		consumer.WithAckWait(60*time.Second),
+	)
+	if err != nil {
+		fmt.Printf("Failed to create dynamic consumer: %v\n", err)
+		return
+	}
+
+	// Output: Failed to create dynamic consumer: JetStream context is required
+}
