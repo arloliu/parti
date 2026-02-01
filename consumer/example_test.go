@@ -133,7 +133,7 @@ func Example_dynamicConsumer() {
 
 	// Consumer is now processing messages for partition-0 and partition-1
 	// Cleanup
-	_ = c.Close(ctx)
+	_ = c.Stop(ctx)
 
 	// Output: Failed to create dynamic consumer: JetStream context is required
 }
@@ -170,7 +170,7 @@ func Example_broadcastConsumer() {
 
 	// Every instance running this code receives all cache.> messages
 	// Cleanup
-	_ = c.Close(ctx)
+	_ = c.Stop(ctx)
 
 	// Output: Failed to create broadcast consumer: JetStream context is required
 }

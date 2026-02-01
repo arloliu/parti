@@ -19,11 +19,11 @@ import (
 // # Lifecycle
 //
 // Create with [NewDynamic], then call [Dynamic.Update] to start consuming assigned
-// partitions. Clean up with [Dynamic.Close]:
+// partitions. Clean up with [Dynamic.Stop]:
 //
 //	consumer, err := consumer.NewDynamic(js, "stream", "worker", "orders.{{.PartitionID}}", handler)
 //	if err != nil { log.Fatal(err) }
-//	defer consumer.Close(ctx)
+//	defer consumer.Stop(ctx)
 //
 //	// Start consuming partitions (typically called by Parti Manager)
 //	if err := consumer.Update(ctx, "worker-0", partitions); err != nil { log.Fatal(err) }
@@ -294,23 +294,25 @@ func (d *Dynamic) UpdateWorkerConsumer(ctx context.Context, workerID string, par
 
 // Close stops all partition consumers.
 //
-// Close cancels all internal pull loops and waits for pending message processing
+// Stop gracefully stops all partition consumers.
+//
+// Stop cancels all internal pull loops and waits for pending message processing
 // to complete (up to the context deadline). The underlying JetStream consumers
 // are NOT deleted; they will be garbage-collected by the server after
 // InactiveThreshold.
 //
-// If DrainOnRemove is enabled, Close will first drain pending messages
+// If DrainOnRemove is enabled, Stop will first drain pending messages
 // (up to DrainOnRemoveTimeout) before stopping.
 //
-// Close is idempotent; calling it multiple times is safe.
+// Stop is idempotent; calling it multiple times is safe.
 //
 // Parameters:
-//   - ctx: Context with shutdown deadline. If the deadline expires, Close
+//   - ctx: Context with shutdown deadline. If the deadline expires, Stop
 //     returns [context.DeadlineExceeded] but consumers will still eventually stop.
 //
 // Returns:
 //   - error: Context error if the wait times out; nil otherwise.
-func (d *Dynamic) Close(ctx context.Context) error {
+func (d *Dynamic) Stop(ctx context.Context) error {
 	return d.inner.Close(ctx)
 }
 

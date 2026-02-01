@@ -9,8 +9,8 @@
 // |-------------|----------------------------------------|--------------|----------------------|
 // | [Queue]     | Load-balanced workers                  | None         | Start → Stop         |
 // | [Static]    | StatefulSet fixed partition            | None         | Start → Stop         |
-// | [Broadcast] | Fan-out to all instances               | None         | Start → Close        |
-// | [Dynamic]   | Manager-assigned partitions (Parti)    | Via Manager  | Update → Close       |
+// | [Broadcast] | Fan-out to all instances               | None         | Start → Stop         |
+// | [Dynamic]   | Manager-assigned partitions (Parti)    | Via Manager  | Update → Stop        |
 //
 // # Lifecycle
 //
@@ -30,19 +30,19 @@
 //
 //	// ... application runs ...
 //
-// ## Broadcast (Start/Close pattern)
+// ## Broadcast (Start/Stop pattern)
 //
 //	c, err := consumer.NewBroadcast(js, "stream", "prefix", "events.>", handler)
 //	if err != nil { log.Fatal(err) }
-//	defer c.Close(ctx)
+//	defer c.Stop(ctx)
 //
 //	if err := c.Start(ctx); err != nil { log.Fatal(err) }
 //
-// ## Dynamic (Update/Close pattern)
+// ## Dynamic (Update/Stop pattern)
 //
 //	c, err := consumer.NewDynamic(js, "stream", "prefix", "orders.{{.PartitionID}}", handler)
 //	if err != nil { log.Fatal(err) }
-//	defer c.Close(ctx)
+//	defer c.Stop(ctx)
 //
 //	// Consumption starts when Update is called (typically by Parti Manager)
 //	if err := c.Update(ctx, "worker-0", partitions); err != nil { log.Fatal(err) }
@@ -50,7 +50,7 @@
 // # Thread Safety
 //
 // All consumer types are safe for concurrent use. Lifecycle methods (Start, Stop,
-// Update, Close) are serialized internally to prevent race conditions.
+// Update) are serialized internally to prevent race conditions.
 //
 // # Message Handler
 //
@@ -71,7 +71,7 @@
 // These are not exported sentinel errors—use string matching or error wrapping checks.
 //
 // Runtime errors from lifecycle methods:
-//   - [context.DeadlineExceeded]: Stop/Close timed out waiting for graceful shutdown
+//   - [context.DeadlineExceeded]: Stop timed out waiting for graceful shutdown
 //   - [subscription.ErrWorkerIDMutation]: Dynamic consumer workerID changed unexpectedly
 //   - [subscription.ErrMaxSubjectsExceeded]: Dynamic partition count exceeds limit
 //
@@ -103,7 +103,7 @@
 // The consumer manages multiple internal per-partition consumers based on assignments.
 //
 //	c, _ := consumer.NewDynamic(js, "events", "worker", "orders.{{.PartitionID}}.events", handler)
-//	defer c.Close(ctx)
+//	defer c.Stop(ctx)
 //	_ = c.Update(ctx, workerID, partitions)
 //
 // # Broadcast
@@ -116,7 +116,7 @@
 // is incompatible because it delivers each message to exactly one consumer.
 //
 //	c, _ := consumer.NewBroadcast(js, "events", "cache-updater", "events.>", handler)
-//	defer c.Close(ctx)
+//	defer c.Stop(ctx)
 //	_ = c.Start(ctx)
 //
 // # Options

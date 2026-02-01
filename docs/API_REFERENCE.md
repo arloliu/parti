@@ -15,9 +15,10 @@
 5. [Data Types](#data-types)
 6. [Strategy Package](#strategy-package)
 7. [Source Package](#source-package)
-8. [Subscription Package](#subscription-package)
-9. [Testing Package](#testing-package)
-10. [Error Types](#error-types)
+8. [Consumer Package](#consumer-package)
+9. [Subscription Package (Deprecated)](#subscription-package-deprecated)
+10. [Testing Package](#testing-package)
+11. [Error Types](#error-types)
 
 ---
 
@@ -1332,7 +1333,278 @@ err := src.Update(ctx, newPartitions)
 
 ---
 
-## Subscription Package
+## Consumer Package
+
+Package `github.com/arloliu/parti/consumer` provides unified JetStream consumer types for partitioned workloads. This package replaces the legacy `subscription` and `partition` packages.
+
+### Consumer Types
+
+| Type        | Use Case                               | Lifecycle        |
+|-------------|----------------------------------------|------------------|
+| `Queue`     | Load-balanced workers (queue group)    | Start → Stop     |
+| `Static`    | Fixed partition (StatefulSet ordinal)  | Start → Stop     |
+| `Dynamic`   | Manager-assigned partitions            | Update → Stop    |
+| `Broadcast` | Fan-out to all instances               | Start → Stop     |
+
+### NewQueue
+
+Creates a load-balanced consumer where multiple instances share one durable.
+
+```go
+func NewQueue(
+    js jetstream.JetStream,
+    streamName string,
+    consumerName string,
+    filterSubject string,
+    handler MessageHandler,
+    opts ...Option,
+) (*Queue, error)
+```
+
+**Parameters**:
+- `js`: JetStream context
+- `streamName`: JetStream stream name
+- `consumerName`: Shared durable consumer name
+- `filterSubject`: Subject filter (supports wildcards)
+- `handler`: Message handler callback
+- `opts`: Functional options
+
+**Returns**:
+- `*Queue`: Initialized queue consumer
+- `error`: Validation error
+
+**Example**:
+```go
+c, err := consumer.NewQueue(js, "JOBS", "job-workers", "jobs.>", handler)
+if err != nil {
+    log.Fatal(err)
+}
+defer c.Stop(ctx)
+
+if err := c.Start(ctx); err != nil {
+    log.Fatal(err)
+}
+```
+
+---
+
+### NewStatic
+
+Creates a consumer bound to a single, fixed partition.
+
+```go
+func NewStatic(
+    js jetstream.JetStream,
+    streamName string,
+    consumerName string,
+    subjectPattern string,
+    numPartitions int,
+    partition int,
+    handler MessageHandler,
+    opts ...Option,
+) (*Static, error)
+```
+
+**Parameters**:
+- `js`: JetStream context
+- `streamName`: JetStream stream name
+- `consumerName`: Durable consumer name
+- `subjectPattern`: Subject template with `{{partition}}` placeholder
+- `numPartitions`: Total number of partitions
+- `partition`: This instance's partition index (0 to numPartitions-1)
+- `handler`: Message handler callback
+- `opts`: Functional options
+
+**Example**:
+```go
+c, err := consumer.NewStatic(js, "EVENTS", "processor-0", "events.{{partition}}", 10, 0, handler)
+if err != nil {
+    log.Fatal(err)
+}
+defer c.Stop(ctx)
+
+if err := c.Start(ctx); err != nil {
+    log.Fatal(err)
+}
+```
+
+---
+
+### NewDynamic
+
+Creates a partition-aware consumer that receives assignments from a Parti Manager.
+
+```go
+func NewDynamic(
+    js jetstream.JetStream,
+    streamName string,
+    consumerPrefix string,
+    subjectTemplate string,
+    handler MessageHandler,
+    opts ...Option,
+) (*Dynamic, error)
+```
+
+**Parameters**:
+- `js`: JetStream context
+- `streamName`: JetStream stream name
+- `consumerPrefix`: Prefix for durable consumer names
+- `subjectTemplate`: Go text/template with `{{.PartitionID}}`
+- `handler`: Message handler callback
+- `opts`: Functional options
+
+**Example**:
+```go
+c, err := consumer.NewDynamic(js, "ORDERS", "processor", "orders.{{.PartitionID}}", handler)
+if err != nil {
+    log.Fatal(err)
+}
+defer c.Stop(ctx)
+
+// Register with Manager for automatic updates
+mgr, _ := parti.NewManager(cfg, js, src, strategy.NewConsistentHash(),
+    parti.WithWorkerConsumerUpdater(c),
+)
+```
+
+---
+
+### NewBroadcast
+
+Creates a fan-out consumer where every instance receives every message.
+
+```go
+func NewBroadcast(
+    js jetstream.JetStream,
+    streamName string,
+    consumerPrefix string,
+    filterSubject string,
+    handler MessageHandler,
+    opts ...Option,
+) (*Broadcast, error)
+```
+
+**Parameters**:
+- `js`: JetStream context
+- `streamName`: JetStream stream name
+- `consumerPrefix`: Prefix for durable consumer name
+- `filterSubject`: Subject filter (supports wildcards)
+- `handler`: Message handler callback
+- `opts`: Functional options
+
+**Example**:
+```go
+c, err := consumer.NewBroadcast(js, "EVENTS", "cache-updater", "events.>", handler,
+    consumer.WithInstanceID("pod-abc123"),
+)
+if err != nil {
+    log.Fatal(err)
+}
+defer c.Stop(ctx)
+
+if err := c.Start(ctx); err != nil {
+    log.Fatal(err)
+}
+```
+
+---
+
+### MessageHandler
+
+Interface for processing messages.
+
+```go
+type MessageHandler interface {
+    HandleMessage(ctx context.Context, msg jetstream.Msg) error
+}
+```
+
+**Functional Adapter**:
+```go
+type MessageHandlerFunc func(ctx context.Context, msg jetstream.Msg) error
+
+func (f MessageHandlerFunc) HandleMessage(ctx context.Context, msg jetstream.Msg) error {
+    return f(ctx, msg)
+}
+```
+
+---
+
+### Consumer Methods
+
+#### Queue Methods
+
+| Method        | Description                              |
+|---------------|------------------------------------------|
+| `Start(ctx)`  | Begin consuming messages                 |
+| `Stop(ctx)`   | Gracefully stop with context timeout     |
+
+#### Static Methods
+
+| Method        | Description                              |
+|---------------|------------------------------------------|
+| `Start(ctx)`  | Begin consuming messages                 |
+| `Stop(ctx)`   | Gracefully stop with context timeout     |
+| `Partition()` | Returns the partition index              |
+| `Subject()`   | Returns the filter subject               |
+
+#### Dynamic Methods
+
+| Method                                      | Description                              |
+|---------------------------------------------|------------------------------------------|
+| `Update(ctx, workerID, partitions)`         | Update partition assignments             |
+| `Stop(ctx)`                                 | Gracefully stop all partition consumers  |
+| `UpdateWorkerConsumer(ctx, id, partitions)` | Implements `WorkerConsumerUpdater`       |
+
+#### Broadcast Methods
+
+| Method        | Description                              |
+|---------------|------------------------------------------|
+| `Start(ctx)`  | Begin consuming messages                 |
+| `Stop(ctx)`   | Gracefully stop with context timeout     |
+
+---
+
+### Consumer Options
+
+All consumers accept functional options:
+
+```go
+c, _ := consumer.NewQueue(js, "stream", "consumer", "subject.>", handler,
+    consumer.WithLogger(myLogger),
+    consumer.WithAckWait(60*time.Second),
+    consumer.WithBatchSize(100),
+)
+```
+
+**Common Options**:
+
+| Option                           | Description                                    |
+|----------------------------------|------------------------------------------------|
+| `WithLogger(logger)`             | Set custom logger                              |
+| `WithMetrics(collector)`         | Set metrics collector                          |
+| `WithAckWait(duration)`          | Time before message redelivery                 |
+| `WithBatchSize(n)`               | Messages per fetch                             |
+| `WithMaxDeliver(n)`              | Max redelivery attempts                        |
+| `WithMaxAckPending(n)`           | Max unacked messages                           |
+| `WithFetchTimeout(duration)`     | Max wait when pulling batch                    |
+| `WithManualAck(bool)`            | Disable auto-acknowledgement                   |
+| `WithInactiveThreshold(duration)`| Consumer cleanup threshold                     |
+
+**Type-Specific Options**:
+
+| Option                           | Consumer Types | Description                          |
+|----------------------------------|----------------|--------------------------------------|
+| `WithInstanceID(id)`             | Broadcast      | Set unique instance identifier       |
+| `WithProcessingGate(cfg)`        | Dynamic        | Enable processing gate               |
+| `WithDrainOnRemove(bool)`        | Dynamic        | Drain messages on partition removal  |
+
+---
+
+## Subscription Package (Deprecated)
+
+> **Deprecation Notice:** The `subscription` package is deprecated. Use the `consumer` package instead.
+> See [Consumer Package](#consumer-package) for the recommended API.
 
 Package `github.com/arloliu/parti/subscription` provides helpers for integrating JetStream message processing with partition assignments.
 
@@ -1557,13 +1829,15 @@ func (bc *BroadcastConsumer) UpdateWorkerConsumer(
 
 **Note**: The `partitions` parameter is **ignored**. The broadcast consumer receives all messages matching its `WildcardFilter`.
 
-#### Close
+#### Stop
 
 Stops the pull loop and releases resources.
 
 ```go
-func (bc *BroadcastConsumer) Close(ctx context.Context) error
+func (bc *BroadcastConsumer) Stop(ctx context.Context) error
 ```
+
+> **Note:** The legacy `Close(ctx)` method is an alias for `Stop(ctx)` for backward compatibility.
 
 ---
 

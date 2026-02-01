@@ -19,11 +19,11 @@ import (
 // # Lifecycle
 //
 // Create with [NewBroadcast], then call [Broadcast.Start] to begin consuming.
-// Clean up with [Broadcast.Close]:
+// Clean up with [Broadcast.Stop]:
 //
 //	consumer, err := consumer.NewBroadcast(js, "stream", "cache-updater", "events.>", handler)
 //	if err != nil { log.Fatal(err) }
-//	defer consumer.Close(ctx)
+//	defer consumer.Stop(ctx)
 //
 //	if err := consumer.Start(ctx); err != nil { log.Fatal(err) }
 //
@@ -35,7 +35,7 @@ import (
 //
 // # Thread Safety
 //
-// Broadcast is safe for concurrent use. [Broadcast.Start] and [Broadcast.Close]
+// Broadcast is safe for concurrent use. [Broadcast.Start] and [Broadcast.Stop]
 // are serialized internally.
 //
 // # Deprecation Notice
@@ -232,21 +232,21 @@ func (b *Broadcast) UpdateWorkerConsumer(ctx context.Context, workerID string, p
 	return b.inner.UpdateWorkerConsumer(ctx, workerID, partitions)
 }
 
-// Close stops the consumer.
+// Stop gracefully stops the consumer.
 //
-// Close cancels the internal pull loop and waits for pending message processing
+// Stop cancels the internal pull loop and waits for pending message processing
 // to complete (up to the context deadline). The underlying JetStream consumer
 // is NOT deleted; it will be garbage-collected by the server after InactiveThreshold.
 //
-// Close is idempotent; calling it multiple times is safe.
+// Stop is idempotent; calling it multiple times is safe.
 //
 // Parameters:
-//   - ctx: Context with shutdown deadline. If the deadline expires, Close
+//   - ctx: Context with shutdown deadline. If the deadline expires, Stop
 //     returns [context.DeadlineExceeded] but the consumer will still eventually stop.
 //
 // Returns:
 //   - error: Context error if the wait times out; nil otherwise.
-func (b *Broadcast) Close(ctx context.Context) error {
+func (b *Broadcast) Stop(ctx context.Context) error {
 	return b.inner.Close(ctx)
 }
 

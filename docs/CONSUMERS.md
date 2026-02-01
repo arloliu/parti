@@ -1,6 +1,6 @@
-# Parti Consumer Helpers
+# Parti Consumer Package
 
-> JetStream consumer management for partitioned workloads.
+> Unified JetStream consumer types for partitioned workloads.
 
 **Related Documentation:**
 - [Docs README](README.md) - Documentation map
@@ -13,440 +13,526 @@
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [WorkerConsumer](#workerconsumer)
-3. [BroadcastConsumer](#broadcastconsumer)
-4. [CompositeConsumerUpdater](#compositeconsumerupdater)
-5. [ProcessingGate](#processinggate)
+2. [Quick Start](#quick-start)
+3. [Consumer Types](#consumer-types)
+   - [Queue](#queue)
+   - [Static](#static)
+   - [Dynamic](#dynamic)
+   - [Broadcast](#broadcast)
+4. [Message Handler](#message-handler)
+5. [Functional Options](#functional-options)
+6. [Migrating from Legacy Packages](#migrating-from-legacy-packages)
+7. [Legacy Packages (Deprecated)](#legacy-packages-deprecated)
 
 ---
 
 ## Overview
 
-The `subscription` package provides helpers to integrate NATS JetStream consumers with Parti's partition management:
+The `consumer` package provides a unified API for JetStream consumers in partitioned workloads:
 
-| Helper                    | Purpose                                       |
-|---------------------------|-----------------------------------------------|
-| `WorkerConsumer`          | Partition-filtered consumer for worker queues |
-| `BroadcastConsumer`       | All-partition consumer for broadcasts         |
-| `CompositeConsumerUpdater`| Manages multiple consumers as one unit        |
-
-These helpers handle consumer lifecycle and filter updates automatically based on partition assignments.
+| Consumer    | Purpose                                    | Coordination | Lifecycle        |
+|-------------|--------------------------------------------|--------------|------------------|
+| `Queue`     | Load-balanced workers (queue group)        | None         | Start → Stop     |
+| `Static`    | Fixed partition (StatefulSet ordinal)      | None         | Start → Stop     |
+| `Dynamic`   | Manager-assigned partitions (Parti core)   | Via Manager  | Update → Stop    |
+| `Broadcast` | Fan-out to all instances                   | None         | Start → Stop     |
 
 ### Import
 
 ```go
-import "github.com/arloliu/parti/subscription"
+import "github.com/arloliu/parti/consumer"
+```
+
+> **Migration Note:** The `consumer` package replaces the legacy `subscription` and `partition`
+> packages, which are now deprecated. See [Migrating from Legacy Packages](#migrating-from-legacy-packages).
+
+---
+
+## Quick Start
+
+### Queue Consumer (Load-Balanced Workers)
+
+```go
+handler := consumer.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+    fmt.Printf("Processing: %s\n", msg.Subject())
+    return nil // auto-ack
+})
+
+c, err := consumer.NewQueue(js, "JOBS", "job-workers", "jobs.>", handler)
+if err != nil {
+    log.Fatal(err)
+}
+defer c.Stop(ctx)
+
+if err := c.Start(ctx); err != nil {
+    log.Fatal(err)
+}
+```
+
+### Dynamic Consumer (Parti Manager)
+
+```go
+c, err := consumer.NewDynamic(js, "ORDERS", "order-processor", "orders.{{.PartitionID}}", handler)
+if err != nil {
+    log.Fatal(err)
+}
+defer c.Stop(ctx)
+
+// Register with Parti Manager for automatic partition assignment
+mgr, _ := parti.NewManager(cfg, js, src, strategy.NewConsistentHash(),
+    parti.WithWorkerConsumerUpdater(c),
+)
 ```
 
 ---
 
-## WorkerConsumer
+## Consumer Types
 
-`WorkerConsumer` creates a JetStream consumer that receives messages **only for assigned partitions**. When assignments change, it automatically updates the consumer's subject filter.
+### Queue
 
-### Architecture
+Load-balanced consumer where multiple instances share one durable consumer. Each message is delivered to exactly one instance (queue group semantics).
 
-```
-    ┌──────────────────────────────────────────────────────┐
-    │                    WorkerConsumer                    │
-    │                                                      │
-    │   ┌─────────────┐    ┌─────────────┐                 │
-    │   │  Partition  │    │  JetStream  │                 │
-    │   │  Callback   │───▶│  Consumer   │                 │
-    │   └─────────────┘    └──────┬──────┘                 │
-    │                             │                        │
-    │   Subject: "orders.>"       │  Filter: "orders.0",   │
-    │                             │          "orders.1"    │
-    └─────────────────────────────┼────────────────────────┘
-                                  │
-                                  ▼
-                           ┌─────────────┐
-                           │   Stream    │
-                           │  "ORDERS"   │
-                           └─────────────┘
-```
+**Use Cases:**
+- Classic worker queue patterns
+- Stateless message processing
+- Horizontal scaling without coordination
 
-### Basic Usage
+**Lifecycle:** `Start(ctx) → Stop(ctx)`
 
 ```go
-import (
-    "context"
-    "time"
-    "github.com/arloliu/parti"
-    "github.com/arloliu/parti/subscription"
-    "github.com/nats-io/nats.go/jetstream"
+c, err := consumer.NewQueue(
+    js,              // jetstream.JetStream
+    "JOBS",          // streamName
+    "job-workers",   // consumerName (shared across instances)
+    "jobs.>",        // filterSubject
+    handler,         // MessageHandler
+    // options...
 )
-
-// Configure worker consumer
-cfg := subscription.WorkerConsumerConfig{
-    StreamName:      "ORDERS",
-    ConsumerPrefix:  "orders-processor",
-    SubjectTemplate: "orders.{{.PartitionID}}",
-    BatchSize:       50,
-    AckWait:         30 * time.Second,
-}
-
-// Create message handler
-handler := subscription.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
-    // Process message - return nil for auto-ack, error for auto-nak
-    return processMessage(msg)
-})
-
-// Create worker consumer
-wc, err := subscription.NewWorkerConsumer(js, cfg, handler)
 if err != nil {
     log.Fatal(err)
 }
+defer c.Stop(ctx)
 
-// Create partition source
-partitions := []parti.Partition{{ID: "0"}, {ID: "1"}, {ID: "2"}}
-src := source.NewStatic(partitions)
-
-// Register with manager for automatic partition-based filter updates
-mgr, _ := parti.NewManager(mgrCfg, js, src, strategy.NewConsistentHash(),
-    parti.WithWorkerConsumerUpdater(wc),
-)
-```
-
-### Configuration Options
-
-```go
-cfg := subscription.WorkerConsumerConfig{
-    // Required fields
-    StreamName:      "ORDERS",                      // JetStream stream name
-    ConsumerPrefix:  "orders-processor",            // Durable name prefix
-    SubjectTemplate: "orders.{{.PartitionID}}",     // Template for subjects
-
-    // Batch settings
-    BatchSize:    100,                // Messages per fetch (default: 1)
-    FetchTimeout: 5 * time.Second,    // Max wait when pulling batch (default: 5s)
-
-    // Consumer configuration
-    AckWait:       30 * time.Second,  // Time before redelivery (default: 30s)
-    MaxDeliver:    5,                 // Max redelivery attempts (default: -1 unlimited)
-    MaxAckPending: 1000,              // Max unacked messages (default: 0 = server default)
-
-    // Processing options
-    ManualAck:     false,             // When true, handler must call msg.Ack/Nak
-    DrainOnRemove: true,              // Graceful drain when partitions removed
+if err := c.Start(ctx); err != nil {
+    log.Fatal(err)
 }
 ```
 
-### Key Methods
+**Key Methods:**
 
-| Method                     | Description                                              |
-|----------------------------|----------------------------------------------------------|
-| `UpdateWorkerConsumer()`   | Called by manager on assignment changes                  |
-| `Close(ctx)`               | Gracefully stops the consumer with context timeout       |
+| Method        | Description                                    |
+|---------------|------------------------------------------------|
+| `Start(ctx)`  | Begin consuming messages                       |
+| `Stop(ctx)`   | Gracefully stop with context timeout           |
 
-### Assignment Updates
+---
 
-When the manager calls `Update([]string{"0", "1", "2"})`:
+### Static
 
-1. Builds subject filter: `["orders.0", "orders.1", "orders.2"]`
-2. Updates JetStream consumer filter
-3. New fetches receive only matching messages
+Consumer bound to a single, fixed partition. Use for StatefulSet deployments where pod ordinal determines partition assignment.
 
-### Error Handling
+**Use Cases:**
+- Kubernetes StatefulSet (pod ordinal → partition)
+- Fixed partition ownership
+- Zero-coordination partitioning
 
-The handler-based API simplifies error handling:
+**Lifecycle:** `Start(ctx) → Stop(ctx)`
 
 ```go
-// Handler returns error for auto-nak, nil for auto-ack
-handler := subscription.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
-    if err := processMessage(msg); err != nil {
-        // Returning error triggers automatic Nak
-        return fmt.Errorf("process failed: %w", err)
-    }
-    // Returning nil triggers automatic Ack
-    return nil
-})
+c, err := consumer.NewStatic(
+    js,                         // jetstream.JetStream
+    "EVENTS",                   // streamName
+    "processor-0",              // consumerName
+    "events.{{partition}}",     // subjectPattern
+    10,                         // numPartitions (total)
+    0,                          // partition (this instance)
+    handler,                    // MessageHandler
+    // options...
+)
+if err != nil {
+    log.Fatal(err)
+}
+defer c.Stop(ctx)
 
-// For manual ack control, use ManualAck: true in config
+if err := c.Start(ctx); err != nil {
+    log.Fatal(err)
+}
+```
+
+**Subject Pattern Placeholders:**
+- `{{partition}}` - Replaced with partition index (required)
+- `{{key}}` - Replaced with partition key (optional, becomes `*` for subscription)
+
+**Key Methods:**
+
+| Method        | Description                                    |
+|---------------|------------------------------------------------|
+| `Start(ctx)`  | Begin consuming messages                       |
+| `Stop(ctx)`   | Gracefully stop with context timeout           |
+| `Partition()` | Returns the partition index                    |
+| `Subject()`   | Returns the filter subject                     |
+
+---
+
+### Dynamic
+
+Partition-aware consumer that receives assignments from a Parti Manager. Manages multiple internal consumers based on assigned partitions.
+
+**Use Cases:**
+- Parti-coordinated workloads
+- Dynamic partition assignment
+- Elastic scaling with partition rebalancing
+
+**Lifecycle:** `Update(ctx, workerID, partitions) → Stop(ctx)`
+
+```go
+c, err := consumer.NewDynamic(
+    js,                              // jetstream.JetStream
+    "ORDERS",                        // streamName
+    "order-processor",               // consumerPrefix
+    "orders.{{.PartitionID}}",       // subjectTemplate (Go template)
+    handler,                         // MessageHandler
+    // options...
+)
+if err != nil {
+    log.Fatal(err)
+}
+defer c.Stop(ctx)
+
+// Register with Manager for automatic updates
+mgr, _ := parti.NewManager(cfg, js, src, strategy.NewConsistentHash(),
+    parti.WithWorkerConsumerUpdater(c),
+)
+```
+
+**Manual Update (without Manager):**
+
+```go
+partitions := []types.Partition{
+    {Keys: []string{"partition-0"}},
+    {Keys: []string{"partition-1"}},
+}
+if err := c.Update(ctx, "worker-0", partitions); err != nil {
+    log.Fatal(err)
+}
+```
+
+**Key Methods:**
+
+| Method                                      | Description                                    |
+|---------------------------------------------|------------------------------------------------|
+| `Update(ctx, workerID, partitions)`         | Update partition assignments                   |
+| `Stop(ctx)`                                 | Gracefully stop all partition consumers        |
+| `UpdateWorkerConsumer(ctx, id, partitions)` | Implements `WorkerConsumerUpdater` interface   |
+
+---
+
+### Broadcast
+
+Fan-out consumer where every instance receives every message. Uses a unique durable name per instance.
+
+**Use Cases:**
+- Cache invalidation
+- Configuration updates
+- Audit logging
+- Global event notifications
+
+**Lifecycle:** `Start(ctx) → Stop(ctx)`
+
+> **Important:** The stream MUST use `LimitsPolicy` or `InterestPolicy`. `WorkQueuePolicy` is incompatible because it delivers each message to exactly one consumer.
+
+```go
+c, err := consumer.NewBroadcast(
+    js,                // jetstream.JetStream
+    "EVENTS",          // streamName
+    "cache-updater",   // consumerPrefix
+    "events.>",        // filterSubject
+    handler,           // MessageHandler
+    consumer.WithInstanceID("pod-abc123"), // unique per instance
+)
+if err != nil {
+    log.Fatal(err)
+}
+defer c.Stop(ctx)
+
+if err := c.Start(ctx); err != nil {
+    log.Fatal(err)
+}
+```
+
+**Key Methods:**
+
+| Method        | Description                                    |
+|---------------|------------------------------------------------|
+| `Start(ctx)`  | Begin consuming messages                       |
+| `Stop(ctx)`   | Gracefully stop with context timeout           |
+
+---
+
+## Message Handler
+
+All consumer types use the unified `MessageHandler` interface:
+
+```go
+type MessageHandler interface {
+    HandleMessage(ctx context.Context, msg jetstream.Msg) error
+}
+```
+
+**Functional Adapter:**
+
+```go
+handler := consumer.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+    // Process message
+    data := msg.Data()
+    _ = data
+
+    return nil  // nil = auto-ack
+})
+```
+
+**Auto-Acknowledgement (default):**
+- `return nil` → Message acknowledged (Ack)
+- `return error` → Message negatively acknowledged (Nak)
+
+**Manual Acknowledgement:**
+
+```go
+c, _ := consumer.NewQueue(js, "stream", "consumer", "subject.>", handler,
+    consumer.WithManualAck(true),
+)
+
+// In handler, you must call one of:
+msg.Ack()           // Acknowledge
+msg.Nak()           // Negative ack (immediate redeliver)
+msg.NakWithDelay(d) // Negative ack with delay
+msg.Term()          // Terminate (no redeliver)
+```
+
+---
+
+## Functional Options
+
+All consumers accept functional options for customization:
+
+```go
+c, _ := consumer.NewQueue(js, "stream", "consumer", "subject.>", handler,
+    consumer.WithLogger(myLogger),
+    consumer.WithMetrics(myCollector),
+    consumer.WithAckWait(60*time.Second),
+    consumer.WithBatchSize(100),
+    consumer.WithMaxDeliver(5),
+)
+```
+
+**Common Options:**
+
+| Option                           | Description                                    |
+|----------------------------------|------------------------------------------------|
+| `WithLogger(logger)`             | Set custom logger                              |
+| `WithMetrics(collector)`         | Set metrics collector                          |
+| `WithAckWait(duration)`          | Time before message redelivery                 |
+| `WithBatchSize(n)`               | Messages per fetch                             |
+| `WithMaxDeliver(n)`              | Max redelivery attempts                        |
+| `WithMaxAckPending(n)`           | Max unacked messages                           |
+| `WithFetchTimeout(duration)`     | Max wait when pulling batch                    |
+| `WithManualAck(bool)`            | Disable auto-acknowledgement                   |
+| `WithInactiveThreshold(duration)`| Consumer cleanup threshold                     |
+
+**Broadcast-Specific Options:**
+
+| Option                           | Description                                    |
+|----------------------------------|------------------------------------------------|
+| `WithInstanceID(id)`             | Set unique instance identifier                 |
+
+**Dynamic-Specific Options:**
+
+| Option                           | Description                                    |
+|----------------------------------|------------------------------------------------|
+| `WithProcessingGate(cfg)`        | Enable processing gate for ownership control   |
+| `WithDrainOnRemove(bool)`        | Drain messages when partitions are removed     |
+
+---
+
+## Migrating from Legacy Packages
+
+The `consumer` package replaces the legacy `subscription` and `partition` packages with a unified API.
+
+### subscription.WorkerConsumer → consumer.Dynamic
+
+```go
+// Legacy (deprecated)
+import "github.com/arloliu/parti/subscription"
+
 cfg := subscription.WorkerConsumerConfig{
     StreamName:      "ORDERS",
     ConsumerPrefix:  "processor",
     SubjectTemplate: "orders.{{.PartitionID}}",
-    ManualAck:       true,  // Handler must call msg.Ack/Nak/Term
 }
+wc, _ := subscription.NewWorkerConsumer(js, cfg, handler)
+defer wc.Close(ctx)
+
+// New (recommended)
+import "github.com/arloliu/parti/consumer"
+
+c, _ := consumer.NewDynamic(js, "ORDERS", "processor", "orders.{{.PartitionID}}", handler)
+defer c.Stop(ctx)
 ```
 
----
-
-## BroadcastConsumer
-
-`BroadcastConsumer` creates a JetStream consumer that receives messages for **all partitions**, regardless of the worker's assignment. Useful for configuration updates, cache invalidation, or global events.
-
-### When to Use
-
-| Use Case                    | Consumer Type    |
-|-----------------------------|------------------|
-| Process assigned orders     | WorkerConsumer   |
-| Invalidate cache globally   | BroadcastConsumer|
-| Receive config updates      | BroadcastConsumer|
-| Process user-specific data  | WorkerConsumer   |
-
-### Basic Usage
+### subscription.BroadcastConsumer → consumer.Broadcast
 
 ```go
-import (
-    "context"
-    "github.com/arloliu/parti"
-    "github.com/arloliu/parti/subscription"
-    "github.com/nats-io/nats.go/jetstream"
-)
-
-// Configure broadcast consumer
+// Legacy (deprecated)
 cfg := subscription.BroadcastConsumerConfig{
     StreamName:     "EVENTS",
-    ConsumerPrefix: "broadcast-events",
-    WildcardFilter: "events.broadcast.>",  // Receives ALL matching messages
-    BatchSize:      10,
+    ConsumerPrefix: "broadcast",
+    WildcardFilter: "events.>",
 }
+bc, _ := subscription.NewBroadcastConsumer(js, cfg, handler)
+defer bc.Close(ctx)
 
-// Create message handler
-handler := subscription.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
-    handleBroadcast(msg)
-    return nil
-})
-
-// Create broadcast consumer
-bc, err := subscription.NewBroadcastConsumer(js, cfg, handler)
-if err != nil {
-    log.Fatal(err)
-}
-defer bc.Close(context.Background())
-
-// Create partition source
-partitions := []parti.Partition{{ID: "0"}, {ID: "1"}, {ID: "2"}}
-src := source.NewStatic(partitions)
-
-// Register with manager (partition updates are ignored - receives all messages)
-mgr, _ := parti.NewManager(mgrCfg, js, src, strategy.NewConsistentHash(),
-    parti.WithWorkerConsumerUpdater(bc),
-)
+// New (recommended)
+c, _ := consumer.NewBroadcast(js, "EVENTS", "broadcast", "events.>", handler)
+defer c.Stop(ctx)
 ```
 
-### Comparison with WorkerConsumer
+### partition.JSConsumer → consumer.Static
 
 ```go
-// WorkerConsumer: receives only assigned partitions (e.g., orders.0, orders.1)
-wcCfg := subscription.WorkerConsumerConfig{
-    StreamName:      "ORDERS",
-    ConsumerPrefix:  "worker",
-    SubjectTemplate: "orders.{{.PartitionID}}",
-}
-wc, _ := subscription.NewWorkerConsumer(js, wcCfg, handler)
+// Legacy (deprecated)
+import "github.com/arloliu/parti/partition"
 
-// BroadcastConsumer: receives ALL messages matching the wildcard filter
-bcCfg := subscription.BroadcastConsumerConfig{
+cfg := partition.ConsumerConfig{
     StreamName:     "EVENTS",
-    ConsumerPrefix: "broadcast",
-    WildcardFilter: "events.broadcast.>",
+    ConsumerName:   "processor-0",
+    SubjectPattern: "events.{{partition}}",
+    NumPartitions:  10,
+    Partition:      0,
 }
-bc, _ := subscription.NewBroadcastConsumer(js, bcCfg, handler)
+pc, _ := partition.NewJSConsumer(js, cfg, handler)
+defer pc.Stop(ctx)
+
+// New (recommended)
+c, _ := consumer.NewStatic(js, "EVENTS", "processor-0", "events.{{partition}}", 10, 0, handler)
+defer c.Stop(ctx)
 ```
 
-### Methods
+### Key Differences
 
-Both `WorkerConsumer` and `BroadcastConsumer` implement `WorkerConsumerUpdater`:
-
-| Method                     | Description                                              |
-|----------------------------|----------------------------------------------------------|
-| `UpdateWorkerConsumer()`   | For BroadcastConsumer, starts the loop (ignores partitions) |
-| `Close(ctx)`               | Gracefully stops the consumer                            |
-
-Note: `UpdateWorkerConsumer()` ignores the partition list for BroadcastConsumer since it always receives all messages matching the wildcard filter.
+| Aspect              | Legacy Packages                    | consumer Package                  |
+|---------------------|------------------------------------|-----------------------------------|
+| API Style           | Config struct + constructor        | Positional args + options         |
+| Method Names        | `Close()` / mixed                  | `Stop()` (consistent)             |
+| Package Count       | 2 packages                         | 1 unified package                 |
+| Message Handler     | Package-specific                   | Unified `MessageHandler`          |
 
 ---
 
-## CompositeConsumerUpdater
+## Legacy Packages (Deprecated)
 
-`CompositeConsumerUpdater` manages multiple consumers as a single unit, simplifying updates when a worker has multiple consumer types.
+> **Deprecation Notice:** The `subscription` and `partition` packages are deprecated.
+> Use the `consumer` package instead for new code. Existing code will continue to work
+> but should be migrated to the new package.
 
-### Use Cases
+### subscription Package
 
-- Multiple streams with different partition schemes
-- Mixed worker and broadcast consumers
-- Coordinated lifecycle management
+The `subscription` package provided `WorkerConsumer` and `BroadcastConsumer` for JetStream integration with Parti.
 
-### Architecture
+**Status:** Deprecated. Use `consumer.Dynamic` and `consumer.Broadcast` instead.
 
-```
-    ┌─────────────────────────────────────────────────────────┐
-    │               CompositeConsumerUpdater                   │
-    │                                                          │
-    │  ┌───────────────┐  ┌───────────────┐  ┌──────────────┐ │
-    │  │WorkerConsumer │  │WorkerConsumer │  │BroadcastConsumer│ │
-    │  │   (orders)    │  │   (payments)  │  │   (events)   │ │
-    │  └───────────────┘  └───────────────┘  └──────────────┘ │
-    │                                                          │
-    │        Update() propagates to all children               │
-    └─────────────────────────────────────────────────────────┘
-```
+### partition Package
 
-### Basic Usage
+The `partition` package provided `JSConsumer` for static partitioning scenarios (e.g., StatefulSet ordinal-based assignment).
+
+**Status:** Deprecated. Use `consumer.Static` instead.
+
+### CompositeConsumerUpdater
+
+The `parti.CompositeConsumerUpdater` continues to work with the new consumer types:
 
 ```go
-import (
-    "github.com/arloliu/parti"
-    "github.com/arloliu/parti/subscription"
-)
+dynamic, _ := consumer.NewDynamic(js, "orders", "processor", "orders.{{.PartitionID}}", handler1)
+broadcast, _ := consumer.NewBroadcast(js, "events", "updater", "events.>", handler2)
 
-// Create individual consumers with their configs
-ordersConsumer, _ := subscription.NewWorkerConsumer(js, ordersCfg, ordersHandler)
-paymentsConsumer, _ := subscription.NewWorkerConsumer(js, paymentsCfg, paymentsHandler)
-eventsConsumer, _ := subscription.NewBroadcastConsumer(js, eventsCfg, eventsHandler)
+composite := parti.NewCompositeConsumerUpdater(dynamic, broadcast)
 
-// Combine into composite updater
-composite := parti.NewCompositeConsumerUpdater(
-    ordersConsumer,
-    paymentsConsumer,
-    eventsConsumer,
-)
-
-// Create partition source
-partitions := []parti.Partition{{ID: "0"}, {ID: "1"}, {ID: "2"}}
-src := source.NewStatic(partitions)
-
-// Register single updater with manager
 mgr, _ := parti.NewManager(cfg, js, src, strategy.NewConsistentHash(),
     parti.WithWorkerConsumerUpdater(composite),
 )
 ```
 
-### Update Propagation
+---
 
-When partition assignments change:
+## Architecture
 
-```go
-// Manager calls composite.Update(ctx, []string{"0", "1", "2"})
-// Which propagates to:
-//   - ordersConsumer.Update(ctx, []string{"0", "1", "2"})
-//   - paymentsConsumer.Update(ctx, []string{"0", "1", "2"})
-//   - eventsConsumer.Update(ctx, []string{"0", "1", "2"})  // (no-op for broadcast)
+### Dynamic Consumer Internals
+
+```
+    ┌──────────────────────────────────────────────────────┐
+    │                    Dynamic Consumer                   │
+    │                                                       │
+    │   ┌─────────────┐    ┌─────────────────────────────┐ │
+    │   │   Manager   │    │  Per-Partition Consumers    │ │
+    │   │  Callback   │───▶│  orders.0, orders.1, ...    │ │
+    │   └─────────────┘    └──────────────┬──────────────┘ │
+    │                                      │                │
+    │   Subject Template:                  │  Filter:       │
+    │   "orders.{{.PartitionID}}"          │  Multi-subject │
+    └──────────────────────────────────────┼────────────────┘
+                                           │
+                                           ▼
+                                    ┌─────────────┐
+                                    │   Stream    │
+                                    │  "ORDERS"   │
+                                    └─────────────┘
 ```
 
-### Error Handling
+### Queue Consumer Internals
 
-If any child consumer fails to update:
-
-```go
-func (c *CompositeConsumerUpdater) Update(ctx context.Context, ids []string) error {
-    var errs []error
-    for _, updater := range c.updaters {
-        if err := updater.Update(ctx, ids); err != nil {
-            errs = append(errs, err)
-        }
-    }
-    return errors.Join(errs...)
-}
 ```
-
-### Methods
-
-| Method            | Description                           |
-|-------------------|---------------------------------------|
-| `Update(ctx,ids)` | Propagates to all child updaters      |
-| `Add(updater)`    | Adds a new consumer to the composite  |
-| `Remove(updater)` | Removes a consumer from the composite |
+    ┌────────────────────────────────────────────────────────┐
+    │                     Queue Consumer                      │
+    │                                                         │
+    │   ┌────────────┐  ┌────────────┐  ┌────────────┐       │
+    │   │ Instance A │  │ Instance B │  │ Instance C │       │
+    │   │  (shared)  │  │  (shared)  │  │  (shared)  │       │
+    │   └─────┬──────┘  └─────┬──────┘  └─────┬──────┘       │
+    │         │               │               │               │
+    │         └───────────────┼───────────────┘               │
+    │                         │                               │
+    │   Consumer Name:        │  Durable: "job-workers"       │
+    │   (shared by all)       │  Load-balanced delivery       │
+    └─────────────────────────┼───────────────────────────────┘
+                              │
+                              ▼
+                       ┌─────────────┐
+                       │   Stream    │
+                       │   "JOBS"    │
+                       └─────────────┘
+```
 
 ---
 
-## ProcessingGate
+## Thread Safety
 
-`ProcessingGate` provides safe message processing during partition reassignment. It prevents processing messages for partitions that are being handed off.
+All consumer types are thread-safe. Lifecycle methods (`Start`, `Stop`, `Update`) are serialized internally to prevent race conditions.
 
-### The Problem
+| Method             | Thread Safety                                 |
+|--------------------|-----------------------------------------------|
+| `Start(ctx)`       | Serialized, call once                         |
+| `Stop(ctx)`        | Serialized, idempotent                        |
+| `Update(...)`      | Serialized, can call multiple times           |
+| Message Handler    | Called from single goroutine per consumer     |
 
-During two-phase handoff:
-1. Leader sends `Prepare` for partition P1 to move from Worker A to Worker B
-2. Worker A must stop processing P1 immediately
-3. Worker A might still have in-flight messages for P1
+---
 
-### How ProcessingGate Solves This
+## Error Handling
 
-```
-    ┌─────────────────────────────────────────────────────────┐
-    │                   ProcessingGate                         │
-    │                                                          │
-    │   Active Partitions: {0, 1, 2}                          │
-    │   Pending Handoff:   {1}        ◄── P1 being moved      │
-    │                                                          │
-    │   AllowProcessing("0") → true   ✓ Process                │
-    │   AllowProcessing("1") → false  ✗ Skip (handoff)        │
-    │   AllowProcessing("2") → true   ✓ Process                │
-    │                                                          │
-    └─────────────────────────────────────────────────────────┘
-```
+**Constructor Errors:**
+- Validation failures (nil JetStream, missing required fields)
+- Not exported as sentinel errors; use string matching if needed
 
-### Basic Usage
-
-```go
-// Create gate with manager
-gate := subscription.NewProcessingGate(mgr)
-
-// In message handler
-func handleMessage(msg *nats.Msg) {
-    partitionID := extractPartitionID(msg.Subject)
-
-    // Check if processing is allowed
-    if !gate.AllowProcessing(partitionID) {
-        // Re-queue or skip - partition is being handed off
-        msg.Nak()
-        return
-    }
-
-    // Safe to process
-    processMessage(msg)
-    msg.Ack()
-}
-```
-
-### Integration with Consumer
-
-```go
-func processLoop(wc *subscription.WorkerConsumer, gate *subscription.ProcessingGate) {
-    for msg := range wc.Messages() {
-        partitionID := extractPartitionID(msg.Subject)
-
-        if !gate.AllowProcessing(partitionID) {
-            msg.NakWithDelay(1 * time.Second)  // Retry later
-            continue
-        }
-
-        if err := process(msg); err != nil {
-            msg.Nak()
-            continue
-        }
-
-        msg.Ack()
-    }
-}
-```
-
-### Thread Safety
-
-`ProcessingGate` is fully thread-safe:
-
-```go
-// Safe to call from multiple goroutines
-go func() { gate.AllowProcessing("0") }()
-go func() { gate.AllowProcessing("1") }()
-```
-
-### Methods
-
-| Method                    | Description                              |
-|---------------------------|------------------------------------------|
-| `AllowProcessing(id)`     | Returns true if partition can be processed |
-| `GetActivePartitions()`   | Returns list of currently active partitions |
-| `GetPendingHandoffs()`    | Returns list of partitions being handed off |
-
-### Automatic Updates
-
-The gate makes decisions based on an ownership resolver (partition owner + handoff state).
-
-When used via `WorkerConsumer` with `ProcessingGate.Enabled = true`, the worker consumer will
-auto-create and manage a claim-based resolver backed by the handoff KV bucket and keep it
-up to date via KV watching. No manager hooks are required.
+**Runtime Errors:**
+- `context.DeadlineExceeded` - Stop timed out
+- `subscription.ErrWorkerIDMutation` - Dynamic consumer workerID changed unexpectedly
+- `subscription.ErrMaxSubjectsExceeded` - Partition count exceeds limit

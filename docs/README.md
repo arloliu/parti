@@ -44,9 +44,9 @@ mgr.Start(context.Background())
 | Document                                      | Description                                                 |
 |-----------------------------------------------|-------------------------------------------------------------|
 | [Lifecycle](LIFECYCLE.md)                     | Worker states, stable IDs, two-phase handoff, degraded mode |
-| [Consumer Helpers](CONSUMERS.md)              | WorkerConsumer, BroadcastConsumer, ProcessingGate           |
+| [Consumer Package](CONSUMERS.md)              | Queue, Static, Dynamic, Broadcast consumers                 |
 | [Strategies & Sources](STRATEGIES.md)         | Assignment strategies, partition sources                    |
-| [Static Partitioning](STATIC_PARTITIONING.md) | The partition package for key-based routing                 |
+| [Static Partitioning](STATIC_PARTITIONING.md) | Key-based routing utilities (deprecated for consumers)      |
 
 ### Reference
 
@@ -72,9 +72,8 @@ make lint              # Check for errors
 ## 📖 Reading Order
 
 1. **[Architecture](ARCHITECTURE.md)** - Concepts and data flow
-2. **[Architecture](ARCHITECTURE.md)** - Understand system design
-3. **[Configuration](CONFIGURATION.md)** - Configure for your environment
-4. **[Lifecycle](LIFECYCLE.md)** - Learn worker states and handoff
-5. **[Consumer Helpers](CONSUMERS.md)** - Set up JetStream consumers
-6. **[Strategies](STRATEGIES.md)** - Choose assignment strategy
-7. **[Reference](REFERENCE.md)** - Hooks, errors, best practices
+2. **[Configuration](CONFIGURATION.md)** - Configure for your environment
+3. **[Lifecycle](LIFECYCLE.md)** - Learn worker states and handoff
+4. **[Consumer Package](CONSUMERS.md)** - Set up JetStream consumers
+5. **[Strategies](STRATEGIES.md)** - Choose assignment strategy
+6. **[Reference](REFERENCE.md)** - Hooks, errors, best practices

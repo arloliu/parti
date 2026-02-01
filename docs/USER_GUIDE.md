@@ -104,11 +104,12 @@ go get github.com/arloliu/parti
 ```
 github.com/arloliu/parti
 ├── parti          # Core: Manager, Config, types
-├── subscription   # Consumer helpers: WorkerConsumer, BroadcastConsumer
+├── consumer       # Unified consumers: Queue, Static, Dynamic, Broadcast
 ├── strategy       # Assignment strategies: ConsistentHash, RoundRobin
 ├── source         # Partition sources: Static, NatsKV
-├── partition      # Static partitioning: HashPartitioner
-└── types          # Shared types: State, Hooks, Partition
+├── types          # Shared types: State, Hooks, Partition
+├── subscription   # (Deprecated) Use consumer package instead
+└── partition      # (Deprecated) Use consumer package instead
 ```
 
 ---
@@ -180,42 +181,42 @@ func main() {
 }
 ```
 
-### With Consumer Helper
+### With Dynamic Consumer
 
 ```go
 import (
     "context"
-    "github.com/arloliu/parti/subscription"
+    "github.com/arloliu/parti/consumer"
     "github.com/nats-io/nats.go/jetstream"
 )
 
-// Configure worker consumer
-cfg := subscription.WorkerConsumerConfig{
-    StreamName:      "ORDERS",
-    ConsumerPrefix:  "order-processor",
-    SubjectTemplate: "orders.{{.PartitionID}}",  // Template with partition placeholder
-}
-
 // Create message handler
-handler := subscription.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+handler := consumer.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
     processOrder(msg)
     return nil  // Return nil for auto-ack, error for auto-nak
 })
 
-// Create worker consumer
-wc, err := subscription.NewWorkerConsumer(js, cfg, handler)
+// Create dynamic consumer with positional args + options
+c, err := consumer.NewDynamic(
+    js,                              // JetStream context
+    "ORDERS",                        // streamName
+    "order-processor",               // consumerPrefix
+    "orders.{{.PartitionID}}",       // subjectTemplate
+    handler,                         // MessageHandler
+)
 if err != nil {
     log.Fatal(err)
 }
+defer c.Stop(ctx)
 
 // Create partition source and manager
 src := source.NewStatic(partitions)
 mgr, _ := parti.NewManager(mgrCfg, js, src, strategy.NewConsistentHash(),
-    parti.WithWorkerConsumerUpdater(wc),
+    parti.WithWorkerConsumerUpdater(c),
 )
 ```
 
-See [Consumer Helpers](CONSUMERS.md) for complete documentation.
+See [Consumer Package](CONSUMERS.md) for complete documentation.
 
 ---
 
@@ -276,10 +277,11 @@ See [Lifecycle Guide](LIFECYCLE.md) for complete state documentation.
 
 | Scenario                                            | Recommended Approach                      |
 |-----------------------------------------------------|-------------------------------------------|
-| Dynamic worker scaling with partition rebalancing   | `parti.Manager` (dynamic partitioning)    |
-| Kubernetes StatefulSet with fixed pod count         | `partition` package (static partitioning) |
-| Global fan-out events (cache invalidation, control) | `BroadcastConsumer`                       |
-| Partitioned workloads with strict ownership         | `WorkerConsumer` + `ProcessingGate`       |
+| Dynamic worker scaling with partition rebalancing   | `parti.Manager` + `consumer.Dynamic`      |
+| Kubernetes StatefulSet with fixed pod count         | `consumer.Static`                         |
+| Global fan-out events (cache invalidation, control) | `consumer.Broadcast`                      |
+| Partitioned workloads with strict ownership         | `consumer.Dynamic` + ProcessingGate       |
+| Load-balanced workers (queue group)                 | `consumer.Queue`                          |
 | Stateful partition processing (caches, connections) | Enable two-phase handoff                  |
 | High availability during NATS outages               | Configure degraded mode                   |
 
