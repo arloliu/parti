@@ -2,6 +2,7 @@ package assignment_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -203,7 +204,7 @@ func TestRoundRobin_EvenDistribution(t *testing.T) {
 	partitions := make([]types.Partition, numPartitions)
 	for i := range partitions {
 		partitions[i] = types.Partition{
-			Keys:   []string{"rr-partition", string(rune(i))},
+			Keys:   []string{"rr-partition", fmt.Sprintf("%03d", i)},
 			Weight: 100,
 		}
 	}

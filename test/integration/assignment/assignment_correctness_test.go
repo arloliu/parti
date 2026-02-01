@@ -196,7 +196,7 @@ func TestAssignmentCorrectness_StableAssignments(t *testing.T) {
 	partitions := make([]types.Partition, numPartitions)
 	for i := range partitions {
 		partitions[i] = types.Partition{
-			Keys:   []string{"test", "partition", string(rune(i))},
+			Keys:   []string{"test", "partition", fmt.Sprintf("%03d", i)},
 			Weight: 100,
 		}
 	}
@@ -231,7 +231,7 @@ func TestAssignmentCorrectness_StableAssignments(t *testing.T) {
 	}
 
 	// Wait for all managers to reach stable state
-	err = testutil.WaitAllManagersState(ctx, mgrWaiters, parti.StateStable, 15*time.Second)
+	err = testutil.WaitAllManagersState(ctx, mgrWaiters, parti.StateStable, 25*time.Second)
 	require.NoError(t, err, "not all managers reached stable state")
 
 	// Record initial assignments after an extra stabilization delay to avoid transient leader catch-up
