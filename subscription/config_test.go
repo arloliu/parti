@@ -101,3 +101,36 @@ func TestWorkerConsumerConfig_SetDefaults(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkerConsumerConfig_Validate_InvalidSubjectTemplate(t *testing.T) {
+	cfg := WorkerConsumerConfig{
+		StreamName:      "TEST",
+		ConsumerPrefix:  "wc",
+		SubjectTemplate: "events.{{.PartitionID",
+	}
+
+	err := cfg.Validate()
+	require.Error(t, err)
+}
+
+func TestWorkerConsumerConfig_Validate_InvalidSubjectTokens(t *testing.T) {
+	cfg := WorkerConsumerConfig{
+		StreamName:      "TEST",
+		ConsumerPrefix:  "wc",
+		SubjectTemplate: "events.>.{{.PartitionID}}",
+	}
+
+	err := cfg.Validate()
+	require.Error(t, err)
+}
+
+func TestBroadcastConsumerConfig_Validate_InvalidWildcardFilter(t *testing.T) {
+	cfg := BroadcastConsumerConfig{
+		StreamName:     "TEST",
+		ConsumerPrefix: "bc",
+		WildcardFilter: "events..>",
+	}
+
+	err := cfg.Validate()
+	require.Error(t, err)
+}

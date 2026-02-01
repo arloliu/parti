@@ -12,10 +12,11 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/zeebo/xxh3"
 
+	"github.com/arloliu/parti/jsutil"
 	"github.com/arloliu/parti/kvutil"
 	"github.com/arloliu/parti/types"
-	"github.com/zeebo/xxh3"
 )
 
 // WorkerConsumer manages one JetStream durable pull consumer per subject (partition).
@@ -450,37 +451,7 @@ func (wc *WorkerConsumer) ensurePerSubjectConsumer(ctx context.Context, durable 
 		MaxAckPending:     wc.config.MaxAckPending,
 	}
 
-	var lastErr error
-	const maxAttempts = 3
-
-	for i := 0; i < maxAttempts; i++ {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-
-		cons, err := wc.js.CreateOrUpdateConsumer(ctx, wc.config.StreamName, cfg)
-		if err == nil {
-			return cons, nil
-		}
-
-		lastErr = err
-		// If stream not found, it's a configuration error, not transient.
-		if errors.Is(err, jetstream.ErrStreamNotFound) {
-			return nil, err
-		}
-
-		if i < maxAttempts-1 {
-			delay := jitterBackoff(time.Duration(i)*50*time.Millisecond, 50*time.Millisecond, 2.0, 200*time.Millisecond, nil)
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(delay):
-				continue
-			}
-		}
-	}
-
-	return nil, fmt.Errorf("failed after %d attempts: %w", maxAttempts, lastErr)
+	return jsutil.EnsureConsumer(ctx, wc.js, wc.config.StreamName, cfg)
 }
 
 // perSubjectDurableName returns a stable, sanitized durable for a given subject.

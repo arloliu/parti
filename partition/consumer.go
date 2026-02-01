@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/arloliu/parti/jsutil"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -28,6 +29,9 @@ type PartitionJSConsumer interface {
 //
 // This consumer is designed for StatefulSet deployments where each pod
 // handles a fixed partition based on its ordinal index.
+//
+// When DispatchByKey is enabled, messages are routed to per-key goroutines
+// for concurrent processing while preserving per-key ordering.
 type JSConsumer struct {
 	js      jetstream.JetStream
 	config  ConsumerConfig
@@ -37,6 +41,9 @@ type JSConsumer struct {
 	subject   string
 
 	consumer jetstream.Consumer
+
+	// keyDispatcher handles per-key concurrent processing (nil if disabled)
+	keyDispatcher *keyDispatcher
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -78,14 +85,34 @@ func NewJSConsumer(
 		return nil, err
 	}
 
-	return &JSConsumer{
+	c := &JSConsumer{
 		js:        js,
 		config:    config,
 		handler:   handler,
 		partition: config.Partition,
 		subject:   subject,
 		done:      make(chan struct{}),
-	}, nil
+	}
+
+	// Initialize key dispatcher if DispatchByKey is enabled
+	if config.DispatchByKey != nil && *config.DispatchByKey {
+		// Use pattern-aware key extractor if no custom one provided
+		keyExtractor := config.KeyExtractor
+		if keyExtractor == nil {
+			keyExtractor = parts.keyExtractorFunc()
+		}
+
+		c.keyDispatcher = newKeyDispatcher(
+			config.Logger,
+			handler,
+			keyExtractor,
+			config.KeyChannelBuffer,
+			config.KeyIdleTimeout,
+			config.ManualAck,
+		)
+	}
+
+	return c, nil
 }
 
 // Start begins consuming messages in a background goroutine.
@@ -128,6 +155,7 @@ func (c *JSConsumer) Stop(ctx context.Context) error {
 	c.mu.Lock()
 	cancel := c.cancel
 	done := c.done
+	dispatcher := c.keyDispatcher
 	c.cancel = nil
 	c.mu.Unlock()
 
@@ -136,9 +164,15 @@ func (c *JSConsumer) Stop(ctx context.Context) error {
 	}
 	cancel()
 
+	// Close key dispatcher if enabled
+	var dispatcherErr error
+	if dispatcher != nil {
+		dispatcherErr = dispatcher.Close(ctx)
+	}
+
 	select {
 	case <-done:
-		return nil
+		return dispatcherErr
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -168,7 +202,7 @@ func (c *JSConsumer) ensureConsumer(ctx context.Context) (jetstream.Consumer, er
 		MaxDeliver:    c.config.MaxDeliver,
 	}
 
-	return c.js.CreateOrUpdateConsumer(ctx, c.config.StreamName, cfg)
+	return jsutil.EnsureConsumer(ctx, c.js, c.config.StreamName, cfg)
 }
 
 func (c *JSConsumer) run(ctx context.Context) {
@@ -215,6 +249,16 @@ func (c *JSConsumer) processIterator(ctx context.Context, iter jetstream.Message
 			return sleepWithContext(ctx, 200*time.Millisecond)
 		}
 
+		// Dispatch to key dispatcher if enabled
+		if c.keyDispatcher != nil {
+			if !c.keyDispatcher.Dispatch(ctx, msg) {
+				iter.Stop()
+				return false
+			}
+			continue
+		}
+
+		// Sequential processing (DispatchByKey disabled)
 		if c.config.ManualAck {
 			_ = c.handler.Handle(ctx, msg)
 			continue

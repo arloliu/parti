@@ -17,4 +17,8 @@ var (
 
 	// ErrPatternEmptyToken is returned when pattern would produce empty subject tokens.
 	ErrPatternEmptyToken = errors.New("pattern produces empty subject token")
+
+	// ErrDispatchByKeyRequiresKeyPlaceholder is returned when DispatchByKey is enabled
+	// but the SubjectPattern does not contain {{key}} placeholder.
+	ErrDispatchByKeyRequiresKeyPlaceholder = errors.New("DispatchByKey requires {{key}} placeholder in SubjectPattern")
 )

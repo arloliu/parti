@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/arloliu/fuda"
 	"github.com/arloliu/parti/internal/logging"
 	"github.com/arloliu/parti/internal/metrics"
 	"github.com/arloliu/parti/types"
-	"github.com/creasty/defaults"
 	"github.com/go-playground/validator/v10"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -151,7 +151,7 @@ func DefaultBroadcastConsumerConfig() BroadcastConsumerConfig {
 
 // SetDefaults sets default values for the configuration.
 func (c *BroadcastConsumerConfig) SetDefaults() error {
-	if err := defaults.Set(c); err != nil {
+	if err := fuda.SetDefaults(c); err != nil {
 		return fmt.Errorf("failed to set defaults: %w", err)
 	}
 
@@ -167,6 +167,10 @@ func (c *BroadcastConsumerConfig) SetDefaults() error {
 
 // Validate checks configuration constraints.
 func (c *BroadcastConsumerConfig) Validate() error {
+	if err := c.SetDefaults(); err != nil {
+		return err
+	}
+
 	validate := validator.New(validator.WithRequiredStructEnabled())
 	if err := validate.Struct(c); err != nil {
 		return fmt.Errorf("configuration validation failed: %w", err)
@@ -176,6 +180,9 @@ func (c *BroadcastConsumerConfig) Validate() error {
 		if !isAllowedConsumerRune(r) {
 			return fmt.Errorf("consumer prefix %q contains invalid characters (allowed: a-z, A-Z, 0-9, -, _)", c.ConsumerPrefix)
 		}
+	}
+	if err := validateSubjectTokens(c.WildcardFilter, true); err != nil {
+		return fmt.Errorf("wildcard filter is invalid: %w", err)
 	}
 
 	return nil

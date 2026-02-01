@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/arloliu/fuda"
 	"github.com/arloliu/parti/types"
-	"github.com/creasty/defaults"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -55,7 +55,7 @@ type ProcessingGateConfig struct {
 
 // applyDefaults sets default values for the configuration.
 func (c *ProcessingGateConfig) applyDefaults() error {
-	if err := defaults.Set(c); err != nil {
+	if err := fuda.SetDefaults(c); err != nil {
 		return fmt.Errorf("failed to set defaults: %w", err)
 	}
 

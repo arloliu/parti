@@ -245,3 +245,41 @@ func TestProcessingGate_Metrics(t *testing.T) {
 	require.Equal(t, 1, metrics.naks["non_owner"])
 	require.Len(t, metrics.delays, 1)
 }
+
+func TestProcessingGateConfig_SetDefaults(t *testing.T) {
+	cfg := ProcessingGateConfig{
+		Enabled: true,
+	}
+	require.NoError(t, cfg.applyDefaults())
+
+	// Check defaults are applied
+	require.Equal(t, 100*time.Millisecond, cfg.NakDelay)
+	require.Equal(t, float64(0), cfg.NakJitter)
+	require.Equal(t, []types.HandoffState{types.HandoffStateStable}, cfg.AllowedStates)
+}
+
+func TestProcessingGateConfig_SetDefaults_PreservesExistingValues(t *testing.T) {
+	cfg := ProcessingGateConfig{
+		Enabled:       true,
+		NakDelay:      200 * time.Millisecond,
+		NakJitter:     0.1,
+		AllowedStates: []types.HandoffState{types.HandoffStateStable, types.HandoffStatePrepare},
+	}
+	require.NoError(t, cfg.applyDefaults())
+
+	// Existing values preserved
+	require.Equal(t, 200*time.Millisecond, cfg.NakDelay)
+	require.Equal(t, 0.1, cfg.NakJitter)
+	require.Equal(t, []types.HandoffState{types.HandoffStateStable, types.HandoffStatePrepare}, cfg.AllowedStates)
+}
+
+func TestProcessingGateConfig_WarmupDefaults(t *testing.T) {
+	cfg := ProcessingGateConfig{
+		Enabled:        true,
+		WarmupDuration: 5 * time.Second, // triggers WarmupAllowedStates default
+	}
+	require.NoError(t, cfg.applyDefaults())
+
+	// WarmupAllowedStates should default to Stable-only when WarmupDuration > 0
+	require.Equal(t, []types.HandoffState{types.HandoffStateStable}, cfg.WarmupAllowedStates)
+}

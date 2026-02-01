@@ -1,0 +1,344 @@
+package consumer
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/arloliu/fuda"
+	"github.com/arloliu/parti/jsutil"
+	"github.com/arloliu/parti/subscription"
+	"github.com/arloliu/parti/types"
+	"github.com/nats-io/nats.go/jetstream"
+)
+
+// Dynamic is a partition-aware consumer that receives assignments from a Parti Manager.
+// It manages multiple internal consumers based on assigned partitions.
+//
+// # Lifecycle
+//
+// Create with [NewDynamic], then call [Dynamic.Update] to start consuming assigned
+// partitions. Clean up with [Dynamic.Close]:
+//
+//	consumer, err := consumer.NewDynamic(js, "stream", "worker", "orders.{{.PartitionID}}", handler)
+//	if err != nil { log.Fatal(err) }
+//	defer consumer.Close(ctx)
+//
+//	// Start consuming partitions (typically called by Parti Manager)
+//	if err := consumer.Update(ctx, "worker-0", partitions); err != nil { log.Fatal(err) }
+//
+// Unlike [Static] and [Queue], Dynamic does NOT have a Start method. Consumption
+// begins when [Dynamic.Update] is called with a non-empty partition list.
+//
+// # Thread Safety
+//
+// Dynamic is safe for concurrent use. [Dynamic.Update] calls are serialized
+// internally to prevent race conditions during assignment changes.
+//
+// # Deprecation Notice
+//
+// This type wraps [subscription.WorkerConsumer]. Future versions may deprecate
+// the subscription package in favor of this unified consumer API.
+type Dynamic struct {
+	inner *subscription.WorkerConsumer
+}
+
+// DynamicConfig configures a Dynamic consumer.
+// Uses unified naming; converted to subscription.WorkerConsumerConfig internally.
+type DynamicConfig struct {
+	CommonConfig
+
+	// StreamName is the JetStream stream to consume from.
+	// Required.
+	StreamName string `validate:"required"`
+
+	// SubjectTemplate is a text/template for building subjects from partitions.
+	//
+	// It relies on the standard Go text/template package.
+	// The template context provides a {{.PartitionID}} variable.
+	//
+	// Example: "orders.{{.PartitionID}}.events"
+	SubjectTemplate string `validate:"required"`
+
+	// ConsumerPrefix is the prefix for the durable consumer name.
+	//
+	// The final durable name is constructed dynamically for each assigned partition:
+	// "<ConsumerPrefix>_<partitionID>_<hash>".
+	//
+	// This ensures unique, stable durability for each partition assignment.
+	ConsumerPrefix string `validate:"required"`
+
+	// ProcessingGate configures optional exclusive processing enforcement.
+	//
+	// When enabled, the WorkerConsumer uses a distributed lock (via KV) to ensure
+	// that it is the *only* active processor for its assigned partitions.
+	// This prevents split-brain processing during rebalances.
+	ProcessingGate *subscription.ProcessingGateConfig
+
+	// Resolver configures the ownership resolver used when ProcessingGate is enabled.
+	//
+	// It defines how ownership is claimed, refreshed, and verified.
+	Resolver subscription.ResolverConfig
+
+	// PullGatingEnabled enables pre-pull ownership/state gating for consumers.
+	//
+	// When true, the consumer will check if it still owns the partition before
+	// issuing a pull request to JetStream. This reduces "ghost" processing of
+	// messages after assignment revocation.
+	PullGatingEnabled bool
+
+	// DrainOnRemove enables graceful draining when a partition assignment is revoked.
+	//
+	// When true, the consumer will stop pulling new messages but finish processing
+	// buffered messages before shutting down the partition consumer.
+	DrainOnRemove bool
+
+	// DrainOnRemoveTimeout caps the time spent draining a revoked partition.
+	//
+	// If draining takes longer than this timeout, the consumer is forcibly closed.
+	// Default: 10s.
+	DrainOnRemoveTimeout time.Duration `default:"10s" validate:"gte=0"`
+
+	// MaxConcurrentSubjects limits the number of partitions (subjects) processed concurrently.
+	//
+	// If the manager assigns more partitions than this limit, excess partitions
+	// will be ignored (and logged/warned).
+	MaxConcurrentSubjects int `validate:"gte=0"`
+
+	// AllowWorkerIDChange controls whether the worker's identity can change during runtime.
+	//
+	// Default: false (immutable once set). Changing WorkerID usually requires a restart.
+	AllowWorkerIDChange bool
+
+	// Retry configures the backoff behavior for control-plane operations
+	// (e.g., initial connection, creating consumers).
+	Retry RetryConfig
+
+	// IteratorEscalationWindow defines the sliding time window used to aggregate
+	// iterator failures for escalation detection.
+	//
+	// If too many iterator errors occur within this window, the consumer will
+	// attempt to escalate recovery.
+	//
+	// Default: 60s.
+	IteratorEscalationWindow time.Duration `default:"60s" validate:"gt=0"`
+
+	// IteratorEscalationThreshold is the number of iterator failures within the
+	// escalation window that triggers consumer refresh/escalation.
+	//
+	// Default: 3.
+	IteratorEscalationThreshold int `default:"3" validate:"gt=0"`
+
+	// PartitionRefreshMinInterval sets the minimum interval between forced claim refreshes
+	// per partition when pull gating is enabled.
+	//
+	// This prevents excessive load on the coordination backend (KV) during high-throughput pulling.
+	//
+	// Default: 500ms.
+	PartitionRefreshMinInterval time.Duration `default:"500ms" validate:"gt=0"`
+
+	// IteratorFactory optionally overrides the internal iterator creation logic.
+	// This is primarily used for testing to inject mock iterators.
+	IteratorFactory func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error)
+}
+
+// NewDynamic creates a new dynamic partition consumer.
+func NewDynamic(
+	js jetstream.JetStream,
+	streamName, consumerPrefix, subjectTemplate string,
+	handler MessageHandler,
+	opts ...DynamicOption,
+) (*Dynamic, error) {
+	if js == nil {
+		return nil, errors.New("JetStream context is required")
+	}
+	if streamName == "" {
+		return nil, errors.New("stream name is required")
+	}
+	if consumerPrefix == "" {
+		return nil, errors.New("consumer prefix is required")
+	}
+	if subjectTemplate == "" {
+		return nil, errors.New("subject template is required")
+	}
+	if handler == nil {
+		return nil, errors.New("message handler is required")
+	}
+
+	// Apply options
+	o := defaultOptions()
+	for _, opt := range opts {
+		opt.apply(&o)
+	}
+
+	// Build configuration
+	cfg := DynamicConfig{
+		CommonConfig: CommonConfig{
+			Logger:            o.logger,
+			Metrics:           o.metrics,
+			ManualAck:         o.manualAck,
+			AckWait:           o.ackWait,
+			MaxDeliver:        o.maxDeliver,
+			BatchSize:         o.batchSize,
+			FetchTimeout:      o.fetchTimeout,
+			MaxWaiting:        o.maxWaiting,
+			MaxAckPending:     o.maxAckPending,
+			InactiveThreshold: o.inactiveThreshold,
+			AckPolicy:         o.ackPolicy,
+		},
+		StreamName:                  streamName,
+		ConsumerPrefix:              consumerPrefix,
+		SubjectTemplate:             subjectTemplate,
+		ProcessingGate:              o.processingGate,
+		Resolver:                    o.resolver,
+		PullGatingEnabled:           o.pullGatingEnabled,
+		DrainOnRemove:               o.drainOnRemove,
+		DrainOnRemoveTimeout:        o.drainOnRemoveTimeout,
+		MaxConcurrentSubjects:       o.maxConcurrentSubjects,
+		AllowWorkerIDChange:         o.allowWorkerIDChange,
+		Retry:                       o.retry,
+		IteratorEscalationWindow:    o.iteratorEscalationWindow,
+		IteratorEscalationThreshold: o.iteratorEscalationThreshold,
+		PartitionRefreshMinInterval: o.partitionRefreshMinInterval,
+		IteratorFactory:             o.iteratorFactory,
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
+	// Convert unified config to subscription.WorkerConsumerConfig
+	workerCfg := subscription.WorkerConsumerConfig{
+		StreamName:                  cfg.StreamName,
+		ConsumerPrefix:              cfg.ConsumerPrefix,
+		SubjectTemplate:             cfg.SubjectTemplate,
+		Logger:                      cfg.Logger,
+		Metrics:                     cfg.Metrics,
+		ManualAck:                   cfg.ManualAck,
+		AckWait:                     cfg.AckWait,
+		MaxDeliver:                  cfg.MaxDeliver,
+		BatchSize:                   cfg.BatchSize,
+		FetchTimeout:                cfg.FetchTimeout,
+		MaxWaiting:                  cfg.MaxWaiting,
+		MaxAckPending:               cfg.MaxAckPending,
+		InactiveThreshold:           cfg.InactiveThreshold,
+		AckPolicy:                   cfg.AckPolicy,
+		ProcessingGate:              cfg.ProcessingGate,
+		Resolver:                    cfg.Resolver,
+		PullGatingEnabled:           cfg.PullGatingEnabled,
+		DrainOnRemove:               cfg.DrainOnRemove,
+		DrainOnRemoveTimeout:        cfg.DrainOnRemoveTimeout,
+		MaxConcurrentSubjects:       cfg.MaxConcurrentSubjects,
+		AllowWorkerIDChange:         cfg.AllowWorkerIDChange,
+		PartitionRefreshMinInterval: cfg.PartitionRefreshMinInterval,
+		IteratorEscalationWindow:    cfg.IteratorEscalationWindow,
+		IteratorEscalationThreshold: cfg.IteratorEscalationThreshold,
+		IteratorFactory:             cfg.IteratorFactory,
+		Retry: subscription.RetryConfig{
+			Backoff:    cfg.Retry.Backoff,
+			Max:        cfg.Retry.Max,
+			Multiplier: cfg.Retry.Multiplier,
+			Base:       cfg.Retry.Base,
+			Seed:       cfg.Retry.Seed,
+		},
+	}
+
+	adapted := subscription.MessageHandlerFunc(handler.Handle)
+
+	inner, err := subscription.NewWorkerConsumer(js, workerCfg, adapted)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Dynamic{inner: inner}, nil
+}
+
+// Update applies a new partition assignment set.
+//
+// This method creates or binds durable consumers for newly assigned partitions
+// and stops consumers for removed partitions. The underlying JetStream consumers
+// are NOT deleted on removal; they will be garbage-collected by the server after
+// InactiveThreshold.
+//
+// Update is typically called by the Parti Manager when assignments change.
+// On the first call, this starts consuming the assigned partitions.
+//
+// Parameters:
+//   - ctx: Context for the update operation. Used for JetStream API calls.
+//   - workerID: The stable worker ID for this instance (e.g., "worker-0").
+//   - partitions: The new set of partitions to consume. Empty list stops all.
+//
+// Returns:
+//   - error: Non-nil if partition creation fails or if workerID mutation is
+//     disallowed (see [DynamicConfig.AllowWorkerIDChange]).
+//
+// Errors:
+//   - [subscription.ErrWorkerIDMutation]: Returned when workerID changes and
+//     AllowWorkerIDChange is false.
+//   - [subscription.ErrMaxSubjectsExceeded]: Returned when partition count
+//     exceeds MaxConcurrentSubjects.
+func (d *Dynamic) Update(ctx context.Context, workerID string, partitions []types.Partition) error {
+	return d.inner.UpdateWorkerConsumer(ctx, workerID, partitions)
+}
+
+// UpdateWorkerConsumer is an alias for [Dynamic.Update] that implements the
+// WorkerConsumerUpdater interface used by the Parti Manager.
+//
+// Deprecated: Use [Dynamic.Update] for new code. This method exists for
+// backward compatibility with code that expects the WorkerConsumerUpdater
+// interface.
+func (d *Dynamic) UpdateWorkerConsumer(ctx context.Context, workerID string, partitions []types.Partition) error {
+	return d.inner.UpdateWorkerConsumer(ctx, workerID, partitions)
+}
+
+// Close stops all partition consumers.
+//
+// Close cancels all internal pull loops and waits for pending message processing
+// to complete (up to the context deadline). The underlying JetStream consumers
+// are NOT deleted; they will be garbage-collected by the server after
+// InactiveThreshold.
+//
+// If DrainOnRemove is enabled, Close will first drain pending messages
+// (up to DrainOnRemoveTimeout) before stopping.
+//
+// Close is idempotent; calling it multiple times is safe.
+//
+// Parameters:
+//   - ctx: Context with shutdown deadline. If the deadline expires, Close
+//     returns [context.DeadlineExceeded] but consumers will still eventually stop.
+//
+// Returns:
+//   - error: Context error if the wait times out; nil otherwise.
+func (d *Dynamic) Close(ctx context.Context) error {
+	return d.inner.Close(ctx)
+}
+
+// SetResolverMetrics sets the metrics collector for the ownership resolver.
+//
+// This is an advanced method for observability integration. Most users do not
+// need to call this directly.
+func (d *Dynamic) SetResolverMetrics(m subscription.ResolverMetrics) {
+	d.inner.SetResolverMetrics(m)
+}
+
+// SetDefaults applies default values to the configuration.
+func (c *DynamicConfig) SetDefaults() error {
+	return fuda.SetDefaults(c)
+}
+
+// Validate checks configuration constraints.
+func (c *DynamicConfig) Validate() error {
+	if err := c.SetDefaults(); err != nil {
+		return err
+	}
+	if err := fuda.Validate(c); err != nil {
+		return err
+	}
+
+	if !jsutil.IsValidConsumerName(c.ConsumerPrefix) {
+		return fmt.Errorf("consumer prefix %q contains invalid characters (allowed: a-z, A-Z, 0-9, -, _)", c.ConsumerPrefix)
+	}
+
+	return nil
+}

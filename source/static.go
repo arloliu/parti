@@ -57,6 +57,7 @@ func (s *Static) Start(_ context.Context) error {
 			return fmt.Errorf("invalid partition at index %d: %w", i, err)
 		}
 	}
+
 	return nil
 }
 

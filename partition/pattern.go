@@ -4,6 +4,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 const (
@@ -39,14 +41,24 @@ func parsePattern(pattern string) (patternParts, error) {
 		idx += cursor
 		parts.segments = append(parts.segments, pattern[cursor:idx])
 
+		if !isPlaceholderTokenBoundary(pattern, idx) {
+			return patternParts{}, ErrInvalidPattern
+		}
+
 		switch {
 		case strings.HasPrefix(pattern[idx:], partitionPlaceholder):
+			if !isPlaceholderTokenBoundaryEnd(pattern, idx, len(partitionPlaceholder)) {
+				return patternParts{}, ErrInvalidPattern
+			}
 			if parts.partitionIndex >= 0 {
 				return patternParts{}, ErrInvalidPattern
 			}
 			parts.partitionIndex = len(parts.segments) - 1
 			cursor = idx + len(partitionPlaceholder)
 		case strings.HasPrefix(pattern[idx:], keyPlaceholder):
+			if !isPlaceholderTokenBoundaryEnd(pattern, idx, len(keyPlaceholder)) {
+				return patternParts{}, ErrInvalidPattern
+			}
 			if parts.keyIndex >= 0 {
 				return patternParts{}, ErrInvalidPattern
 			}
@@ -63,6 +75,21 @@ func parsePattern(pattern string) (patternParts, error) {
 	}
 
 	return parts, nil
+}
+
+func isPlaceholderTokenBoundary(pattern string, start int) bool {
+	if start == 0 {
+		return true
+	}
+	return pattern[start-1] == '.'
+}
+
+func isPlaceholderTokenBoundaryEnd(pattern string, start int, length int) bool {
+	end := start + length
+	if end >= len(pattern) {
+		return true
+	}
+	return pattern[end] == '.'
 }
 
 func (p *patternParts) buildSubject(key string, partition int) string {
@@ -125,6 +152,79 @@ func (p *patternParts) buildFilterSubject(partition int) string {
 	}
 
 	return builder.String()
+}
+
+// extractKey extracts the key from a subject based on the pattern.
+//
+// The pattern defines where {{key}} is located. This method parses the subject
+// and returns the token at the key position.
+//
+// Parameters:
+//   - subject: The full NATS subject (e.g., "events.0.customer-abc")
+//
+// Returns:
+//   - string: The extracted key, or empty string if extraction fails
+//
+// Example:
+//
+//	pattern: "events.{{partition}}.{{key}}"
+//	subject: "events.0.customer-abc"
+//	→ returns "customer-abc"
+func (p *patternParts) extractKey(subject string) string {
+	if !p.hasKey {
+		return ""
+	}
+
+	keyTokenIndex := p.keyTokenIndex()
+	tokens := strings.Split(subject, ".")
+	if keyTokenIndex >= len(tokens) {
+		return ""
+	}
+
+	return tokens[keyTokenIndex]
+}
+
+// keyTokenIndex calculates the token index where {{key}} appears in the subject.
+//
+// For pattern "events.{{partition}}.{{key}}", the key is at token index 2.
+// For pattern "events.{{key}}.{{partition}}", the key is at token index 1.
+func (p *patternParts) keyTokenIndex() int {
+	if !p.hasKey {
+		return -1
+	}
+
+	// Build the prefix string up to the key placeholder and count dots
+	// Each dot represents a token boundary
+	var prefix strings.Builder
+	for i := 0; i < p.keyIndex; i++ {
+		prefix.WriteString(p.segments[i])
+		// Add a placeholder character for each placeholder before keyIndex
+		if i == p.partitionIndex {
+			prefix.WriteString("0") // partition placeholder
+		}
+	}
+	// Add the segment right before the key placeholder
+	prefix.WriteString(p.segments[p.keyIndex])
+
+	// Count dots to determine token index
+	return strings.Count(prefix.String(), ".")
+}
+
+// keyExtractorFunc returns a KeyExtractorFunc that uses this pattern's structure
+// to extract the key from message subjects.
+func (p *patternParts) keyExtractorFunc() KeyExtractorFunc {
+	if !p.hasKey {
+		return nil
+	}
+
+	keyTokenIdx := p.keyTokenIndex()
+	return func(msg jetstream.Msg) string {
+		tokens := strings.Split(msg.Subject(), ".")
+		if keyTokenIdx >= len(tokens) {
+			return ""
+		}
+		return tokens[keyTokenIdx]
+	}
 }
 
 func validateSubjectTokens(subject string, allowWildcard bool) error {

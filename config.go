@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/creasty/defaults"
+	"github.com/arloliu/fuda"
 	"github.com/go-playground/validator/v10"
 )
 
@@ -132,20 +132,6 @@ type DegradedAlertConfig struct {
 	AlertInterval time.Duration `yaml:"alertInterval" default:"1m" validate:"gt=0"`
 }
 
-// DefaultDegradedAlertConfig returns default alert configuration for degraded mode.
-//
-// Returns:
-//   - DegradedAlertConfig: Configuration with production defaults
-func DefaultDegradedAlertConfig() DegradedAlertConfig {
-	return DegradedAlertConfig{
-		InfoThreshold:     30 * time.Second,
-		WarnThreshold:     2 * time.Minute,
-		ErrorThreshold:    5 * time.Minute,
-		CriticalThreshold: 10 * time.Minute,
-		AlertInterval:     1 * time.Minute,
-	}
-}
-
 // DegradedBehaviorConfig controls when the manager enters and exits degraded mode.
 type DegradedBehaviorConfig struct {
 	// EnterThreshold is how long NATS connectivity errors must persist before entering degraded mode.
@@ -174,18 +160,12 @@ type DegradedBehaviorConfig struct {
 	RecoveryGracePeriod time.Duration `yaml:"recoveryGracePeriod" default:"15s" validate:"gte=0"`
 }
 
-// DefaultDegradedBehaviorConfig returns default behavior configuration for degraded mode.
-//
-// Returns:
-//   - DegradedBehaviorConfig: Configuration with balanced production defaults
-func DefaultDegradedBehaviorConfig() DegradedBehaviorConfig {
-	return DegradedBehaviorConfig{
-		EnterThreshold:      10 * time.Second,
-		ExitThreshold:       5 * time.Second,
-		KVErrorThreshold:    5,
-		KVErrorWindow:       30 * time.Second,
-		RecoveryGracePeriod: 15 * time.Second,
-	}
+// defaultDegradedBehaviorConfig returns default behavior configuration for degraded mode.
+// Used internally by DegradedBehaviorPreset("balanced").
+func defaultDegradedBehaviorConfig() DegradedBehaviorConfig {
+	var cfg DegradedBehaviorConfig
+	_ = fuda.SetDefaults(&cfg)
+	return cfg
 }
 
 // DegradedBehaviorPreset returns a preconfigured DegradedBehaviorConfig based on the preset name.
@@ -219,7 +199,7 @@ func DegradedBehaviorPreset(preset string) (DegradedBehaviorConfig, error) {
 			RecoveryGracePeriod: 20 * time.Second,
 		}, nil
 	case "balanced":
-		return DefaultDegradedBehaviorConfig(), nil
+		return defaultDegradedBehaviorConfig(), nil
 	case "aggressive":
 		return DegradedBehaviorConfig{
 			EnterThreshold:      5 * time.Second,
@@ -425,11 +405,11 @@ func DefaultConfig() Config {
 // SetDefaults applies default values to zero-valued configuration fields.
 // If a field is zero-valued, it will be set to the corresponding default value.
 func SetDefaults(cfg *Config) {
-	if err := defaults.Set(cfg); err != nil {
+	if err := fuda.SetDefaults(cfg); err != nil {
 		panic(fmt.Errorf("failed to set defaults: %w", err))
 	}
 
-	// Dynamic defaults
+	// Dynamic defaults that cannot be expressed via struct tags
 	if cfg.EmergencyGracePeriod == 0 {
 		// Default: 1.5x HeartbeatInterval (allows one missed heartbeat)
 		cfg.EmergencyGracePeriod = time.Duration(float64(cfg.HeartbeatInterval) * 1.5)

@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/arloliu/parti/jsutil"
 	"github.com/arloliu/parti/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -258,36 +259,7 @@ func (bc *BroadcastConsumer) ensureConsumer(ctx context.Context, durable string)
 		MaxAckPending:     bc.config.MaxAckPending,
 	}
 
-	var lastErr error
-	const maxAttempts = 3
-
-	for i := range maxAttempts {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-
-		cons, err := bc.js.CreateOrUpdateConsumer(ctx, bc.config.StreamName, cfg)
-		if err == nil {
-			return cons, nil
-		}
-
-		lastErr = err
-		if errors.Is(err, jetstream.ErrStreamNotFound) {
-			return nil, err
-		}
-
-		if i < maxAttempts-1 {
-			delay := jitterBackoff(time.Duration(i)*50*time.Millisecond, 50*time.Millisecond, 2.0, 200*time.Millisecond, nil)
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(delay):
-				continue
-			}
-		}
-	}
-
-	return nil, fmt.Errorf("failed after %d attempts: %w", maxAttempts, lastErr)
+	return jsutil.EnsureConsumer(ctx, bc.js, bc.config.StreamName, cfg)
 }
 
 // runLoop is the main message processing loop.
