@@ -136,9 +136,13 @@
 //
 // The consumer package uses unified field names in constructors:
 //
-//	| Constructor Param  | Static         | Dynamic          | Broadcast        | Queue           |
-//	|--------------------|----------------|------------------|------------------|------------------|
-//	| streamName         | StreamName     | StreamName       | StreamName       | StreamName      |
 //	| consumerName/Prefix| ConsumerName   | ConsumerPrefix   | ConsumerPrefix   | ConsumerName    |
 //	| subject pattern    | SubjectPattern | SubjectTemplate  | FilterSubject    | FilterSubject   |
+//
+// # Helpers
+//
+// The package provides helper functions to assist with partition determination in Kubernetes environments:
+//
+//   - [GetPartitionFromEnv]: Reads partition index from PARTITION_INDEX or HOSTNAME (for StatefulSets).
+//   - [ParseStatefulSetOrdinal]: Extracts the ordinal index from a hostname string.
 package consumer

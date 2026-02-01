@@ -271,3 +271,16 @@ func (c *StaticConfig) Validate() error {
 
 	return nil
 }
+
+// ParseStatefulSetOrdinal extracts the ordinal index from a StatefulSet pod hostname.
+//
+// Wraps [partition.ParseStatefulSetOrdinal].
+func ParseStatefulSetOrdinal(hostname string) (int, error) {
+	return partition.ParseStatefulSetOrdinal(hostname)
+}
+
+// GetPartitionFromEnv reads the partition index from environment.
+// Wraps [partition.GetPartitionFromEnv].
+func GetPartitionFromEnv() (int, error) {
+	return partition.GetPartitionFromEnv()
+}
