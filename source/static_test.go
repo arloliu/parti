@@ -50,3 +50,25 @@ func TestStatic_List(t *testing.T) {
 		require.Equal(t, int64(100), result2[0].Weight)
 	})
 }
+
+func TestStatic_Start(t *testing.T) {
+	t.Run("valid partitions", func(t *testing.T) {
+		partitions := []types.Partition{
+			{Keys: []string{"valid", "one"}},
+		}
+		src := NewStatic(partitions)
+		require.NoError(t, src.Start(context.Background()))
+	})
+
+	t.Run("invalid partitions", func(t *testing.T) {
+		partitions := []types.Partition{
+			{Keys: []string{"valid"}},
+			{Keys: []string{"invalid.dot"}},
+		}
+		src := NewStatic(partitions)
+		err := src.Start(context.Background())
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "invalid partition at index 1")
+		require.Contains(t, err.Error(), "invalid character '.'")
+	})
+}

@@ -20,6 +20,58 @@ func TestPartitionSubjectKey(t *testing.T) {
 	require.Equal(t, "", p2.SubjectKey())
 }
 
+func TestPartitionValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		partition Partition
+		wantErr   bool
+	}{
+		{
+			name:      "Valid",
+			partition: Partition{Keys: []string{"topic", "p", "42"}},
+			wantErr:   false,
+		},
+		{
+			name:      "InvalidDot",
+			partition: Partition{Keys: []string{"topic.name", "p"}},
+			wantErr:   true,
+		},
+		{
+			name:      "InvalidSpace",
+			partition: Partition{Keys: []string{"topic", "p "}},
+			wantErr:   true,
+		},
+		{
+			name:      "InvalidTab",
+			partition: Partition{Keys: []string{"topic\t", "p"}},
+			wantErr:   true,
+		},
+		{
+			name:      "InvalidEmptyKey",
+			partition: Partition{Keys: []string{"topic", ""}},
+			wantErr:   true,
+		},
+		{
+			name:      "EmptyPartition",
+			partition: Partition{},
+			wantErr:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.partition.Validate()
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestPartitionID(t *testing.T) {
 	t.Parallel()
 

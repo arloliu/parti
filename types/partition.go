@@ -1,6 +1,8 @@
 package types
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/zeebo/xxh3"
@@ -18,6 +20,32 @@ type Partition struct {
 	// Weight represents the relative processing cost (default: 100).
 	// Used by weighted assignment strategies for load balancing.
 	Weight int64 `json:"weight"`
+}
+
+// Validate checks if the partition configuration is valid.
+//
+// Validation rules:
+//   - Keys must not contain dots (".") as they are used as separators in NATS subjects.
+//   - Keys must not contain whitespace.
+//   - Keys must not be empty.
+func (p Partition) Validate() error {
+	if len(p.Keys) == 0 {
+		return nil // Empty partition is technically valid, though unusual
+	}
+
+	for i, key := range p.Keys {
+		if key == "" {
+			return errors.New("partition key cannot be empty")
+		}
+		if strings.Contains(key, ".") {
+			return fmt.Errorf("partition key at index %d contains invalid character '.' (dots are reserved separators): %q", i, key)
+		}
+		if strings.ContainsAny(key, " \t\n\r") {
+			return fmt.Errorf("partition key at index %d contains whitespace: %q", i, key)
+		}
+	}
+
+	return nil
 }
 
 // SubjectKey returns the canonical subject identifier for the partition formed by

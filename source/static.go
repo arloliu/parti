@@ -2,6 +2,7 @@ package source
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/arloliu/parti/types"
@@ -46,8 +47,16 @@ func NewStatic(partitions []types.Partition) *Static {
 }
 
 // Start implements PartitionSource.Start.
-// For Static source, this is a no-op.
+// For Static source, it validates the static partitions.
 func (s *Static) Start(_ context.Context) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for i, p := range s.partitions {
+		if err := p.Validate(); err != nil {
+			return fmt.Errorf("invalid partition at index %d: %w", i, err)
+		}
+	}
 	return nil
 }
 
