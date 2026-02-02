@@ -17,6 +17,15 @@ func TestPartitionConfigValidate(t *testing.T) {
 	require.NoError(t, cfg.Validate())
 }
 
+func TestPartitionConfigValidate_AllowsWildcardPattern(t *testing.T) {
+	cfg := PartitionConfig{
+		NumPartitions:  4,
+		SubjectPattern: "events.*.{{key}}.{{partition}}",
+	}
+
+	require.NoError(t, cfg.Validate())
+}
+
 func TestPartitionConfigValidate_InvalidPattern(t *testing.T) {
 	cfg := PartitionConfig{
 		NumPartitions:  4,
@@ -33,6 +42,20 @@ func TestConsumerConfigValidate(t *testing.T) {
 		PartitionConfig: PartitionConfig{
 			NumPartitions:  4,
 			SubjectPattern: "events.{{key}}.completed.{{partition}}",
+		},
+		StreamName:   "EVENTS",
+		ConsumerName: "consumer-0",
+		Partition:    0,
+	}
+
+	require.NoError(t, cfg.Validate())
+}
+
+func TestConsumerConfigValidate_AllowsWildcardPattern(t *testing.T) {
+	cfg := ConsumerConfig{
+		PartitionConfig: PartitionConfig{
+			NumPartitions:  4,
+			SubjectPattern: "events.{{key}}.{{partition}}.>",
 		},
 		StreamName:   "EVENTS",
 		ConsumerName: "consumer-0",

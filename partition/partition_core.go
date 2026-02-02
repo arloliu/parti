@@ -16,6 +16,12 @@ func newPartitionCore(config PartitionConfig) (*partitionCore, error) {
 		return nil, err
 	}
 
+	// Publishers must produce concrete subjects (no wildcards).
+	sample := parts.buildSubject("key", 0)
+	if err := validateSubjectTokens(sample, false); err != nil {
+		return nil, err
+	}
+
 	core := &partitionCore{
 		config:       config,
 		patternParts: parts,

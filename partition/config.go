@@ -30,10 +30,16 @@ type PartitionConfig struct {
 	//   - "events.completed.{{partition}}"       → "events.completed.0"
 	//   - "events.{{key}}.{{partition}}"         → "events.tool-abc.3"
 	//   - "orders.{{partition}}.{{key}}.created" → "orders.2.customer-xyz.created"
+	//   - "events.*.{{key}}.{{partition}}"       → "events.*.tool-abc.3" (consumer filter)
+	//   - "events.{{key}}.{{partition}}.>"       → "events.tool-abc.3.>" (consumer filter)
 	//
 	// Validation:
 	//   - Must contain {{partition}} placeholder
 	//   - Must not produce empty NATS subject tokens (e.g., "events..{{partition}}" is invalid)
+	//   - Wildcards are allowed for consumers/subscribers:
+	//     - "*" can appear in any token
+	//     - ">" can only appear as the last token
+	//   - Publishers require concrete subjects; wildcard patterns are rejected for publishing
 	SubjectPattern string `validate:"required,contains={{partition}}"`
 
 	// HashSeed is an optional seed for the consistent hash function.
@@ -166,13 +172,7 @@ func (cfg *PartitionConfig) Validate() error {
 		return err
 	}
 
-	// Validate sample publish subject (no wildcards allowed in publish subject).
-	sample := parts.buildSubject("key", 0)
-	if err := validateSubjectTokens(sample, false); err != nil {
-		return err
-	}
-
-	// Validate filter subject (wildcards allowed when {{key}} is present).
+	// Validate filter subject (wildcards allowed in patterns).
 	filter := parts.buildFilterSubject(0)
 
 	return validateSubjectTokens(filter, true)

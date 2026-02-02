@@ -14,6 +14,16 @@ func TestNewPublisher_InvalidArgs(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestNewPublisher_WildcardPatternRejected(t *testing.T) {
+	_, nc := partitesting.StartEmbeddedNATS(t)
+
+	_, err := NewPublisher(nc, PartitionConfig{
+		NumPartitions:  2,
+		SubjectPattern: "events.*.{{partition}}",
+	})
+	require.Error(t, err)
+}
+
 func TestPublisher_GetSubjectForPartition_OutOfRange(t *testing.T) {
 	_, nc := partitesting.StartEmbeddedNATS(t)
 
