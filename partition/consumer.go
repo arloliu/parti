@@ -104,6 +104,7 @@ func NewJSConsumer(
 
 		c.keyDispatcher = newKeyDispatcher(
 			config.Logger,
+			config.Metrics,
 			handler,
 			keyExtractor,
 			config.KeyChannelBuffer,
@@ -196,10 +197,14 @@ func (c *JSConsumer) Subject() string {
 
 func (c *JSConsumer) ensureConsumer(ctx context.Context) (jetstream.Consumer, error) {
 	cfg := jetstream.ConsumerConfig{
-		Durable:       c.config.ConsumerName,
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		FilterSubject: c.subject,
-		MaxDeliver:    c.config.MaxDeliver,
+		Durable:           c.config.ConsumerName,
+		AckPolicy:         c.config.AckPolicy,
+		FilterSubject:     c.subject,
+		MaxDeliver:        c.config.MaxDeliver,
+		AckWait:           c.config.AckWait,
+		MaxAckPending:     c.config.MaxAckPending,
+		InactiveThreshold: c.config.InactiveThreshold,
+		MaxWaiting:        c.config.MaxWaiting,
 	}
 
 	return jsutil.EnsureConsumer(ctx, c.js, c.config.StreamName, cfg)
@@ -218,6 +223,7 @@ func (c *JSConsumer) run(ctx context.Context) {
 			jetstream.PullExpiry(c.config.FetchTimeout),
 		)
 		if err != nil {
+			c.config.Metrics.IncrementWorkerConsumerIteratorRestart("error")
 			c.config.Logger.Warn("partition consumer messages iterator error", "error", err, "subject", c.subject)
 			if !sleepWithContext(ctx, 200*time.Millisecond) {
 				return

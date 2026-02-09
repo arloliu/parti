@@ -354,6 +354,7 @@ func (q *Queue) runLoop(ctx context.Context) {
 
 		iter, err := q.iterFactory(cons, q.config.BatchSize, q.config.FetchTimeout)
 		if err != nil {
+			q.metrics.IncrementWorkerConsumerIteratorRestart("create_error")
 			q.logger.Error("failed to create iterator", "error", err)
 			if !q.delayWithBackoffOrExit(ctx, &backoff) {
 				return
@@ -365,6 +366,7 @@ func (q *Queue) runLoop(ctx context.Context) {
 		hadError := q.processIterator(ctx, iter)
 		iter.Stop()
 		if hadError {
+			q.metrics.IncrementWorkerConsumerIteratorRestart("transient_error")
 			if !q.delayWithBackoffOrExit(ctx, &backoff) {
 				return
 			}

@@ -7,7 +7,9 @@ import (
 
 	"github.com/arloliu/fuda"
 	"github.com/arloliu/parti/internal/logging"
+	"github.com/arloliu/parti/internal/metrics"
 	"github.com/arloliu/parti/types"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 // PartitionConfig configures static partition-based publishing and consuming.
@@ -55,6 +57,10 @@ type ConsumerConfig struct {
 	// PartitionConfig is embedded for partition settings.
 	PartitionConfig
 
+	// Metrics is the metrics collector for consumer operations.
+	// If nil, a no-op collector is used.
+	Metrics types.MetricsCollector
+
 	// StreamName is the JetStream stream to consume from. Required.
 	StreamName string `validate:"required"`
 
@@ -73,6 +79,10 @@ type ConsumerConfig struct {
 	// FetchTimeout is the maximum time to wait for messages in each pull.
 	FetchTimeout time.Duration `default:"5s"`
 
+	// MaxWaiting is the maximum number of outstanding pull requests allowed.
+	// Default: 2.
+	MaxWaiting int `default:"2" validate:"gt=0"`
+
 	// ManualAck disables automatic ack/nak behavior.
 	// When false (default): handler returns nil → Ack, handler returns error → Nak.
 	// When true: handler must call msg.Ack/Nak/Term explicitly.
@@ -83,6 +93,31 @@ type ConsumerConfig struct {
 	// (if configured on the stream) or discarded.
 	// Default: 0 (use JetStream stream default, typically unlimited).
 	MaxDeliver int `default:"0" validate:"gte=0"`
+
+	// AckWait is the time allowed for processing a message before it is considered lost
+	// and re-delivered by the server.
+	//
+	// Default: 30s.
+	AckWait time.Duration `default:"30s" validate:"gt=0"`
+
+	// MaxAckPending limits the number of messages that can be in-flight (unacknowledged)
+	// at any given time.
+	//
+	// If the limit is reached, the server will pause delivery until some messages are acknowledged.
+	// If zero, the server's consumer default is used.
+	MaxAckPending int `validate:"gte=0"`
+
+	// InactiveThreshold is the duration after which an idle consumer (with no active subscriptions)
+	// will be automatically deleted by the server.
+	//
+	// Default: 24h.
+	InactiveThreshold time.Duration `default:"24h" validate:"gt=0"`
+
+	// AckPolicy controls the JetStream acknowledgement policy.
+	//
+	// Typically set to AckExplicitPolicy for reliable processing.
+	// Defaults to AckExplicitPolicy if usually not set manually.
+	AckPolicy jetstream.AckPolicy
 
 	// DispatchByKey enables per-key concurrent message processing.
 	//
@@ -204,6 +239,18 @@ func (cfg *ConsumerConfig) Validate() error {
 	if cfg.FetchTimeout <= 0 {
 		cfg.FetchTimeout = 5 * time.Second
 	}
+	if cfg.MaxWaiting <= 0 {
+		cfg.MaxWaiting = 2
+	}
+	if cfg.AckWait <= 0 {
+		cfg.AckWait = 30 * time.Second
+	}
+	if cfg.InactiveThreshold <= 0 {
+		cfg.InactiveThreshold = 24 * time.Hour
+	}
+	if cfg.AckPolicy == jetstream.AckNonePolicy { // Assuming explicit is default if 0
+		cfg.AckPolicy = jetstream.AckExplicitPolicy
+	}
 
 	// Validate DispatchByKey requires {{key}} in SubjectPattern
 	if cfg.DispatchByKey != nil && *cfg.DispatchByKey {
@@ -221,6 +268,9 @@ func (cfg *ConsumerConfig) Validate() error {
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = logging.NewNop()
+	}
+	if cfg.Metrics == nil {
+		cfg.Metrics = metrics.NewNop()
 	}
 
 	return nil
