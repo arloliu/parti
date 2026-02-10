@@ -5,18 +5,17 @@
 //
 // # Choosing a Consumer Type
 //
-// | Type        | Use Case                               | Coordination | Lifecycle            |
-// |-------------|----------------------------------------|--------------|----------------------|
-// | [Queue]     | Load-balanced workers                  | None         | Start → Stop         |
-// | [Static]    | StatefulSet fixed partition            | None         | Start → Stop         |
-// | [Broadcast] | Fan-out to all instances               | None         | Start → Stop         |
-// | [Dynamic]   | Manager-assigned partitions (Parti)    | Via Manager  | Update → Stop        |
+//	Type         Use Case                                Coordination  Lifecycle
+//	[Queue]      Load-balanced workers                   None          Start → Stop
+//	[Static]     StatefulSet fixed partition             None          Start → Stop
+//	[Broadcast]  Fan-out to all instances                None          Start → Stop
+//	[Dynamic]    Manager-assigned partitions (Parti)     Via Manager   Update → Stop
 //
 // # Lifecycle
 //
 // Each consumer type follows a consistent lifecycle pattern:
 //
-// ## Queue and Static (Start/Stop pattern)
+// Queue and Static (Start/Stop pattern)
 //
 //	// Create and configure
 //	c, err := consumer.NewQueue(js, "stream", "consumer", "subject.>", handler)
@@ -30,7 +29,7 @@
 //
 //	// ... application runs ...
 //
-// ## Broadcast (Start/Stop pattern)
+// Broadcast (Start/Stop pattern)
 //
 //	c, err := consumer.NewBroadcast(js, "stream", "prefix", "events.>", handler)
 //	if err != nil { log.Fatal(err) }
@@ -38,7 +37,7 @@
 //
 //	if err := c.Start(ctx); err != nil { log.Fatal(err) }
 //
-// ## Dynamic (Update/Stop pattern)
+// Dynamic (Update/Stop pattern)
 //
 //	c, err := consumer.NewDynamic(js, "stream", "prefix", "orders.{{.PartitionID}}", handler)
 //	if err != nil { log.Fatal(err) }
@@ -136,8 +135,8 @@
 //
 // The consumer package uses unified field names in constructors:
 //
-//	| consumerName/Prefix| ConsumerName   | ConsumerPrefix   | ConsumerPrefix   | ConsumerName    |
-//	| subject pattern    | SubjectPattern | SubjectTemplate  | FilterSubject    | FilterSubject   |
+//	consumerName/Prefix  ConsumerName    ConsumerPrefix   ConsumerPrefix   ConsumerName
+//	subject pattern      SubjectPattern  SubjectTemplate  FilterSubject    FilterSubject
 //
 // # Helpers
 //
