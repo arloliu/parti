@@ -73,8 +73,8 @@ type ConsumerConfig struct {
 	Partition int `validate:"gte=0,ltfield=NumPartitions"`
 
 	// BatchSize is the number of messages to fetch per pull request.
-	// Default: 100
-	BatchSize int `default:"100"`
+	// Default: 1
+	BatchSize int `default:"1" validate:"gt=0"`
 
 	// FetchTimeout is the maximum time to wait for messages in each pull.
 	FetchTimeout time.Duration `default:"5s"`
@@ -91,8 +91,8 @@ type ConsumerConfig struct {
 	// MaxDeliver sets the maximum number of delivery attempts for a message.
 	// After MaxDeliver attempts, the message is moved to the dead letter subject
 	// (if configured on the stream) or discarded.
-	// Default: 0 (use JetStream stream default, typically unlimited).
-	MaxDeliver int `default:"0" validate:"gte=0"`
+	// Default: -1 (unlimited).
+	MaxDeliver int `default:"-1" validate:"gte=-1"`
 
 	// AckWait is the time allowed for processing a message before it is considered lost
 	// and re-delivered by the server.
@@ -232,9 +232,6 @@ func (cfg *ConsumerConfig) Validate() error {
 	}
 	if cfg.Partition < 0 || cfg.Partition >= cfg.NumPartitions {
 		return ErrPartitionOutOfRange
-	}
-	if cfg.BatchSize <= 0 {
-		cfg.BatchSize = 100
 	}
 	if cfg.FetchTimeout <= 0 {
 		cfg.FetchTimeout = 5 * time.Second

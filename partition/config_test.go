@@ -118,10 +118,10 @@ func TestConsumerConfig_SetDefaults(t *testing.T) {
 
 	// Check defaults are applied (Validate calls setDefaults internally)
 	require.NotNil(t, cfg.Logger)
-	require.Equal(t, 100, cfg.BatchSize)
+	require.Equal(t, 1, cfg.BatchSize)
 	require.Equal(t, 5*time.Second, cfg.FetchTimeout)
 	require.False(t, cfg.ManualAck)
-	require.Equal(t, 0, cfg.MaxDeliver)
+	require.Equal(t, -1, cfg.MaxDeliver)
 }
 
 func TestConsumerConfig_SetDefaults_PreservesExistingValues(t *testing.T) {

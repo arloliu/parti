@@ -396,10 +396,10 @@ Embeds `PartitionConfig` plus:
 | `StreamName`   | `string`        | Yes      | -       | JetStream stream name                      |
 | `ConsumerName` | `string`        | Yes      | -       | Durable consumer name                      |
 | `Partition`    | `int`           | Yes      | -       | Partition index (0 to N-1)                 |
-| `BatchSize`    | `int`           | No       | `100`   | Messages per fetch batch                   |
+| `BatchSize`    | `int`           | No       | `1`     | Messages per fetch batch                   |
 | `FetchTimeout` | `time.Duration` | No       | `5s`    | Fetch timeout                              |
 | `ManualAck`    | `bool`          | No       | `false` | Disable auto-ack behavior                  |
-| `MaxDeliver`   | `int`           | No       | `0`     | Max delivery attempts (0 = stream default) |
+| `MaxDeliver`   | `int`           | No       | `-1`    | Max delivery attempts (-1 = unlimited) |
 
 ## Advanced Usage
 
