@@ -136,7 +136,7 @@ func (c *JSConsumer) Start(ctx context.Context) error {
 	}
 	c.consumer = cons
 
-	loopCtx, cancel := context.WithCancel(ctx)
+	loopCtx, cancel := context.WithCancel(context.Background())
 	c.cancel = cancel
 	c.done = make(chan struct{})
 
@@ -165,18 +165,20 @@ func (c *JSConsumer) Stop(ctx context.Context) error {
 	}
 	cancel()
 
-	// Close key dispatcher if enabled
-	var dispatcherErr error
-	if dispatcher != nil {
-		dispatcherErr = dispatcher.Close(ctx)
-	}
-
+	// Wait for run loop to stop first
 	select {
 	case <-done:
-		return dispatcherErr
+		// Run loop stopped, now close dispatcher
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+
+	// Close key dispatcher if enabled (after run loop has stopped)
+	if dispatcher != nil {
+		return dispatcher.Close(ctx)
+	}
+
+	return nil
 }
 
 // Partition returns the partition index this consumer handles.
@@ -218,9 +220,12 @@ func (c *JSConsumer) run(ctx context.Context) {
 			return
 		}
 
+		heartbeat := max(c.config.FetchTimeout/2, 100*time.Millisecond)
+
 		iter, err := c.consumer.Messages(
 			jetstream.PullMaxMessages(c.config.BatchSize),
 			jetstream.PullExpiry(c.config.FetchTimeout),
+			jetstream.PullHeartbeat(heartbeat),
 		)
 		if err != nil {
 			c.config.Metrics.IncrementWorkerConsumerIteratorRestart("error")
@@ -241,24 +246,31 @@ func (c *JSConsumer) processIterator(ctx context.Context, iter jetstream.Message
 	stop := context.AfterFunc(ctx, iter.Stop)
 	defer func() {
 		_ = stop()
+		iter.Stop() // Ensure iterator is stopped when exiting
 	}()
 
 	for {
 		if ctx.Err() != nil {
-			iter.Stop()
 			return false
 		}
 
 		msg, err := iter.Next()
 		if err != nil {
-			iter.Stop()
+			// If the iterator was explicitly closed, don't retry - context is likely cancelled
+			if errors.Is(err, jetstream.ErrMsgIteratorClosed) {
+				c.config.Logger.Debug("partition consumer iterator closed", "subject", c.subject)
+				return false
+			}
+
+			// For other errors (timeout, connection issues), log and retry with new iterator
+			c.config.Logger.Debug("partition consumer iterator error, will retry", "error", err, "subject", c.subject)
+
 			return sleepWithContext(ctx, 200*time.Millisecond)
 		}
 
 		// Dispatch to key dispatcher if enabled
 		if c.keyDispatcher != nil {
 			if !c.keyDispatcher.Dispatch(ctx, msg) {
-				iter.Stop()
 				return false
 			}
 			continue

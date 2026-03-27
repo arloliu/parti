@@ -264,7 +264,7 @@ func (q *Queue) Start(ctx context.Context) error {
 	q.consumer = cons
 
 	// Start the pull loop
-	loopCtx, cancel := context.WithCancel(ctx)
+	loopCtx, cancel := context.WithCancel(context.Background())
 	q.loopCancel = cancel
 	q.loopStarted = true
 	q.loopDone = make(chan struct{})
