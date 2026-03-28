@@ -25,7 +25,7 @@ type Option interface {
 // QueueOption applies only to Queue consumers.
 //
 // This interface allows both universal Options and Queue-specific options
-// (like WithIteratorEscalation) to be passed to NewQueue.
+// to be passed to NewQueue.
 // Broadcast/Static/Dynamic specific options do not implement this, enforcing type safety.
 type QueueOption interface {
 	apply(*options)
@@ -72,12 +72,14 @@ type options struct {
 	maxAckPending     int
 	inactiveThreshold time.Duration
 	ackPolicy         jetstream.AckPolicy
-	retry             RetryConfig
 
-	// Queue / Dynamic specific
+	// Queue / Broadcast / Dynamic shared
+	retry           RetryConfig
+	iteratorFactory func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error)
+
+	// Dynamic specific
 	iteratorEscalationWindow    time.Duration
 	iteratorEscalationThreshold int
-	iteratorFactory             func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error)
 
 	// Broadcast specific
 	instanceID string
@@ -114,18 +116,16 @@ func defaultOptions() options {
 		maxAckPending:     0,
 		inactiveThreshold: 24 * time.Hour,
 		ackPolicy:         jetstream.AckExplicitPolicy,
+
+		// Queue / Broadcast / Dynamic defaults
 		retry: RetryConfig{
 			Backoff:    100 * time.Millisecond,
 			Max:        5 * time.Second,
 			Multiplier: 1.6,
 			Base:       200 * time.Millisecond,
 		},
-
-		// Queue defaults
 		iteratorEscalationWindow:    60 * time.Second,
 		iteratorEscalationThreshold: 3,
-
-		// Dynamic defaults
 		drainOnRemoveTimeout:        10 * time.Second,
 		partitionRefreshMinInterval: 500 * time.Millisecond,
 		resolver: subscription.ResolverConfig{
@@ -296,8 +296,15 @@ func WithAckPolicy(p jetstream.AckPolicy) Option {
 }
 
 // WithRetry sets the retry backoff configuration.
-func WithRetry(cfg RetryConfig) Option {
-	return universalOpt(func(o *options) {
+//
+// Supported by: Queue, Broadcast, Dynamic.
+// Static consumers use a fixed internal retry and ignore this option.
+func WithRetry(cfg RetryConfig) interface {
+	QueueOption
+	BroadcastOption
+	DynamicOption
+} {
+	return iterOpt(func(o *options) {
 		o.retry = cfg
 	})
 }
@@ -305,13 +312,12 @@ func WithRetry(cfg RetryConfig) Option {
 // -- Shared or Specific Options --
 
 // WithIteratorEscalation configures iterator failure escalation.
-// Supported by: Queue, Broadcast, Dynamic.
-func WithIteratorEscalation(window time.Duration, threshold int) interface {
-	QueueOption
-	BroadcastOption
-	DynamicOption
-} {
-	return iterOpt(func(o *options) {
+//
+// Only supported by Dynamic consumers. The escalation mechanism uses a
+// sliding window to detect bursts of iterator failures and triggers
+// consumer recreation when the threshold is exceeded.
+func WithIteratorEscalation(window time.Duration, threshold int) DynamicOption {
+	return dynamicOpt(func(o *options) {
 		if window > 0 {
 			o.iteratorEscalationWindow = window
 		}

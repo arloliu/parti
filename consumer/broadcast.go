@@ -83,21 +83,6 @@ type BroadcastConfig struct {
 	// (e.g., initial connection, creating the consumer).
 	Retry RetryConfig
 
-	// IteratorEscalationWindow defines the sliding time window used to aggregate
-	// iterator failures for escalation detection.
-	//
-	// If too many iterator errors occur within this window, the consumer will
-	// attempt to escalate recovery (e.g., recreating the consumer).
-	//
-	// Default: 60s.
-	IteratorEscalationWindow time.Duration `default:"60s" validate:"gt=0"`
-
-	// IteratorEscalationThreshold is the number of iterator failures within the
-	// escalation window that triggers consumer refresh/escalation.
-	//
-	// Default: 3.
-	IteratorEscalationThreshold int `default:"3" validate:"gt=0"`
-
 	// IteratorFactory optionally overrides the internal iterator creation logic.
 	// This is primarily used for testing to inject mock iterators.
 	IteratorFactory func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error)
@@ -147,14 +132,12 @@ func NewBroadcast(
 			InactiveThreshold: o.inactiveThreshold,
 			AckPolicy:         o.ackPolicy,
 		},
-		StreamName:                  streamName,
-		ConsumerPrefix:              consumerPrefix,
-		FilterSubject:               filterSubject,
-		InstanceID:                  o.instanceID,
-		Retry:                       o.retry,
-		IteratorEscalationWindow:    o.iteratorEscalationWindow,
-		IteratorEscalationThreshold: o.iteratorEscalationThreshold,
-		IteratorFactory:             o.iteratorFactory,
+		StreamName:      streamName,
+		ConsumerPrefix:  consumerPrefix,
+		FilterSubject:   filterSubject,
+		InstanceID:      o.instanceID,
+		Retry:           o.retry,
+		IteratorFactory: o.iteratorFactory,
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -163,24 +146,22 @@ func NewBroadcast(
 
 	// Convert unified config to subscription.BroadcastConsumerConfig
 	broadcastCfg := subscription.BroadcastConsumerConfig{
-		StreamName:                  cfg.StreamName,
-		ConsumerPrefix:              cfg.ConsumerPrefix,
-		ConsumerID:                  cfg.InstanceID,    // InstanceID -> ConsumerID
-		WildcardFilter:              cfg.FilterSubject, // FilterSubject -> WildcardFilter
-		Logger:                      cfg.Logger,
-		Metrics:                     cfg.Metrics,
-		ManualAck:                   cfg.ManualAck,
-		AckWait:                     cfg.AckWait,
-		MaxDeliver:                  cfg.MaxDeliver,
-		BatchSize:                   cfg.BatchSize,
-		FetchTimeout:                cfg.FetchTimeout,
-		MaxWaiting:                  cfg.MaxWaiting,
-		MaxAckPending:               cfg.MaxAckPending,
-		InactiveThreshold:           cfg.InactiveThreshold,
-		AckPolicy:                   cfg.AckPolicy,
-		IteratorEscalationWindow:    cfg.IteratorEscalationWindow,
-		IteratorEscalationThreshold: cfg.IteratorEscalationThreshold,
-		IteratorFactory:             cfg.IteratorFactory,
+		StreamName:        cfg.StreamName,
+		ConsumerPrefix:    cfg.ConsumerPrefix,
+		ConsumerID:        cfg.InstanceID,    // InstanceID -> ConsumerID
+		WildcardFilter:    cfg.FilterSubject, // FilterSubject -> WildcardFilter
+		Logger:            cfg.Logger,
+		Metrics:           cfg.Metrics,
+		ManualAck:         cfg.ManualAck,
+		AckWait:           cfg.AckWait,
+		MaxDeliver:        cfg.MaxDeliver,
+		BatchSize:         cfg.BatchSize,
+		FetchTimeout:      cfg.FetchTimeout,
+		MaxWaiting:        cfg.MaxWaiting,
+		MaxAckPending:     cfg.MaxAckPending,
+		InactiveThreshold: cfg.InactiveThreshold,
+		AckPolicy:         cfg.AckPolicy,
+		IteratorFactory:   cfg.IteratorFactory,
 		Retry: subscription.RetryConfig{
 			Backoff:    cfg.Retry.Backoff,
 			Max:        cfg.Retry.Max,

@@ -132,10 +132,6 @@ func TestBroadcastConfig_SetDefaults(t *testing.T) {
 	require.Equal(t, 2, cfg.MaxWaiting)
 	require.Equal(t, 24*time.Hour, cfg.InactiveThreshold)
 
-	// BroadcastConfig specific defaults
-	require.Equal(t, 60*time.Second, cfg.IteratorEscalationWindow)
-	require.Equal(t, 3, cfg.IteratorEscalationThreshold)
-
 	// RetryConfig defaults
 	require.Equal(t, 100*time.Millisecond, cfg.Retry.Backoff)
 	require.Equal(t, 5*time.Second, cfg.Retry.Max)
@@ -145,19 +141,15 @@ func TestBroadcastConfig_SetDefaults(t *testing.T) {
 
 func TestBroadcastConfig_SetDefaults_PreservesExistingValues(t *testing.T) {
 	cfg := BroadcastConfig{
-		StreamName:                  "TEST",
-		FilterSubject:               "events.>",
-		ConsumerPrefix:              "test",
-		IteratorEscalationWindow:    120 * time.Second,
-		IteratorEscalationThreshold: 5,
+		StreamName:     "TEST",
+		FilterSubject:  "events.>",
+		ConsumerPrefix: "test",
 	}
 	cfg.AckWait = 60 * time.Second
 
 	require.NoError(t, cfg.SetDefaults())
 
 	// Existing values preserved
-	require.Equal(t, 120*time.Second, cfg.IteratorEscalationWindow)
-	require.Equal(t, 5, cfg.IteratorEscalationThreshold)
 	require.Equal(t, 60*time.Second, cfg.AckWait)
 
 	// Unset values get defaults

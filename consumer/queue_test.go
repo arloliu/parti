@@ -167,7 +167,6 @@ func TestQueue_StartStop(t *testing.T) {
 
 	q, err := NewQueue(js, "QUEUE_TEST", "queue-workers", "queue.>", handler,
 		WithFetchTimeout(500*time.Millisecond),
-		WithIteratorEscalation(60*time.Second, 3),
 	)
 	require.NoError(t, err)
 

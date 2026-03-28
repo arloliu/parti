@@ -41,17 +41,14 @@ func TestStrictOptions(t *testing.T) {
 	logger := logging.NewNop()
 
 	t.Run("Queue Options", func(t *testing.T) {
-		// Valid options for Queue: Universal + Queue-specific
+		// Valid options for Queue: Universal
 		q, err := NewQueue(js, "STREAM", "queue", "subj.>", handler,
-			WithLogger(logger),                        // Universal
-			WithAckWait(5*time.Second),                // Universal
-			WithIteratorEscalation(10*time.Second, 5), // Queue/Broadcast/Dynamic shared
+			WithLogger(logger),         // Universal
+			WithAckWait(5*time.Second), // Universal
 		)
 		require.NoError(t, err)
 		require.Equal(t, logger, q.config.Logger)
 		require.Equal(t, 5*time.Second, q.config.AckWait)
-		require.Equal(t, 10*time.Second, q.config.IteratorEscalationWindow)
-		require.Equal(t, 5, q.config.IteratorEscalationThreshold)
 	})
 
 	t.Run("Broadcast Options", func(t *testing.T) {

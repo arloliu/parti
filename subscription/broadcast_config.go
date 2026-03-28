@@ -111,16 +111,6 @@ type BroadcastConsumerConfig struct {
 	// Retry configures backoff behavior for control-plane operations.
 	Retry RetryConfig
 
-	// IteratorEscalationWindow defines the sliding time window used to aggregate
-	// iterator failures for escalation detection.
-	// Default: 60s.
-	IteratorEscalationWindow time.Duration `default:"60s" validate:"gt=0"`
-
-	// IteratorEscalationThreshold is the number of iterator failures within the
-	// escalation window that triggers a single escalation (consumer refresh).
-	// Default: 3.
-	IteratorEscalationThreshold int `default:"3" validate:"gt=0"`
-
 	// IteratorFactory optionally overrides the iterator creation logic for testing or
 	// advanced customization. When nil, a default factory is used.
 	IteratorFactory func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error)
@@ -131,15 +121,13 @@ type BroadcastConsumerConfig struct {
 // must still be set by the user.
 func DefaultBroadcastConsumerConfig() BroadcastConsumerConfig {
 	return BroadcastConsumerConfig{
-		AckPolicy:                   jetstream.AckExplicitPolicy,
-		AckWait:                     DefaultAckWait,
-		MaxDeliver:                  DefaultMaxDeliver,
-		InactiveThreshold:           DefaultInactiveThreshold,
-		BatchSize:                   DefaultBatchSize,
-		MaxWaiting:                  DefaultMaxWaiting,
-		FetchTimeout:                DefaultFetchTimeout,
-		IteratorEscalationWindow:    DefaultIteratorEscalationWindow,
-		IteratorEscalationThreshold: DefaultIteratorEscalationThreshold,
+		AckPolicy:         jetstream.AckExplicitPolicy,
+		AckWait:           DefaultAckWait,
+		MaxDeliver:        DefaultMaxDeliver,
+		InactiveThreshold: DefaultInactiveThreshold,
+		BatchSize:         DefaultBatchSize,
+		MaxWaiting:        DefaultMaxWaiting,
+		FetchTimeout:      DefaultFetchTimeout,
 		Retry: RetryConfig{
 			Backoff:    DefaultRetryBackoff,
 			Base:       DefaultRetryBase,

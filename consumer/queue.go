@@ -80,21 +80,6 @@ type QueueConfig struct {
 	// (e.g., initial connection, creating the consumer).
 	Retry RetryConfig
 
-	// IteratorEscalationWindow defines the sliding time window used to aggregate
-	// iterator failures for escalation detection.
-	//
-	// If too many iterator errors occur within this window, the consumer will
-	// attempt to escalate recovery (e.g., recreating the consumer).
-	//
-	// Default: 60s.
-	IteratorEscalationWindow time.Duration `default:"60s" validate:"gt=0"`
-
-	// IteratorEscalationThreshold is the number of iterator failures within the
-	// escalation window that triggers consumer refresh/escalation.
-	//
-	// Default: 3.
-	IteratorEscalationThreshold int `default:"3" validate:"gt=0"`
-
 	// IteratorFactory optionally overrides the internal iterator creation logic.
 	// This is primarily used for testing to inject mock iterators.
 	IteratorFactory func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error)
@@ -114,8 +99,6 @@ func DefaultQueueConfig() QueueConfig {
 			InactiveThreshold: 24 * time.Hour,
 			AckPolicy:         jetstream.AckExplicitPolicy,
 		},
-		IteratorEscalationWindow:    60 * time.Second,
-		IteratorEscalationThreshold: 3,
 		Retry: RetryConfig{
 			Backoff:    100 * time.Millisecond,
 			Max:        5 * time.Second,
@@ -204,13 +187,11 @@ func NewQueue(
 			InactiveThreshold: o.inactiveThreshold,
 			AckPolicy:         o.ackPolicy,
 		},
-		StreamName:                  streamName,
-		ConsumerName:                consumerName,
-		FilterSubject:               filterSubject,
-		Retry:                       o.retry,
-		IteratorEscalationWindow:    o.iteratorEscalationWindow,
-		IteratorEscalationThreshold: o.iteratorEscalationThreshold,
-		IteratorFactory:             o.iteratorFactory,
+		StreamName:      streamName,
+		ConsumerName:    consumerName,
+		FilterSubject:   filterSubject,
+		Retry:           o.retry,
+		IteratorFactory: o.iteratorFactory,
 	}
 
 	if err := cfg.Validate(); err != nil {
