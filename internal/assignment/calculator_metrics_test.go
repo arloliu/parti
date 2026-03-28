@@ -18,8 +18,8 @@ type WorkerChange struct {
 
 // MockMetricsCollector captures metric calls for verification.
 type MockMetricsCollector struct {
-	types.MetricsCollector // Embed interface to satisfy it (panics on unimplemented methods)
-	mu                     sync.Mutex
+	CalculatorAndAssignmentMetrics // Embed combined interface (panics on unimplemented methods)
+	mu                             sync.Mutex
 
 	// Captured data
 	workerChanges []WorkerChange

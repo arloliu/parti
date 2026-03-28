@@ -100,9 +100,9 @@ type WorkerConsumerConfig struct {
 	// Logger provides structured logging. Defaults to a no-op logger when nil.
 	Logger types.Logger
 
-	// Metrics is the global metrics collector used across the library.
+	// Metrics is the metrics collector for worker consumer operations.
 	// If nil, no metrics are emitted from the worker consumer helper.
-	Metrics types.MetricsCollector
+	Metrics types.WorkerConsumerMetrics
 
 	// ManualAck, when true, disables the helper's automatic Ack/Nak behavior.
 	// Handlers are responsible for calling msg.Ack/Nak/Term and optionally

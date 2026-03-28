@@ -61,7 +61,7 @@ type DynamicOption interface {
 type options struct {
 	// Common
 	logger            types.Logger
-	metrics           types.MetricsCollector
+	metrics           types.WorkerConsumerMetrics
 	manualAck         bool
 	ackWait           time.Duration
 	maxDeliver        int
@@ -190,13 +190,16 @@ func WithLogger(l types.Logger) Option {
 	})
 }
 
-// WithMetrics sets the metrics collector for consumer operations.
+// WithMetrics sets the metrics collector for worker consumer operations.
+//
+// The consumer package only uses WorkerConsumerMetrics methods. Passing a full
+// MetricsCollector (which embeds WorkerConsumerMetrics) also works.
 //
 // If nil is passed, the default no-op collector is retained.
 //
 // Parameters:
 //   - m: Metrics collector implementation (nil is ignored)
-func WithMetrics(m types.MetricsCollector) Option {
+func WithMetrics(m types.WorkerConsumerMetrics) Option {
 	return universalOpt(func(o *options) {
 		if m != nil {
 			o.metrics = m

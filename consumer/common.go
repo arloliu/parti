@@ -20,9 +20,9 @@ type CommonConfig struct {
 	// If nil, a no-op logger is used.
 	Logger types.Logger
 
-	// Metrics is the metrics collector for consumer operations.
+	// Metrics is the metrics collector for worker consumer operations.
 	// If nil, a no-op collector is used.
-	Metrics types.MetricsCollector
+	Metrics types.WorkerConsumerMetrics
 
 	// ManualAck disables automatic acknowledgement of messages.
 	//

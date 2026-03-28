@@ -10,6 +10,16 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
+// CalculatorAndAssignmentMetrics combines the metrics interfaces needed by the calculator
+// and its sub-components (e.g., AssignmentPublisher).
+//
+// The calculator itself records CalculatorMetrics (rebalance durations, worker changes, etc.)
+// and delegates AssignmentMetrics to the AssignmentPublisher.
+type CalculatorAndAssignmentMetrics interface {
+	types.CalculatorMetrics
+	types.AssignmentMetrics
+}
+
 // Config holds calculator configuration.
 //
 // Use NewCalculatorWithConfig(cfg) to create a calculator with validated
@@ -37,9 +47,9 @@ type Config struct {
 	PlannedScaleWindow   time.Duration // Stabilization window for planned scale (default: 10s)
 
 	// Optional dependencies
-	Metrics       types.MetricsCollector // Metrics collector (default: no-op)
-	Logger        types.Logger           // Logger (default: no-op)
-	StateProvider types.StateProvider    // Manager state provider for degraded mode checks (default: nil)
+	Metrics       CalculatorAndAssignmentMetrics // Metrics collector (default: no-op)
+	Logger        types.Logger                   // Logger (default: no-op)
+	StateProvider types.StateProvider            // Manager state provider for degraded mode checks (default: nil)
 }
 
 // Validate checks configuration validity.

@@ -19,9 +19,9 @@ type ConsumerConfig struct {
 	// PartitionConfig is embedded for partition settings.
 	partition.PartitionConfig
 
-	// Metrics is the metrics collector for consumer operations.
+	// Metrics is the metrics collector for worker consumer operations.
 	// If nil, a no-op collector is used.
-	Metrics types.MetricsCollector
+	Metrics types.WorkerConsumerMetrics
 
 	// StreamName is the JetStream stream to consume from. Required.
 	StreamName string `validate:"required"`

@@ -106,7 +106,6 @@ func NewJSConsumer(
 
 		c.keyDispatcher = newKeyDispatcher(
 			config.Logger,
-			config.Metrics,
 			handler,
 			keyExtractor,
 			config.KeyChannelBuffer,

@@ -24,7 +24,7 @@ type partitionConsumerConfig struct {
 	IteratorEscalationThreshold int
 
 	// Metrics
-	Metrics types.MetricsCollector
+	Metrics types.WorkerConsumerMetrics
 }
 
 // partitionConsumer manages the consumption loop for a single partition (subject).

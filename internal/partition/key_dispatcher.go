@@ -44,7 +44,6 @@ type KeyExtractorFunc func(msg jetstream.Msg) string
 // proportionally. Consider whether your use case is suitable for this pattern.
 type keyDispatcher struct {
 	logger       types.Logger
-	metrics      types.MetricsCollector
 	handler      messageHandler
 	keyExtractor KeyExtractorFunc
 	channelBuf   int
@@ -80,7 +79,6 @@ type keyMessage struct {
 // extractor from PatternParts.KeyExtractorFunc().
 func newKeyDispatcher(
 	logger types.Logger,
-	metrics types.MetricsCollector,
 	handler messageHandler,
 	keyExtractor KeyExtractorFunc,
 	channelBuf int,
@@ -101,7 +99,6 @@ func newKeyDispatcher(
 
 	return &keyDispatcher{
 		logger:       logger,
-		metrics:      metrics,
 		handler:      handler,
 		keyExtractor: keyExtractor,
 		channelBuf:   channelBuf,

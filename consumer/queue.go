@@ -43,7 +43,7 @@ type Queue struct {
 	js       jetstream.JetStream
 	config   QueueConfig
 	logger   types.Logger
-	metrics  types.MetricsCollector
+	metrics  types.WorkerConsumerMetrics
 	handler  MessageHandler
 	retryRNG *rand.Rand
 

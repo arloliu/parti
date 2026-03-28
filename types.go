@@ -26,6 +26,11 @@ type (
 	PartitionSourceUpdater   = types.PartitionSourceUpdater
 	ElectionAgent            = types.ElectionAgent
 	MetricsCollector         = types.MetricsCollector
+	ManagerMetrics           = types.ManagerMetrics
+	CalculatorMetrics        = types.CalculatorMetrics
+	WorkerMetrics            = types.WorkerMetrics
+	AssignmentMetrics        = types.AssignmentMetrics
+	WorkerConsumerMetrics    = types.WorkerConsumerMetrics
 	Logger                   = types.Logger
 	Hooks                    = types.Hooks
 )

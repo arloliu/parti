@@ -14,7 +14,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/arloliu/parti/v2/internal/logging"
-	"github.com/arloliu/parti/v2/internal/metrics"
 )
 
 // mockMsg implements jetstream.Msg for testing.
@@ -61,7 +60,7 @@ func TestKeyDispatcher_DispatchByKey(t *testing.T) {
 		return nil
 	})
 
-	kd := newKeyDispatcher(logger, metrics.NewNop(), handler, testKeyExtractor, 16, 100*time.Millisecond, false)
+	kd := newKeyDispatcher(logger, handler, testKeyExtractor, 16, 100*time.Millisecond, false)
 	defer func() {
 		_ = kd.Close(t.Context())
 	}()
@@ -118,7 +117,7 @@ func TestKeyDispatcher_PerKeyOrdering(t *testing.T) {
 		return nil
 	})
 
-	kd := newKeyDispatcher(logger, metrics.NewNop(), handler, testKeyExtractor, 64, 100*time.Millisecond, false)
+	kd := newKeyDispatcher(logger, handler, testKeyExtractor, 64, 100*time.Millisecond, false)
 	defer func() {
 		_ = kd.Close(t.Context())
 	}()
@@ -160,7 +159,7 @@ func TestKeyDispatcher_IdleTimeout(t *testing.T) {
 	})
 
 	// Short idle timeout for testing
-	kd := newKeyDispatcher(logger, metrics.NewNop(), handler, testKeyExtractor, 16, 50*time.Millisecond, false)
+	kd := newKeyDispatcher(logger, handler, testKeyExtractor, 16, 50*time.Millisecond, false)
 	defer func() {
 		_ = kd.Close(t.Context())
 	}()
@@ -191,7 +190,7 @@ func TestKeyDispatcher_Close(t *testing.T) {
 		return nil
 	})
 
-	kd := newKeyDispatcher(logger, metrics.NewNop(), handler, testKeyExtractor, 16, 1*time.Second, false)
+	kd := newKeyDispatcher(logger, handler, testKeyExtractor, 16, 1*time.Second, false)
 
 	ctx := t.Context()
 
@@ -223,7 +222,7 @@ func TestKeyDispatcher_Backpressure(t *testing.T) {
 	})
 
 	// Small buffer of 2
-	kd := newKeyDispatcher(logger, metrics.NewNop(), handler, testKeyExtractor, 2, 1*time.Second, false)
+	kd := newKeyDispatcher(logger, handler, testKeyExtractor, 2, 1*time.Second, false)
 	defer func() {
 		close(blockCh)
 		_ = kd.Close(t.Context())
@@ -278,7 +277,7 @@ func TestKeyDispatcher_CustomKeyExtractor(t *testing.T) {
 		return subj
 	}
 
-	kd := newKeyDispatcher(logger, metrics.NewNop(), handler, customExtractor, 16, 100*time.Millisecond, false)
+	kd := newKeyDispatcher(logger, handler, customExtractor, 16, 100*time.Millisecond, false)
 	defer func() {
 		_ = kd.Close(t.Context())
 	}()
@@ -312,7 +311,7 @@ func TestKeyDispatcher_ManualAck(t *testing.T) {
 		return nil
 	})
 
-	kd := newKeyDispatcher(logger, metrics.NewNop(), handler, testKeyExtractor, 16, 100*time.Millisecond, true)
+	kd := newKeyDispatcher(logger, handler, testKeyExtractor, 16, 100*time.Millisecond, true)
 	defer func() {
 		_ = kd.Close(t.Context())
 	}()
@@ -334,7 +333,7 @@ func TestKeyDispatcher_AutoAck(t *testing.T) {
 		return nil // success
 	})
 
-	kd := newKeyDispatcher(logger, metrics.NewNop(), handler, testKeyExtractor, 16, 100*time.Millisecond, false)
+	kd := newKeyDispatcher(logger, handler, testKeyExtractor, 16, 100*time.Millisecond, false)
 	defer func() {
 		_ = kd.Close(t.Context())
 	}()
@@ -356,7 +355,7 @@ func TestKeyDispatcher_AutoNak(t *testing.T) {
 		return assert.AnError // failure
 	})
 
-	kd := newKeyDispatcher(logger, metrics.NewNop(), handler, testKeyExtractor, 16, 100*time.Millisecond, false)
+	kd := newKeyDispatcher(logger, handler, testKeyExtractor, 16, 100*time.Millisecond, false)
 	defer func() {
 		_ = kd.Close(t.Context())
 	}()
