@@ -47,7 +47,7 @@ func TestWorkerConsumerUpdate(t *testing.T) {
 	src := source.NewStatic(partitions)
 
 	cfg := &parti.Config{WorkerIDPrefix: "w", WorkerIDMax: 10}
-	parti.SetDefaults(cfg)
+	require.NoError(t, parti.SetDefaults(cfg))
 
 	// Use consistent hash strategy for assignment
 	chStrat := strategy.NewConsistentHash()

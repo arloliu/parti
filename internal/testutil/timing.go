@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/arloliu/parti/v2"
@@ -84,7 +85,9 @@ func MakeEmergencyFast() TimingProfile {
 // Returns the mutated config pointer for chaining.
 func (tp TimingProfile) ApplyTo(cfg *parti.Config) *parti.Config {
 	// Base defaults
-	parti.SetDefaults(cfg)
+	if err := parti.SetDefaults(cfg); err != nil {
+		panic(fmt.Errorf("testutil.TimingProfile.ApplyTo: %w", err))
+	}
 
 	if tp.HeartbeatInterval > 0 {
 		cfg.HeartbeatInterval = tp.HeartbeatInterval
@@ -142,6 +145,10 @@ func (tp TimingProfile) ApplyTo(cfg *parti.Config) *parti.Config {
 // NewConfigFromProfile creates a new parti.Config with defaults applied then profile overrides.
 func NewConfigFromProfile(tp TimingProfile) parti.Config {
 	cfg := parti.Config{}
-	parti.SetDefaults(&cfg)
+
+	if err := parti.SetDefaults(&cfg); err != nil {
+		panic(fmt.Errorf("testutil.NewConfigFromProfile: %w", err))
+	}
+
 	return *tp.ApplyTo(&cfg)
 }

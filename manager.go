@@ -185,7 +185,9 @@ func NewManager(cfg *Config, js jetstream.JetStream, source PartitionSource, str
 	}
 
 	// Fill defaults & validate
-	SetDefaults(cfg)
+	if err := SetDefaults(cfg); err != nil {
+		return nil, fmt.Errorf("failed to apply config defaults: %w", err)
+	}
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}

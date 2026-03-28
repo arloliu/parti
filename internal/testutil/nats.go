@@ -49,7 +49,10 @@ func IntegrationTestConfig() parti.Config {
 		RestartDetectionRatio: 0.5,
 		RebalanceCooldown:     2 * time.Second, // Reduced from default 10s - faster rebalancing in tests
 	}
-	parti.SetDefaults(&cfg) // Apply default KV bucket names
+
+	if err := parti.SetDefaults(&cfg); err != nil {
+		panic(fmt.Errorf("testutil.StandardTestConfig: %w", err))
+	}
 
 	return cfg
 }
@@ -72,7 +75,10 @@ func FastTestConfig() parti.Config {
 		RestartDetectionRatio: 0.5,
 		RebalanceCooldown:     300 * time.Millisecond, // Must be <= PlannedScaleWindow (300ms)
 	}
-	parti.SetDefaults(&cfg) // Apply default KV bucket names
+
+	if err := parti.SetDefaults(&cfg); err != nil {
+		panic(fmt.Errorf("testutil.FastTestConfig: %w", err))
+	}
 
 	return cfg
 }

@@ -30,7 +30,7 @@ func TestDefaultConfig(t *testing.T) {
 func TestSetDefaults(t *testing.T) {
 	t.Run("applies defaults to empty config", func(t *testing.T) {
 		cfg := Config{}
-		SetDefaults(&cfg)
+		require.NoError(t, SetDefaults(&cfg))
 
 		require.Equal(t, "worker", cfg.WorkerIDPrefix)
 		require.Equal(t, 999, cfg.WorkerIDMax)
@@ -55,7 +55,7 @@ func TestSetDefaults(t *testing.T) {
 			ShutdownTimeout:       20 * time.Second,
 			RebalanceCooldown:     15 * time.Second,
 		}
-		SetDefaults(&cfg)
+		require.NoError(t, SetDefaults(&cfg))
 
 		// All custom values should be preserved
 		require.Equal(t, "custom", cfg.WorkerIDPrefix)
@@ -80,7 +80,7 @@ func TestSetDefaults(t *testing.T) {
 			WorkerIDTTL:    45 * time.Second,
 			// Leave other fields empty
 		}
-		SetDefaults(&cfg)
+		require.NoError(t, SetDefaults(&cfg))
 
 		// Custom values preserved
 		require.Equal(t, "myworker", cfg.WorkerIDPrefix)
@@ -143,7 +143,7 @@ heartbeatInterval: 5s
 	require.NoError(t, err)
 
 	// Apply defaults for unset fields
-	SetDefaults(&cfg)
+	require.NoError(t, SetDefaults(&cfg))
 
 	// Custom values preserved
 	require.Equal(t, "custom", cfg.WorkerIDPrefix)
@@ -308,7 +308,7 @@ func TestConfigValidate(t *testing.T) {
 		}
 
 		// Apply defaults for degraded mode settings
-		SetDefaults(&cfg)
+		require.NoError(t, SetDefaults(&cfg))
 
 		err := cfg.Validate()
 		require.NoError(t, err)
@@ -340,7 +340,7 @@ func TestConfigValidate(t *testing.T) {
 		}
 
 		// Apply defaults for degraded mode settings
-		SetDefaults(&cfg)
+		require.NoError(t, SetDefaults(&cfg))
 
 		err := cfg.Validate()
 		require.NoError(t, err)

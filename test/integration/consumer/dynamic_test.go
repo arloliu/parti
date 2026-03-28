@@ -261,7 +261,7 @@ func TestDynamic_ManagerIntegration(t *testing.T) {
 	src := source.NewStatic(partitions)
 	chStrat := strategy.NewConsistentHash()
 	cfg := &parti.Config{WorkerIDPrefix: "w", WorkerIDMax: 10}
-	parti.SetDefaults(cfg)
+	require.NoError(t, parti.SetDefaults(cfg))
 
 	mgr, err := parti.NewManager(cfg, js, src, chStrat, parti.WithWorkerConsumerUpdater(dc))
 	require.NoError(t, err)

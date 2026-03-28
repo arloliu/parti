@@ -394,19 +394,27 @@ type Config struct {
 
 // DefaultConfig returns a Config with sensible defaults.
 //
+// This function panics only if the library's own struct tags are malformed,
+// which indicates a programming error in Parti itself.
+//
 // Returns:
 //   - Config: Configuration with default values
 func DefaultConfig() Config {
 	var cfg Config
-	SetDefaults(&cfg)
+	if err := SetDefaults(&cfg); err != nil {
+		panic(fmt.Errorf("parti: DefaultConfig: %w", err))
+	}
 	return cfg
 }
 
 // SetDefaults applies default values to zero-valued configuration fields.
 // If a field is zero-valued, it will be set to the corresponding default value.
-func SetDefaults(cfg *Config) {
+//
+// Returns:
+//   - error: Non-nil if the default tags on the Config struct are malformed
+func SetDefaults(cfg *Config) error {
 	if err := fuda.SetDefaults(cfg); err != nil {
-		panic(fmt.Errorf("failed to set defaults: %w", err))
+		return fmt.Errorf("failed to set defaults: %w", err)
 	}
 
 	// Dynamic defaults that cannot be expressed via struct tags
@@ -414,6 +422,8 @@ func SetDefaults(cfg *Config) {
 		// Default: 1.5x HeartbeatInterval (allows one missed heartbeat)
 		cfg.EmergencyGracePeriod = time.Duration(float64(cfg.HeartbeatInterval) * 1.5)
 	}
+
+	return nil
 }
 
 // TTL Configuration Guide

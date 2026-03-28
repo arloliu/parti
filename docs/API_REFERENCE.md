@@ -54,7 +54,9 @@ cfg := &parti.Config{
     WorkerIDPrefix: "worker",
     WorkerIDMax:    999,
 }
-parti.SetDefaults(cfg)
+if err := parti.SetDefaults(cfg); err != nil {
+    log.Fatal(err)
+}
 
 src := source.NewStatic(partitions)
 strategy := strategy.NewConsistentHash()
@@ -791,13 +793,15 @@ type Config struct {
 Fills in missing configuration values with defaults.
 
 ```go
-func SetDefaults(cfg *Config)
+func SetDefaults(cfg *Config) error
 ```
 
 **Example**:
 ```go
 cfg := &Config{WorkerIDMax: 999}
-parti.SetDefaults(cfg)
+if err := parti.SetDefaults(cfg); err != nil {
+    log.Fatal(err)
+}
 // Now cfg has all defaults filled in
 ```
 
