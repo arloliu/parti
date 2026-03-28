@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/arloliu/parti/v2"
-	"github.com/arloliu/parti/v2/subscription"
+	"github.com/arloliu/parti/v2/internal/durable"
 	partitesting "github.com/arloliu/parti/v2/partitest"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -101,7 +101,7 @@ func TestWorkerConsumer_ExternalDeletionRecoveryKPI(t *testing.T) {
 		return msg.Ack()
 	}
 
-	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
+	helper, err := durable.NewWorkerConsumer(js, durable.WorkerConsumerConfig{
 		StreamName:      streamName,
 		ConsumerPrefix:  "kpiw",
 		SubjectTemplate: "kpi.rec.{{.PartitionID}}",

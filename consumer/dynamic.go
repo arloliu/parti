@@ -8,7 +8,7 @@ import (
 
 	"github.com/arloliu/fuda"
 	"github.com/arloliu/parti/v2/jsutil"
-	"github.com/arloliu/parti/v2/subscription"
+	"github.com/arloliu/parti/v2/internal/durable"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -38,14 +38,14 @@ import (
 //
 // # Deprecation Notice
 //
-// This type wraps [subscription.WorkerConsumer]. Future versions may deprecate
+// This type wraps [durable.WorkerConsumer]. Future versions may deprecate
 // the subscription package in favor of this unified consumer API.
 type Dynamic struct {
-	inner *subscription.WorkerConsumer
+	inner *durable.WorkerConsumer
 }
 
 // DynamicConfig configures a Dynamic consumer.
-// Uses unified naming; converted to subscription.WorkerConsumerConfig internally.
+// Uses unified naming; converted to durable.WorkerConsumerConfig internally.
 type DynamicConfig struct {
 	CommonConfig
 
@@ -208,8 +208,8 @@ func NewDynamic(
 		return nil, err
 	}
 
-	// Convert unified config to subscription.WorkerConsumerConfig
-	workerCfg := subscription.WorkerConsumerConfig{
+	// Convert unified config to durable.WorkerConsumerConfig
+	workerCfg := durable.WorkerConsumerConfig{
 		StreamName:                  cfg.StreamName,
 		ConsumerPrefix:              cfg.ConsumerPrefix,
 		SubjectTemplate:             cfg.SubjectTemplate,
@@ -235,7 +235,7 @@ func NewDynamic(
 		IteratorEscalationWindow:    cfg.IteratorEscalationWindow,
 		IteratorEscalationThreshold: cfg.IteratorEscalationThreshold,
 		IteratorFactory:             cfg.IteratorFactory,
-		Retry: subscription.RetryConfig{
+		Retry: durable.RetryConfig{
 			Backoff:    cfg.Retry.Backoff,
 			Max:        cfg.Retry.Max,
 			Multiplier: cfg.Retry.Multiplier,
@@ -244,7 +244,7 @@ func NewDynamic(
 		},
 	}
 
-	inner, err := subscription.NewWorkerConsumer(js, workerCfg, handler.Handle)
+	inner, err := durable.NewWorkerConsumer(js, workerCfg, handler.Handle)
 	if err != nil {
 		return nil, err
 	}
@@ -272,9 +272,9 @@ func NewDynamic(
 //     disallowed (see [DynamicConfig.AllowWorkerIDChange]).
 //
 // Errors:
-//   - [subscription.ErrWorkerIDMutation]: Returned when workerID changes and
+//   - [durable.ErrWorkerIDMutation]: Returned when workerID changes and
 //     AllowWorkerIDChange is false.
-//   - [subscription.ErrMaxSubjectsExceeded]: Returned when partition count
+//   - [durable.ErrMaxSubjectsExceeded]: Returned when partition count
 //     exceeds MaxConcurrentSubjects.
 func (d *Dynamic) Update(ctx context.Context, workerID string, partitions []types.Partition) error {
 	return d.inner.UpdateWorkerConsumer(ctx, workerID, partitions)
@@ -345,12 +345,12 @@ func (c *DynamicConfig) Validate() error {
 
 // toSubscriptionGateConfig converts a consumer-owned ProcessingGateConfig to
 // the internal subscription equivalent. Returns nil when cfg is nil.
-func toSubscriptionGateConfig(cfg *ProcessingGateConfig) *subscription.ProcessingGateConfig {
+func toSubscriptionGateConfig(cfg *ProcessingGateConfig) *durable.ProcessingGateConfig {
 	if cfg == nil {
 		return nil
 	}
 
-	return &subscription.ProcessingGateConfig{
+	return &durable.ProcessingGateConfig{
 		Enabled:             cfg.Enabled,
 		AllowedStates:       cfg.AllowedStates,
 		WarmupDuration:      cfg.WarmupDuration,
@@ -358,14 +358,14 @@ func toSubscriptionGateConfig(cfg *ProcessingGateConfig) *subscription.Processin
 		NakDelay:            cfg.NakDelay,
 		NakJitter:           cfg.NakJitter,
 		Debug:               cfg.Debug,
-		Metrics:             cfg.Metrics, // consumer.GateMetrics satisfies subscription.GateMetrics
+		Metrics:             cfg.Metrics, // consumer.GateMetrics satisfies durable.GateMetrics
 	}
 }
 
 // toSubscriptionResolverConfig converts a consumer-owned ResolverConfig to the
 // internal subscription equivalent.
-func toSubscriptionResolverConfig(cfg ResolverConfig) subscription.ResolverConfig {
-	return subscription.ResolverConfig{
+func toSubscriptionResolverConfig(cfg ResolverConfig) durable.ResolverConfig {
+	return durable.ResolverConfig{
 		OwnershipResolver:   cfg.OwnershipResolver,
 		HandoffBucketName:   cfg.HandoffBucketName,
 		HandoffClaimsPrefix: cfg.HandoffClaimsPrefix,

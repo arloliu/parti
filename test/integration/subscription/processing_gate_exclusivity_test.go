@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/arloliu/parti/v2/internal/testutil"
-	"github.com/arloliu/parti/v2/subscription"
+	"github.com/arloliu/parti/v2/internal/durable"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
@@ -65,23 +65,23 @@ func TestProcessingGate_Exclusivity(t *testing.T) {
 	}
 
 	// Create two WorkerConsumers with Processing Gate enabled and same subject template
-	cfg := subscription.WorkerConsumerConfig{
+	cfg := durable.WorkerConsumerConfig{
 		StreamName:      "PGATE_TEST",
 		ConsumerPrefix:  "worker",
 		SubjectTemplate: "events.{{.PartitionID}}",
-		ProcessingGate:  &subscription.ProcessingGateConfig{Enabled: true, NakDelay: 50 * time.Millisecond},
-		Resolver:        subscription.ResolverConfig{HandoffBucketName: bucket},
+		ProcessingGate:  &durable.ProcessingGateConfig{Enabled: true, NakDelay: 50 * time.Millisecond},
+		Resolver:        durable.ResolverConfig{HandoffBucketName: bucket},
 		// Keep small batch for determinism
 		BatchSize: 1,
 		// Make fetch responsive
 		FetchTimeout: 2 * time.Second,
 	}
 
-	w1, err := subscription.NewWorkerConsumer(js, cfg, handler(&w1Processed))
+	w1, err := durable.NewWorkerConsumer(js, cfg, handler(&w1Processed))
 	require.NoError(t, err)
 	defer func() { _ = w1.Close(context.Background()) }()
 
-	w2, err := subscription.NewWorkerConsumer(js, cfg, handler(&w2Processed))
+	w2, err := durable.NewWorkerConsumer(js, cfg, handler(&w2Processed))
 	require.NoError(t, err)
 	defer func() { _ = w2.Close(context.Background()) }()
 
@@ -157,24 +157,24 @@ func TestProcessingGate_Handoff_CustomResolver(t *testing.T) {
 
 	res := newSwitchingResolver("w1", types.HandoffStateStable)
 
-	cfg := subscription.WorkerConsumerConfig{
+	cfg := durable.WorkerConsumerConfig{
 		StreamName:      "PGATE_TEST2",
 		ConsumerPrefix:  "worker",
 		SubjectTemplate: "events2.{{.PartitionID}}",
-		ProcessingGate: &subscription.ProcessingGateConfig{
+		ProcessingGate: &durable.ProcessingGateConfig{
 			Enabled:       true,
 			NakDelay:      50 * time.Millisecond,
 			AllowedStates: []types.HandoffState{types.HandoffStateStable, types.HandoffStateCommit},
 		},
-		Resolver:  subscription.ResolverConfig{OwnershipResolver: res},
+		Resolver:  durable.ResolverConfig{OwnershipResolver: res},
 		BatchSize: 1, FetchTimeout: 2 * time.Second,
 	}
 
-	w1, err := subscription.NewWorkerConsumer(js, cfg, func(ctx context.Context, msg jetstream.Msg) error { atomic.AddInt32(&w1Processed, 1); return nil })
+	w1, err := durable.NewWorkerConsumer(js, cfg, func(ctx context.Context, msg jetstream.Msg) error { atomic.AddInt32(&w1Processed, 1); return nil })
 	require.NoError(t, err)
 	defer func() { _ = w1.Close(context.Background()) }()
 
-	w2, err := subscription.NewWorkerConsumer(js, cfg, func(ctx context.Context, msg jetstream.Msg) error { atomic.AddInt32(&w2Processed, 1); return nil })
+	w2, err := durable.NewWorkerConsumer(js, cfg, func(ctx context.Context, msg jetstream.Msg) error { atomic.AddInt32(&w2Processed, 1); return nil })
 	require.NoError(t, err)
 	defer func() { _ = w2.Close(context.Background()) }()
 

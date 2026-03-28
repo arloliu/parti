@@ -12,7 +12,7 @@ import (
 	"github.com/arloliu/parti/v2/internal/testutil"
 	"github.com/arloliu/parti/v2/source"
 	"github.com/arloliu/parti/v2/strategy"
-	"github.com/arloliu/parti/v2/subscription"
+	"github.com/arloliu/parti/v2/internal/durable"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
@@ -86,22 +86,22 @@ func TestProcessingGate_Manager_Handoff(t *testing.T) {
 			return nil // helper will ACK
 		}
 	}
-	wcCfg := subscription.WorkerConsumerConfig{
+	wcCfg := durable.WorkerConsumerConfig{
 		StreamName:      "PGATE_MGR",
 		ConsumerPrefix:  "worker",
 		SubjectTemplate: "events.{{.PartitionID}}",
-		ProcessingGate: &subscription.ProcessingGateConfig{
+		ProcessingGate: &durable.ProcessingGateConfig{
 			Enabled:       true,
 			NakDelay:      500 * time.Millisecond,
 			Debug:         true,
 			AllowedStates: []types.HandoffState{types.HandoffStateStable, types.HandoffStateCommit},
 		},
-		Resolver:     subscription.ResolverConfig{HandoffBucketName: bucket},
+		Resolver:     durable.ResolverConfig{HandoffBucketName: bucket},
 		BatchSize:    1,
 		FetchTimeout: 2 * time.Second,
 		Logger:       logging.NewTest(t),
 	}
-	wc1, err := subscription.NewWorkerConsumer(js, wcCfg, handler(&w1Processed))
+	wc1, err := durable.NewWorkerConsumer(js, wcCfg, handler(&w1Processed))
 	require.NoError(t, err)
 	defer func() { _ = wc1.Close(context.Background()) }()
 
@@ -125,7 +125,7 @@ func TestProcessingGate_Manager_Handoff(t *testing.T) {
 	t.Cleanup(func() { _ = m2.Stop(context.Background()) })
 
 	// Start wc2 (simulating m2's consumer starting up)
-	wc2, err := subscription.NewWorkerConsumer(js, wcCfg, handler(&w2Processed))
+	wc2, err := durable.NewWorkerConsumer(js, wcCfg, handler(&w2Processed))
 	require.NoError(t, err)
 	defer func() { _ = wc2.Close(context.Background()) }()
 	require.NoError(t, wc2.UpdateWorkerConsumer(ctx, m2.WorkerID(), []types.Partition{{Keys: []string{pid}}}))

@@ -11,7 +11,7 @@ import (
 
 	"github.com/arloliu/parti/v2/internal/assignment/handoff"
 	"github.com/arloliu/parti/v2/internal/testutil"
-	"github.com/arloliu/parti/v2/subscription"
+	"github.com/arloliu/parti/v2/internal/durable"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
@@ -33,7 +33,7 @@ func TestClaimBasedResolver_Chaos_ConcurrentUpdates(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	resolver := subscription.NewClaimBasedResolver(kv, "claims/", nil)
+	resolver := durable.NewClaimBasedResolver(kv, "claims/", nil)
 	err = resolver.Start(context.Background())
 	require.NoError(t, err)
 	defer resolver.Stop()

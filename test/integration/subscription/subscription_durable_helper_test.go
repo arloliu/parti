@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arloliu/parti/v2/subscription"
+	"github.com/arloliu/parti/v2/internal/durable"
 	partitesting "github.com/arloliu/parti/v2/partitest"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
@@ -32,7 +32,7 @@ func TestWorkerConsumer_NewAndDefaults(t *testing.T) {
 	require.NoError(t, err)
 
 	// Valid config (explicit ack policy)
-	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
+	helper, err := durable.NewWorkerConsumer(js, durable.WorkerConsumerConfig{
 		StreamName:      "defaults-stream",
 		ConsumerPrefix:  "test",
 		SubjectTemplate: "work.{{.PartitionID}}",
@@ -42,7 +42,7 @@ func TestWorkerConsumer_NewAndDefaults(t *testing.T) {
 	require.NotNil(t, helper)
 
 	// Defaults applied when zero values provided (uses same stream)
-	helper2, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
+	helper2, err := durable.NewWorkerConsumer(js, durable.WorkerConsumerConfig{
 		StreamName:      "defaults-stream",
 		ConsumerPrefix:  "test",
 		SubjectTemplate: "work.{{.PartitionID}}",
@@ -70,7 +70,7 @@ func TestWorkerConsumer_Basic(t *testing.T) {
 	require.NoError(t, err)
 
 	var msgCount atomic.Int32
-	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
+	helper, err := durable.NewWorkerConsumer(js, durable.WorkerConsumerConfig{
 		StreamName:        "work-stream",
 		ConsumerPrefix:    "worker",
 		SubjectTemplate:   "work.{{.PartitionID}}",
@@ -80,7 +80,7 @@ func TestWorkerConsumer_Basic(t *testing.T) {
 		InactiveThreshold: 1 * time.Hour,
 		BatchSize:         5,
 		FetchTimeout:      1 * time.Second,
-		Retry:             subscription.RetryConfig{Max: 3 * 100 * time.Millisecond, Backoff: 100 * time.Millisecond},
+		Retry:             durable.RetryConfig{Max: 3 * 100 * time.Millisecond, Backoff: 100 * time.Millisecond},
 	}, func(ctx context.Context, msg jetstream.Msg) error { msgCount.Add(1); return msg.Ack() })
 	require.NoError(t, err)
 	defer helper.Close(ctx)
@@ -131,7 +131,7 @@ func TestWorkerConsumer_MessageHandling(t *testing.T) {
 		return nil
 	}
 
-	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
+	helper, err := durable.NewWorkerConsumer(js, durable.WorkerConsumerConfig{
 		StreamName:        "test-stream",
 		ConsumerPrefix:    "test",
 		SubjectTemplate:   "test.{{.PartitionID}}",
@@ -141,7 +141,7 @@ func TestWorkerConsumer_MessageHandling(t *testing.T) {
 		InactiveThreshold: 1 * time.Hour,
 		BatchSize:         10,
 		FetchTimeout:      1 * time.Second,
-		Retry:             subscription.RetryConfig{Max: 3 * 100 * time.Millisecond, Backoff: 100 * time.Millisecond},
+		Retry:             durable.RetryConfig{Max: 3 * 100 * time.Millisecond, Backoff: 100 * time.Millisecond},
 	}, h)
 	require.NoError(t, err)
 	defer helper.Close(ctx)
@@ -167,7 +167,7 @@ func TestWorkerConsumer_CloseAndLogger(t *testing.T) {
 	require.NoError(t, err)
 
 	testLogger := partitesting.NewTestLogger(t)
-	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
+	helper, err := durable.NewWorkerConsumer(js, durable.WorkerConsumerConfig{
 		StreamName:        "close-stream",
 		ConsumerPrefix:    "close",
 		SubjectTemplate:   "close.{{.PartitionID}}",
@@ -177,7 +177,7 @@ func TestWorkerConsumer_CloseAndLogger(t *testing.T) {
 		InactiveThreshold: 1 * time.Hour,
 		BatchSize:         10,
 		FetchTimeout:      2 * time.Second,
-		Retry:             subscription.RetryConfig{Max: 2 * 100 * time.Millisecond, Backoff: 100 * time.Millisecond},
+		Retry:             durable.RetryConfig{Max: 2 * 100 * time.Millisecond, Backoff: 100 * time.Millisecond},
 		Logger:            testLogger,
 	}, func(ctx context.Context, msg jetstream.Msg) error { return nil })
 	require.NoError(t, err)

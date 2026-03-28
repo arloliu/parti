@@ -105,7 +105,7 @@ func TestUniversalOptions(t *testing.T) {
 	require.Equal(t, 5, q.config.MaxDeliver)
 
 	// 2. Broadcast
-	// Broadcast struct inspection is harder as it wraps subscription.BroadcastConsumer.
+	// Broadcast struct inspection is harder as it wraps durable.BroadcastConsumer.
 	// But we verify no compilation error and no runtime error.
 	_, err = NewBroadcast(js, "S", "C", "F", handler, convertToBroadcastOpts(opts)...)
 	require.NoError(t, err)

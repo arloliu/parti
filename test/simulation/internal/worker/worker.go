@@ -18,7 +18,7 @@ import (
 	"github.com/arloliu/parti/v2"
 	"github.com/arloliu/parti/v2/source"
 	"github.com/arloliu/parti/v2/strategy"
-	"github.com/arloliu/parti/v2/subscription"
+	"github.com/arloliu/parti/v2/internal/durable"
 	"github.com/arloliu/parti/v2/test/simulation/internal/coordinator"
 	"github.com/arloliu/parti/v2/test/simulation/internal/logging"
 	"github.com/arloliu/parti/v2/test/simulation/internal/metrics"
@@ -233,7 +233,7 @@ func NewWorker(cfg Config) (*Worker, error) { //nolint:cyclop
 		perSubMaxAckPending = 8
 	}
 	// Create durable helper early so manager can drive updates via option.
-	helperConfig := subscription.WorkerConsumerConfig{
+	helperConfig := durable.WorkerConsumerConfig{
 		ConsumerPrefix:  "simulation",
 		SubjectTemplate: "simulation.partition.{{.PartitionID}}",
 		StreamName:      "SIMULATION",
@@ -262,7 +262,7 @@ func NewWorker(cfg Config) (*Worker, error) { //nolint:cyclop
 
 	// Enable Processing Gate for exclusive consumption when configured
 	if cfg.EnforceExclusiveConsumption {
-		pg := &subscription.ProcessingGateConfig{
+		pg := &durable.ProcessingGateConfig{
 			Enabled:   true,
 			NakDelay:  cfg.GateNakDelay,
 			NakJitter: cfg.GateNakJitter,
@@ -313,7 +313,7 @@ func NewWorker(cfg Config) (*Worker, error) { //nolint:cyclop
 		return nil, fmt.Errorf("failed to init JetStream: %w", err)
 	}
 
-	updater, err := subscription.NewWorkerConsumer(js, helperConfig, worker.processMessage)
+	updater, err := durable.NewWorkerConsumer(js, helperConfig, worker.processMessage)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create worker consumer updater: %w", err)
 	}

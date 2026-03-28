@@ -8,7 +8,7 @@ import (
 
 	"github.com/arloliu/fuda"
 	"github.com/arloliu/parti/v2/jsutil"
-	"github.com/arloliu/parti/v2/subscription"
+	"github.com/arloliu/parti/v2/internal/durable"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -40,14 +40,14 @@ import (
 //
 // # Deprecation Notice
 //
-// This type wraps [subscription.BroadcastConsumer]. Future versions may deprecate
+// This type wraps [durable.BroadcastConsumer]. Future versions may deprecate
 // the subscription package in favor of this unified consumer API.
 type Broadcast struct {
-	inner *subscription.BroadcastConsumer
+	inner *durable.BroadcastConsumer
 }
 
 // BroadcastConfig configures a Broadcast consumer.
-// Uses unified naming; converted to subscription.BroadcastConsumerConfig internally.
+// Uses unified naming; converted to durable.BroadcastConsumerConfig internally.
 type BroadcastConfig struct {
 	CommonConfig
 
@@ -144,8 +144,8 @@ func NewBroadcast(
 		return nil, err
 	}
 
-	// Convert unified config to subscription.BroadcastConsumerConfig
-	broadcastCfg := subscription.BroadcastConsumerConfig{
+	// Convert unified config to durable.BroadcastConsumerConfig
+	broadcastCfg := durable.BroadcastConsumerConfig{
 		StreamName:        cfg.StreamName,
 		ConsumerPrefix:    cfg.ConsumerPrefix,
 		ConsumerID:        cfg.InstanceID,    // InstanceID -> ConsumerID
@@ -162,7 +162,7 @@ func NewBroadcast(
 		InactiveThreshold: cfg.InactiveThreshold,
 		AckPolicy:         cfg.AckPolicy,
 		IteratorFactory:   cfg.IteratorFactory,
-		Retry: subscription.RetryConfig{
+		Retry: durable.RetryConfig{
 			Backoff:    cfg.Retry.Backoff,
 			Max:        cfg.Retry.Max,
 			Multiplier: cfg.Retry.Multiplier,
@@ -171,7 +171,7 @@ func NewBroadcast(
 		},
 	}
 
-	inner, err := subscription.NewBroadcastConsumer(js, broadcastCfg, handler.Handle)
+	inner, err := durable.NewBroadcastConsumer(js, broadcastCfg, handler.Handle)
 	if err != nil {
 		return nil, err
 	}

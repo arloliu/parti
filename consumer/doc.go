@@ -71,8 +71,8 @@
 //
 // Runtime errors from lifecycle methods:
 //   - [context.DeadlineExceeded]: Stop timed out waiting for graceful shutdown
-//   - [subscription.ErrWorkerIDMutation]: Dynamic consumer workerID changed unexpectedly
-//   - [subscription.ErrMaxSubjectsExceeded]: Dynamic partition count exceeds limit
+//   - [durable.ErrWorkerIDMutation]: Dynamic consumer workerID changed unexpectedly
+//   - [durable.ErrMaxSubjectsExceeded]: Dynamic partition count exceeds limit
 //
 // # Consumer Types
 //

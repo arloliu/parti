@@ -10,7 +10,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/arloliu/parti/v2/subscription"
+	"github.com/arloliu/parti/v2/internal/durable"
 	partitesting "github.com/arloliu/parti/v2/partitest"
 	"github.com/arloliu/parti/v2/types"
 )
@@ -37,7 +37,7 @@ func TestBroadcastConsumer_Integration_ReceivesAllMessages(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	cfg := subscription.BroadcastConsumerConfig{
+	cfg := durable.BroadcastConsumerConfig{
 		StreamName:     "BC_INTEGRATION",
 		ConsumerPrefix: "bcint",
 		ConsumerID:     "worker-1",
@@ -60,7 +60,7 @@ func TestBroadcastConsumer_Integration_ReceivesAllMessages(t *testing.T) {
 		return nil
 	}
 
-	bc, err := subscription.NewBroadcastConsumer(js, cfg, handler)
+	bc, err := durable.NewBroadcastConsumer(js, cfg, handler)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bc.Close(ctx) })
 
@@ -120,7 +120,7 @@ func TestBroadcastConsumer_Integration_IgnoresPartitionUpdates(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	cfg := subscription.BroadcastConsumerConfig{
+	cfg := durable.BroadcastConsumerConfig{
 		StreamName:     "BC_DYNAMIC",
 		ConsumerPrefix: "bcdyn",
 		ConsumerID:     "worker-1",
@@ -139,7 +139,7 @@ func TestBroadcastConsumer_Integration_IgnoresPartitionUpdates(t *testing.T) {
 		return nil
 	}
 
-	bc, err := subscription.NewBroadcastConsumer(js, cfg, handler)
+	bc, err := durable.NewBroadcastConsumer(js, cfg, handler)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bc.Close(ctx) })
 
@@ -207,7 +207,7 @@ func TestBroadcastConsumer_Integration_Close(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	cfg := subscription.BroadcastConsumerConfig{
+	cfg := durable.BroadcastConsumerConfig{
 		StreamName:     "BC_CLOSE",
 		ConsumerPrefix: "bcclose",
 		ConsumerID:     "worker-1",
@@ -222,7 +222,7 @@ func TestBroadcastConsumer_Integration_Close(t *testing.T) {
 		return nil
 	}
 
-	bc, err := subscription.NewBroadcastConsumer(js, cfg, handler)
+	bc, err := durable.NewBroadcastConsumer(js, cfg, handler)
 	require.NoError(t, err)
 
 	parts := []types.Partition{{Keys: []string{"test"}}}

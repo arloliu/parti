@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/arloliu/parti/v2"
-	"github.com/arloliu/parti/v2/subscription"
+	"github.com/arloliu/parti/v2/internal/durable"
 	partitesting "github.com/arloliu/parti/v2/partitest"
 )
 
@@ -73,7 +73,7 @@ func TestWorkerConsumer_ManualAck_Backpressure(t *testing.T) {
 	}
 
 	// Configure helper with ManualAck enabled and MaxAckPending capped to capacity
-	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
+	helper, err := durable.NewWorkerConsumer(js, durable.WorkerConsumerConfig{
 		StreamName:      "manual-stream",
 		ConsumerPrefix:  "wkr",
 		SubjectTemplate: "jobs.{{.PartitionID}}",

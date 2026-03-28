@@ -25,8 +25,8 @@ type CompositeConsumerUpdater struct {
 //
 // Example:
 //
-//	wc, _ := subscription.NewWorkerConsumer(js, wcConfig, handler1)
-//	bc, _ := subscription.NewBroadcastConsumer(js, bcConfig, handler2)
+//	wc, _ := durable.NewWorkerConsumer(js, wcConfig, handler1)
+//	bc, _ := durable.NewBroadcastConsumer(js, bcConfig, handler2)
 //	composite := parti.NewCompositeConsumerUpdater(wc, bc)
 //	mgr, _ := parti.NewManager(cfg, js, src, strategy,
 //	    parti.WithWorkerConsumerUpdater(composite),

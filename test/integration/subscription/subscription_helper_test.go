@@ -11,7 +11,7 @@ import (
 	"github.com/arloliu/parti/v2/internal/testutil"
 	"github.com/arloliu/parti/v2/source"
 	"github.com/arloliu/parti/v2/strategy"
-	"github.com/arloliu/parti/v2/subscription"
+	"github.com/arloliu/parti/v2/internal/durable"
 	partitest "github.com/arloliu/parti/v2/partitest"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
@@ -40,11 +40,11 @@ func TestSubscriptionHelper_Creation(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create durable helper (single-consumer)
-	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
+	helper, err := durable.NewWorkerConsumer(js, durable.WorkerConsumerConfig{
 		StreamName:      "test-stream",
 		ConsumerPrefix:  "worker",
 		SubjectTemplate: "test.sub.{{.PartitionID}}",
-		Retry:           subscription.RetryConfig{Max: 3 * 100 * time.Millisecond, Backoff: 100 * time.Millisecond},
+		Retry:           durable.RetryConfig{Max: 3 * 100 * time.Millisecond, Backoff: 100 * time.Millisecond},
 	}, func(c context.Context, m jetstream.Msg) error { return nil })
 	require.NoError(t, err)
 	defer helper.Close(context.Background())
@@ -165,11 +165,11 @@ func TestSubscriptionHelper_UpdateOnRebalance(t *testing.T) {
 	// Create stream and durable helper for first manager (reuse js)
 	_, err = js.CreateStream(ctx, jetstream.StreamConfig{Name: "test-stream", Subjects: []string{"rebalance.sub.>"}})
 	require.NoError(t, err)
-	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
+	helper, err := durable.NewWorkerConsumer(js, durable.WorkerConsumerConfig{
 		StreamName:      "test-stream",
 		ConsumerPrefix:  "worker",
 		SubjectTemplate: "rebalance.sub.{{.PartitionID}}",
-		Retry:           subscription.RetryConfig{Max: 3 * 100 * time.Millisecond, Backoff: 100 * time.Millisecond},
+		Retry:           durable.RetryConfig{Max: 3 * 100 * time.Millisecond, Backoff: 100 * time.Millisecond},
 	}, func(c context.Context, m jetstream.Msg) error { return nil })
 	require.NoError(t, err)
 	defer helper.Close(context.Background())
@@ -277,11 +277,11 @@ func TestSubscriptionHelper_Cleanup(t *testing.T) {
 	require.NoError(t, err)
 	_, err = js.CreateStream(ctx, jetstream.StreamConfig{Name: "test-stream", Subjects: []string{"cleanup.sub.>"}})
 	require.NoError(t, err)
-	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
+	helper, err := durable.NewWorkerConsumer(js, durable.WorkerConsumerConfig{
 		StreamName:      "test-stream",
 		ConsumerPrefix:  "worker",
 		SubjectTemplate: "cleanup.sub.{{.PartitionID}}",
-		Retry:           subscription.RetryConfig{Max: 3 * 100 * time.Millisecond, Backoff: 100 * time.Millisecond},
+		Retry:           durable.RetryConfig{Max: 3 * 100 * time.Millisecond, Backoff: 100 * time.Millisecond},
 	}, func(c context.Context, m jetstream.Msg) error { return nil })
 	require.NoError(t, err)
 
@@ -334,11 +334,11 @@ func TestSubscriptionHelper_ErrorHandling(t *testing.T) {
 	require.NoError(t, err)
 	_, err = js.CreateStream(ctx, jetstream.StreamConfig{Name: "test-stream", Subjects: []string{"err.sub.>"}})
 	require.NoError(t, err)
-	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
+	helper, err := durable.NewWorkerConsumer(js, durable.WorkerConsumerConfig{
 		StreamName:      "test-stream",
 		ConsumerPrefix:  "worker",
 		SubjectTemplate: "err.sub.{{.PartitionID}}",
-		Retry:           subscription.RetryConfig{Max: 3 * 50 * time.Millisecond, Backoff: 50 * time.Millisecond},
+		Retry:           durable.RetryConfig{Max: 3 * 50 * time.Millisecond, Backoff: 50 * time.Millisecond},
 	}, func(c context.Context, m jetstream.Msg) error { return nil })
 	require.NoError(t, err)
 	defer helper.Close(context.Background())

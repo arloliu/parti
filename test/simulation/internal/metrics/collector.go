@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/arloliu/parti/v2/subscription"
+	"github.com/arloliu/parti/v2/internal/durable"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	promclient "github.com/prometheus/client_model/go"
@@ -841,7 +841,7 @@ func (c *Collector) RecoveryDurationSummary() (uint64, float64) {
 // Parameters:
 //   - results: Slice of audit results per partition
 //   - workerID: ID of the worker performing the audit (for future labeling; currently unused)
-func (c *Collector) RecordDrainAudit(results []subscription.AuditResult, workerID string) {
+func (c *Collector) RecordDrainAudit(results []durable.AuditResult, workerID string) {
 	var totalLate, totalLost, totalHoles int
 	var maxDuration time.Duration
 	timedOut := false
@@ -920,13 +920,13 @@ func (c *Collector) ColdStartConvergenceSummary() (uint64, float64) {
 	return 0, 0
 }
 
-// GateMetricsAdapter returns an adapter that implements subscription.GateMetrics.
-func (c *Collector) GateMetricsAdapter() subscription.GateMetrics {
+// GateMetricsAdapter returns an adapter that implements durable.GateMetrics.
+func (c *Collector) GateMetricsAdapter() durable.GateMetrics {
 	return gateMetricsAdapter{c: c}
 }
 
-// ResolverMetricsAdapter returns an adapter that implements subscription.ResolverMetrics.
-func (c *Collector) ResolverMetricsAdapter() subscription.ResolverMetrics {
+// ResolverMetricsAdapter returns an adapter that implements durable.ResolverMetrics.
+func (c *Collector) ResolverMetricsAdapter() durable.ResolverMetrics {
 	return resolverMetricsAdapter{c: c}
 }
 

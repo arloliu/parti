@@ -8,7 +8,7 @@ import (
 	"github.com/arloliu/parti/v2"
 	"github.com/arloliu/parti/v2/source"
 	"github.com/arloliu/parti/v2/strategy"
-	"github.com/arloliu/parti/v2/subscription"
+	"github.com/arloliu/parti/v2/internal/durable"
 	partitesting "github.com/arloliu/parti/v2/partitest"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
@@ -53,7 +53,7 @@ func TestWorkerConsumerUpdate(t *testing.T) {
 	chStrat := strategy.NewConsistentHash()
 
 	// Durable helper for single consumer updates
-	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
+	helper, err := durable.NewWorkerConsumer(js, durable.WorkerConsumerConfig{
 		StreamName:      "WORKER_TEST",
 		ConsumerPrefix:  "worker",
 		SubjectTemplate: "work.{{.PartitionID}}",
@@ -95,7 +95,7 @@ func TestWorkerConsumerUpdate(t *testing.T) {
 }
 
 // waitForSubjectInfos polls helper.SubjectConsumerInfos until all expected subjects have info or times out.
-func waitForSubjectInfos(t *testing.T, helper *subscription.WorkerConsumer, expected []string) {
+func waitForSubjectInfos(t *testing.T, helper *durable.WorkerConsumer, expected []string) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {

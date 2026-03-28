@@ -11,7 +11,7 @@ import (
 
 	"github.com/arloliu/parti/v2"
 	"github.com/arloliu/parti/v2/consumer"
-	"github.com/arloliu/parti/v2/subscription"
+	"github.com/arloliu/parti/v2/internal/durable"
 	partitesting "github.com/arloliu/parti/v2/partitest"
 )
 
@@ -67,7 +67,7 @@ func TestWIPHandler_Integration(t *testing.T) {
 	})
 
 	// Create worker consumer with short AckWait
-	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
+	helper, err := durable.NewWorkerConsumer(js, durable.WorkerConsumerConfig{
 		StreamName:      streamName,
 		ConsumerPrefix:  "wip-worker",
 		SubjectTemplate: "wip.{{.PartitionID}}",

@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/arloliu/parti/v2"
-	"github.com/arloliu/parti/v2/subscription"
+	"github.com/arloliu/parti/v2/internal/durable"
 	partitesting "github.com/arloliu/parti/v2/partitest"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
@@ -33,7 +33,7 @@ func TestWorkerConsumerLifecycleAndExpansion(t *testing.T) {
 		return msg.Ack()
 	}
 
-	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
+	helper, err := durable.NewWorkerConsumer(js, durable.WorkerConsumerConfig{
 		StreamName:      "lifecycle-stream",
 		ConsumerPrefix:  "wkr",
 		SubjectTemplate: "lifecycle.test.{{.PartitionID}}",
@@ -84,7 +84,7 @@ func TestWorkerConsumerConcurrentUpdatesConverges(t *testing.T) {
 	require.NoError(t, err)
 
 	mh := func(c context.Context, msg jetstream.Msg) error { return msg.Ack() }
-	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
+	helper, err := durable.NewWorkerConsumer(js, durable.WorkerConsumerConfig{
 		StreamName:      "converge-int-stream",
 		ConsumerPrefix:  "wkr",
 		SubjectTemplate: "converge.int.{{.PartitionID}}",
@@ -137,7 +137,7 @@ func TestWorkerConsumerWorkerIDSwitch(t *testing.T) {
 	require.NoError(t, err)
 
 	mh := func(c context.Context, msg jetstream.Msg) error { return msg.Ack() }
-	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
+	helper, err := durable.NewWorkerConsumer(js, durable.WorkerConsumerConfig{
 		StreamName:          "switch-int-stream",
 		ConsumerPrefix:      "wkr",
 		SubjectTemplate:     "switch.int.{{.PartitionID}}",
@@ -171,7 +171,7 @@ func TestWorkerConsumerExternalDeletion(t *testing.T) {
 	require.NoError(t, err)
 
 	mh := func(c context.Context, msg jetstream.Msg) error { return msg.Ack() }
-	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
+	helper, err := durable.NewWorkerConsumer(js, durable.WorkerConsumerConfig{
 		StreamName:      "extdel-stream",
 		ConsumerPrefix:  "wkr",
 		SubjectTemplate: "extdel.test.{{.PartitionID}}",

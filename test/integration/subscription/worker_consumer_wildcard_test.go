@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/arloliu/parti/v2"
-	"github.com/arloliu/parti/v2/subscription"
+	"github.com/arloliu/parti/v2/internal/durable"
 	partitesting "github.com/arloliu/parti/v2/partitest"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
@@ -54,7 +54,7 @@ func TestWorkerConsumer_WildcardSubjectTemplate(t *testing.T) {
 	}
 
 	// Configure WorkerConsumer with wildcard template
-	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
+	helper, err := durable.NewWorkerConsumer(js, durable.WorkerConsumerConfig{
 		StreamName:      streamName,
 		ConsumerPrefix:  "wc-wildcard",
 		SubjectTemplate: "orders.{{.PartitionID}}.>", // Wildcard at the end
