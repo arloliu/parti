@@ -14,9 +14,9 @@ import (
 	"github.com/arloliu/parti/v2"
 	"github.com/arloliu/parti/v2/consumer"
 	"github.com/arloliu/parti/v2/kvutil"
+	partitesting "github.com/arloliu/parti/v2/partitest"
 	"github.com/arloliu/parti/v2/source"
 	"github.com/arloliu/parti/v2/strategy"
-	partitesting "github.com/arloliu/parti/v2/partitest"
 	"github.com/arloliu/parti/v2/types"
 )
 

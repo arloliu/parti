@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/arloliu/fuda"
-	"github.com/arloliu/parti/v2/jsutil"
 	"github.com/arloliu/parti/v2/internal/durable"
+	"github.com/arloliu/parti/v2/jsutil"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -207,7 +207,7 @@ func NewDynamic(
 		return nil, err
 	}
 
-		// Build worker consumer config from unified DynamicConfig.
+	// Build worker consumer config from unified DynamicConfig.
 	workerCfg := durable.WorkerConsumerConfig{
 		StreamName:                  cfg.StreamName,
 		ConsumerPrefix:              cfg.ConsumerPrefix,

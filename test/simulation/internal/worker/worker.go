@@ -16,9 +16,9 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/arloliu/parti/v2"
+	"github.com/arloliu/parti/v2/internal/durable"
 	"github.com/arloliu/parti/v2/source"
 	"github.com/arloliu/parti/v2/strategy"
-	"github.com/arloliu/parti/v2/internal/durable"
 	"github.com/arloliu/parti/v2/test/simulation/internal/coordinator"
 	"github.com/arloliu/parti/v2/test/simulation/internal/logging"
 	"github.com/arloliu/parti/v2/test/simulation/internal/metrics"

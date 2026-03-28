@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arloliu/parti/v2/partition"
 	ipartition "github.com/arloliu/parti/v2/internal/partition"
 	partitesting "github.com/arloliu/parti/v2/partitest"
+	"github.com/arloliu/parti/v2/partition"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

@@ -13,8 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/arloliu/parti/v2/consumer"
-	"github.com/arloliu/parti/v2/partition"
 	partitesting "github.com/arloliu/parti/v2/partitest"
+	"github.com/arloliu/parti/v2/partition"
 )
 
 // TestStatic_BasicPublishConsume verifies that a Static consumer receives messages

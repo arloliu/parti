@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/arloliu/parti/v2/internal/stableid"
-	partitest "github.com/arloliu/parti/v2/partitest"
+	"github.com/arloliu/parti/v2/partitest"
 	"github.com/stretchr/testify/require"
 )
 

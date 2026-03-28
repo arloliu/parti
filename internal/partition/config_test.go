@@ -1,4 +1,4 @@
-package ipartition
+package partition
 
 import (
 	"errors"

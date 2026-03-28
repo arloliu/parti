@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/arloliu/fuda"
-	"github.com/arloliu/parti/v2/jsutil"
 	"github.com/arloliu/parti/v2/internal/durable"
+	"github.com/arloliu/parti/v2/jsutil"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -143,7 +143,7 @@ func NewBroadcast(
 		return nil, err
 	}
 
-		// Build broadcast consumer config from unified BroadcastConfig.
+	// Build broadcast consumer config from unified BroadcastConfig.
 	broadcastCfg := durable.BroadcastConsumerConfig{
 		StreamName:        cfg.StreamName,
 		ConsumerPrefix:    cfg.ConsumerPrefix,

@@ -1,4 +1,4 @@
-// Package testing provides test utilities for the Parti library.
+// Package partitest provides test utilities for the Parti library.
 //
 // This package offers helpers for setting up test environments, particularly
 // embedded NATS servers for integration testing. It follows Go's convention

@@ -6,10 +6,10 @@ import (
 	"time"
 
 	"github.com/arloliu/parti/v2"
-	"github.com/arloliu/parti/v2/source"
-	"github.com/arloliu/parti/v2/strategy"
 	"github.com/arloliu/parti/v2/internal/durable"
 	partitesting "github.com/arloliu/parti/v2/partitest"
+	"github.com/arloliu/parti/v2/source"
+	"github.com/arloliu/parti/v2/strategy"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 )

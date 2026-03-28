@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arloliu/parti/v2/test/simulation/internal/coordinator"
 	partitesting "github.com/arloliu/parti/v2/partitest"
+	"github.com/arloliu/parti/v2/test/simulation/internal/coordinator"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 )

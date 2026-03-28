@@ -1,9 +1,9 @@
 package durable
 
 import (
-"context"
+	"context"
 
-"github.com/nats-io/nats.go/jetstream"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 // messageHandler is the internal contract for processing JetStream messages.
@@ -26,8 +26,8 @@ import (
 //   - With AckExplicit policy, failing to ACK within AckWait causes redelivery.
 //   - Exactly-once is not guaranteed; design handlers to be idempotent.
 type messageHandler interface {
-// Handle processes a single message.
-Handle(ctx context.Context, msg jetstream.Msg) error
+	// Handle processes a single message.
+	Handle(ctx context.Context, msg jetstream.Msg) error
 }
 
 // messageHandlerFunc is a function adapter for messageHandler.
