@@ -40,7 +40,7 @@ The `consumer` package provides a unified API for JetStream consumers in partiti
 ### Import
 
 ```go
-import "github.com/arloliu/parti/consumer"
+import "github.com/arloliu/parti/v2/consumer"
 ```
 
 > **Migration Note:** The `consumer` package replaces the legacy `subscription` and `partition`
@@ -373,7 +373,7 @@ wc, _ := subscription.NewWorkerConsumer(js, cfg, handler)
 defer wc.Close(ctx)
 
 // New (recommended)
-import "github.com/arloliu/parti/consumer"
+import "github.com/arloliu/parti/v2/consumer"
 
 c, _ := consumer.NewDynamic(js, "ORDERS", "processor", "orders.{{.PartitionID}}", handler)
 defer c.Stop(ctx)
@@ -430,9 +430,8 @@ defer c.Stop(ctx)
 
 ## Legacy Packages (Deprecated)
 
-> **Deprecation Notice:** The `subscription` and `partition` packages are deprecated.
-> Use the `consumer` package instead for new code. Existing code will continue to work
-> but should be migrated to the new package.
+> **Note:** The `subscription` and `partition` consumer APIs were removed in v2.
+> Use the `consumer` package instead. The functionality has been moved to `internal/durable`.
 
 ### subscription Package
 
@@ -534,5 +533,5 @@ All consumer types are thread-safe. Lifecycle methods (`Start`, `Stop`, `Update`
 
 **Runtime Errors:**
 - `context.DeadlineExceeded` - Stop timed out
-- `subscription.ErrWorkerIDMutation` - Dynamic consumer workerID changed unexpectedly
-- `subscription.ErrMaxSubjectsExceeded` - Partition count exceeds limit
+- `consumer.ErrWorkerIDMutation` - Dynamic consumer workerID changed unexpectedly
+- `consumer.ErrMaxSubjectsExceeded` - Partition count exceeds limit

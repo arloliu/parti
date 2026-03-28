@@ -1,6 +1,6 @@
 # partition
 
-Static partition-based publishing and consuming for NATS and JetStream.
+Static partition-based publishing and subscribing for NATS and JetStream.
 
 ## Overview
 
@@ -72,7 +72,7 @@ The subject pattern defines how partition keys map to NATS subjects.
 ## Installation
 
 ```bash
-go get github.com/arloliu/parti/partition
+go get github.com/arloliu/parti/v2/partition
 ```
 
 ## Quick Start
@@ -86,7 +86,7 @@ import (
     "context"
     "log"
 
-    "github.com/arloliu/parti/partition"
+    "github.com/arloliu/parti/v2/partition"
     "github.com/nats-io/nats.go"
 )
 
@@ -135,6 +135,9 @@ func main() {
 
 ### JetStream Publisher + Consumer
 
+For JetStream consumption, use `partition.JSPublisher` for publishing and
+`consumer.NewStatic()` from the [`consumer`](../consumer/) package for consuming:
+
 ```go
 package main
 
@@ -142,7 +145,8 @@ import (
     "context"
     "log"
 
-    "github.com/arloliu/parti/partition"
+    "github.com/arloliu/parti/v2/consumer"
+    "github.com/arloliu/parti/v2/partition"
     "github.com/nats-io/nats.go"
     "github.com/nats-io/nats.go/jetstream"
 )
@@ -160,7 +164,7 @@ func main() {
         Subjects: []string{"events.*.0", "events.*.1", "events.*.2", "events.*.3"},
     })
 
-    // Publisher
+    // Publisher (from partition package)
     pub, err := partition.NewJSPublisher(js, partition.PartitionConfig{
         NumPartitions:  4,
         SubjectPattern: "events.{{key}}.{{partition}}",
@@ -169,28 +173,19 @@ func main() {
         log.Fatal(err)
     }
 
-    // Consumer for partition 0
-    consumer, err := partition.NewJSConsumer(
-        js,
-        partition.ConsumerConfig{
-            PartitionConfig: partition.PartitionConfig{
-                NumPartitions:  4,
-                SubjectPattern: "events.{{key}}.{{partition}}",
-            },
-            StreamName:   "events",
-            ConsumerName: "processor-0",
-            Partition:    0,
-        },
-        partition.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
-            log.Printf("Received: %s", string(msg.Data()))
-            return nil // auto-ack
-        }),
-    )
+    // Consumer for partition 0 (from consumer package)
+    handler := consumer.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+        log.Printf("Received: %s", string(msg.Data()))
+        return nil // auto-ack
+    })
+
+    sc, err := consumer.NewStatic(js, "events", "processor-0",
+        "events.{{key}}.{{partition}}", 4, 0, handler)
     if err != nil {
         log.Fatal(err)
     }
 
-    if err := consumer.Start(ctx); err != nil {
+    if err := sc.Start(ctx); err != nil {
         log.Fatal(err)
     }
 
@@ -219,15 +214,10 @@ if err != nil {
     log.Fatal(err)
 }
 
-consumer, err := partition.NewJSConsumer(js, partition.ConsumerConfig{
-    PartitionConfig: partition.PartitionConfig{
-        NumPartitions:  4,
-        SubjectPattern: "events.{{key}}.{{partition}}",
-    },
-    StreamName:   "events",
-    ConsumerName: fmt.Sprintf("processor-%d", partitionIndex),
-    Partition:    partitionIndex,
-}, handler)
+sc, err := consumer.NewStatic(js, "events",
+    fmt.Sprintf("processor-%d", partitionIndex),
+    "events.{{key}}.{{partition}}",
+    numPartitions, partitionIndex, handler)
 ```
 
 ### Kubernetes Downward API Configuration
@@ -303,7 +293,8 @@ import (
     "os"
     "strconv"
 
-    "github.com/arloliu/parti/partition"
+    "github.com/arloliu/parti/v2/consumer"
+    "github.com/arloliu/parti/v2/partition"
     "github.com/nats-io/nats.go"
     "github.com/nats-io/nats.go/jetstream"
 )
@@ -333,28 +324,21 @@ func main() {
 
     js, _ := jetstream.New(nc)
 
-    consumer, err := partition.NewJSConsumer(
-        js,
-        partition.ConsumerConfig{
-            PartitionConfig: partition.PartitionConfig{
-                NumPartitions:  numPartitions,
-                SubjectPattern: "events.{{key}}.{{partition}}",
-            },
-            StreamName:   "events",
-            ConsumerName: fmt.Sprintf("processor-%d", partitionIndex),
-            Partition:    partitionIndex,
-        },
-        partition.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
-            // Process message
-            log.Printf("Processing: %s", string(msg.Data()))
-            return nil
-        }),
-    )
+    handler := consumer.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+        // Process message
+        log.Printf("Processing: %s", string(msg.Data()))
+        return nil
+    })
+
+    sc, err := consumer.NewStatic(js, "events",
+        fmt.Sprintf("processor-%d", partitionIndex),
+        "events.{{key}}.{{partition}}",
+        numPartitions, partitionIndex, handler)
     if err != nil {
         log.Fatal(err)
     }
 
-    if err := consumer.Start(ctx); err != nil {
+    if err := sc.Start(ctx); err != nil {
         log.Fatal(err)
     }
 
@@ -387,45 +371,10 @@ env:
 | `HashSeed`       | `uint64`       | No       | `0`     | Seed for hash function. Different seeds produce different distributions |
 | `Logger`         | `types.Logger` | No       | no-op   | Structured logger instance                                              |
 
-### ConsumerConfig
-
-Embeds `PartitionConfig` plus:
-
-| Field          | Type            | Required | Default | Description                                |
-|----------------|-----------------|----------|---------|--------------------------------------------|
-| `StreamName`   | `string`        | Yes      | -       | JetStream stream name                      |
-| `ConsumerName` | `string`        | Yes      | -       | Durable consumer name                      |
-| `Partition`    | `int`           | Yes      | -       | Partition index (0 to N-1)                 |
-| `BatchSize`    | `int`           | No       | `1`     | Messages per fetch batch                   |
-| `FetchTimeout` | `time.Duration` | No       | `5s`    | Fetch timeout                              |
-| `ManualAck`    | `bool`          | No       | `false` | Disable auto-ack behavior                  |
-| `MaxDeliver`   | `int`           | No       | `-1`    | Max delivery attempts (-1 = unlimited) |
+> **JetStream Consumer Configuration:** For JetStream consumer settings (AckWait, MaxDeliver,
+> BatchSize, etc.), see the [`consumer` package documentation](../consumer/).
 
 ## Advanced Usage
-
-### Manual Acknowledgment
-
-For fine-grained control over message acknowledgment:
-
-```go
-consumer, err := partition.NewJSConsumer(
-    js,
-    partition.ConsumerConfig{
-        // ... other config
-        ManualAck: true,
-    },
-    partition.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
-        if err := processMessage(msg); err != nil {
-            // Negative ack with delay for retry
-            return msg.NakWithDelay(5 * time.Second)
-        }
-        // Explicit acknowledgment
-        return msg.Ack()
-    }),
-)
-```
-
-### Async Publishing (JetStream)
 
 ```go
 pub, _ := partition.NewJSPublisher(js, config)
@@ -458,26 +407,20 @@ pub, err := partition.NewPublisherWithOptions(
     partition.WithHashSeed(12345),
 )
 
-// Subscriber
+// JetStream Publisher
+jsPub, err := partition.NewJSPublisherWithOptions(
+    js,
+    partition.WithNumPartitions(4),
+    partition.WithSubjectPattern("events.{{key}}.{{partition}}"),
+)
+
+// Subscriber (core NATS)
 sub, err := partition.NewSubscriberWithOptions(
     nc,
     0, // partition
     handler,
     partition.WithNumPartitions(4),
     partition.WithSubjectPattern("events.{{key}}.{{partition}}"),
-)
-
-// JetStream Consumer
-consumer, err := partition.NewJSConsumerWithOptions(
-    js,
-    handler,
-    partition.WithStreamName("events"),
-    partition.WithConsumerName("processor-0"),
-    partition.WithPartitionIndex(0),
-    partition.WithConsumerNumPartitions(4),
-    partition.WithConsumerSubjectPattern("events.{{key}}.{{partition}}"),
-    partition.WithManualAck(true),
-    partition.WithMaxDeliver(5),
 )
 ```
 
@@ -527,7 +470,7 @@ key := "user-123"
 | `GetSubjectForPartition(partition) (string, error)`                | Get subject for specific partition |
 | `NumPartitions() int`                                              | Get total partition count          |
 
-### Subscriber/JSConsumer Methods
+### Subscriber Methods
 
 | Method             | Description              |
 |--------------------|--------------------------|
@@ -535,6 +478,10 @@ key := "user-123"
 | `Stop() error`     | Stop consuming           |
 | `Partition() int`  | Get assigned partition   |
 | `Subject() string` | Get subscription subject |
+
+> **JetStream Consumer Methods:** For JetStream consumer API (Start, Stop, Update),
+> see `consumer.Static`, `consumer.Dynamic`, and `consumer.Broadcast` in the
+> [`consumer` package](../consumer/).
 
 ## Error Handling
 
@@ -569,3 +516,4 @@ key := "user-123"
 - Configuration defaults are applied during validation
 - The hash function is xxh3 (extremely fast, good distribution)
 - Partition assignment is deterministic: same key + seed + NumPartitions = same partition
+- For JetStream consumption, use the [`consumer` package](../consumer/) (`consumer.NewStatic`, `consumer.NewDynamic`)

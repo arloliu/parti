@@ -46,16 +46,22 @@ parti/                                  # Root = main public package
 │   ├── static.go                       # Static source implementation
 │   └── static_test.go
 │
-├── subscription/                       # Subscription helper subpackage
+├── consumer/                           # Unified JetStream consumer API
 │   ├── doc.go                          # Package documentation
-│   ├── helper.go                       # Subscription helper implementation
-│   └── helper_test.go
+│   ├── handler.go                      # Single MessageHandler definition
+│   ├── defaults.go                     # Tuning-relevant default constants
+│   └── *_test.go
 │
 ├── internal/                           # Private implementation (not importable)
-│   ├── manager/                        # Manager implementation
-│   │   ├── manager.go                  # Core manager logic
-│   │   ├── manager_test.go
-│   │   └── state_machine.go            # State machine transitions
+│   ├── durable/                        # JetStream durable consumers
+│   │   ├── worker_consumer.go          # WorkerConsumer (filter-based)
+│   │   ├── broadcast_consumer.go       # BroadcastConsumer (fan-out)
+│   │   └── *_test.go
+│   │
+│   ├── partition/                      # Partition consumer internals
+│   │   ├── js_consumer.go              # JSConsumer implementation
+│   │   ├── config.go                   # ConsumerConfig
+│   │   └── *_test.go
 │   │
 │   ├── election/                       # Election implementations
 │   │   ├── nats.go                     # NATS KV-based election (default)
@@ -122,7 +128,7 @@ parti/                                  # Root = main public package
 - Functional options (`WithHooks`, `WithLogger`, `WithMetrics`, `WithElectionAgent`, `WithWorkerConsumerUpdater`, etc.)
 - Common types: `Partition`, `Assignment`, `State`
 
-**Import**: `import "github.com/arloliu/parti"`
+**Import**: `import "github.com/arloliu/parti/v2"`
 
 ### Subpackage: `strategy`
 
@@ -132,7 +138,7 @@ parti/                                  # Root = main public package
 - `ConsistentHash` - Weighted consistent hashing with virtual nodes
 - `RoundRobin` - Simple round-robin distribution
 
-**Import**: `import "github.com/arloliu/parti/strategy"`
+**Import**: `import "github.com/arloliu/parti/v2/strategy"`
 
 **Constructors**:
 - `strategy.NewConsistentHash(...)`
@@ -146,26 +152,29 @@ parti/                                  # Root = main public package
 **Contents**:
 - `Static` - Fixed list of partitions
 
-**Import**: `import "github.com/arloliu/parti/source"`
+**Import**: `import "github.com/arloliu/parti/v2/source"`
 
 **Constructors**:
 - `source.NewStatic(partitions)`
 - `source.NewNatsKV(js, bucket)`
 
-### Subpackage: `subscription`
+### Subpackage: `consumer`
 
-**Purpose**: NATS subscription management utilities.
+**Purpose**: Unified JetStream consumer types for partitioned workloads.
 
 **Contents**:
-- `WorkerConsumer` - Per-worker durable consumer with partition-scoped filters
-- `BroadcastConsumer` - Wildcard consumer for fan-out streams
-- `ProcessingGate` - Optional ownership/state-based processing enforcement
+- `Queue` - Load-balanced workers (queue group)
+- `Static` - Fixed partition (StatefulSet ordinal)
+- `Dynamic` - Manager-assigned partitions (Parti core)
+- `Broadcast` - Fan-out to all instances
 
-**Import**: `import "github.com/arloliu/parti/subscription"`
+**Import**: `import "github.com/arloliu/parti/v2/consumer"`
 
 **Constructors**:
-- `subscription.NewWorkerConsumer(js, cfg, handler)`
-- `subscription.NewBroadcastConsumer(js, cfg, handler)`
+- `consumer.NewQueue(js, stream, name, filter, handler)`
+- `consumer.NewStatic(js, stream, name, pattern, numPartitions, partition, handler)`
+- `consumer.NewDynamic(js, stream, prefix, template, handler)`
+- `consumer.NewBroadcast(js, stream, prefix, filter, handler)`
 
 ### Internal Packages
 
@@ -187,9 +196,9 @@ Users import the root package plus built-in strategy/source packages:
 
 ```go
 import (
-    "github.com/arloliu/parti"
-    "github.com/arloliu/parti/source"
-    "github.com/arloliu/parti/strategy"
+    "github.com/arloliu/parti/v2"
+    "github.com/arloliu/parti/v2/source"
+    "github.com/arloliu/parti/v2/strategy"
     "github.com/nats-io/nats.go/jetstream"
 )
 
@@ -221,10 +230,10 @@ Users import subpackages directly for customization:
 import (
     "context"
 
-    "github.com/arloliu/parti"
-    "github.com/arloliu/parti/source"
-    "github.com/arloliu/parti/strategy"
-    "github.com/arloliu/parti/subscription"
+    "github.com/arloliu/parti/v2"
+    "github.com/arloliu/parti/v2/consumer"
+    "github.com/arloliu/parti/v2/source"
+    "github.com/arloliu/parti/v2/strategy"
     "github.com/nats-io/nats.go/jetstream"
 )
 
@@ -245,15 +254,13 @@ strat := strategy.NewConsistentHash(
     strategy.WithHashSeed(12345),
 )
 
-// Consumer helper wired to the manager for automatic filter updates.
-wc, _ := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
-    StreamName:      "events",
-    ConsumerPrefix:  "worker",
-    SubjectTemplate: "events.{{.PartitionID}}",
-}, subscription.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
-    // Handle message
-    return nil
-}))
+// Dynamic consumer wired to the manager for automatic partition updates.
+dc, _ := consumer.NewDynamic(js, "events", "worker", "events.{{.PartitionID}}",
+    consumer.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+        // Handle message
+        return nil
+    }),
+)
 
 hooks := &parti.Hooks{
     OnAssignmentChanged: func(ctx context.Context, oldPartitions, newPartitions []parti.Partition) error {
@@ -264,7 +271,7 @@ hooks := &parti.Hooks{
 
 mgr, err := parti.NewManager(&cfg, js, src, strat,
     parti.WithHooks(hooks),
-    parti.WithWorkerConsumerUpdater(wc),
+    parti.WithWorkerConsumerUpdater(dc),
 )
 if err != nil {
     log.Fatal(err)
@@ -301,7 +308,7 @@ Each example is self-contained and shows different aspects:
 ### Why Root-Level Package?
 
 **Advantages**:
-- Simpler import path: `import "github.com/arloliu/parti"`
+- Simpler import path: `import "github.com/arloliu/parti/v2"`
 - Matches repository name
 - Common for single-purpose libraries (net/http, database/sql, context)
 - All core interfaces visible in one godoc page

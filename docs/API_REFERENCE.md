@@ -1,8 +1,8 @@
 # Parti API Reference
 
-**Version**: 1.3.0
+**Version**: 2.0.0
 **Last Updated**: December 6, 2025
-**Library**: `github.com/arloliu/parti`
+**Library**: `github.com/arloliu/parti/v2`
 
 ---
 
@@ -16,9 +16,8 @@
 6. [Strategy Package](#strategy-package)
 7. [Source Package](#source-package)
 8. [Consumer Package](#consumer-package)
-9. [Subscription Package (Deprecated)](#subscription-package-deprecated)
-10. [Testing Package](#testing-package)
-11. [Error Types](#error-types)
+9. [Testing Package](#testing-package)
+10. [Error Types](#error-types)
 
 ---
 
@@ -1183,7 +1182,7 @@ const (
 
 ## Strategy Package
 
-Package `github.com/arloliu/parti/strategy` provides built-in assignment strategies.
+Package `github.com/arloliu/parti/v2/strategy` provides built-in assignment strategies.
 
 ### ConsistentHash
 
@@ -1276,7 +1275,7 @@ strategy := strategy.NewWeightedConsistentHash(
 
 ## Source Package
 
-Package `github.com/arloliu/parti/source` provides built-in partition sources.
+Package `github.com/arloliu/parti/v2/source` provides built-in partition sources.
 
 ### Static
 
@@ -1335,7 +1334,7 @@ err := src.Update(ctx, newPartitions)
 
 ## Consumer Package
 
-Package `github.com/arloliu/parti/consumer` provides unified JetStream consumer types for partitioned workloads. This package replaces the legacy `subscription` and `partition` packages.
+Package `github.com/arloliu/parti/v2/consumer` provides unified JetStream consumer types for partitioned workloads. This package replaces the legacy `subscription` and `partition` packages.
 
 ### Consumer Types
 
@@ -1601,308 +1600,9 @@ c, _ := consumer.NewQueue(js, "stream", "consumer", "subject.>", handler,
 
 ---
 
-## Subscription Package (Deprecated)
-
-> **Deprecation Notice:** The `subscription` package is deprecated. Use the `consumer` package instead.
-> See [Consumer Package](#consumer-package) for the recommended API.
-
-Package `github.com/arloliu/parti/subscription` provides helpers for integrating JetStream message processing with partition assignments.
-
-### WorkerConsumer
-
-Manages a single durable pull consumer per worker whose FilterSubjects set is updated on assignment changes. This minimizes consumer churn and supports hot-reload of subjects without restarting the pull loop.
-
-```go
-func NewWorkerConsumer(js jetstream.JetStream, cfg WorkerConsumerConfig, handler MessageHandler) (*WorkerConsumer, error)
-```
-
-**Parameters**:
-- `js`: JetStream context
-- `cfg`: Configuration for the consumer
-- `handler`: Callback for processing messages
-
-**Returns**:
-- `*WorkerConsumer`: Initialized consumer manager
-- `error`: Validation error
-
----
-
-### WorkerConsumerConfig
-
-Configuration for the WorkerConsumer.
-
-```go
-type WorkerConsumerConfig struct {
-    StreamName       string        // Required: JetStream stream name
-    ConsumerPrefix   string        // Required: Durable name prefix (final: <prefix>-<workerID>)
-    SubjectTemplate  string        // Required: Go template (e.g. "events.{{.PartitionID}}")
-
-    // Consumer Configuration
-    AckPolicy        jetstream.AckPolicy
-    AckWait          time.Duration
-    MaxDeliver       int
-    InactiveThreshold time.Duration
-    MaxAckPending    int
-
-    // Pull Configuration
-    BatchSize        int
-    MaxWaiting       int
-    FetchTimeout     time.Duration
-
-    // Resilience
-    MaxRetries       int
-    RetryBackoff     time.Duration
-    HealthFailureThreshold int
-
-    // Advanced Features
-    ProcessingGate   ProcessingGateConfig // Gate configuration
-    PullGatingEnabled bool                // Stop pulling when gate is closed
-    DrainOnRemove    bool                 // Drain messages for removed partitions
-    ManualAck        bool                 // If true, handler must Ack messages
-
-    // Dependencies
-    Logger           parti.Logger
-    Metrics          parti.MetricsCollector
-}
-```
-
----
-
-### ProcessingGateConfig
-
-Configures the processing gate which controls message flow based on assignment status.
-
-```go
-type ProcessingGateConfig struct {
-    Enabled       bool          // Enable processing gate
-    AllowedStates []parti.State // States where processing is allowed
-    WarmupDuration time.Duration // Time to wait after gate opens
-}
-```
-
-**Fields**:
-- `Enabled`: If true, messages are checked against the gate before processing.
-- `AllowedStates`: List of manager states where processing is allowed (default: `StateStable`).
-- `WarmupDuration`: Optional delay after entering an allowed state before processing begins.
-
----
-
-### MessageHandler
-
-Interface for processing messages.
-
-```go
-type MessageHandler interface {
-    HandleMessage(ctx context.Context, msg jetstream.Msg) error
-}
-```
-
-**Functional Adapter**:
-```go
-type MessageHandlerFunc func(ctx context.Context, msg jetstream.Msg) error
-
-func (f MessageHandlerFunc) HandleMessage(ctx context.Context, msg jetstream.Msg) error {
-    return f(ctx, msg)
-}
-```
-
----
-
-### WorkerConsumer Methods
-
-#### UpdateWorkerConsumer
-
-Updates the consumer's filter subjects based on assigned partitions.
-
-```go
-func (wc *WorkerConsumer) UpdateWorkerConsumer(ctx context.Context, workerID string, partitions []parti.Partition) error
-```
-
-**Note**: Typically called automatically by the Manager if registered via `WithWorkerConsumerUpdater`.
-
-#### Health
-
-Returns the current health status of the consumer.
-
-```go
-func (wc *WorkerConsumer) Health() WorkerConsumerHealth
-```
-
----
-
-### WorkerConsumerUpdater Option
-
-Functional option enabling Manager-driven consumer reconciliation.
-
-```go
-func WithWorkerConsumerUpdater(updater WorkerConsumerUpdater) Option
-```
-
-When provided, the Manager invokes `UpdateWorkerConsumer` after initial assignment and on every subsequent change.
-
-**Example**:
-```go
-consumer, _ := subscription.NewWorkerConsumer(js, cfg, handler)
-mgr, _ := parti.NewManager(cfg, js, src, strat,
-    parti.WithWorkerConsumerUpdater(consumer),
-)
-```
-
----
-
-### BroadcastConsumer
-
-Creates a single durable consumer per worker instance that receives all messages matching a wildcard filter.
-
-```go
-func NewBroadcastConsumer(
-    js jetstream.JetStream,
-    cfg BroadcastConsumerConfig,
-    handler MessageHandler,
-) (*BroadcastConsumer, error)
-```
-
-**Parameters**:
-- `js`: JetStream context
-- `cfg`: Broadcast consumer configuration
-- `handler`: Message handler (same interface as WorkerConsumer)
-
-**Returns**:
-- `*BroadcastConsumer`: Initialized broadcast consumer
-- `error`: Validation error
-
----
-
-### BroadcastConsumerConfig
-
-Configuration for the BroadcastConsumer.
-
-```go
-type BroadcastConsumerConfig struct {
-    StreamName     string // Required: JetStream stream name
-    ConsumerPrefix string // Required: Prefix for durable name
-    WildcardFilter string // Required: JetStream filter subject (e.g. "events.>")
-    ConsumerID     string // Optional: Consumer identity (see resolution rules)
-
-    // Consumer Configuration
-    AckPolicy        jetstream.AckPolicy
-    AckWait          time.Duration
-    MaxDeliver       int
-    InactiveThreshold time.Duration
-    MaxAckPending    int
-
-    // Pull Configuration
-    BatchSize        int
-    FetchTimeout     time.Duration
-
-    // Dependencies
-    Logger  types.Logger
-    Metrics ConsumerMetrics
-}
-```
-
-**ConsumerID Resolution**:
-
-| Value | Behavior |
-|-------|----------|
-| Empty | Try `HOSTNAME`, then `POD_NAME`, then generate random |
-| `"fixed-value"` | Use literal value |
-| `"env:VAR_NAME"` | Use value of environment variable `VAR_NAME` |
-
-If a name collision occurs during consumer creation, a new random ID is automatically generated.
-
----
-
-### BroadcastConsumer Methods
-
-#### UpdateWorkerConsumer
-
-Implements `WorkerConsumerUpdater` interface. Ensures the pull loop is running.
-
-```go
-func (bc *BroadcastConsumer) UpdateWorkerConsumer(
-    ctx context.Context,
-    workerID string,
-    partitions []types.Partition,
-) error
-```
-
-**Note**: The `partitions` parameter is **ignored**. The broadcast consumer receives all messages matching its `WildcardFilter`.
-
-#### Stop
-
-Stops the pull loop and releases resources.
-
-```go
-func (bc *BroadcastConsumer) Stop(ctx context.Context) error
-```
-
-> **Note:** The legacy `Close(ctx)` method is an alias for `Stop(ctx)` for backward compatibility.
-
----
-
-### CompositeConsumerUpdater
-
-Combines multiple `WorkerConsumerUpdater` implementations for registration with a single Manager.
-
-```go
-func NewCompositeConsumerUpdater(updaters ...WorkerConsumerUpdater) *CompositeConsumerUpdater
-```
-
-**Parameters**:
-- `updaters`: Variadic list of updaters (nil values are ignored)
-
-**Returns**:
-- `*CompositeConsumerUpdater`: Composite that fans out to all registered updaters
-
-**Example**:
-```go
-wc, _ := subscription.NewWorkerConsumer(js, wcConfig, handler1)
-bc, _ := subscription.NewBroadcastConsumer(js, bcConfig, handler2)
-composite := parti.NewCompositeConsumerUpdater(wc, bc)
-
-mgr, _ := parti.NewManager(cfg, js, src, strat,
-    parti.WithWorkerConsumerUpdater(composite),
-)
-```
-
----
-
-### CompositeConsumerUpdater Methods
-
-#### UpdateWorkerConsumer
-
-Calls `UpdateWorkerConsumer` on all registered updaters. Errors are aggregated.
-
-```go
-func (c *CompositeConsumerUpdater) UpdateWorkerConsumer(
-    ctx context.Context,
-    workerID string,
-    partitions []types.Partition,
-) error
-```
-
-#### Add
-
-Dynamically registers additional updaters.
-
-```go
-func (c *CompositeConsumerUpdater) Add(updaters ...WorkerConsumerUpdater)
-```
-
-#### Len
-
-Returns the number of registered updaters.
-
-```go
-func (c *CompositeConsumerUpdater) Len() int
-```
-
----
-
 ## Testing Package
 
-Package `github.com/arloliu/parti/testing` provides utilities for testing.
+Package `github.com/arloliu/parti/v2/partitest` provides utilities for testing.
 
 ### Embedded NATS
 

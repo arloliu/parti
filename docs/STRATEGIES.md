@@ -40,7 +40,7 @@ Assignment strategies determine **how partitions are distributed across workers*
 ### Import
 
 ```go
-import "github.com/arloliu/parti/strategy"
+import "github.com/arloliu/parti/v2/strategy"
 ```
 
 ### Strategy Interface
@@ -93,7 +93,7 @@ The default strategy. Distributes partitions using consistent hashing for stable
 **Usage:**
 
 ```go
-import "github.com/arloliu/parti/strategy"
+import "github.com/arloliu/parti/v2/strategy"
 
 // Default: 100 virtual nodes
 s := strategy.NewConsistentHash()
@@ -154,8 +154,8 @@ Weights influence virtual node distribution:
 
 ```go
 import (
-    "github.com/arloliu/parti"
-    "github.com/arloliu/parti/strategy"
+    "github.com/arloliu/parti/v2"
+    "github.com/arloliu/parti/v2/strategy"
 )
 
 // Create weighted strategy
@@ -225,7 +225,7 @@ Simplest strategy. Distributes partitions evenly in order.
 **Usage:**
 
 ```go
-import "github.com/arloliu/parti/strategy"
+import "github.com/arloliu/parti/v2/strategy"
 
 s := strategy.NewRoundRobin()
 
@@ -247,7 +247,7 @@ Implement the `AssignmentStrategy` interface:
 ```go
 package custom
 
-import "github.com/arloliu/parti"
+import "github.com/arloliu/parti/v2"
 
 type AffinityStrategy struct {
     affinityMap map[string]string  // partition -> preferred worker
@@ -294,7 +294,7 @@ Partition sources define **where partition definitions come from**. The `source`
 ### Import
 
 ```go
-import "github.com/arloliu/parti/source"
+import "github.com/arloliu/parti/v2/source"
 ```
 
 ### Source Interface
@@ -322,8 +322,8 @@ Fixed partition list defined at startup.
 
 ```go
 import (
-    "github.com/arloliu/parti"
-    "github.com/arloliu/parti/source"
+    "github.com/arloliu/parti/v2"
+    "github.com/arloliu/parti/v2/source"
 )
 
 // Simple: just partition IDs
@@ -365,7 +365,7 @@ mgr, _ := parti.NewManager(cfg, js, src, strategy.NewConsistentHash())
 Dynamic partition definitions stored in NATS KV.
 
 ```go
-import "github.com/arloliu/parti/source"
+import "github.com/arloliu/parti/v2/source"
 
 // Create source from KV bucket
 src := source.NewNatsKV(js, "partitions-bucket")
@@ -448,7 +448,7 @@ package custom
 
 import (
     "context"
-    "github.com/arloliu/parti"
+    "github.com/arloliu/parti/v2"
 )
 
 type DatabaseSource struct {

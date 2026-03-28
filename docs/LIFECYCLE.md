@@ -6,7 +6,7 @@
 - [Docs README](README.md) - Documentation map
 - [Architecture](ARCHITECTURE.md) - System architecture and concepts
 - [Configuration Guide](CONFIGURATION.md) - Configuration options
-- [Consumer Helpers](CONSUMERS.md) - JetStream subscription management
+- [Consumer Helpers](CONSUMERS.md) - JetStream consumer management
 
 ---
 

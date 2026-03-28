@@ -6,7 +6,7 @@
 - [Docs README](README.md) - Documentation map
 - [Configuration Guide](CONFIGURATION.md) - Configuration options
 - [Lifecycle & State Management](LIFECYCLE.md) - Worker states and handoff
-- [Consumer Helpers](CONSUMERS.md) - JetStream subscription management
+- [Consumer Helpers](CONSUMERS.md) - JetStream consumer management
 
 ---
 
@@ -71,7 +71,7 @@ Parti uses NATS JetStream KeyValue buckets for coordination between workers:
 | **Election Agent**      | Manages leader election using NATS KV lease semantics                           |
 | **Calculator**          | Leader-only: calculates partition assignments using chosen strategy             |
 | **Heartbeat Publisher** | Publishes periodic health signals for failure detection                         |
-| **WorkerConsumer**      | Manages JetStream subscriptions for assigned partitions                         |
+| **WorkerConsumer**      | Manages JetStream consumers for assigned partitions                         |
 | **ProcessingGate**      | Enforces ownership before processing messages                                   |
 
 ### Manager
@@ -83,7 +83,7 @@ The `Manager` is the central component that coordinates worker identity, leader 
 - Participate in leader election
 - Watch for assignment changes
 - Invoke hooks on lifecycle events
-- Manage WorkerConsumer subscriptions
+- Manage WorkerConsumer partition filters
 
 ### Leader vs Follower
 

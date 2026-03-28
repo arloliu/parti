@@ -2,7 +2,7 @@
 
 > The `partition` package for application-level partitioning.
 
-> **Note:** For JetStream consumers, use the `consumer` package instead. The `partition.JSConsumer`
+> **Note:** For JetStream consumers, use the `consumer` package instead. The `partition.JSConsumer` has been moved to `internal/partition` and is no longer part of the public API.
 > is deprecated in favor of `consumer.Static`. See [Consumer Package](CONSUMERS.md).
 
 **Related Documentation:**
@@ -31,7 +31,7 @@ This is different from Parti's core functionality (which assigns partitions to w
 ### Import
 
 ```go
-import "github.com/arloliu/parti/partition"
+import "github.com/arloliu/parti/v2/partition"
 ```
 
 ### Relationship to Core Parti
@@ -87,7 +87,7 @@ The built-in `HashPartitioner` uses consistent hashing to map keys to partitions
 ### Basic Usage
 
 ```go
-import "github.com/arloliu/parti/partition"
+import "github.com/arloliu/parti/v2/partition"
 
 // Create partitioner with 16 partitions
 p := partition.NewHashPartitioner(16)
@@ -109,9 +109,9 @@ p.Partition("order-abc")  // "12"
 
 ```go
 import (
-    "github.com/arloliu/parti"
-    "github.com/arloliu/parti/partition"
-    "github.com/arloliu/parti/source"
+    "github.com/arloliu/parti/v2"
+    "github.com/arloliu/parti/v2/partition"
+    "github.com/arloliu/parti/v2/source"
 )
 
 // Create partitioner and source with same partition count
@@ -174,7 +174,7 @@ p := partition.NewHashPartitioner(16,
 Create partition ID slices for initialization:
 
 ```go
-import "github.com/arloliu/parti/partition"
+import "github.com/arloliu/parti/v2/partition"
 
 // Generate ["0", "1", "2", ..., "15"]
 ids := partition.GeneratePartitionIDs(16)

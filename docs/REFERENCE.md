@@ -121,7 +121,7 @@ mgr, err := parti.NewManager(cfg, js, src, strategy.NewConsistentHash(),
 ### Sentinel Errors
 
 ```go
-import "github.com/arloliu/parti"
+import "github.com/arloliu/parti/v2"
 
 // Configuration / construction
 parti.ErrInvalidConfig

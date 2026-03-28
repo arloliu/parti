@@ -255,7 +255,7 @@ import (
     "encoding/json"
     "net/http"
 
-    "github.com/arloliu/parti"
+    "github.com/arloliu/parti/v2"
 )
 
 type HealthHandler struct {
