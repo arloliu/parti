@@ -396,7 +396,7 @@ func (r *ClaimBasedResolver) stopAndResetTimer(timer *time.Timer, d time.Duratio
 
 // toState converts internal handoff claim state to public HandoffState.
 //
-//nolint:exhaustive // Abort and Unknown states map to Unknown
+// ClaimStateAbort and ClaimStateUnknown both map to HandoffStateUnknown.
 func toState(cs handoff.ClaimState) types.HandoffState {
 	switch cs {
 	case handoff.ClaimStateStable:
@@ -405,7 +405,9 @@ func toState(cs handoff.ClaimState) types.HandoffState {
 		return types.HandoffStatePrepare
 	case handoff.ClaimStateCommit:
 		return types.HandoffStateCommit
-	default:
+	case handoff.ClaimStateAbort, handoff.ClaimStateUnknown:
 		return types.HandoffStateUnknown
 	}
+
+	return types.HandoffStateUnknown
 }

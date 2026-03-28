@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	ipartition "github.com/arloliu/parti/v2/internal/partition"
+	"github.com/arloliu/parti/v2/internal/ipartition"
 	partitesting "github.com/arloliu/parti/v2/partitest"
 	"github.com/arloliu/parti/v2/partition"
 	"github.com/nats-io/nats.go"

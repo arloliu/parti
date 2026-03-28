@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	"github.com/arloliu/fuda"
-	ipartition "github.com/arloliu/parti/v2/internal/partition"
+	"github.com/arloliu/parti/v2/internal/ipartition"
 	"github.com/arloliu/parti/v2/jsutil"
 	"github.com/arloliu/parti/v2/partition"
 	"github.com/nats-io/nats.go/jetstream"
