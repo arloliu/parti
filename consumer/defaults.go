@@ -27,6 +27,11 @@ const (
 	// batch of messages during a fetch.
 	DefaultFetchMaxWait = 5 * time.Second
 
+	// DefaultMaxAckPending is the default number of messages that can be
+	// in-flight (unacknowledged) per consumer. Set to 1 for strict ordered
+	// processing. Increase for higher throughput at the cost of ordering.
+	DefaultMaxAckPending = 1
+
 	// DefaultMaxWaiting is the default maximum number of outstanding pull
 	// requests. Set conservatively to 2 to prevent thundering-herd issues
 	// when managing many partitions per worker.

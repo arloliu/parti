@@ -35,11 +35,6 @@ import (
 //
 // Dynamic is safe for concurrent use. [Dynamic.Update] calls are serialized
 // internally to prevent race conditions during assignment changes.
-//
-// # Deprecation Notice
-//
-// This type wraps [durable.WorkerConsumer]. Future versions may deprecate
-// the subscription package in favor of this unified consumer API.
 type Dynamic struct {
 	inner *durable.WorkerConsumer
 }
@@ -271,9 +266,9 @@ func NewDynamic(
 //     disallowed (see [DynamicConfig.AllowWorkerIDChange]).
 //
 // Errors:
-//   - [durable.ErrWorkerIDMutation]: Returned when workerID changes and
+//   - [ErrWorkerIDMutation]: Returned when workerID changes and
 //     AllowWorkerIDChange is false.
-//   - [durable.ErrMaxSubjectsExceeded]: Returned when partition count
+//   - [ErrMaxSubjectsExceeded]: Returned when partition count
 //     exceeds MaxConcurrentSubjects.
 func (d *Dynamic) Update(ctx context.Context, workerID string, partitions []types.Partition) error {
 	return d.inner.UpdateWorkerConsumer(ctx, workerID, partitions)

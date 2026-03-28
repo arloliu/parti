@@ -37,11 +37,6 @@ import (
 //
 // Broadcast is safe for concurrent use. [Broadcast.Start] and [Broadcast.Stop]
 // are serialized internally.
-//
-// # Deprecation Notice
-//
-// This type wraps [durable.BroadcastConsumer]. Future versions may deprecate
-// the subscription package in favor of this unified consumer API.
 type Broadcast struct {
 	inner *durable.BroadcastConsumer
 }
