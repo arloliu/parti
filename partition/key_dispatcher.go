@@ -45,7 +45,7 @@ type KeyExtractorFunc func(msg jetstream.Msg) string
 type keyDispatcher struct {
 	logger       types.Logger
 	metrics      types.MetricsCollector
-	handler      MessageHandler
+	handler      messageHandler
 	keyExtractor KeyExtractorFunc
 	channelBuf   int
 	idleTimeout  time.Duration
@@ -81,7 +81,7 @@ type keyMessage struct {
 func newKeyDispatcher(
 	logger types.Logger,
 	metrics types.MetricsCollector, // Added metrics
-	handler MessageHandler,
+	handler messageHandler,
 	keyExtractor KeyExtractorFunc,
 	channelBuf int,
 	idleTimeout time.Duration,

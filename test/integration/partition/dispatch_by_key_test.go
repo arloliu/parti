@@ -57,7 +57,7 @@ func TestDispatchByKey_EndToEnd(t *testing.T) {
 		DispatchByKey:    &dispatchEnabled,
 		KeyChannelBuffer: 16,
 		KeyIdleTimeout:   100 * time.Millisecond,
-	}, partition.MessageHandlerFunc(func(_ context.Context, msg jetstream.Msg) error {
+	}, func(_ context.Context, msg jetstream.Msg) error {
 		// Extract key from subject (last token)
 		subj := msg.Subject()
 		var key string
@@ -73,7 +73,7 @@ func TestDispatchByKey_EndToEnd(t *testing.T) {
 		mu.Unlock()
 
 		return nil
-	}))
+	})
 	require.NoError(t, err)
 
 	// Start consumer
@@ -155,13 +155,13 @@ func TestDispatchByKey_GracefulStop(t *testing.T) {
 		DispatchByKey:    &dispatchEnabled,
 		KeyChannelBuffer: 32,
 		KeyIdleTimeout:   5 * time.Second,
-	}, partition.MessageHandlerFunc(func(_ context.Context, msg jetstream.Msg) error {
+	}, func(_ context.Context, msg jetstream.Msg) error {
 		handlerStarted <- struct{}{}
 		time.Sleep(50 * time.Millisecond) // Simulate processing time
 		processed.Add(1)
 
 		return nil
-	}))
+	})
 	require.NoError(t, err)
 
 	require.NoError(t, consumer.Start(ctx))
@@ -239,9 +239,9 @@ func TestDispatchByKey_NoGoroutineLeak(t *testing.T) {
 			DispatchByKey:    &dispatchEnabled,
 			KeyChannelBuffer: 8,
 			KeyIdleTimeout:   50 * time.Millisecond,
-		}, partition.MessageHandlerFunc(func(_ context.Context, msg jetstream.Msg) error {
+		}, func(_ context.Context, msg jetstream.Msg) error {
 			return nil
-		}))
+		})
 		require.NoError(t, err)
 
 		require.NoError(t, consumer.Start(ctx))
@@ -315,7 +315,7 @@ func TestDispatchByKey_PerKeyOrdering(t *testing.T) {
 		DispatchByKey:    &dispatchEnabled,
 		KeyChannelBuffer: 64,
 		KeyIdleTimeout:   1 * time.Second,
-	}, partition.MessageHandlerFunc(func(_ context.Context, msg jetstream.Msg) error {
+	}, func(_ context.Context, msg jetstream.Msg) error {
 		// Extract key and sequence from data
 		data := string(msg.Data())
 		key, seq := parseKeySeq(data)
@@ -328,7 +328,7 @@ func TestDispatchByKey_PerKeyOrdering(t *testing.T) {
 		mu.Unlock()
 
 		return nil
-	}))
+	})
 	require.NoError(t, err)
 
 	require.NoError(t, consumer.Start(ctx))

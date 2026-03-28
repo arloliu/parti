@@ -186,9 +186,7 @@ func NewStatic(
 		MaxWaiting:        cfg.MaxWaiting,
 	}
 
-	adapted := partition.MessageHandlerFunc(handler.Handle)
-
-	inner, err := partition.NewJSConsumer(js, partitionCfg, adapted)
+	inner, err := partition.NewJSConsumer(js, partitionCfg, handler.Handle)
 	if err != nil {
 		return nil, err
 	}

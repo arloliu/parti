@@ -53,7 +53,7 @@ func TestKeyDispatcher_DispatchByKey(t *testing.T) {
 	var mu sync.Mutex
 	processed := make(map[string][]string) // key -> list of subjects processed
 
-	handler := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	handler := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
 		key := testKeyExtractor(msg)
 		mu.Lock()
 		processed[key] = append(processed[key], msg.Subject())
@@ -104,7 +104,7 @@ func TestKeyDispatcher_PerKeyOrdering(t *testing.T) {
 	order := make(map[string][]int) // key -> order of processing
 
 	var counter atomic.Int32
-	handler := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	handler := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
 		key := testKeyExtractor(msg)
 		idx := int(counter.Add(1))
 
@@ -155,7 +155,7 @@ func TestKeyDispatcher_PerKeyOrdering(t *testing.T) {
 
 func TestKeyDispatcher_IdleTimeout(t *testing.T) {
 	logger := logging.NewNop()
-	handler := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	handler := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
 		return nil
 	})
 
@@ -185,7 +185,7 @@ func TestKeyDispatcher_Close(t *testing.T) {
 	logger := logging.NewNop()
 
 	var processed atomic.Int32
-	handler := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	handler := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
 		time.Sleep(10 * time.Millisecond)
 		processed.Add(1)
 		return nil
@@ -217,7 +217,7 @@ func TestKeyDispatcher_Backpressure(t *testing.T) {
 
 	// Handler that blocks
 	blockCh := make(chan struct{})
-	handler := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	handler := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
 		<-blockCh
 		return nil
 	})
@@ -261,7 +261,7 @@ func TestKeyDispatcher_CustomKeyExtractor(t *testing.T) {
 	var mu sync.Mutex
 	processed := make(map[string]int)
 
-	handler := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	handler := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
 		// Use custom extractor's result for tracking
 		mu.Lock()
 		processed[msg.Subject()]++
@@ -307,7 +307,7 @@ func TestKeyDispatcher_CustomKeyExtractor(t *testing.T) {
 func TestKeyDispatcher_ManualAck(t *testing.T) {
 	logger := logging.NewNop()
 
-	handler := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	handler := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
 		// Don't call ack - handler is responsible
 		return nil
 	})
@@ -330,7 +330,7 @@ func TestKeyDispatcher_ManualAck(t *testing.T) {
 func TestKeyDispatcher_AutoAck(t *testing.T) {
 	logger := logging.NewNop()
 
-	handler := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	handler := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
 		return nil // success
 	})
 
@@ -352,7 +352,7 @@ func TestKeyDispatcher_AutoAck(t *testing.T) {
 func TestKeyDispatcher_AutoNak(t *testing.T) {
 	logger := logging.NewNop()
 
-	handler := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	handler := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
 		return assert.AnError // failure
 	})
 

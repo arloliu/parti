@@ -35,7 +35,7 @@ type PartitionJSConsumer interface {
 type JSConsumer struct {
 	js      jetstream.JetStream
 	config  ConsumerConfig
-	handler MessageHandler
+	handler messageHandler
 
 	partition int
 	subject   string
@@ -55,7 +55,7 @@ type JSConsumer struct {
 // Parameters:
 //   - js: JetStream context
 //   - config: Consumer configuration
-//   - handler: Message handler
+//   - fn: Message handler function
 //
 // Returns:
 //   - *JSConsumer: Configured consumer
@@ -63,14 +63,15 @@ type JSConsumer struct {
 func NewJSConsumer(
 	js jetstream.JetStream,
 	config ConsumerConfig,
-	handler MessageHandler,
+	fn func(context.Context, jetstream.Msg) error,
 ) (*JSConsumer, error) {
 	if js == nil {
 		return nil, errors.New("jetstream context is required")
 	}
-	if handler == nil {
+	if fn == nil {
 		return nil, errors.New("message handler is required")
 	}
+	handler := messageHandlerFunc(fn)
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}

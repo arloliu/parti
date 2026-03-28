@@ -55,13 +55,13 @@ func TestJSConsumer_PublishBeforeAndAfterStart(t *testing.T) {
 		ConsumerName: "test-repro-0",
 		Partition:    0,
 		FetchTimeout: 2 * time.Second,
-	}, partition.MessageHandlerFunc(func(_ context.Context, msg jetstream.Msg) error {
+	}, func(_ context.Context, msg jetstream.Msg) error {
 		n := received.Add(1)
 		data := string(msg.Data())
 		t.Logf("  Received message #%d: %s", n, data)
 		msgCh <- data
 		return nil
-	}))
+	})
 	require.NoError(t, err)
 	require.NoError(t, consumer.Start(ctx))
 
@@ -143,13 +143,13 @@ func TestJSConsumer_PublishAfterMultipleIteratorCycles(t *testing.T) {
 		ConsumerName: "test-cycles-0",
 		Partition:    0,
 		FetchTimeout: 1 * time.Second, // Short timeout to force iterator restarts
-	}, partition.MessageHandlerFunc(func(_ context.Context, msg jetstream.Msg) error {
+	}, func(_ context.Context, msg jetstream.Msg) error {
 		n := received.Add(1)
 		data := string(msg.Data())
 		t.Logf("  Received message #%d: %s", n, data)
 		msgCh <- data
 		return nil
-	}))
+	})
 	require.NoError(t, err)
 	require.NoError(t, consumer.Start(ctx))
 
@@ -241,13 +241,13 @@ func TestJSConsumer_SeparatePublisherConnections(t *testing.T) {
 		ConsumerName: "test-separate-0",
 		Partition:    0,
 		FetchTimeout: 2 * time.Second,
-	}, partition.MessageHandlerFunc(func(_ context.Context, msg jetstream.Msg) error {
+	}, func(_ context.Context, msg jetstream.Msg) error {
 		n := received.Add(1)
 		data := string(msg.Data())
 		t.Logf("  Received message #%d: %s (subject=%s)", n, data, msg.Subject())
 		msgCh <- data
 		return nil
-	}))
+	})
 	require.NoError(t, err)
 	require.NoError(t, consumer.Start(ctx))
 

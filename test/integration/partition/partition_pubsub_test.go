@@ -48,10 +48,10 @@ func TestPartitionPublishConsume(t *testing.T) {
 		StreamName:   streamName,
 		ConsumerName: "consumer-0",
 		Partition:    0,
-	}, partition.MessageHandlerFunc(func(_ context.Context, msg jetstream.Msg) error {
+	}, func(_ context.Context, msg jetstream.Msg) error {
 		msgCh <- string(msg.Data())
 		return nil
-	}))
+	})
 	require.NoError(t, err)
 
 	require.NoError(t, consumer.Start(ctx))
@@ -147,10 +147,10 @@ func TestJSPublisherPublishConsume(t *testing.T) {
 		StreamName:   streamName,
 		ConsumerName: "consumer-1",
 		Partition:    1,
-	}, partition.MessageHandlerFunc(func(_ context.Context, msg jetstream.Msg) error {
+	}, func(_ context.Context, msg jetstream.Msg) error {
 		msgCh <- string(msg.Data())
 		return nil
-	}))
+	})
 	require.NoError(t, err)
 
 	require.NoError(t, consumer.Start(ctx))
@@ -259,10 +259,10 @@ func TestMultiplePartitionConsumers(t *testing.T) {
 			StreamName:   streamName,
 			ConsumerName: fmt.Sprintf("consumer-%d", i),
 			Partition:    i,
-		}, partition.MessageHandlerFunc(func(_ context.Context, msg jetstream.Msg) error {
+		}, func(_ context.Context, msg jetstream.Msg) error {
 			results[idx] <- string(msg.Data())
 			return nil
-		}))
+		})
 		require.NoError(t, err)
 		require.NoError(t, consumers[i].Start(ctx))
 	}
@@ -372,14 +372,14 @@ func TestConsumerManualAck(t *testing.T) {
 		ConsumerName: "manual-consumer",
 		Partition:    0,
 		ManualAck:    true,
-	}, partition.MessageHandlerFunc(func(_ context.Context, msg jetstream.Msg) error {
+	}, func(_ context.Context, msg jetstream.Msg) error {
 		// Manually ack
 		if err := msg.Ack(); err != nil {
 			return err
 		}
 		acked <- struct{}{}
 		return nil
-	}))
+	})
 	require.NoError(t, err)
 	require.NoError(t, consumer.Start(ctx))
 

@@ -1,6 +1,7 @@
 package partition
 
 import (
+	"context"
 	"time"
 
 	"github.com/arloliu/parti/v2/types"
@@ -115,7 +116,7 @@ func NewJSPublisherWithOptions(js jetstream.JetStream, opts ...Option) (*JSPubli
 //   - error: Validation or initialization error
 func NewJSConsumerWithOptions(
 	js jetstream.JetStream,
-	handler MessageHandler,
+	handler func(context.Context, jetstream.Msg) error,
 	opts ...ConsumerOption,
 ) (*JSConsumer, error) {
 	cfg := NewConsumerConfig(opts...)

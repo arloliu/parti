@@ -34,7 +34,7 @@ func TestJSConsumer_StartTwice(t *testing.T) {
 		StreamName:   "events",
 		ConsumerName: "consumer-0",
 		Partition:    0,
-	}, MessageHandlerFunc(func(context.Context, jetstream.Msg) error { return nil }))
+	}, messageHandlerFunc(func(context.Context, jetstream.Msg) error { return nil }))
 	require.NoError(t, err)
 
 	require.NoError(t, consumer.Start(ctx))
@@ -59,7 +59,7 @@ func TestJSConsumer_StopWithoutStart(t *testing.T) {
 		StreamName:   "events",
 		ConsumerName: "consumer-0",
 		Partition:    0,
-	}, MessageHandlerFunc(func(context.Context, jetstream.Msg) error { return nil }))
+	}, messageHandlerFunc(func(context.Context, jetstream.Msg) error { return nil }))
 	require.NoError(t, err)
 
 	stopCtx, cancel := context.WithTimeout(t.Context(), time.Second)
@@ -68,7 +68,7 @@ func TestJSConsumer_StopWithoutStart(t *testing.T) {
 }
 
 func TestNewJSConsumer_InvalidArgs(t *testing.T) {
-	_, err := NewJSConsumer(nil, ConsumerConfig{}, MessageHandlerFunc(func(context.Context, jetstream.Msg) error { return nil }))
+	_, err := NewJSConsumer(nil, ConsumerConfig{}, messageHandlerFunc(func(context.Context, jetstream.Msg) error { return nil }))
 	require.Error(t, err)
 
 	_, nc := partitesting.StartEmbeddedNATS(t)
@@ -111,7 +111,7 @@ func TestJSConsumer_GracefulShutdown(t *testing.T) {
 		ConsumerName: "graceful-consumer-0",
 		Partition:    0,
 		FetchTimeout: 1 * time.Second,
-	}, MessageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error {
+	}, messageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error {
 		processed <- struct{}{}
 		return nil
 	}))
@@ -166,7 +166,7 @@ func TestJSConsumer_StopTimeout(t *testing.T) {
 		Partition:    0,
 		FetchTimeout: 5 * time.Second,
 		ManualAck:    true, // Don't auto-ack so message stays in-flight
-	}, MessageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error {
+	}, messageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error {
 		<-blockingHandler // Block until closed
 		return nil
 	}))
@@ -212,7 +212,7 @@ func TestJSConsumer_StopIdempotent(t *testing.T) {
 		ConsumerName: "idempotent-consumer-0",
 		Partition:    0,
 		FetchTimeout: 1 * time.Second,
-	}, MessageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error {
+	}, messageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error {
 		return nil
 	}))
 	require.NoError(t, err)
