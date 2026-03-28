@@ -45,7 +45,6 @@ type Dynamic struct {
 }
 
 // DynamicConfig configures a Dynamic consumer.
-// Uses unified naming; converted to durable.WorkerConsumerConfig internally.
 type DynamicConfig struct {
 	CommonConfig
 
@@ -208,7 +207,7 @@ func NewDynamic(
 		return nil, err
 	}
 
-	// Convert unified config to durable.WorkerConsumerConfig
+		// Build worker consumer config from unified DynamicConfig.
 	workerCfg := durable.WorkerConsumerConfig{
 		StreamName:                  cfg.StreamName,
 		ConsumerPrefix:              cfg.ConsumerPrefix,

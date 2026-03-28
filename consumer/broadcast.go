@@ -47,7 +47,6 @@ type Broadcast struct {
 }
 
 // BroadcastConfig configures a Broadcast consumer.
-// Uses unified naming; converted to durable.BroadcastConsumerConfig internally.
 type BroadcastConfig struct {
 	CommonConfig
 
@@ -144,7 +143,7 @@ func NewBroadcast(
 		return nil, err
 	}
 
-	// Convert unified config to durable.BroadcastConsumerConfig
+		// Build broadcast consumer config from unified BroadcastConfig.
 	broadcastCfg := durable.BroadcastConsumerConfig{
 		StreamName:        cfg.StreamName,
 		ConsumerPrefix:    cfg.ConsumerPrefix,

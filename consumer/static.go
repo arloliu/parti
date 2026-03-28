@@ -35,7 +35,6 @@ type Static struct {
 }
 
 // StaticConfig configures a Static consumer.
-// Uses unified naming; converted to ipartition.ConsumerConfig internally.
 type StaticConfig struct {
 	CommonConfig
 
@@ -154,7 +153,7 @@ func NewStatic(
 		return nil, err
 	}
 
-	// Convert unified config to ipartition.ConsumerConfig
+	// Build consumer config from unified StaticConfig.
 	partitionCfg := ipartition.ConsumerConfig{
 		PartitionConfig: partition.PartitionConfig{
 			NumPartitions:  cfg.NumPartitions,
