@@ -4,12 +4,14 @@ This directory contains end-to-end tests that exercise multiple components of th
 
 ## Directory Structure
 
+- **consumer/**: Integration tests for the unified consumer API (`Queue`, `Static`, `Dynamic`, `Broadcast`, `WIPHandler`). Tests the public `consumer` package that users import directly.
+- **partition/**: Static partition-based publish/subscribe (`JSConsumer`, `Publisher`, `JSPublisher`, `Subscriber`).
+- **subscription/**: Internal subscription-layer tests (`WorkerConsumer` internals, `ProcessingGate`, durable helpers, iterator recovery).
 - **assignment/**: Partition assignment, partition sources, strategy behavior, and invariants.
 - **manager/**: Manager lifecycle, state machine transitions, leader election, watchers, and claimers.
 - **failure/**: Failure and resilience scenarios (NATS outages, error handling, graceful shutdown, emergency mode).
 - **handoff/**: Partition handoff scenarios.
 - **stableid/**: Stable ID generation and management.
-- **subscription/**: JetStream subscription helpers, durable consumer behavior, and worker consumer flows.
 - **misc/**: Miscellaneous tests that don't fit into other categories.
 
 ## Guidelines
