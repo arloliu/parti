@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/arloliu/parti/v2/partition"
+	ipartition "github.com/arloliu/parti/v2/internal/partition"
 	partitesting "github.com/arloliu/parti/v2/partitest"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -46,7 +47,7 @@ func TestJSConsumer_PublishBeforeAndAfterStart(t *testing.T) {
 	// Step 2: Start consumer
 	var received atomic.Int32
 	msgCh := make(chan string, 20)
-	consumer, err := partition.NewJSConsumer(js, partition.ConsumerConfig{
+	consumer, err := ipartition.NewJSConsumer(js, ipartition.ConsumerConfig{
 		PartitionConfig: partition.PartitionConfig{
 			NumPartitions:  2,
 			SubjectPattern: "repro.{{partition}}",
@@ -134,7 +135,7 @@ func TestJSConsumer_PublishAfterMultipleIteratorCycles(t *testing.T) {
 	// Start consumer with a SHORT FetchTimeout so iterator cycles quickly
 	var received atomic.Int32
 	msgCh := make(chan string, 20)
-	consumer, err := partition.NewJSConsumer(js, partition.ConsumerConfig{
+	consumer, err := ipartition.NewJSConsumer(js, ipartition.ConsumerConfig{
 		PartitionConfig: partition.PartitionConfig{
 			NumPartitions:  2,
 			SubjectPattern: "cycles.{{partition}}",
@@ -232,7 +233,7 @@ func TestJSConsumer_SeparatePublisherConnections(t *testing.T) {
 	// Step 2: Start consumer
 	var received atomic.Int32
 	msgCh := make(chan string, 20)
-	consumer, err := partition.NewJSConsumer(js, partition.ConsumerConfig{
+	consumer, err := ipartition.NewJSConsumer(js, ipartition.ConsumerConfig{
 		PartitionConfig: partition.PartitionConfig{
 			NumPartitions:  2,
 			SubjectPattern: "separate.{{partition}}",

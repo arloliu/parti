@@ -1,4 +1,4 @@
-package partition
+package ipartition
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"time"
 
 	partitesting "github.com/arloliu/parti/v2/partitest"
+	"github.com/arloliu/parti/v2/partition"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 )
@@ -27,7 +28,7 @@ func TestJSConsumer_StartTwice(t *testing.T) {
 	require.NoError(t, err)
 
 	consumer, err := NewJSConsumer(js, ConsumerConfig{
-		PartitionConfig: PartitionConfig{
+		PartitionConfig: partition.PartitionConfig{
 			NumPartitions:  2,
 			SubjectPattern: "events.{{key}}.completed.{{partition}}",
 		},
@@ -52,7 +53,7 @@ func TestJSConsumer_StopWithoutStart(t *testing.T) {
 	require.NoError(t, err)
 
 	consumer, err := NewJSConsumer(js, ConsumerConfig{
-		PartitionConfig: PartitionConfig{
+		PartitionConfig: partition.PartitionConfig{
 			NumPartitions:  1,
 			SubjectPattern: "events.{{partition}}",
 		},
@@ -103,7 +104,7 @@ func TestJSConsumer_GracefulShutdown(t *testing.T) {
 
 	processed := make(chan struct{}, 10)
 	consumer, err := NewJSConsumer(js, ConsumerConfig{
-		PartitionConfig: PartitionConfig{
+		PartitionConfig: partition.PartitionConfig{
 			NumPartitions:  2,
 			SubjectPattern: "graceful.{{partition}}",
 		},
@@ -157,7 +158,7 @@ func TestJSConsumer_StopTimeout(t *testing.T) {
 
 	blockingHandler := make(chan struct{})
 	consumer, err := NewJSConsumer(js, ConsumerConfig{
-		PartitionConfig: PartitionConfig{
+		PartitionConfig: partition.PartitionConfig{
 			NumPartitions:  2,
 			SubjectPattern: "timeout.{{partition}}",
 		},
@@ -204,7 +205,7 @@ func TestJSConsumer_StopIdempotent(t *testing.T) {
 	require.NoError(t, err)
 
 	consumer, err := NewJSConsumer(js, ConsumerConfig{
-		PartitionConfig: PartitionConfig{
+		PartitionConfig: partition.PartitionConfig{
 			NumPartitions:  2,
 			SubjectPattern: "idempotent.{{partition}}",
 		},

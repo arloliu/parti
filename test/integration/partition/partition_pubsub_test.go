@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/arloliu/parti/v2/partition"
+	ipartition "github.com/arloliu/parti/v2/internal/partition"
 	partitesting "github.com/arloliu/parti/v2/partitest"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -40,7 +41,7 @@ func TestPartitionPublishConsume(t *testing.T) {
 	require.NotEmpty(t, key)
 
 	msgCh := make(chan string, 1)
-	consumer, err := partition.NewJSConsumer(js, partition.ConsumerConfig{
+	consumer, err := ipartition.NewJSConsumer(js, ipartition.ConsumerConfig{
 		PartitionConfig: partition.PartitionConfig{
 			NumPartitions:  4,
 			SubjectPattern: "events.{{key}}.completed.{{partition}}",
@@ -139,7 +140,7 @@ func TestJSPublisherPublishConsume(t *testing.T) {
 	require.NotEmpty(t, key)
 
 	msgCh := make(chan string, 1)
-	consumer, err := partition.NewJSConsumer(js, partition.ConsumerConfig{
+	consumer, err := ipartition.NewJSConsumer(js, ipartition.ConsumerConfig{
 		PartitionConfig: partition.PartitionConfig{
 			NumPartitions:  4,
 			SubjectPattern: "events.{{key}}.completed.{{partition}}",
@@ -247,11 +248,11 @@ func TestMultiplePartitionConsumers(t *testing.T) {
 
 	// Create consumers for all 3 partitions
 	results := make([]chan string, 3)
-	consumers := make([]*partition.JSConsumer, 3)
+	consumers := make([]*ipartition.JSConsumer, 3)
 	for i := range 3 {
 		results[i] = make(chan string, 10)
 		idx := i
-		consumers[i], err = partition.NewJSConsumer(js, partition.ConsumerConfig{
+		consumers[i], err = ipartition.NewJSConsumer(js, ipartition.ConsumerConfig{
 			PartitionConfig: partition.PartitionConfig{
 				NumPartitions:  3,
 				SubjectPattern: "multi.{{partition}}",
@@ -363,7 +364,7 @@ func TestConsumerManualAck(t *testing.T) {
 	require.NoError(t, err)
 
 	acked := make(chan struct{}, 1)
-	consumer, err := partition.NewJSConsumer(js, partition.ConsumerConfig{
+	consumer, err := ipartition.NewJSConsumer(js, ipartition.ConsumerConfig{
 		PartitionConfig: partition.PartitionConfig{
 			NumPartitions:  1,
 			SubjectPattern: "manual.{{partition}}",

@@ -1,24 +1,26 @@
 package partition
 
+import "github.com/arloliu/parti/v2/internal/partutil"
+
 type partitionCore struct {
 	config PartitionConfig
 
 	precomputedSubjects []string
-	patternParts        patternParts
+	patternParts        partutil.PatternParts
 }
 
 func newPartitionCore(config PartitionConfig) (*partitionCore, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	parts, err := parsePattern(config.SubjectPattern)
+	parts, err := partutil.ParsePattern(config.SubjectPattern)
 	if err != nil {
 		return nil, err
 	}
 
 	// Publishers must produce concrete subjects (no wildcards).
-	sample := parts.buildSubject("key", 0)
-	if err := validateSubjectTokens(sample, false); err != nil {
+	sample := parts.BuildSubject("key", 0)
+	if err := partutil.ValidateSubjectTokens(sample, false); err != nil {
 		return nil, err
 	}
 
@@ -27,10 +29,10 @@ func newPartitionCore(config PartitionConfig) (*partitionCore, error) {
 		patternParts: parts,
 	}
 
-	if !parts.hasKey {
+	if !parts.HasKey {
 		core.precomputedSubjects = make([]string, config.NumPartitions)
 		for i := range config.NumPartitions {
-			core.precomputedSubjects[i] = parts.buildSubjectNoKey(i)
+			core.precomputedSubjects[i] = parts.BuildSubjectNoKey(i)
 		}
 	}
 
@@ -38,7 +40,7 @@ func newPartitionCore(config PartitionConfig) (*partitionCore, error) {
 }
 
 func (c *partitionCore) getPartition(key string) int {
-	return computePartition(key, c.config.NumPartitions, c.config.HashSeed)
+	return partutil.ComputePartition(key, c.config.NumPartitions, c.config.HashSeed)
 }
 
 func (c *partitionCore) getSubject(key string) string {
@@ -55,7 +57,7 @@ func (c *partitionCore) getSubjectForPartition(partition int) (string, error) {
 		return "", ErrPartitionOutOfRange
 	}
 
-	return c.patternParts.buildFilterSubject(partition), nil
+	return c.patternParts.BuildFilterSubject(partition), nil
 }
 
 func (c *partitionCore) numPartitions() int {
@@ -70,5 +72,5 @@ func (c *partitionCore) subjectForKey(key string, partition int) string {
 		return c.precomputedSubjects[partition]
 	}
 
-	return c.patternParts.buildSubject(key, partition)
+	return c.patternParts.BuildSubject(key, partition)
 }

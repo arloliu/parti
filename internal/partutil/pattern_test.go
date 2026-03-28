@@ -1,4 +1,4 @@
-package partition
+package partutil
 
 import (
 	"errors"
@@ -8,11 +8,11 @@ import (
 )
 
 func TestParsePattern(t *testing.T) {
-	parts, err := parsePattern("events.{{key}}.completed.{{partition}}")
+	parts, err := ParsePattern("events.{{key}}.completed.{{partition}}")
 	require.NoError(t, err)
-	require.True(t, parts.hasKey)
-	require.Equal(t, 0, parts.keyIndex)
-	require.Equal(t, 1, parts.partitionIndex)
+	require.True(t, parts.HasKey)
+	require.Equal(t, 0, parts.KeyIndex)
+	require.Equal(t, 1, parts.PartitionIndex)
 }
 
 func TestParsePattern_Invalid(t *testing.T) {
@@ -26,7 +26,7 @@ func TestParsePattern_Invalid(t *testing.T) {
 
 	for _, pattern := range tests {
 		t.Run(pattern, func(t *testing.T) {
-			_, err := parsePattern(pattern)
+			_, err := ParsePattern(pattern)
 			require.Error(t, err)
 			require.True(t, errors.Is(err, ErrInvalidPattern))
 		})
@@ -34,29 +34,22 @@ func TestParsePattern_Invalid(t *testing.T) {
 }
 
 func TestBuildSubject(t *testing.T) {
-	parts, err := parsePattern("events.{{key}}.completed.{{partition}}")
+	parts, err := ParsePattern("events.{{key}}.completed.{{partition}}")
 	require.NoError(t, err)
 
-	subject := parts.buildSubject("tool-1", 3)
+	subject := parts.BuildSubject("tool-1", 3)
 	require.Equal(t, "events.tool-1.completed.3", subject)
 
-	filter := parts.buildFilterSubject(3)
+	filter := parts.BuildFilterSubject(3)
 	require.Equal(t, "events.*.completed.3", filter)
 }
 
-func TestValidateKeyForPublish(t *testing.T) {
-	require.ErrorIs(t, validateKeyForPublish(""), ErrEmptyKey)
-	require.ErrorIs(t, validateKeyForPublish("a.*.b"), ErrInvalidKey)
-	require.ErrorIs(t, validateKeyForPublish("a..b"), ErrInvalidKey)
-	require.NoError(t, validateKeyForPublish("a.b"))
-}
-
 func TestValidateSubjectTokens(t *testing.T) {
-	require.NoError(t, validateSubjectTokens("a.b.c", false))
-	require.ErrorIs(t, validateSubjectTokens("a..c", false), ErrPatternEmptyToken)
-	require.ErrorIs(t, validateSubjectTokens("a.*.c", false), ErrInvalidPattern)
-	require.NoError(t, validateSubjectTokens("a.*.c", true))
-	require.ErrorIs(t, validateSubjectTokens("a.>.c", true), ErrInvalidPattern)
+	require.NoError(t, ValidateSubjectTokens("a.b.c", false))
+	require.ErrorIs(t, ValidateSubjectTokens("a..c", false), ErrPatternEmptyToken)
+	require.ErrorIs(t, ValidateSubjectTokens("a.*.c", false), ErrInvalidPattern)
+	require.NoError(t, ValidateSubjectTokens("a.*.c", true))
+	require.ErrorIs(t, ValidateSubjectTokens("a.>.c", true), ErrInvalidPattern)
 }
 
 func TestExtractKey(t *testing.T) {
@@ -100,22 +93,22 @@ func TestExtractKey(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			parts, err := parsePattern(tt.pattern)
+			parts, err := ParsePattern(tt.pattern)
 			require.NoError(t, err)
-			require.True(t, parts.hasKey)
+			require.True(t, parts.HasKey)
 
-			key := parts.extractKey(tt.subject)
+			key := parts.ExtractKey(tt.subject)
 			require.Equal(t, tt.expected, key)
 		})
 	}
 }
 
 func TestExtractKey_NoKeyPlaceholder(t *testing.T) {
-	parts, err := parsePattern("events.{{partition}}.data")
+	parts, err := ParsePattern("events.{{partition}}.data")
 	require.NoError(t, err)
-	require.False(t, parts.hasKey)
+	require.False(t, parts.HasKey)
 
-	key := parts.extractKey("events.0.data")
+	key := parts.ExtractKey("events.0.data")
 	require.Empty(t, key)
 }
 
@@ -149,10 +142,10 @@ func TestKeyTokenIndex(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			parts, err := parsePattern(tt.pattern)
+			parts, err := ParsePattern(tt.pattern)
 			require.NoError(t, err)
 
-			idx := parts.keyTokenIndex()
+			idx := parts.KeyTokenIndex()
 			require.Equal(t, tt.expected, idx)
 		})
 	}

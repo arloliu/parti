@@ -17,19 +17,3 @@ func TestNewConfigOptions(t *testing.T) {
 	require.Equal(t, "events.{{partition}}", cfg.SubjectPattern)
 	require.Equal(t, uint64(42), cfg.HashSeed)
 }
-
-func TestNewConsumerConfigOptions(t *testing.T) {
-	cfg := NewConsumerConfig(
-		WithStreamName("EVENTS"),
-		WithConsumerName("consumer-1"),
-		WithPartitionIndex(1),
-		WithConsumerNumPartitions(4),
-		WithConsumerSubjectPattern("events.{{partition}}"),
-	)
-
-	require.Equal(t, "EVENTS", cfg.StreamName)
-	require.Equal(t, "consumer-1", cfg.ConsumerName)
-	require.Equal(t, 1, cfg.Partition)
-	require.Equal(t, 4, cfg.NumPartitions)
-	require.Equal(t, "events.{{partition}}", cfg.SubjectPattern)
-}

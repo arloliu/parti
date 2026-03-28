@@ -1,4 +1,4 @@
-package partition
+package ipartition
 
 import (
 	"context"
@@ -77,10 +77,10 @@ type keyMessage struct {
 // newKeyDispatcher creates a new key dispatcher.
 //
 // The keyExtractor must not be nil - callers should provide a pattern-aware
-// extractor from patternParts.keyExtractorFunc().
+// extractor from PatternParts.KeyExtractorFunc().
 func newKeyDispatcher(
 	logger types.Logger,
-	metrics types.MetricsCollector, // Added metrics
+	metrics types.MetricsCollector,
 	handler messageHandler,
 	keyExtractor KeyExtractorFunc,
 	channelBuf int,

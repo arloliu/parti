@@ -1,6 +1,10 @@
 package partition
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/arloliu/parti/v2/internal/partutil"
+)
 
 var (
 	// ErrEmptyKey is returned when Publish is called with an empty key.
@@ -10,15 +14,15 @@ var (
 	ErrInvalidKey = errors.New("partition key contains invalid subject tokens")
 
 	// ErrInvalidPattern is returned when SubjectPattern is malformed.
-	ErrInvalidPattern = errors.New("invalid subject pattern")
+	ErrInvalidPattern = partutil.ErrInvalidPattern
 
 	// ErrPartitionOutOfRange is returned when partition index >= NumPartitions.
-	ErrPartitionOutOfRange = errors.New("partition index out of range")
+	ErrPartitionOutOfRange = partutil.ErrPartitionOutOfRange
 
 	// ErrPatternEmptyToken is returned when pattern would produce empty subject tokens.
-	ErrPatternEmptyToken = errors.New("pattern produces empty subject token")
+	ErrPatternEmptyToken = partutil.ErrPatternEmptyToken
 
 	// ErrDispatchByKeyRequiresKeyPlaceholder is returned when DispatchByKey is enabled
 	// but the SubjectPattern does not contain {{key}} placeholder.
-	ErrDispatchByKeyRequiresKeyPlaceholder = errors.New("DispatchByKey requires {{key}} placeholder in SubjectPattern")
+	ErrDispatchByKeyRequiresKeyPlaceholder = partutil.ErrDispatchByKeyRequiresKeyPlaceholder
 )

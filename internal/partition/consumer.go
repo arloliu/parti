@@ -1,4 +1,4 @@
-package partition
+package ipartition
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/arloliu/parti/v2/internal/partutil"
 	"github.com/arloliu/parti/v2/jsutil"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -76,13 +77,13 @@ func NewJSConsumer(
 		return nil, err
 	}
 
-	parts, err := parsePattern(config.SubjectPattern)
+	parts, err := partutil.ParsePattern(config.SubjectPattern)
 	if err != nil {
 		return nil, err
 	}
 
-	subject := parts.buildFilterSubject(config.Partition)
-	if err := validateSubjectTokens(subject, true); err != nil {
+	subject := parts.BuildFilterSubject(config.Partition)
+	if err := partutil.ValidateSubjectTokens(subject, true); err != nil {
 		return nil, err
 	}
 
@@ -100,7 +101,7 @@ func NewJSConsumer(
 		// Use pattern-aware key extractor if no custom one provided
 		keyExtractor := config.KeyExtractor
 		if keyExtractor == nil {
-			keyExtractor = parts.keyExtractorFunc()
+			keyExtractor = KeyExtractorFunc(parts.KeyExtractorFunc())
 		}
 
 		c.keyDispatcher = newKeyDispatcher(

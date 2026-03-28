@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/arloliu/parti/v2/internal/partutil"
 	"github.com/nats-io/nats.go"
 )
 
@@ -71,13 +72,13 @@ func NewSubscriber(
 		return nil, ErrPartitionOutOfRange
 	}
 
-	parts, err := parsePattern(config.SubjectPattern)
+	parts, err := partutil.ParsePattern(config.SubjectPattern)
 	if err != nil {
 		return nil, err
 	}
 
-	subject := parts.buildFilterSubject(partition)
-	if err := validateSubjectTokens(subject, true); err != nil {
+	subject := parts.BuildFilterSubject(partition)
+	if err := partutil.ValidateSubjectTokens(subject, true); err != nil {
 		return nil, err
 	}
 

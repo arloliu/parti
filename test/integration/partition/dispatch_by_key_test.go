@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/arloliu/parti/v2/partition"
+	ipartition "github.com/arloliu/parti/v2/internal/partition"
 	partitesting "github.com/arloliu/parti/v2/partitest"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
@@ -46,7 +47,7 @@ func TestDispatchByKey_EndToEnd(t *testing.T) {
 	processed := make(map[string][]string) // key -> list of data
 
 	dispatchEnabled := true
-	consumer, err := partition.NewJSConsumer(js, partition.ConsumerConfig{
+	consumer, err := ipartition.NewJSConsumer(js, ipartition.ConsumerConfig{
 		PartitionConfig: partition.PartitionConfig{
 			NumPartitions:  4,
 			SubjectPattern: "events.{{partition}}.{{key}}",
@@ -144,7 +145,7 @@ func TestDispatchByKey_GracefulStop(t *testing.T) {
 	handlerStarted := make(chan struct{}, 100)
 
 	dispatchEnabled := true
-	consumer, err := partition.NewJSConsumer(js, partition.ConsumerConfig{
+	consumer, err := ipartition.NewJSConsumer(js, ipartition.ConsumerConfig{
 		PartitionConfig: partition.PartitionConfig{
 			NumPartitions:  4,
 			SubjectPattern: "graceful.{{partition}}.{{key}}",
@@ -228,7 +229,7 @@ func TestDispatchByKey_NoGoroutineLeak(t *testing.T) {
 	// Run multiple consumer lifecycles
 	for cycle := range 3 {
 		dispatchEnabled := true
-		consumer, err := partition.NewJSConsumer(js, partition.ConsumerConfig{
+		consumer, err := ipartition.NewJSConsumer(js, ipartition.ConsumerConfig{
 			PartitionConfig: partition.PartitionConfig{
 				NumPartitions:  4,
 				SubjectPattern: "leak.{{partition}}.{{key}}",
@@ -304,7 +305,7 @@ func TestDispatchByKey_PerKeyOrdering(t *testing.T) {
 	keyOrder := make(map[string][]int) // key -> order of received sequence numbers
 
 	dispatchEnabled := true
-	consumer, err := partition.NewJSConsumer(js, partition.ConsumerConfig{
+	consumer, err := ipartition.NewJSConsumer(js, ipartition.ConsumerConfig{
 		PartitionConfig: partition.PartitionConfig{
 			NumPartitions:  4,
 			SubjectPattern: "order.{{partition}}.{{key}}",

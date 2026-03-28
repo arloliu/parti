@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/arloliu/fuda"
+	ipartition "github.com/arloliu/parti/v2/internal/partition"
 	"github.com/arloliu/parti/v2/jsutil"
 	"github.com/arloliu/parti/v2/partition"
 	"github.com/nats-io/nats.go/jetstream"
@@ -29,17 +30,12 @@ import (
 //
 // Static is safe for concurrent use. [Static.Start] and [Static.Stop] are
 // serialized internally.
-//
-// # Deprecation Notice
-//
-// This type wraps [partition.JSConsumer]. Future versions may deprecate the
-// partition package in favor of this unified consumer API.
 type Static struct {
-	inner *partition.JSConsumer
+	inner *ipartition.JSConsumer
 }
 
 // StaticConfig configures a Static consumer.
-// Uses unified naming; converted to partition.ConsumerConfig internally.
+// Uses unified naming; converted to ipartition.ConsumerConfig internally.
 type StaticConfig struct {
 	CommonConfig
 
@@ -158,8 +154,8 @@ func NewStatic(
 		return nil, err
 	}
 
-	// Convert unified config to partition.ConsumerConfig
-	partitionCfg := partition.ConsumerConfig{
+	// Convert unified config to ipartition.ConsumerConfig
+	partitionCfg := ipartition.ConsumerConfig{
 		PartitionConfig: partition.PartitionConfig{
 			NumPartitions:  cfg.NumPartitions,
 			SubjectPattern: cfg.SubjectPattern,
@@ -186,7 +182,7 @@ func NewStatic(
 		MaxWaiting:        cfg.MaxWaiting,
 	}
 
-	inner, err := partition.NewJSConsumer(js, partitionCfg, handler.Handle)
+	inner, err := ipartition.NewJSConsumer(js, partitionCfg, handler.Handle)
 	if err != nil {
 		return nil, err
 	}
