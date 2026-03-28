@@ -71,7 +71,7 @@ func (c *ProcessingGateConfig) applyDefaults() error {
 	return nil
 }
 
-// processingGate wraps a MessageHandler and enforces exclusive processing based on ownership.
+// processingGate wraps a messageHandler and enforces exclusive processing based on ownership.
 // Reads are O(1), relying on a resolver backed by a high-performance cache.
 type processingGate struct {
 	workerID   string
@@ -132,13 +132,13 @@ func newProcessingGate(
 	return g, nil
 }
 
-// Wrap returns a MessageHandler that applies gate policy before calling the base handler.
-func (g *processingGate) Wrap(base MessageHandler) MessageHandler {
+// Wrap returns a messageHandler that applies gate policy before calling the base handler.
+func (g *processingGate) Wrap(base messageHandler) messageHandler {
 	if base == nil || g == nil || g.resolver == nil || !g.cfg.Enabled {
 		return base
 	}
 
-	return MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	return messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
 		// Select allowed states based on warm-up status (no locking required)
 		allowed := g.allowedSteady
 		if !g.warmupUntil.IsZero() && time.Now().Before(g.warmupUntil) && len(g.allowedWarmup) > 0 {

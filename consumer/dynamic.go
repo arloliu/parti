@@ -244,9 +244,7 @@ func NewDynamic(
 		},
 	}
 
-	adapted := subscription.MessageHandlerFunc(handler.Handle)
-
-	inner, err := subscription.NewWorkerConsumer(js, workerCfg, adapted)
+	inner, err := subscription.NewWorkerConsumer(js, workerCfg, handler.Handle)
 	if err != nil {
 		return nil, err
 	}

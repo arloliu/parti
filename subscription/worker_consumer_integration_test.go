@@ -35,11 +35,11 @@ func TestWorkerConsumer_Integration(t *testing.T) {
 	// Message handler to track received messages
 	var receivedCount int32
 	receivedCh := make(chan string, 200)
-	handler := subscription.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	handler := func(ctx context.Context, msg jetstream.Msg) error {
 		atomic.AddInt32(&receivedCount, 1)
 		receivedCh <- string(msg.Data())
 		return msg.Ack()
-	})
+	}
 
 	// Create WorkerConsumer
 	cfg := subscription.WorkerConsumerConfig{

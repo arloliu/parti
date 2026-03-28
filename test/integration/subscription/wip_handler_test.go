@@ -50,7 +50,7 @@ func TestWIPHandler_Integration(t *testing.T) {
 	processingDone := make(chan struct{})
 
 	// Slow handler that takes longer than AckWait
-	slowHandler := subscription.MessageHandlerFunc(func(c context.Context, msg jetstream.Msg) error {
+	slowHandler := func(c context.Context, msg jetstream.Msg) error {
 		count := processCount.Add(1)
 		if count == 1 {
 			// First processing: simulate long work
@@ -58,10 +58,10 @@ func TestWIPHandler_Integration(t *testing.T) {
 			close(processingDone)
 		}
 		return nil
-	})
+	}
 
 	// Wrap with WIPHandler - heartbeat every 500ms to keep message alive
-	wrappedHandler := consumer.NewWIPHandler(slowHandler, consumer.WIPConfig{
+	wrappedHandler := consumer.NewWIPHandler(consumer.MessageHandlerFunc(slowHandler), consumer.WIPConfig{
 		Interval:    500 * time.Millisecond,
 		MinInterval: -1, // Disable clamping for test
 	})
@@ -73,7 +73,7 @@ func TestWIPHandler_Integration(t *testing.T) {
 		SubjectTemplate: "wip.{{.PartitionID}}",
 		AckWait:         2 * time.Second, // Short AckWait - would redeliver without WIP
 		BatchSize:       1,
-	}, wrappedHandler)
+	}, wrappedHandler.Handle)
 	require.NoError(t, err)
 	defer helper.Close(context.Background())
 

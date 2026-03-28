@@ -58,10 +58,10 @@ func TestWorkerConsumerUpdate(t *testing.T) {
 		ConsumerPrefix:  "worker",
 		SubjectTemplate: "work.{{.PartitionID}}",
 		BatchSize:       5,
-	}, subscription.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	}, func(ctx context.Context, msg jetstream.Msg) error {
 		// Simply ACK
 		return msg.Ack()
-	}))
+	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = helper.Close(context.Background()) })
 

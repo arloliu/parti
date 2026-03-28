@@ -55,7 +55,7 @@ func TestWorkerConsumer_UpdateAndPullLoop_ProcessesMessages(t *testing.T) {
 	require.NoError(t, err)
 
 	var handled int32
-	handler := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	handler := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
 		atomic.AddInt32(&handled, 1)
 		// returning nil causes helper to Ack in default mode
 		return nil
@@ -151,7 +151,7 @@ func TestWorkerConsumer_PullGating_SuppressesUntilOwnerStable(t *testing.T) {
 	require.NoError(t, err)
 
 	var handled int32
-	h := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	h := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
 		atomic.AddInt32(&handled, 1)
 		return nil
 	})
@@ -248,7 +248,7 @@ func TestWorkerConsumer_IteratorEscalation_BurstTriggersMetric(t *testing.T) {
 	cfg.Metrics = &m
 	require.NoError(t, cfg.SetDefaults())
 	tmpl, _ := template.New("subject").Parse(cfg.SubjectTemplate)
-	wc := &WorkerConsumer{js: js, config: cfg, logger: cfg.Logger, handler: MessageHandlerFunc(func(context.Context, jetstream.Msg) error { return nil }), subjects: make(map[string]*partitionConsumer), iterFactory: iterFactory, subjectTemplate: tmpl}
+	wc := &WorkerConsumer{js: js, config: cfg, logger: cfg.Logger, handler: messageHandlerFunc(func(context.Context, jetstream.Msg) error { return nil }), subjects: make(map[string]*partitionConsumer), iterFactory: iterFactory, subjectTemplate: tmpl}
 
 	require.NoError(t, wc.UpdateWorkerConsumer(ctx, "w1", []types.Partition{{Keys: []string{"x"}}}))
 	t.Cleanup(func() { _ = wc.Close(context.Background()) })
@@ -280,7 +280,7 @@ func TestWorkerConsumer_SubjectRemoval_InactiveGCGarbageCollects(t *testing.T) {
 	cfg.InactiveThreshold = 300 * time.Millisecond
 	require.NoError(t, cfg.SetDefaults())
 	tmpl, _ := template.New("subject").Parse(cfg.SubjectTemplate)
-	wc := &WorkerConsumer{js: js, config: cfg, logger: cfg.Logger, handler: MessageHandlerFunc(func(context.Context, jetstream.Msg) error { return nil }), subjects: make(map[string]*partitionConsumer), iterFactory: defaultIterFactory, subjectTemplate: tmpl}
+	wc := &WorkerConsumer{js: js, config: cfg, logger: cfg.Logger, handler: messageHandlerFunc(func(context.Context, jetstream.Msg) error { return nil }), subjects: make(map[string]*partitionConsumer), iterFactory: defaultIterFactory, subjectTemplate: tmpl}
 
 	subj := "gc.a.1"
 	part := []types.Partition{{Keys: []string{"a", "1"}}}
@@ -338,7 +338,7 @@ func TestWorkerConsumer_DualWorkerPullGating_OnlyOwnerPulls(t *testing.T) {
 	require.NoError(t, err)
 
 	var a1w1, a1w2, b1w1, b1w2 int32
-	h1 := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	h1 := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
 		if msg.Subject() == "pg2.a.1" {
 			atomic.AddInt32(&a1w1, 1)
 		}
@@ -348,7 +348,7 @@ func TestWorkerConsumer_DualWorkerPullGating_OnlyOwnerPulls(t *testing.T) {
 
 		return nil
 	})
-	h2 := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	h2 := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
 		if msg.Subject() == "pg2.a.1" {
 			atomic.AddInt32(&a1w2, 1)
 		}
@@ -439,7 +439,7 @@ func TestWorkerConsumer_SubscribesAllPartitions_AfterAssignment(t *testing.T) {
 	require.NoError(t, err)
 
 	var p1, p2, p3 int32
-	h := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	h := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
 		switch msg.Subject() {
 		case "suball.a.1":
 			atomic.AddInt32(&p1, 1)
@@ -525,7 +525,7 @@ func TestWorkerConsumer_ManualAck_MaxAckPending_ThrottlesDelivery(t *testing.T) 
 
 	msgCh := make(chan jetstream.Msg, 16)
 	var delivered int32
-	handler := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	handler := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
 		atomic.AddInt32(&delivered, 1)
 		// don't ack yet; push to channel for the test to control
 		select {
@@ -648,7 +648,7 @@ func TestWorkerConsumer_UpdateRemovesSubject_StopsLoopKeepsDurable(t *testing.T)
 	require.NoError(t, err)
 
 	var handled int32
-	h := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	h := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
 		atomic.AddInt32(&handled, 1)
 		return nil
 	})
@@ -725,7 +725,7 @@ func TestWorkerConsumer_Close_RespectsTimeout(t *testing.T) {
 
 	// Handler that blocks until signaled
 	blockCh := make(chan struct{})
-	handler := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	handler := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
 		<-blockCh
 		return nil
 	})

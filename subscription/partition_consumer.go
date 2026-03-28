@@ -102,7 +102,7 @@ func newPartitionConsumer(
 }
 
 // Run starts the consumption loop. It blocks until the context is canceled.
-func (pc *partitionConsumer) Run(ctx context.Context, handler MessageHandler) {
+func (pc *partitionConsumer) Run(ctx context.Context, handler messageHandler) {
 	pc.lifecycleMu.Lock()
 	if pc.stopped {
 		pc.lifecycleMu.Unlock()
@@ -262,7 +262,7 @@ func (pc *partitionConsumer) Drain(ctx context.Context) {
 func (pc *partitionConsumer) processIterator(
 	ctx context.Context,
 	iter jetstream.MessagesContext,
-	handler MessageHandler,
+	handler messageHandler,
 ) (exit bool, iterErr error) {
 	stopperCh := pc.startIterStopper(ctx, iter)
 	defer func() {

@@ -80,11 +80,11 @@ func TestProcessingGate_Manager_Handoff(t *testing.T) {
 
 	// Build two WorkerConsumers with Processing Gate enabled, both on same subject
 	var w1Processed, w2Processed int32
-	handler := func(counter *int32) subscription.MessageHandler {
-		return subscription.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	handler := func(counter *int32) func(context.Context, jetstream.Msg) error {
+		return func(ctx context.Context, msg jetstream.Msg) error {
 			atomic.AddInt32(counter, 1)
 			return nil // helper will ACK
-		})
+		}
 	}
 	wcCfg := subscription.WorkerConsumerConfig{
 		StreamName:      "PGATE_MGR",

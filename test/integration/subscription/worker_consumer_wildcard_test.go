@@ -47,11 +47,11 @@ func TestWorkerConsumer_WildcardSubjectTemplate(t *testing.T) {
 	var handled atomic.Int64
 	receivedSubjects := make(chan string, 100)
 
-	mh := subscription.MessageHandlerFunc(func(c context.Context, msg jetstream.Msg) error {
+	mh := func(c context.Context, msg jetstream.Msg) error {
 		handled.Add(1)
 		receivedSubjects <- msg.Subject()
 		return msg.Ack()
-	})
+	}
 
 	// Configure WorkerConsumer with wildcard template
 	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{

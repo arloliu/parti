@@ -51,7 +51,7 @@ type BroadcastConsumer struct {
 	js      jetstream.JetStream
 	config  BroadcastConsumerConfig
 	logger  types.Logger
-	handler MessageHandler
+	handler messageHandler
 
 	mu       sync.RWMutex
 	updateMu sync.Mutex // Serializes UpdateWorkerConsumer calls
@@ -83,13 +83,15 @@ type BroadcastConsumer struct {
 // The underlying stream MUST use LimitsPolicy or InterestPolicy.
 // WorkQueuePolicy is incompatible because it delivers each message to
 // exactly one consumer, defeating the fan-out purpose.
-func NewBroadcastConsumer(js jetstream.JetStream, cfg BroadcastConsumerConfig, handler MessageHandler) (*BroadcastConsumer, error) {
+func NewBroadcastConsumer(js jetstream.JetStream, cfg BroadcastConsumerConfig, fn func(context.Context, jetstream.Msg) error) (*BroadcastConsumer, error) {
 	if js == nil {
 		return nil, errors.New("JetStream context is required")
 	}
-	if handler == nil {
+	if fn == nil {
 		return nil, errors.New("message handler is required")
 	}
+
+	handler := messageHandlerFunc(fn)
 
 	if err := cfg.SetDefaults(); err != nil {
 		return nil, fmt.Errorf("failed to set defaults: %w", err)

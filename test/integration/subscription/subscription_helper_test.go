@@ -45,7 +45,7 @@ func TestSubscriptionHelper_Creation(t *testing.T) {
 		ConsumerPrefix:  "worker",
 		SubjectTemplate: "test.sub.{{.PartitionID}}",
 		Retry:           subscription.RetryConfig{Max: 3 * 100 * time.Millisecond, Backoff: 100 * time.Millisecond},
-	}, subscription.MessageHandlerFunc(func(c context.Context, m jetstream.Msg) error { return nil }))
+	}, func(c context.Context, m jetstream.Msg) error { return nil })
 	require.NoError(t, err)
 	defer helper.Close(context.Background())
 
@@ -170,7 +170,7 @@ func TestSubscriptionHelper_UpdateOnRebalance(t *testing.T) {
 		ConsumerPrefix:  "worker",
 		SubjectTemplate: "rebalance.sub.{{.PartitionID}}",
 		Retry:           subscription.RetryConfig{Max: 3 * 100 * time.Millisecond, Backoff: 100 * time.Millisecond},
-	}, subscription.MessageHandlerFunc(func(c context.Context, m jetstream.Msg) error { return nil }))
+	}, func(c context.Context, m jetstream.Msg) error { return nil })
 	require.NoError(t, err)
 	defer helper.Close(context.Background())
 
@@ -282,7 +282,7 @@ func TestSubscriptionHelper_Cleanup(t *testing.T) {
 		ConsumerPrefix:  "worker",
 		SubjectTemplate: "cleanup.sub.{{.PartitionID}}",
 		Retry:           subscription.RetryConfig{Max: 3 * 100 * time.Millisecond, Backoff: 100 * time.Millisecond},
-	}, subscription.MessageHandlerFunc(func(c context.Context, m jetstream.Msg) error { return nil }))
+	}, func(c context.Context, m jetstream.Msg) error { return nil })
 	require.NoError(t, err)
 
 	// Create test partitions
@@ -339,7 +339,7 @@ func TestSubscriptionHelper_ErrorHandling(t *testing.T) {
 		ConsumerPrefix:  "worker",
 		SubjectTemplate: "err.sub.{{.PartitionID}}",
 		Retry:           subscription.RetryConfig{Max: 3 * 50 * time.Millisecond, Backoff: 50 * time.Millisecond},
-	}, subscription.MessageHandlerFunc(func(c context.Context, m jetstream.Msg) error { return nil }))
+	}, func(c context.Context, m jetstream.Msg) error { return nil })
 	require.NoError(t, err)
 	defer helper.Close(context.Background())
 

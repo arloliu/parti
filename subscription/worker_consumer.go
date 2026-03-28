@@ -37,7 +37,7 @@ type WorkerConsumer struct {
 	js      jetstream.JetStream
 	config  WorkerConsumerConfig
 	logger  types.Logger
-	handler MessageHandler
+	handler messageHandler
 
 	// parsed subject template for subject generation
 	subjectTemplate *template.Template
@@ -67,13 +67,15 @@ type WorkerConsumer struct {
 }
 
 // NewWorkerConsumer creates a new per-subject durable consumer helper.
-func NewWorkerConsumer(js jetstream.JetStream, cfg WorkerConsumerConfig, handler MessageHandler) (*WorkerConsumer, error) {
+func NewWorkerConsumer(js jetstream.JetStream, cfg WorkerConsumerConfig, fn func(context.Context, jetstream.Msg) error) (*WorkerConsumer, error) {
 	if js == nil {
 		return nil, errors.New("JetStream context is required")
 	}
-	if handler == nil {
+	if fn == nil {
 		return nil, errors.New("message handler is required")
 	}
+
+	handler := messageHandlerFunc(fn)
 
 	if err := cfg.SetDefaults(); err != nil {
 		return nil, fmt.Errorf("failed to set defaults: %w", err)

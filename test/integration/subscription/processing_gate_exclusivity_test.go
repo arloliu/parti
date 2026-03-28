@@ -56,12 +56,12 @@ func TestProcessingGate_Exclusivity(t *testing.T) {
 	var w1Processed int32
 	var w2Processed int32
 
-	handler := func(counter *int32) subscription.MessageHandler {
-		return subscription.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	handler := func(counter *int32) func(context.Context, jetstream.Msg) error {
+		return func(ctx context.Context, msg jetstream.Msg) error {
 			atomic.AddInt32(counter, 1)
 			// Default mode: returning nil causes helper to ACK
 			return nil
-		})
+		}
 	}
 
 	// Create two WorkerConsumers with Processing Gate enabled and same subject template
@@ -170,11 +170,11 @@ func TestProcessingGate_Handoff_CustomResolver(t *testing.T) {
 		BatchSize: 1, FetchTimeout: 2 * time.Second,
 	}
 
-	w1, err := subscription.NewWorkerConsumer(js, cfg, subscription.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error { atomic.AddInt32(&w1Processed, 1); return nil }))
+	w1, err := subscription.NewWorkerConsumer(js, cfg, func(ctx context.Context, msg jetstream.Msg) error { atomic.AddInt32(&w1Processed, 1); return nil })
 	require.NoError(t, err)
 	defer func() { _ = w1.Close(context.Background()) }()
 
-	w2, err := subscription.NewWorkerConsumer(js, cfg, subscription.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error { atomic.AddInt32(&w2Processed, 1); return nil }))
+	w2, err := subscription.NewWorkerConsumer(js, cfg, func(ctx context.Context, msg jetstream.Msg) error { atomic.AddInt32(&w2Processed, 1); return nil })
 	require.NoError(t, err)
 	defer func() { _ = w2.Close(context.Background()) }()
 

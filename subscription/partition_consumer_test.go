@@ -53,7 +53,7 @@ func TestPartitionConsumer_Run_ProcessAndExit(t *testing.T) {
 	// Handler
 	processed := make([]string, 0)
 	var mu sync.Mutex
-	handler := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	handler := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
 		mu.Lock()
 		processed = append(processed, string(msg.Data()))
 		mu.Unlock()

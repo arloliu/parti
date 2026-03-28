@@ -30,10 +30,10 @@ func TestWorkerConsumer_AutoRecreateOnExternalDeletion(t *testing.T) {
 
 	// Handler counts messages
 	var handled atomic.Int64
-	mh := subscription.MessageHandlerFunc(func(c context.Context, msg jetstream.Msg) error {
+	mh := func(c context.Context, msg jetstream.Msg) error {
 		handled.Add(1)
 		return msg.Ack()
-	})
+	}
 
 	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
 		StreamName:      "autorec-stream",

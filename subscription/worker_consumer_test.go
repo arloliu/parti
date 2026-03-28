@@ -97,7 +97,7 @@ func TestWorkerConsumer_WorkerIDMutationGuard_EarlyReturn(t *testing.T) {
 	wc.workerID = "w1"
 	wc.config.AllowWorkerIDChange = false
 
-	h := MessageHandlerFunc(func(ctx context.Context, _ jetstream.Msg) error { return nil })
+	h := messageHandlerFunc(func(ctx context.Context, _ jetstream.Msg) error { return nil })
 
 	// Call Update with a different workerID and no partitions; expect early ErrWorkerIDMutation
 	wc.handler = h

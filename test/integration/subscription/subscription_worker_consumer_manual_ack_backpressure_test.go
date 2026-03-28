@@ -63,14 +63,14 @@ func TestWorkerConsumer_ManualAck_Backpressure(t *testing.T) {
 	}()
 
 	// Manual-ack handler: enqueue or block to apply backpressure
-	handler := subscription.MessageHandlerFunc(func(c context.Context, msg jetstream.Msg) error {
+	handler := func(c context.Context, msg jetstream.Msg) error {
 		workCh <- msg // block when full; applies backpressure to the pull loop
 		if d := int32(len(workCh)); d > maxDepth.Load() {
 			maxDepth.Store(d)
 		}
 
 		return nil // manual ack mode: do not Ack here
-	})
+	}
 
 	// Configure helper with ManualAck enabled and MaxAckPending capped to capacity
 	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{

@@ -11,8 +11,6 @@
 //     deterministic subject sets from partitions (template expansion, dedupe,
 //     sort), applies changes atomically via CreateOrUpdateConsumer, and runs a
 //     resilient pull loop with heartbeat tolerance.
-//   - MessageHandler / MessageHandlerFunc: Minimal interface for user message
-//     processing, enabling dependency injection and straightforward testing.
 //
 // WorkerConsumer Highlights
 //   - Hot-reload semantics: Pull loop is started once and not restarted on
@@ -32,7 +30,7 @@
 //	    StreamName:      "events-stream",
 //	    ConsumerPrefix:  "worker",
 //	    SubjectTemplate: "events.{{.PartitionID}}",
-//	}, subscription.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+//		}, func(ctx context.Context, msg jetstream.Msg) error {
 //	    // process message
 //	    return msg.Ack()
 //	}))

@@ -140,7 +140,7 @@ func TestNewBroadcastConsumer_RequiresJetStream(t *testing.T) {
 		ConsumerPrefix: "bc",
 		WildcardFilter: "events.>",
 	}
-	handler := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error { return nil })
+	handler := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error { return nil })
 
 	_, err := NewBroadcastConsumer(nil, cfg, handler)
 	require.Error(t, err)
@@ -182,7 +182,7 @@ func TestBroadcastConsumer_DurableName_Format(t *testing.T) {
 		ConsumerID:     "worker-1",
 		WildcardFilter: "events.>",
 	}
-	handler := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error { return nil })
+	handler := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error { return nil })
 
 	bc, err := NewBroadcastConsumer(js, cfg, handler)
 	require.NoError(t, err)
@@ -232,7 +232,7 @@ func TestBroadcastConsumer_UpdateWorkerConsumer_ReceivesMessages(t *testing.T) {
 	}
 
 	var handled int32
-	handler := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	handler := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
 		atomic.AddInt32(&handled, 1)
 		return nil
 	})
@@ -303,7 +303,7 @@ func TestBroadcastConsumer_ReceivesAllMessages(t *testing.T) {
 	}
 
 	var totalHandled int32
-	handler := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	handler := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
 		atomic.AddInt32(&totalHandled, 1)
 		return nil
 	})

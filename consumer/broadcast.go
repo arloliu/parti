@@ -171,9 +171,7 @@ func NewBroadcast(
 		},
 	}
 
-	adapted := subscription.MessageHandlerFunc(handler.Handle)
-
-	inner, err := subscription.NewBroadcastConsumer(js, broadcastCfg, adapted)
+	inner, err := subscription.NewBroadcastConsumer(js, broadcastCfg, handler.Handle)
 	if err != nil {
 		return nil, err
 	}

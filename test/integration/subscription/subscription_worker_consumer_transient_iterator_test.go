@@ -111,10 +111,10 @@ func TestWorkerConsumer_TransientIteratorFailures(t *testing.T) {
 
 	// Handler counts successful ACKs.
 	var handled atomic.Int64
-	mh := subscription.MessageHandlerFunc(func(c context.Context, msg jetstream.Msg) error {
+	mh := func(c context.Context, msg jetstream.Msg) error {
 		handled.Add(1)
 		return msg.Ack()
-	})
+	}
 
 	// Metrics capture.
 	metrics := newTransientCaptureMetrics()

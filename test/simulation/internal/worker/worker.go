@@ -313,7 +313,7 @@ func NewWorker(cfg Config) (*Worker, error) { //nolint:cyclop
 		return nil, fmt.Errorf("failed to init JetStream: %w", err)
 	}
 
-	updater, err := subscription.NewWorkerConsumer(js, helperConfig, subscription.MessageHandlerFunc(worker.processMessage))
+	updater, err := subscription.NewWorkerConsumer(js, helperConfig, worker.processMessage)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create worker consumer updater: %w", err)
 	}

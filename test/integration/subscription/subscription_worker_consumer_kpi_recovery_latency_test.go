@@ -86,7 +86,7 @@ func TestWorkerConsumer_ExternalDeletionRecoveryKPI(t *testing.T) {
 	rc := newResultCollector(trialCount * 3)
 
 	// Partition set fixed (single partition is enough to validate semantics).
-	mh := subscription.MessageHandlerFunc(func(c context.Context, msg jetstream.Msg) error {
+	mh := func(c context.Context, msg jetstream.Msg) error {
 		id := string(msg.Data())
 		// Recovery latency is encoded as message header start time in unix nano (published right after deletion).
 		startStr := msg.Headers().Get("X-Delete-Time-Nano")
@@ -99,7 +99,7 @@ func TestWorkerConsumer_ExternalDeletionRecoveryKPI(t *testing.T) {
 		rc.Add(result{id: id, latency: latency})
 
 		return msg.Ack()
-	})
+	}
 
 	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
 		StreamName:      streamName,

@@ -47,7 +47,7 @@ func TestBroadcastConsumer_Integration_ReceivesAllMessages(t *testing.T) {
 	}
 
 	var p1Count, p2Count, p3Count int32
-	handler := subscription.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	handler := func(ctx context.Context, msg jetstream.Msg) error {
 		switch {
 		case strings.Contains(msg.Subject(), "region.us-east"):
 			atomic.AddInt32(&p1Count, 1)
@@ -58,7 +58,7 @@ func TestBroadcastConsumer_Integration_ReceivesAllMessages(t *testing.T) {
 		}
 
 		return nil
-	})
+	}
 
 	bc, err := subscription.NewBroadcastConsumer(js, cfg, handler)
 	require.NoError(t, err)
@@ -130,14 +130,14 @@ func TestBroadcastConsumer_Integration_IgnoresPartitionUpdates(t *testing.T) {
 	}
 
 	var p1Count, p2Count int32
-	handler := subscription.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	handler := func(ctx context.Context, msg jetstream.Msg) error {
 		if strings.Contains(msg.Subject(), "p1") {
 			atomic.AddInt32(&p1Count, 1)
 		} else if strings.Contains(msg.Subject(), "p2") {
 			atomic.AddInt32(&p2Count, 1)
 		}
 		return nil
-	})
+	}
 
 	bc, err := subscription.NewBroadcastConsumer(js, cfg, handler)
 	require.NoError(t, err)
@@ -217,10 +217,10 @@ func TestBroadcastConsumer_Integration_Close(t *testing.T) {
 	}
 
 	var handled int32
-	handler := subscription.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	handler := func(ctx context.Context, msg jetstream.Msg) error {
 		atomic.AddInt32(&handled, 1)
 		return nil
-	})
+	}
 
 	bc, err := subscription.NewBroadcastConsumer(js, cfg, handler)
 	require.NoError(t, err)

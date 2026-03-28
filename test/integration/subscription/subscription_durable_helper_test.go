@@ -23,7 +23,7 @@ func TestWorkerConsumer_NewAndDefaults(t *testing.T) {
 	_, nc := partitesting.StartEmbeddedNATS(t)
 
 	// No-op handler
-	noop := subscription.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error { return nil })
+	noop := func(ctx context.Context, msg jetstream.Msg) error { return nil }
 
 	// Create a unique stream for this test to avoid collisions with other tests.
 	js, err := jetstream.New(nc)
@@ -81,7 +81,7 @@ func TestWorkerConsumer_Basic(t *testing.T) {
 		BatchSize:         5,
 		FetchTimeout:      1 * time.Second,
 		Retry:             subscription.RetryConfig{Max: 3 * 100 * time.Millisecond, Backoff: 100 * time.Millisecond},
-	}, subscription.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error { msgCount.Add(1); return msg.Ack() }))
+	}, func(ctx context.Context, msg jetstream.Msg) error { msgCount.Add(1); return msg.Ack() })
 	require.NoError(t, err)
 	defer helper.Close(ctx)
 
@@ -118,7 +118,7 @@ func TestWorkerConsumer_MessageHandling(t *testing.T) {
 
 	var mu sync.Mutex
 	processed := make(map[string]int)
-	h := subscription.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	h := func(ctx context.Context, msg jetstream.Msg) error {
 		data := string(msg.Data())
 		mu.Lock()
 		processed[data]++
@@ -129,7 +129,7 @@ func TestWorkerConsumer_MessageHandling(t *testing.T) {
 		}
 
 		return nil
-	})
+	}
 
 	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
 		StreamName:        "test-stream",
@@ -179,7 +179,7 @@ func TestWorkerConsumer_CloseAndLogger(t *testing.T) {
 		FetchTimeout:      2 * time.Second,
 		Retry:             subscription.RetryConfig{Max: 2 * 100 * time.Millisecond, Backoff: 100 * time.Millisecond},
 		Logger:            testLogger,
-	}, subscription.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error { return nil }))
+	}, func(ctx context.Context, msg jetstream.Msg) error { return nil })
 	require.NoError(t, err)
 
 	defer func() { require.NoError(t, helper.Close(ctx)) }()

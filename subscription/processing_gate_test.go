@@ -56,7 +56,7 @@ func TestProcessingGate_AllowsOwner(t *testing.T) {
 	require.NoError(t, err)
 
 	processed := false
-	base := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	base := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
 		processed = true
 		return nil
 	})
@@ -73,7 +73,7 @@ func TestProcessingGate_NaksNonOwner(t *testing.T) {
 	resolver := fakeResolver{owner: "w2", state: types.HandoffStateStable, ok: true}
 	g, err := newProcessingGate("w1", "events.{{.PartitionID}}", resolver, ProcessingGateConfig{Enabled: true, NakDelay: 150 * time.Millisecond}, nil)
 	require.NoError(t, err)
-	base := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error { return nil })
+	base := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error { return nil })
 	wrapped := g.Wrap(base)
 	msg := &fakeMsg{subj: "events.partition-7"}
 	_ = wrapped.Handle(t.Context(), msg)
@@ -86,7 +86,7 @@ func TestProcessingGate_DisallowedState(t *testing.T) {
 	resolver := fakeResolver{owner: "w1", state: types.HandoffStatePrepare, ok: true}
 	g, err := newProcessingGate("w1", "events.{{.PartitionID}}", resolver, ProcessingGateConfig{Enabled: true}, nil)
 	require.NoError(t, err)
-	base := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error { return nil })
+	base := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error { return nil })
 	wrapped := g.Wrap(base)
 	msg := &fakeMsg{subj: "events.partition-7"}
 	_ = wrapped.Handle(t.Context(), msg)
@@ -110,7 +110,7 @@ func TestProcessingGate_Warmup(t *testing.T) {
 	require.NoError(t, err)
 
 	processed := false
-	base := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	base := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
 		processed = true
 		return nil
 	})
@@ -139,7 +139,7 @@ func TestProcessingGate_SubjectParsingFailure(t *testing.T) {
 	require.NoError(t, err)
 
 	processed := false
-	base := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	base := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
 		processed = true
 		return nil
 	})
@@ -176,7 +176,7 @@ func TestProcessingGate_UnknownOwnership_Refresh(t *testing.T) {
 	require.NoError(t, err)
 
 	processed := false
-	base := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	base := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
 		processed = true
 		return nil
 	})
@@ -197,7 +197,7 @@ func TestProcessingGate_Disabled(t *testing.T) {
 	require.NoError(t, err)
 
 	processed := false
-	base := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+	base := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
 		processed = true
 		return nil
 	})
@@ -236,7 +236,7 @@ func TestProcessingGate_Metrics(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 
-	base := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error { return nil })
+	base := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error { return nil })
 	wrapped := g.Wrap(base)
 
 	msg := &fakeMsg{subj: "events.partition-7"}

@@ -28,10 +28,10 @@ func TestWorkerConsumerLifecycleAndExpansion(t *testing.T) {
 	require.NoError(t, err)
 
 	var handled atomic.Int64
-	mh := subscription.MessageHandlerFunc(func(c context.Context, msg jetstream.Msg) error {
+	mh := func(c context.Context, msg jetstream.Msg) error {
 		handled.Add(1)
 		return msg.Ack()
-	})
+	}
 
 	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
 		StreamName:      "lifecycle-stream",
@@ -83,7 +83,7 @@ func TestWorkerConsumerConcurrentUpdatesConverges(t *testing.T) {
 	_, err = js.CreateStream(ctx, jetstream.StreamConfig{Name: "converge-int-stream", Subjects: []string{"converge.int.>"}})
 	require.NoError(t, err)
 
-	mh := subscription.MessageHandlerFunc(func(c context.Context, msg jetstream.Msg) error { return msg.Ack() })
+	mh := func(c context.Context, msg jetstream.Msg) error { return msg.Ack() }
 	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
 		StreamName:      "converge-int-stream",
 		ConsumerPrefix:  "wkr",
@@ -136,7 +136,7 @@ func TestWorkerConsumerWorkerIDSwitch(t *testing.T) {
 	_, err = js.CreateStream(ctx, jetstream.StreamConfig{Name: "switch-int-stream", Subjects: []string{"switch.int.>"}})
 	require.NoError(t, err)
 
-	mh := subscription.MessageHandlerFunc(func(c context.Context, msg jetstream.Msg) error { return msg.Ack() })
+	mh := func(c context.Context, msg jetstream.Msg) error { return msg.Ack() }
 	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
 		StreamName:          "switch-int-stream",
 		ConsumerPrefix:      "wkr",
@@ -170,7 +170,7 @@ func TestWorkerConsumerExternalDeletion(t *testing.T) {
 	_, err = js.CreateStream(ctx, jetstream.StreamConfig{Name: "extdel-stream", Subjects: []string{"extdel.test.>"}})
 	require.NoError(t, err)
 
-	mh := subscription.MessageHandlerFunc(func(c context.Context, msg jetstream.Msg) error { return msg.Ack() })
+	mh := func(c context.Context, msg jetstream.Msg) error { return msg.Ack() }
 	helper, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
 		StreamName:      "extdel-stream",
 		ConsumerPrefix:  "wkr",
