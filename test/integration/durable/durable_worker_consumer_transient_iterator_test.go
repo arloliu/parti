@@ -1,4 +1,4 @@
-package subscription_test
+package durable_test
 
 import (
 	"context"
