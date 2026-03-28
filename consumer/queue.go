@@ -364,7 +364,6 @@ func (q *Queue) runLoop(ctx context.Context) {
 		backoff = 0
 
 		hadError := q.processIterator(ctx, iter)
-		iter.Stop()
 		if hadError {
 			q.metrics.IncrementWorkerConsumerIteratorRestart("transient_error")
 			if !q.delayWithBackoffOrExit(ctx, &backoff) {
@@ -379,11 +378,17 @@ func (q *Queue) runLoop(ctx context.Context) {
 // processIterator processes messages from an iterator.
 // Returns true if it exits due to a transient iterator error.
 func (q *Queue) processIterator(ctx context.Context, iter jetstream.MessagesContext) bool {
+	// Stop the iterator when the context is cancelled so that iter.Next()
+	// unblocks with ErrMsgIteratorClosed instead of hanging indefinitely.
+	stop := context.AfterFunc(ctx, iter.Stop)
+	defer func() {
+		_ = stop()
+		iter.Stop() // Ensure iterator is stopped when exiting
+	}()
+
 	for {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return false
-		default:
 		}
 
 		msg, err := iter.Next()
