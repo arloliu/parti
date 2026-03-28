@@ -11,6 +11,27 @@
 //	[Broadcast]  Fan-out to all instances                None          Start → Stop
 //	[Dynamic]    Manager-assigned partitions (Parti)     Via Manager   Update → Stop
 //
+// # Pairing with Publishers
+//
+// Each consumer type pairs with a publisher from [partition] or JetStream:
+//
+//	Consumer       Typical Publisher            Notes
+//	[Queue]        js.Publish / jsutil          Plain JetStream publish; all workers share load
+//	[Static]       partition.JSPublisher        Hashes key → fixed partition subject
+//	[Broadcast]    js.Publish                   Single publish reaches all instances
+//	[Dynamic]      partition.JSPublisher        Hashes key → partition assigned by Manager
+//
+// Example: publish to a Static or Dynamic consumer using partition.JSPublisher:
+//
+//	pub, err := partition.NewJSPublisher(js, partition.NewConfig(
+//	    partition.WithNumPartitions(10),
+//	    partition.WithSubjectPattern("events.{{partition}}"),
+//	))
+//	if err != nil { log.Fatal(err) }
+//
+//	// Key "order-123" is consistently hashed to the same partition.
+//	if err := pub.Publish(ctx, "order-123", payload); err != nil { log.Fatal(err) }
+//
 // # Lifecycle
 //
 // Each consumer type follows a consistent lifecycle pattern:
@@ -71,8 +92,8 @@
 //
 // Runtime errors from lifecycle methods:
 //   - [context.DeadlineExceeded]: Stop timed out waiting for graceful shutdown
-//   - [durable.ErrWorkerIDMutation]: Dynamic consumer workerID changed unexpectedly
-//   - [durable.ErrMaxSubjectsExceeded]: Dynamic partition count exceeds limit
+//   - Worker ID changed unexpectedly (Dynamic consumer only)
+//   - Partition count exceeds configured limit (Dynamic consumer only)
 //
 // # Consumer Types
 //

@@ -15,7 +15,7 @@ Parti is a Go library for NATS-based work partitioning that provides dynamic par
 
 **Project Details:**
 - **Language:** Go >=1.25.0
-- **Module:** github.com/arloliu/parti
+- **Module:** github.com/arloliu/parti/v2
 - **Project Structure:**
   ```
   parti/                        # Root = main public package
@@ -24,6 +24,16 @@ Parti is a Go library for NATS-based work partitioning that provides dynamic par
   ├── config.go                 # Configuration types
   ├── options.go                # Functional options & factories
   ├── *_test.go                 # Unit tests
+  ├── consumer/                 # Unified JetStream consumer API (Queue, Static, Dynamic, Broadcast)
+  │   ├── handler.go            # Single MessageHandler definition
+  │   ├── defaults.go           # Tuning-relevant default constants
+  │   └── *_test.go
+  ├── partition/                # Static partition routing (publish + core-NATS subscribe)
+  │   ├── publisher.go          # NewPublisher (core NATS)
+  │   ├── js_publisher.go       # NewJSPublisher (JetStream)
+  │   ├── subscriber.go         # NewSubscriber (core NATS push)
+  │   ├── config.go             # PartitionConfig
+  │   └── *_test.go
   ├── strategy/                 # Assignment strategies subpackage
   │   ├── consistent_hash.go
   │   ├── round_robin.go
@@ -31,23 +41,29 @@ Parti is a Go library for NATS-based work partitioning that provides dynamic par
   ├── source/                   # Partition sources subpackage
   │   ├── static.go
   │   └── *_test.go
-  ├── subscription/             # Subscription helper subpackage
-  │   ├── helper.go
-  │   └── *_test.go
+  ├── partitest/                # Test helpers (renamed from testing/)
+  ├── jsutil/                   # JetStream utilities
+  ├── kvutil/                   # KV utilities
+  ├── types/                    # Shared contracts (leaf package)
   ├── internal/                 # Private implementation
-  │   ├── manager/              # Manager implementation
+  │   ├── durable/              # JetStream durable consumers (renamed from subscription/)
+  │   ├── partition/            # JSConsumer, ConsumerConfig, KeyExtractorFunc (package ipartition)
+  │   ├── partutil/             # Shared pattern/hash/validation utilities
   │   ├── election/             # Election (NATS KV, external agent)
   │   ├── heartbeat/            # Heartbeat publisher
   │   ├── assignment/           # Assignment calculation
   │   ├── stableid/             # Stable ID claiming
-  │   └── hash/                 # Hash utilities
-  ├── test/                     # Integration tests
+  │   ├── hash/                 # Hash utilities
+  │   ├── logging/              # Logger helpers
+  │   ├── metrics/              # Metrics helpers
+  │   └── testutil/             # Test utilities
+  ├── test/                     # Integration & simulation tests
   │   ├── integration/          # Cross-component scenarios
-  │   └── testutil/             # Shared test utilities
+  │   ├── simulation/           # Load simulation
+  │   └── stress/               # Stress tests
   ├── examples/                 # Example programs
   │   ├── basic/
-  │   ├── defender/
-  │   └── custom-strategy/
+  │   └── kv-watcher/
   ├── docs/                     # Design documentation
   └── .github/
       └── copilot-instructions.md
@@ -70,7 +86,7 @@ Parti is a Go library for NATS-based work partitioning that provides dynamic par
 - **Compile-time interface assertions:** Use strategically to avoid import cycles
   - Pattern: `var _ InterfaceName = (*ConcreteType)(nil)`
   - **Use in:** `internal/*` packages only (safe to import root package)
-  - **DO NOT use in:** Public subpackages like `strategy/`, `source/`, `subscription/` (causes import cycles)
+  - **DO NOT use in:** Public subpackages like `strategy/`, `source/`, `consumer/` (causes import cycles)
   - Place immediately after type definition
   - Comment format: `// Compile-time assertion that TypeName implements InterfaceName.`
   - Benefits: Compile-time safety, documentation, refactoring protection

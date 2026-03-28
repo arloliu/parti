@@ -1,7 +1,7 @@
 # Parti
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/arloliu/parti.svg)](https://pkg.go.dev/github.com/arloliu/parti)
-[![Go Report Card](https://goreportcard.com/badge/github.com/arloliu/parti)](https://goreportcard.com/report/github.com/arloliu/parti)
+[![Go Reference](https://pkg.go.dev/badge/github.com/arloliu/parti/v2.svg)](https://pkg.go.dev/github.com/arloliu/parti/v2)
+[![Go Report Card](https://goreportcard.com/badge/github.com/arloliu/parti/v2)](https://goreportcard.com/report/github.com/arloliu/parti/v2)
 [![License: Apache](https://img.shields.io/badge/License-Apache-blue.svg)](LICENSE)
 
 **Parti** is a Go library for NATS-based work partitioning that provides dynamic partition assignment across worker instances with stable worker IDs, leader-based coordination, and robust failure handling.
@@ -27,7 +27,7 @@ It is designed for building distributed systems where work needs to be sharded a
 
 - **Deterministic Routing**: Messages are routed to fixed partitions using xxh3 hashing on partition keys.
 - **StatefulSet Integration**: Designed for Kubernetes StatefulSet deployments where each pod handles a fixed partition based on its ordinal.
-- **Dual Protocol Support**: Works with both core NATS (`Publisher`/`Subscriber`) and JetStream (`JSPublisher`/`JSConsumer`).
+- **Dual Protocol Support**: Works with both core NATS (`Publisher`/`Subscriber`) and JetStream (`JSPublisher`). Consuming from JetStream partitions is handled by the `consumer` package (`Static`, `Dynamic`).
 - **Subject Pattern Templates**: Flexible subject patterns with `{{partition}}` and `{{key}}` placeholders.
 - **Zero Coordination**: No leader election or external coordination required—simple and predictable.
 
@@ -36,7 +36,7 @@ See the [partition package README](partition/README.md) for detailed documentati
 ## Installation
 
 ```bash
-go get github.com/arloliu/parti
+go get github.com/arloliu/parti/v2
 ```
 
 ## Quick Start
@@ -54,10 +54,10 @@ import (
     "syscall"
     "time"
 
-    "github.com/arloliu/parti"
-    "github.com/arloliu/parti/source"
-    "github.com/arloliu/parti/strategy"
-    "github.com/arloliu/parti/subscription"
+    "github.com/arloliu/parti/v2"
+    "github.com/arloliu/parti/v2/consumer"
+    "github.com/arloliu/parti/v2/source"
+    "github.com/arloliu/parti/v2/strategy"
     "github.com/nats-io/nats.go"
     "github.com/nats-io/nats.go/jetstream"
 )
@@ -95,23 +95,25 @@ func main() {
     src := source.NewStatic(partitions)
     strat := strategy.NewConsistentHash()
 
-    // 5. Create WorkerConsumer (handles NATS subscriptions)
-    // This automatically manages a JetStream consumer for assigned partitions
-    consumer, err := subscription.NewWorkerConsumer(js, subscription.WorkerConsumerConfig{
-        StreamName:      "ORDERS",
-        ConsumerPrefix:  "processor",
-        SubjectTemplate: "orders.{{.PartitionID}}.complete", // e.g., orders.0.complete
-        ProcessingGate: &subscription.ProcessingGateConfig{
-            Enabled: true, // Block processing if partition is revoked
-        },
-    }, handleMessage)
+    // 5. Create a Dynamic consumer (manages per-partition JetStream consumers)
+    // Parti Manager calls consumer.Update() when assignments change.
+    handler := consumer.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+        log.Printf("Processing message on subject: %s", msg.Subject())
+        return nil // auto-ack on nil return
+    })
+
+    dyn, err := consumer.NewDynamic(js, "ORDERS", "processor",
+        "orders.{{.PartitionID}}.complete", handler,
+        consumer.WithProcessingGate(&consumer.ProcessingGateConfig{Enabled: true}),
+    )
     if err != nil {
         log.Fatal(err)
     }
+    defer dyn.Stop(context.Background())
 
     // 6. Create and Start Manager
     mgr, err := parti.NewManager(cfg, js, src, strat,
-        parti.WithWorkerConsumerUpdater(consumer), // Link consumer to manager
+        parti.WithWorkerConsumerUpdater(dyn), // Manager calls dyn.Update on assignment changes
     )
     if err != nil {
         log.Fatal(err)
@@ -133,12 +135,6 @@ func main() {
 
     log.Println("Shutting down...")
     mgr.Stop(ctx)
-}
-
-func handleMessage(ctx context.Context, msg jetstream.Msg) error {
-    log.Printf("Processing message on subject: %s", msg.Subject())
-    msg.Ack()
-    return nil
 }
 ```
 
