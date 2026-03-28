@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/arloliu/parti/v2/internal/logging"
-	"github.com/arloliu/parti/v2/subscription"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
@@ -74,7 +73,7 @@ func TestStrictOptions(t *testing.T) {
 	})
 
 	t.Run("Dynamic Options", func(t *testing.T) {
-		gateCfg := &subscription.ProcessingGateConfig{
+		gateCfg := &ProcessingGateConfig{
 			Enabled: false,
 		}
 

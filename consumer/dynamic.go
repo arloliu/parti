@@ -74,12 +74,12 @@ type DynamicConfig struct {
 	// When enabled, the WorkerConsumer uses a distributed lock (via KV) to ensure
 	// that it is the *only* active processor for its assigned partitions.
 	// This prevents split-brain processing during rebalances.
-	ProcessingGate *subscription.ProcessingGateConfig
+	ProcessingGate *ProcessingGateConfig
 
 	// Resolver configures the ownership resolver used when ProcessingGate is enabled.
 	//
 	// It defines how ownership is claimed, refreshed, and verified.
-	Resolver subscription.ResolverConfig
+	Resolver ResolverConfig
 
 	// PullGatingEnabled enables pre-pull ownership/state gating for consumers.
 	//
@@ -224,8 +224,8 @@ func NewDynamic(
 		MaxAckPending:               cfg.MaxAckPending,
 		InactiveThreshold:           cfg.InactiveThreshold,
 		AckPolicy:                   cfg.AckPolicy,
-		ProcessingGate:              cfg.ProcessingGate,
-		Resolver:                    cfg.Resolver,
+		ProcessingGate:              toSubscriptionGateConfig(cfg.ProcessingGate),
+		Resolver:                    toSubscriptionResolverConfig(cfg.Resolver),
 		PullGatingEnabled:           cfg.PullGatingEnabled,
 		DrainOnRemove:               cfg.DrainOnRemove,
 		DrainOnRemoveTimeout:        cfg.DrainOnRemoveTimeout,
@@ -320,7 +320,7 @@ func (d *Dynamic) Stop(ctx context.Context) error {
 //
 // This is an advanced method for observability integration. Most users do not
 // need to call this directly.
-func (d *Dynamic) SetResolverMetrics(m subscription.ResolverMetrics) {
+func (d *Dynamic) SetResolverMetrics(m ResolverMetrics) {
 	d.inner.SetResolverMetrics(m)
 }
 
@@ -343,4 +343,35 @@ func (c *DynamicConfig) Validate() error {
 	}
 
 	return nil
+}
+
+// toSubscriptionGateConfig converts a consumer-owned ProcessingGateConfig to
+// the internal subscription equivalent. Returns nil when cfg is nil.
+func toSubscriptionGateConfig(cfg *ProcessingGateConfig) *subscription.ProcessingGateConfig {
+	if cfg == nil {
+		return nil
+	}
+
+	return &subscription.ProcessingGateConfig{
+		Enabled:             cfg.Enabled,
+		AllowedStates:       cfg.AllowedStates,
+		WarmupDuration:      cfg.WarmupDuration,
+		WarmupAllowedStates: cfg.WarmupAllowedStates,
+		NakDelay:            cfg.NakDelay,
+		NakJitter:           cfg.NakJitter,
+		Debug:               cfg.Debug,
+		Metrics:             cfg.Metrics, // consumer.GateMetrics satisfies subscription.GateMetrics
+	}
+}
+
+// toSubscriptionResolverConfig converts a consumer-owned ResolverConfig to the
+// internal subscription equivalent.
+func toSubscriptionResolverConfig(cfg ResolverConfig) subscription.ResolverConfig {
+	return subscription.ResolverConfig{
+		OwnershipResolver:   cfg.OwnershipResolver,
+		HandoffBucketName:   cfg.HandoffBucketName,
+		HandoffClaimsPrefix: cfg.HandoffClaimsPrefix,
+		BatchWindow:         cfg.BatchWindow,
+		BatchMaxItems:       cfg.BatchMaxItems,
+	}
 }

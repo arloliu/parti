@@ -5,7 +5,6 @@ import (
 
 	"github.com/arloliu/parti/v2/internal/logging"
 	"github.com/arloliu/parti/v2/internal/metrics"
-	"github.com/arloliu/parti/v2/subscription"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -92,8 +91,8 @@ type options struct {
 	keyExtractor     func(msg jetstream.Msg) string
 
 	// Dynamic specific
-	processingGate              *subscription.ProcessingGateConfig
-	resolver                    subscription.ResolverConfig
+	processingGate              *ProcessingGateConfig
+	resolver                    ResolverConfig
 	pullGatingEnabled           bool
 	drainOnRemove               bool
 	drainOnRemoveTimeout        time.Duration
@@ -128,7 +127,7 @@ func defaultOptions() options {
 		iteratorEscalationThreshold: 3,
 		drainOnRemoveTimeout:        10 * time.Second,
 		partitionRefreshMinInterval: 500 * time.Millisecond,
-		resolver: subscription.ResolverConfig{
+		resolver: ResolverConfig{
 			HandoffBucketName:   "parti-handoff",
 			HandoffClaimsPrefix: "claims/",
 			BatchWindow:         5 * time.Millisecond,
@@ -437,14 +436,14 @@ func WithKeyExtractor(fn func(msg jetstream.Msg) string) StaticOption {
 // -- Dynamic specific --
 
 // WithProcessingGate enables processing gate with given config.
-func WithProcessingGate(cfg *subscription.ProcessingGateConfig) DynamicOption {
+func WithProcessingGate(cfg *ProcessingGateConfig) DynamicOption {
 	return dynamicOpt(func(o *options) {
 		o.processingGate = cfg
 	})
 }
 
 // WithResolver configures the ownership resolver.
-func WithResolver(cfg subscription.ResolverConfig) DynamicOption {
+func WithResolver(cfg ResolverConfig) DynamicOption {
 	return dynamicOpt(func(o *options) {
 		o.resolver = cfg
 	})

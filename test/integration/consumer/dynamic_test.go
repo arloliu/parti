@@ -16,7 +16,6 @@ import (
 	"github.com/arloliu/parti/v2/kvutil"
 	"github.com/arloliu/parti/v2/source"
 	"github.com/arloliu/parti/v2/strategy"
-	"github.com/arloliu/parti/v2/subscription"
 	partitesting "github.com/arloliu/parti/v2/partitest"
 	"github.com/arloliu/parti/v2/types"
 )
@@ -550,7 +549,7 @@ func TestDynamic_WithProcessingGate(t *testing.T) {
 		return nil
 	})
 
-	gateConfig := &subscription.ProcessingGateConfig{
+	gateConfig := &consumer.ProcessingGateConfig{
 		Enabled:  true,
 		NakDelay: 50 * time.Millisecond,
 	}
@@ -559,7 +558,7 @@ func TestDynamic_WithProcessingGate(t *testing.T) {
 		consumer.WithBatchSize(1),
 		consumer.WithFetchTimeout(1*time.Second),
 		consumer.WithProcessingGate(gateConfig),
-		consumer.WithResolver(subscription.ResolverConfig{HandoffBucketName: bucket}),
+		consumer.WithResolver(consumer.ResolverConfig{HandoffBucketName: bucket}),
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = dc1.Stop(ctx) })
@@ -568,7 +567,7 @@ func TestDynamic_WithProcessingGate(t *testing.T) {
 		consumer.WithBatchSize(1),
 		consumer.WithFetchTimeout(1*time.Second),
 		consumer.WithProcessingGate(gateConfig),
-		consumer.WithResolver(subscription.ResolverConfig{HandoffBucketName: bucket}),
+		consumer.WithResolver(consumer.ResolverConfig{HandoffBucketName: bucket}),
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = dc2.Stop(ctx) })
