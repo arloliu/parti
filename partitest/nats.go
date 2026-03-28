@@ -1,4 +1,4 @@
-package testing
+package partitest
 
 import (
 	"errors"

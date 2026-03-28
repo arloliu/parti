@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/arloliu/parti/v2/internal/assignment/handoff"
-	partitesting "github.com/arloliu/parti/v2/testing"
+	partitesting "github.com/arloliu/parti/v2/partitest"
 	"github.com/arloliu/parti/v2/types"
 )
 

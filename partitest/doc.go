@@ -13,11 +13,11 @@
 //
 //	import (
 //	    "testing"
-//	    partitest "github.com/arloliu/parti/v2/testing"
+//	    partitest "github.com/arloliu/parti/v2/partitest"
 //	)
 //
 //	func TestMyComponent(t *testing.T) {
 //	    _, nc := partitest.StartEmbeddedNATS(t)
 //	    // Use nc for your tests
 //	}
-package testing
+package partitest

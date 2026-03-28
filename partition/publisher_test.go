@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	partitesting "github.com/arloliu/parti/v2/testing"
+	partitesting "github.com/arloliu/parti/v2/partitest"
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/require"
 )

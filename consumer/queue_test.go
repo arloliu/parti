@@ -10,7 +10,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	partitesting "github.com/arloliu/parti/v2/testing"
+	partitesting "github.com/arloliu/parti/v2/partitest"
 )
 
 func TestQueueConfig_Validate_RequiredFields(t *testing.T) {

@@ -10,7 +10,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	partitest "github.com/arloliu/parti/v2/testing"
+	partitest "github.com/arloliu/parti/v2/partitest"
 )
 
 // TestConcurrentKVBucketCreation verifies that multiple goroutines can safely

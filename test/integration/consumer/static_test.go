@@ -14,7 +14,7 @@ import (
 
 	"github.com/arloliu/parti/v2/consumer"
 	"github.com/arloliu/parti/v2/partition"
-	partitesting "github.com/arloliu/parti/v2/testing"
+	partitesting "github.com/arloliu/parti/v2/partitest"
 )
 
 // TestStatic_BasicPublishConsume verifies that a Static consumer receives messages

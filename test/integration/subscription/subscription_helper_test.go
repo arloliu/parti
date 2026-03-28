@@ -12,7 +12,7 @@ import (
 	"github.com/arloliu/parti/v2/source"
 	"github.com/arloliu/parti/v2/strategy"
 	"github.com/arloliu/parti/v2/subscription"
-	partitest "github.com/arloliu/parti/v2/testing"
+	partitest "github.com/arloliu/parti/v2/partitest"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"

@@ -8,7 +8,7 @@ import (
 	"github.com/arloliu/parti/v2/test/simulation/internal/coordinator"
 	"github.com/arloliu/parti/v2/test/simulation/internal/producer"
 	"github.com/arloliu/parti/v2/test/simulation/internal/worker"
-	partitesting "github.com/arloliu/parti/v2/testing"
+	partitesting "github.com/arloliu/parti/v2/partitest"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"

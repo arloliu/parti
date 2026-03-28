@@ -11,7 +11,7 @@ import (
 
 	"github.com/arloliu/parti/v2"
 	"github.com/arloliu/parti/v2/subscription"
-	partitesting "github.com/arloliu/parti/v2/testing"
+	partitesting "github.com/arloliu/parti/v2/partitest"
 )
 
 // TestWorkerConsumer_ManualAck_Backpressure verifies that ManualAck mode allows

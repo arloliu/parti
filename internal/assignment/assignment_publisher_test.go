@@ -8,7 +8,7 @@ import (
 
 	"github.com/arloliu/parti/v2/internal/logging"
 	"github.com/arloliu/parti/v2/internal/metrics"
-	partitest "github.com/arloliu/parti/v2/testing"
+	partitest "github.com/arloliu/parti/v2/partitest"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/stretchr/testify/require"
 )

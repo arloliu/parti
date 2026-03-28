@@ -12,7 +12,7 @@ import (
 	"github.com/arloliu/parti/v2"
 	"github.com/arloliu/parti/v2/consumer"
 	"github.com/arloliu/parti/v2/subscription"
-	partitesting "github.com/arloliu/parti/v2/testing"
+	partitesting "github.com/arloliu/parti/v2/partitest"
 )
 
 // TestWIPHandler_Integration verifies that WIPHandler prevents message redelivery
