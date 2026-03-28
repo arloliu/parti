@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arloliu/parti/internal/stableid"
+	"github.com/arloliu/parti/v2/internal/stableid"
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"

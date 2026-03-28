@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"github.com/arloliu/fuda"
-	"github.com/arloliu/parti/jsutil"
-	"github.com/arloliu/parti/subscription"
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/jsutil"
+	"github.com/arloliu/parti/v2/subscription"
+	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
 

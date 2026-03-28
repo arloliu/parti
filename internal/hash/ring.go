@@ -6,7 +6,7 @@ import (
 
 	"github.com/zeebo/xxh3"
 
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/types"
 )
 
 // Ring implements a consistent hash ring with virtual nodes.

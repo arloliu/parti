@@ -4,7 +4,7 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/types"
 )
 
 // SlogLogger implements types.Logger using Go's standard log/slog package.

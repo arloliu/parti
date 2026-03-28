@@ -3,7 +3,7 @@ package hooks
 import (
 	"context"
 
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/types"
 )
 
 // NopHooks implements Hooks with no-op callbacks.

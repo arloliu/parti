@@ -9,8 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/arloliu/parti/internal/assignment/handoff"
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/internal/assignment/handoff"
+	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
 

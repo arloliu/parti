@@ -5,13 +5,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arloliu/parti/internal/testutil"
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/internal/testutil"
+	"github.com/arloliu/parti/v2/types"
 	"github.com/stretchr/testify/require"
 )
 
 // To enable debug logging for troubleshooting, import and use:
-//   "github.com/arloliu/parti/internal/logging"
+//   "github.com/arloliu/parti/v2/internal/logging"
 //
 // Then when adding workers:
 //   debugLogger := logging.NewTest(t)

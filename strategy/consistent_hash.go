@@ -3,8 +3,8 @@ package strategy
 import (
 	"errors"
 
-	"github.com/arloliu/parti/internal/hash"
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/internal/hash"
+	"github.com/arloliu/parti/v2/types"
 )
 
 // ConsistentHash implements consistent hashing with virtual nodes.

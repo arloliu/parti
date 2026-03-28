@@ -8,7 +8,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	partitest "github.com/arloliu/parti/testing"
+	partitest "github.com/arloliu/parti/v2/testing"
 )
 
 type testStruct struct {

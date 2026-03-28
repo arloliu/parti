@@ -7,8 +7,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/arloliu/parti/internal/natsutil"
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/internal/natsutil"
+	"github.com/arloliu/parti/v2/types"
 )
 
 // Calculator manages partition assignment calculation and distribution.

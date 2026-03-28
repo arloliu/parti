@@ -3,7 +3,7 @@ package logging
 import (
 	"log"
 
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/types"
 )
 
 // NewStdLogger creates a logger that writes to standard log output.

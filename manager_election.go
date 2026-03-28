@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/arloliu/parti/internal/election"
-	"github.com/arloliu/parti/internal/heartbeat"
-	"github.com/arloliu/parti/internal/stableid"
+	"github.com/arloliu/parti/v2/internal/election"
+	"github.com/arloliu/parti/v2/internal/heartbeat"
+	"github.com/arloliu/parti/v2/internal/stableid"
 	"github.com/nats-io/nats.go/jetstream"
 )
 

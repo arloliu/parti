@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arloliu/parti/internal/logging"
+	"github.com/arloliu/parti/v2/internal/logging"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"

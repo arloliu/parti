@@ -6,8 +6,8 @@ import (
 	"fmt"
 
 	"github.com/arloliu/fuda"
-	"github.com/arloliu/parti/jsutil"
-	"github.com/arloliu/parti/partition"
+	"github.com/arloliu/parti/v2/jsutil"
+	"github.com/arloliu/parti/v2/partition"
 	"github.com/nats-io/nats.go/jetstream"
 )
 

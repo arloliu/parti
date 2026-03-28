@@ -3,8 +3,8 @@ package assignment_test
 import (
 	"testing"
 
-	"github.com/arloliu/parti/internal/testutil"
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/internal/testutil"
+	"github.com/arloliu/parti/v2/types"
 )
 
 // TestInvariants_Smoke ensures the invariant helper is wired and usable in integration tests.

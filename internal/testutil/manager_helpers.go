@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arloliu/parti"
+	"github.com/arloliu/parti/v2"
 	"github.com/nats-io/nats.go/jetstream"
 )
 

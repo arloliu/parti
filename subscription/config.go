@@ -5,9 +5,9 @@ import (
 	"time"
 
 	"github.com/arloliu/fuda"
-	"github.com/arloliu/parti/internal/logging"
-	"github.com/arloliu/parti/internal/metrics"
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/internal/logging"
+	"github.com/arloliu/parti/v2/internal/metrics"
+	"github.com/arloliu/parti/v2/types"
 	"github.com/go-playground/validator/v10"
 	"github.com/nats-io/nats.go/jetstream"
 )

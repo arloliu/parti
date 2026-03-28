@@ -3,7 +3,7 @@ package assignment
 import (
 	"context"
 
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/types"
 )
 
 // NopCalculator implements a no-op assignment calculator.

@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	partitest "github.com/arloliu/parti/testing"
-	"github.com/arloliu/parti/types"
+	partitest "github.com/arloliu/parti/v2/testing"
+	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 )

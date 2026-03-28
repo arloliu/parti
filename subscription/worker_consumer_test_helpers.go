@@ -3,7 +3,7 @@ package subscription
 import (
 	"sync/atomic"
 
-	imetrics "github.com/arloliu/parti/internal/metrics"
+	imetrics "github.com/arloliu/parti/v2/internal/metrics"
 )
 
 // captureEscalationMetrics captures iterator escalation events.

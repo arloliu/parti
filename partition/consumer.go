@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/arloliu/parti/jsutil"
+	"github.com/arloliu/parti/v2/jsutil"
 	"github.com/nats-io/nats.go/jetstream"
 )
 

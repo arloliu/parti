@@ -11,14 +11,14 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/arloliu/parti"
-	"github.com/arloliu/parti/consumer"
-	"github.com/arloliu/parti/kvutil"
-	"github.com/arloliu/parti/source"
-	"github.com/arloliu/parti/strategy"
-	"github.com/arloliu/parti/subscription"
-	partitesting "github.com/arloliu/parti/testing"
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2"
+	"github.com/arloliu/parti/v2/consumer"
+	"github.com/arloliu/parti/v2/kvutil"
+	"github.com/arloliu/parti/v2/source"
+	"github.com/arloliu/parti/v2/strategy"
+	"github.com/arloliu/parti/v2/subscription"
+	partitesting "github.com/arloliu/parti/v2/testing"
+	"github.com/arloliu/parti/v2/types"
 )
 
 // TestDynamic_UpdateWithPartitions verifies that a Dynamic consumer creates

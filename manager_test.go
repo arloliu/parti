@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arloliu/parti/source"
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/source"
+	"github.com/arloliu/parti/v2/types"
 	"github.com/stretchr/testify/require"
 )
 

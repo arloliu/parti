@@ -9,9 +9,9 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/arloliu/parti/consumer"
-	partitesting "github.com/arloliu/parti/testing"
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/consumer"
+	partitesting "github.com/arloliu/parti/v2/testing"
+	"github.com/arloliu/parti/v2/types"
 )
 
 // TestWIPHandler_PreventsRedelivery verifies that WIPHandler prevents message

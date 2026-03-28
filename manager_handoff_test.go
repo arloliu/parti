@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arloliu/parti/internal/assignment/handoff"
-	"github.com/arloliu/parti/internal/logging"
+	"github.com/arloliu/parti/v2/internal/assignment/handoff"
+	"github.com/arloliu/parti/v2/internal/logging"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )

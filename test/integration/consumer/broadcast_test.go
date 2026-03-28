@@ -11,8 +11,8 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/arloliu/parti/consumer"
-	partitesting "github.com/arloliu/parti/testing"
+	"github.com/arloliu/parti/v2/consumer"
+	partitesting "github.com/arloliu/parti/v2/testing"
 )
 
 // TestBroadcast_ReceivesAllMessages verifies that a Broadcast consumer receives

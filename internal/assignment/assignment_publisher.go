@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/arloliu/parti/kvutil"
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/kvutil"
+	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
 

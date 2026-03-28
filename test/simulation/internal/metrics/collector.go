@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/arloliu/parti/subscription"
+	"github.com/arloliu/parti/v2/subscription"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	promclient "github.com/prometheus/client_model/go"

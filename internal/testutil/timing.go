@@ -3,7 +3,7 @@ package testutil
 import (
 	"time"
 
-	"github.com/arloliu/parti"
+	"github.com/arloliu/parti/v2"
 )
 
 // TimingProfile encapsulates a set of tuned timing parameters for integration tests.

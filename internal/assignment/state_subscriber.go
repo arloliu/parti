@@ -3,7 +3,7 @@ package assignment
 import (
 	"sync"
 
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/types"
 )
 
 // stateSubscriber is a helper for managing state change subscriptions.

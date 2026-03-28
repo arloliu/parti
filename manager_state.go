@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/types"
 )
 
 // WaitState waits for the manager to reach the expected state within the timeout period.

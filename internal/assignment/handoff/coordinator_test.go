@@ -5,8 +5,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/arloliu/parti/internal/assignment/handoff"
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/internal/assignment/handoff"
+	"github.com/arloliu/parti/v2/types"
 	"github.com/stretchr/testify/require"
 )
 

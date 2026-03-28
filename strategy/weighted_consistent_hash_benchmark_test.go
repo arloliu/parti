@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/types"
 )
 
 // generatePartitions creates n partitions with deterministic IDs and optional weight variance.

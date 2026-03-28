@@ -3,7 +3,7 @@ package testutil
 import (
 	"testing"
 
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/types"
 )
 
 func TestAssertAssignmentsConsistent_Passes(t *testing.T) {

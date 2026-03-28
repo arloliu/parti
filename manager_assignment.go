@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/arloliu/parti/internal/assignment"
-	"github.com/arloliu/parti/kvutil"
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/internal/assignment"
+	"github.com/arloliu/parti/v2/kvutil"
+	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
 

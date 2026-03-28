@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/types"
 )
 
 // Static implements a partition source with a fixed list of partitions.

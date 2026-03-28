@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arloliu/parti/subscription"
-	partitesting "github.com/arloliu/parti/testing"
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/subscription"
+	partitesting "github.com/arloliu/parti/v2/testing"
+	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 )

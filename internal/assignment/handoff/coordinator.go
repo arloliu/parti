@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/types"
 )
 
 // Coordinator abstracts partition handoff application for a single worker.

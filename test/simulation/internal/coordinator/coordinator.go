@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/arloliu/parti/test/simulation/internal/metrics"
-	"github.com/arloliu/parti/test/simulation/internal/producer"
+	"github.com/arloliu/parti/v2/test/simulation/internal/metrics"
+	"github.com/arloliu/parti/v2/test/simulation/internal/producer"
 )
 
 // Coordinator manages simulation tracking and validation.

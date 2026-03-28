@@ -9,10 +9,10 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/arloliu/parti"
-	"github.com/arloliu/parti/consumer"
-	"github.com/arloliu/parti/subscription"
-	partitesting "github.com/arloliu/parti/testing"
+	"github.com/arloliu/parti/v2"
+	"github.com/arloliu/parti/v2/consumer"
+	"github.com/arloliu/parti/v2/subscription"
+	partitesting "github.com/arloliu/parti/v2/testing"
 )
 
 // TestWIPHandler_Integration verifies that WIPHandler prevents message redelivery

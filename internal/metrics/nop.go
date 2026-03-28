@@ -1,6 +1,6 @@
 package metrics
 
-import "github.com/arloliu/parti/types"
+import "github.com/arloliu/parti/v2/types"
 
 // NopMetrics implements a no-op metrics collector.
 //

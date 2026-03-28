@@ -4,9 +4,9 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/arloliu/parti/internal/hash"
-	"github.com/arloliu/parti/internal/logging"
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/internal/hash"
+	"github.com/arloliu/parti/v2/internal/logging"
+	"github.com/arloliu/parti/v2/types"
 )
 
 const (

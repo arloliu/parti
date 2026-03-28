@@ -3,7 +3,7 @@ package parti
 import (
 	"context"
 
-	"github.com/arloliu/parti/internal/assignment/handoff"
+	"github.com/arloliu/parti/v2/internal/assignment/handoff"
 )
 
 // Option configures a Manager with optional dependencies.

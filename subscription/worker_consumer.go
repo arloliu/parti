@@ -14,9 +14,9 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/zeebo/xxh3"
 
-	"github.com/arloliu/parti/jsutil"
-	"github.com/arloliu/parti/kvutil"
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/jsutil"
+	"github.com/arloliu/parti/v2/kvutil"
+	"github.com/arloliu/parti/v2/types"
 )
 
 // WorkerConsumer manages one JetStream durable pull consumer per subject (partition).

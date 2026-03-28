@@ -1,6 +1,6 @@
 package subscription
 
-import "github.com/arloliu/parti/types"
+import "github.com/arloliu/parti/v2/types"
 
 // emitControlRetry delegates retry increment to the global metrics collector if provided.
 func emitControlRetry(mc types.MetricsCollector, op string) {

@@ -15,7 +15,7 @@
 //
 // To enable detailed logging for troubleshooting, pass a logger when adding workers:
 //
-//	import "github.com/arloliu/parti/internal/logging"
+//	import "github.com/arloliu/parti/v2/internal/logging"
 //
 //	debugLogger := logger.NewTest(t)
 //	cluster.AddWorker(ctx, debugLogger)  // With debug logs
@@ -41,6 +41,6 @@
 //	cluster.StartWorkers(ctx)
 //	cluster.WaitForStableState(15 * time.Second)
 //
-// Note: For NATS server setup, use the github.com/arloliu/parti/testing package.
+// Note: For NATS server setup, use the github.com/arloliu/parti/v2/testing package.
 // This package is specifically for integration test scenarios and helper utilities.
 package testutil

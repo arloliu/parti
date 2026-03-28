@@ -3,7 +3,7 @@ package metrics
 import (
 	"testing"
 
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/types"
 	"github.com/stretchr/testify/require"
 )
 

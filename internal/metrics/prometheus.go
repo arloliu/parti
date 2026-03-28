@@ -3,7 +3,7 @@ package metrics
 import (
 	"sync"
 
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/types"
 	"github.com/prometheus/client_golang/prometheus"
 )
 

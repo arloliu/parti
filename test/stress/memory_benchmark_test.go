@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arloliu/parti/internal/testutil"
+	"github.com/arloliu/parti/v2/internal/testutil"
 	"github.com/stretchr/testify/require"
 )
 

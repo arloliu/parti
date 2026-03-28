@@ -1,6 +1,6 @@
 package logging
 
-import "github.com/arloliu/parti/types"
+import "github.com/arloliu/parti/v2/types"
 
 // NewNop creates a no-op logger that discards all log output.
 func NewNop() types.Logger {

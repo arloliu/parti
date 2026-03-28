@@ -3,7 +3,7 @@ package testing
 import (
 	"testing"
 
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/types"
 )
 
 // NewTestLogger creates a new logger instance that writes to the testing.T logger.

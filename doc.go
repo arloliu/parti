@@ -10,9 +10,9 @@
 // Basic usage with default settings:
 //
 //	import (
-//	    "github.com/arloliu/parti"
-//	    "github.com/arloliu/parti/source"
-//	    "github.com/arloliu/parti/strategy"
+//	    "github.com/arloliu/parti/v2"
+//	    "github.com/arloliu/parti/v2/source"
+//	    "github.com/arloliu/parti/v2/strategy"
 //	)
 //
 //	cfg := parti.Config{
@@ -54,9 +54,9 @@
 // Custom strategy with options:
 //
 //	import (
-//	    "github.com/arloliu/parti"
-//	    "github.com/arloliu/parti/source"
-//	    "github.com/arloliu/parti/strategy"
+//	    "github.com/arloliu/parti/v2"
+//	    "github.com/arloliu/parti/v2/source"
+//	    "github.com/arloliu/parti/v2/strategy"
 //	)
 //
 //	assignmentStrategy := strategy.NewConsistentHash(

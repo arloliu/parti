@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/types"
 	"golang.org/x/sync/errgroup"
 )
 

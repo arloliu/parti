@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/arloliu/fuda"
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
 

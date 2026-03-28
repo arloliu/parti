@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arloliu/parti/internal/logging"
-	"github.com/arloliu/parti/internal/metrics"
+	"github.com/arloliu/parti/v2/internal/logging"
+	"github.com/arloliu/parti/v2/internal/metrics"
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/require"
 )

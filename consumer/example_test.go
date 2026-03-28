@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/arloliu/parti/consumer"
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/consumer"
+	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
 

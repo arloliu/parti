@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arloliu/parti/internal/assignment/handoff"
+	"github.com/arloliu/parti/v2/internal/assignment/handoff"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 )

@@ -3,7 +3,7 @@ package strategy
 import (
 	"slices"
 
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/types"
 )
 
 // RoundRobin implements simple round-robin partition assignment.

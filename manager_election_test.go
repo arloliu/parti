@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arloliu/parti/internal/logging"
-	"github.com/arloliu/parti/source"
-	"github.com/arloliu/parti/strategy"
-	partitest "github.com/arloliu/parti/testing"
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/internal/logging"
+	"github.com/arloliu/parti/v2/source"
+	"github.com/arloliu/parti/v2/strategy"
+	partitest "github.com/arloliu/parti/v2/testing"
+	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 )

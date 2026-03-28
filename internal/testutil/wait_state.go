@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/types"
 )
 
 // ManagerWaiter defines the subset of Manager methods needed for waiting.

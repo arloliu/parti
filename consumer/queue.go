@@ -11,10 +11,10 @@ import (
 	"github.com/arloliu/fuda"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/arloliu/parti/internal/logging"
-	"github.com/arloliu/parti/internal/metrics"
-	"github.com/arloliu/parti/jsutil"
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/internal/logging"
+	"github.com/arloliu/parti/v2/internal/metrics"
+	"github.com/arloliu/parti/v2/jsutil"
+	"github.com/arloliu/parti/v2/types"
 )
 
 // Queue is a load-balanced consumer where multiple instances share one durable.

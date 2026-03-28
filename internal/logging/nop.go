@@ -1,7 +1,7 @@
 // Package logging provides logging utilities for the Parti library.
 package logging
 
-import "github.com/arloliu/parti/types"
+import "github.com/arloliu/parti/v2/types"
 
 // NopLogger is a no-op logger that discards all log messages.
 //

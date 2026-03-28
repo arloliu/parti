@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arloliu/parti/test/simulation/internal/metrics"
+	"github.com/arloliu/parti/v2/test/simulation/internal/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 )
 

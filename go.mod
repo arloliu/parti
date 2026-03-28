@@ -1,4 +1,4 @@
-module github.com/arloliu/parti
+module github.com/arloliu/parti/v2
 
 go 1.25.0
 

@@ -17,9 +17,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/arloliu/parti"
-	"github.com/arloliu/parti/source"
-	"github.com/arloliu/parti/strategy"
+	"github.com/arloliu/parti/v2"
+	"github.com/arloliu/parti/v2/source"
+	"github.com/arloliu/parti/v2/strategy"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )

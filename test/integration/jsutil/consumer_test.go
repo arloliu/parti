@@ -5,8 +5,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/arloliu/parti/jsutil"
-	partitesting "github.com/arloliu/parti/testing"
+	"github.com/arloliu/parti/v2/jsutil"
+	partitesting "github.com/arloliu/parti/v2/testing"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

@@ -3,7 +3,7 @@ package election
 import (
 	"context"
 
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2/types"
 )
 
 // NopElection implements a no-op election agent.

@@ -15,15 +15,15 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/arloliu/parti"
-	"github.com/arloliu/parti/source"
-	"github.com/arloliu/parti/strategy"
-	"github.com/arloliu/parti/subscription"
-	"github.com/arloliu/parti/test/simulation/internal/coordinator"
-	"github.com/arloliu/parti/test/simulation/internal/logging"
-	"github.com/arloliu/parti/test/simulation/internal/metrics"
-	"github.com/arloliu/parti/test/simulation/internal/producer"
-	"github.com/arloliu/parti/types"
+	"github.com/arloliu/parti/v2"
+	"github.com/arloliu/parti/v2/source"
+	"github.com/arloliu/parti/v2/strategy"
+	"github.com/arloliu/parti/v2/subscription"
+	"github.com/arloliu/parti/v2/test/simulation/internal/coordinator"
+	"github.com/arloliu/parti/v2/test/simulation/internal/logging"
+	"github.com/arloliu/parti/v2/test/simulation/internal/metrics"
+	"github.com/arloliu/parti/v2/test/simulation/internal/producer"
+	"github.com/arloliu/parti/v2/types"
 )
 
 // minDuration returns the smaller of a and b.

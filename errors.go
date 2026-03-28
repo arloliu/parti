@@ -1,6 +1,6 @@
 package parti
 
-import "github.com/arloliu/parti/types"
+import "github.com/arloliu/parti/v2/types"
 
 // Re-export sentinel errors from the internal types package.
 //
