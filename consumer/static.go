@@ -94,7 +94,7 @@ type StaticConfig struct {
 func NewStatic(
 	js jetstream.JetStream,
 	streamName, consumerName, subjectPattern string,
-	numPartitions, partIdx int,
+	numPartitions, partitionIndex int,
 	handler MessageHandler,
 	opts ...StaticOption,
 ) (*Static, error) {
@@ -113,7 +113,7 @@ func NewStatic(
 	if numPartitions <= 0 {
 		return nil, errors.New("num partitions must be greater than 0")
 	}
-	if partIdx < 0 || partIdx >= numPartitions {
+	if partitionIndex < 0 || partitionIndex >= numPartitions {
 		return nil, errors.New("partition index out of range")
 	}
 	if handler == nil {
@@ -145,7 +145,7 @@ func NewStatic(
 		ConsumerName:   consumerName,
 		SubjectPattern: subjectPattern,
 		NumPartitions:  numPartitions,
-		Partition:      partIdx,
+		Partition:      partitionIndex,
 		HashSeed:       o.hashSeed,
 	}
 
