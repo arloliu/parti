@@ -23,4 +23,5 @@ var (
 	ErrDegraded                   = types.ErrDegraded
 	ErrIDClaimFailed              = types.ErrIDClaimFailed
 	ErrAssignmentFailed           = types.ErrAssignmentFailed
+	ErrInvalidPreset              = types.ErrInvalidPreset
 )

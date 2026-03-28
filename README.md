@@ -48,6 +48,7 @@ package main
 
 import (
     "context"
+    "fmt"
     "log"
     "os"
     "os/signal"
@@ -79,7 +80,7 @@ func main() {
     var partitions []parti.Partition
     for i := 0; i < 10; i++ {
         partitions = append(partitions, parti.Partition{
-            Keys: []string{"orders", string(rune('0' + i))},
+            Keys: []string{"orders", fmt.Sprintf("%d", i)},
         })
     }
 
@@ -89,11 +90,13 @@ func main() {
         WorkerIDMax:    10,
         WorkerIDTTL:    10 * time.Second,
     }
-    parti.SetDefaults(cfg)
+    if err := parti.SetDefaults(cfg); err != nil {
+        log.Fatal(err)
+    }
 
     // 4. Create Manager components
     src := source.NewStatic(partitions)
-    strat := strategy.NewConsistentHash()
+    hashStrategy := strategy.NewConsistentHash()
 
     // 5. Create a Dynamic consumer (manages per-partition JetStream consumers)
     // Parti Manager calls consumer.Update() when assignments change.
@@ -112,7 +115,7 @@ func main() {
     defer dyn.Stop(context.Background())
 
     // 6. Create and Start Manager
-    mgr, err := parti.NewManager(cfg, js, src, strat,
+    mgr, err := parti.NewManager(cfg, js, src, hashStrategy,
         parti.WithWorkerConsumerUpdater(dyn), // Manager calls dyn.Update on assignment changes
     )
     if err != nil {

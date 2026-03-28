@@ -62,6 +62,9 @@ var (
 
 	// ErrAssignmentFailed is returned when assignment calculation or distribution fails.
 	ErrAssignmentFailed = errors.New("assignment failed")
+
+	// ErrInvalidPreset is returned when an unrecognized preset name is passed to DegradedBehaviorPreset.
+	ErrInvalidPreset = errors.New("invalid degraded behavior preset")
 )
 
 // Calculator errors - Internal assignment calculator component errors.

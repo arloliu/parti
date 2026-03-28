@@ -548,6 +548,6 @@ func TestDegradedBehaviorPreset(t *testing.T) {
 	t.Run("invalid preset returns error", func(t *testing.T) {
 		_, err := DegradedBehaviorPreset("invalid")
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "invalid degraded behavior preset")
+		require.ErrorIs(t, err, ErrInvalidPreset)
 	})
 }

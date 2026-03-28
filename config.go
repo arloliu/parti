@@ -209,7 +209,7 @@ func DegradedBehaviorPreset(preset string) (DegradedBehaviorConfig, error) {
 			RecoveryGracePeriod: 10 * time.Second,
 		}, nil
 	default:
-		return DegradedBehaviorConfig{}, fmt.Errorf("invalid degraded behavior preset %q: must be one of [conservative, balanced, aggressive]", preset)
+		return DegradedBehaviorConfig{}, fmt.Errorf("%w: %q (must be one of [conservative, balanced, aggressive])", ErrInvalidPreset, preset)
 	}
 }
 
