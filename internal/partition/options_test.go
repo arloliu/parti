@@ -41,4 +41,7 @@ func TestConsumerConfigWithPartitionConfig(t *testing.T) {
 	}
 	require.Equal(t, 4, cfg.NumPartitions)
 	require.Equal(t, "events.{{partition}}", cfg.SubjectPattern)
+	require.Equal(t, "EVENTS", cfg.StreamName)
+	require.Equal(t, "consumer-0", cfg.ConsumerName)
+	require.Equal(t, 0, cfg.Partition)
 }
