@@ -63,7 +63,7 @@ type Manager struct {
 
 	// Handoff coordinator (feature-flagged); abstracts assignment application.
 	handoffCoordinator handoff.Coordinator
-	handoffMetrics     handoff.MetricsRecorder
+	handoffMetrics     HandoffMetricsRecorder
 
 	// Two-phase resume tracking
 	// Populated at startup if we detect in-flight claims that require resumption.
@@ -241,7 +241,7 @@ func NewManager(cfg *Config, js jetstream.JetStream, source PartitionSource, str
 	// Initialize handoff coordinator; claim store wired later during Start when KV buckets are created.
 	hm := options.handoffMetrics
 	if hm == nil {
-		hm = handoff.NopMetrics{}
+		hm = types.NopHandoffMetricsRecorder{}
 	}
 	m.handoffMetrics = hm
 	m.handoffCoordinator = handoff.New(
@@ -268,11 +268,9 @@ func NewManager(cfg *Config, js jetstream.JetStream, source PartitionSource, str
 // assignment changes will also trigger UpdateWorkerConsumer before Hooks.OnAssignmentChanged
 // is invoked, enabling hot-reload of FilterSubjects without restarting pull loops.
 //
-// IMPORTANT: On error, caller MUST call Stop(ctx) to clean up resources:
-//   - Stops ID renewal goroutine
-//   - Releases claimed stable worker ID
-//   - Cancels background operations
-//   - Prevents goroutine and resource leaks
+// If Start returns an error, all partially-acquired resources (KV leases,
+// background goroutines, election state) are automatically cleaned up.
+// The caller does NOT need to call Stop after a failed Start.
 //
 // Parameters:
 //   - ctx: Context for startup timeout control (not manager lifetime)
@@ -284,17 +282,23 @@ func NewManager(cfg *Config, js jetstream.JetStream, source PartitionSource, str
 //
 //	mgr := parti.NewManager(cfg, js, source, strategy)
 //	if err := mgr.Start(ctx); err != nil {
-//	    // Cleanup on startup failure
-//	    _ = mgr.Stop(context.Background())
-//	    return err
+//	    return err // no need to call Stop
 //	}
-func (m *Manager) Start(ctx context.Context) error {
+func (m *Manager) Start(ctx context.Context) (startErr error) {
 	// Prepare context and startup deadline
 	startupCtx, cancel, err := m.prepareStart(ctx)
 	if err != nil {
 		return err
 	}
 	defer cancel()
+
+	// Auto-cleanup on startup failure: release any partially-acquired resources
+	// so callers do not need to call Stop after a failed Start.
+	defer func() {
+		if startErr != nil {
+			_ = m.Stop(context.Background())
+		}
+	}()
 
 	// Use injected JetStream context (already constructed by caller)
 	js := m.js

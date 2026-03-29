@@ -151,19 +151,19 @@ func NewQueue(
 	opts ...QueueOption,
 ) (*Queue, error) {
 	if js == nil {
-		return nil, errors.New("JetStream context is required")
+		return nil, fmt.Errorf("%w: JetStream context is required", ErrInvalidConfig)
 	}
 	if streamName == "" {
-		return nil, errors.New("stream name is required")
+		return nil, fmt.Errorf("%w: stream name is required", ErrInvalidConfig)
 	}
 	if consumerName == "" {
-		return nil, errors.New("consumer name is required")
+		return nil, fmt.Errorf("%w: consumer name is required", ErrInvalidConfig)
 	}
 	if filterSubject == "" {
-		return nil, errors.New("filter subject is required")
+		return nil, fmt.Errorf("%w: filter subject is required", ErrInvalidConfig)
 	}
 	if handler == nil {
-		return nil, errors.New("message handler is required")
+		return nil, fmt.Errorf("%w: message handler is required", ErrInvalidConfig)
 	}
 
 	// Apply options

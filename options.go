@@ -1,10 +1,6 @@
 package parti
 
-import (
-	"context"
-
-	"github.com/arloliu/parti/v2/internal/assignment/handoff"
-)
+import "context"
 
 // Option configures a Manager with optional dependencies.
 type Option func(*managerOptions)
@@ -16,7 +12,7 @@ type managerOptions struct {
 	metrics         MetricsCollector
 	logger          Logger
 	consumerUpdater WorkerConsumerUpdater
-	handoffMetrics  handoff.MetricsRecorder
+	handoffMetrics  HandoffMetricsRecorder
 }
 
 // WithElectionAgent sets a custom election agent.
@@ -112,11 +108,11 @@ func WithLogger(logger Logger) Option {
 // future global wiring.
 //
 // Parameters:
-//   - mr: handoff.MetricsRecorder implementation
+//   - mr: HandoffMetricsRecorder implementation
 //
 // Returns:
 //   - Option: Functional option for NewManager
-func WithHandoffMetricsRecorder(mr handoff.MetricsRecorder) Option {
+func WithHandoffMetricsRecorder(mr HandoffMetricsRecorder) Option {
 	return func(o *managerOptions) {
 		o.handoffMetrics = mr
 	}

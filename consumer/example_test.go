@@ -48,7 +48,7 @@ func Example_queueConsumer() {
 	// In a real application, wait for shutdown signal, then:
 	_ = q.Stop(ctx)
 
-	// Output: Failed to create queue: JetStream context is required
+	// Output: Failed to create queue: invalid consumer configuration: JetStream context is required
 }
 
 // This example demonstrates how to create a Static consumer for StatefulSet
@@ -92,7 +92,7 @@ func Example_staticConsumer() {
 	// Cleanup
 	_ = c.Stop(ctx)
 
-	// Output: Failed to create static consumer: JetStream context is required
+	// Output: Failed to create static consumer: invalid consumer configuration: JetStream context is required
 }
 
 // This example demonstrates how to create a Dynamic consumer that receives
@@ -135,7 +135,7 @@ func Example_dynamicConsumer() {
 	// Cleanup
 	_ = c.Stop(ctx)
 
-	// Output: Failed to create dynamic consumer: JetStream context is required
+	// Output: Failed to create dynamic consumer: invalid consumer configuration: JetStream context is required
 }
 
 // This example demonstrates how to create a Broadcast consumer where every
@@ -172,7 +172,7 @@ func Example_broadcastConsumer() {
 	// Cleanup
 	_ = c.Stop(ctx)
 
-	// Output: Failed to create broadcast consumer: JetStream context is required
+	// Output: Failed to create broadcast consumer: invalid consumer configuration: JetStream context is required
 }
 
 // This example demonstrates how to use the MessageHandlerFunc adapter to
@@ -262,7 +262,7 @@ func Example_wipHandler() {
 		return
 	}
 
-	// Output: Failed to create queue: JetStream context is required
+	// Output: Failed to create queue: invalid consumer configuration: JetStream context is required
 }
 
 // This example demonstrates using WIPHandler with Dynamic consumer
@@ -294,5 +294,5 @@ func Example_wipHandlerWithDynamic() {
 		return
 	}
 
-	// Output: Failed to create dynamic consumer: JetStream context is required
+	// Output: Failed to create dynamic consumer: invalid consumer configuration: JetStream context is required
 }

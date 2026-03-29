@@ -2,7 +2,6 @@ package consumer
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -145,19 +144,19 @@ func NewDynamic(
 	opts ...DynamicOption,
 ) (*Dynamic, error) {
 	if js == nil {
-		return nil, errors.New("JetStream context is required")
+		return nil, fmt.Errorf("%w: JetStream context is required", ErrInvalidConfig)
 	}
 	if streamName == "" {
-		return nil, errors.New("stream name is required")
+		return nil, fmt.Errorf("%w: stream name is required", ErrInvalidConfig)
 	}
 	if consumerPrefix == "" {
-		return nil, errors.New("consumer prefix is required")
+		return nil, fmt.Errorf("%w: consumer prefix is required", ErrInvalidConfig)
 	}
 	if subjectTemplate == "" {
-		return nil, errors.New("subject template is required")
+		return nil, fmt.Errorf("%w: subject template is required", ErrInvalidConfig)
 	}
 	if handler == nil {
-		return nil, errors.New("message handler is required")
+		return nil, fmt.Errorf("%w: message handler is required", ErrInvalidConfig)
 	}
 
 	// Apply options

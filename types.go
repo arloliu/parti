@@ -31,6 +31,7 @@ type (
 	WorkerMetrics            = types.WorkerMetrics
 	AssignmentMetrics        = types.AssignmentMetrics
 	WorkerConsumerMetrics    = types.WorkerConsumerMetrics
+	HandoffMetricsRecorder   = types.HandoffMetricsRecorder
 	Logger                   = types.Logger
 	Hooks                    = types.Hooks
 )

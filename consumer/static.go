@@ -2,7 +2,6 @@ package consumer
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/arloliu/fuda"
@@ -99,25 +98,25 @@ func NewStatic(
 	opts ...StaticOption,
 ) (*Static, error) {
 	if js == nil {
-		return nil, errors.New("JetStream context is required")
+		return nil, fmt.Errorf("%w: JetStream context is required", ErrInvalidConfig)
 	}
 	if streamName == "" {
-		return nil, errors.New("stream name is required")
+		return nil, fmt.Errorf("%w: stream name is required", ErrInvalidConfig)
 	}
 	if consumerName == "" {
-		return nil, errors.New("consumer name is required")
+		return nil, fmt.Errorf("%w: consumer name is required", ErrInvalidConfig)
 	}
 	if subjectPattern == "" {
-		return nil, errors.New("subject pattern is required")
+		return nil, fmt.Errorf("%w: subject pattern is required", ErrInvalidConfig)
 	}
 	if numPartitions <= 0 {
-		return nil, errors.New("num partitions must be greater than 0")
+		return nil, fmt.Errorf("%w: num partitions must be greater than 0", ErrInvalidConfig)
 	}
 	if partitionIndex < 0 || partitionIndex >= numPartitions {
-		return nil, errors.New("partition index out of range")
+		return nil, fmt.Errorf("%w: partition index out of range", ErrInvalidConfig)
 	}
 	if handler == nil {
-		return nil, errors.New("message handler is required")
+		return nil, fmt.Errorf("%w: message handler is required", ErrInvalidConfig)
 	}
 
 	// Apply options
