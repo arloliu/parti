@@ -35,10 +35,12 @@ func TestManager_clonePartitions(t *testing.T) {
 // stubCalculator satisfies assignmentCalculator but is NOT assignment.NopCalculator.
 type stubCalculator struct{}
 
-func (s *stubCalculator) Start(context.Context) error                                           { return nil }
-func (s *stubCalculator) Stop(context.Context) error                                            { return nil }
-func (s *stubCalculator) SubscribeToStateChanges() (<-chan types.CalculatorState, func())        { return nil, func() {} }
-func (s *stubCalculator) TriggerRebalance(context.Context) error                                { return nil }
+func (s *stubCalculator) Start(context.Context) error { return nil }
+func (s *stubCalculator) Stop(context.Context) error  { return nil }
+func (s *stubCalculator) SubscribeToStateChanges() (<-chan types.CalculatorState, func()) {
+	return nil, func() {}
+}
+func (s *stubCalculator) TriggerRebalance(context.Context) error { return nil }
 
 func TestManager_calculateAndPublish(t *testing.T) {
 	t.Run("returns error for NopCalculator", func(t *testing.T) {

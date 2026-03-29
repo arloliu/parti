@@ -23,8 +23,8 @@ type spyElection struct {
 func (s *spyElection) RequestLeadership(context.Context, string, int64) (bool, error) {
 	return false, nil
 }
-func (s *spyElection) RenewLeadership(context.Context) error    { return nil }
-func (s *spyElection) IsLeader(context.Context) (bool, error)   { return false, nil }
+func (s *spyElection) RenewLeadership(context.Context) error  { return nil }
+func (s *spyElection) IsLeader(context.Context) (bool, error) { return false, nil }
 func (s *spyElection) ReleaseLeadership(_ context.Context) error {
 	s.releaseCalled.Store(true)
 	return nil
