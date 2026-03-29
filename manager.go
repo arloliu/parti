@@ -573,12 +573,12 @@ func (m *Manager) logError(msg string, keysAndValues ...any) {
 				ctx = context.Background()
 			}
 
-			// Run hook asynchronously to avoid blocking
-			go func() {
+			// Run hook asynchronously but tracked by WaitGroup so Stop waits for completion
+			m.wg.Go(func() {
 				if hookErr := m.hooks.OnError(ctx, err); hookErr != nil {
 					m.logger.Warn("hook_error", "hook", "OnError", "error", hookErr)
 				}
-			}()
+			})
 		}
 	}
 }

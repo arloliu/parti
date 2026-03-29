@@ -106,14 +106,11 @@ func (m *Manager) transitionState(from, to State) {
 		"worker_id", m.WorkerID(),
 	)
 
-	// Trigger state change hook
+	// Trigger state change hook (tracked by WaitGroup so Stop waits for completion)
 	if m.hooks.OnStateChanged != nil {
-		// Run hook in background to avoid blocking state machine
-		go func() {
-			if err := m.hooks.OnStateChanged(m.ctx, from, to); err != nil {
-				m.logError("state change hook error", "from", from, "to", to, "error", err)
-			}
-		}()
+		m.invokeHook("state change", func() error {
+			return m.hooks.OnStateChanged(m.ctx, from, to)
+		})
 	}
 
 	// Record metrics (always non-nil, defaults to nopMetrics)

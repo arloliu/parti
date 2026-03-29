@@ -79,11 +79,9 @@ func (m *Manager) participateElection(ctx context.Context, kv jetstream.KeyValue
 
 	// Invoke leadership hook if status changed (initial state is false)
 	if isLeader && m.hooks != nil && m.hooks.OnLeadershipChanged != nil {
-		go func() {
-			if err := m.hooks.OnLeadershipChanged(m.ctx, true); err != nil {
-				m.logger.Warn("hook_error", "hook", "OnLeadershipChanged", "error", err)
-			}
-		}()
+		m.invokeHook("leadership changed", func() error {
+			return m.hooks.OnLeadershipChanged(m.ctx, true)
+		})
 	}
 
 	if isLeader {
@@ -127,13 +125,11 @@ func (m *Manager) monitorLeadership() {
 					m.isLeader.Store(false)
 					m.logger.Info("lost leadership", "worker_id", m.WorkerID())
 
-					// Invoke leadership hook
+					// Invoke leadership hook (tracked by WaitGroup)
 					if m.hooks != nil && m.hooks.OnLeadershipChanged != nil {
-						go func() {
-							if err := m.hooks.OnLeadershipChanged(m.ctx, false); err != nil {
-								m.logger.Warn("hook_error", "hook", "OnLeadershipChanged", "error", err)
-							}
-						}()
+						m.invokeHook("leadership lost", func() error {
+							return m.hooks.OnLeadershipChanged(m.ctx, false)
+						})
 					}
 
 					_ = m.stopCalculator()
@@ -157,13 +153,11 @@ func (m *Manager) monitorLeadership() {
 					m.isLeader.Store(true)
 					m.logger.Info("became leader", "worker_id", m.WorkerID())
 
-					// Invoke leadership hook
+					// Invoke leadership hook (tracked by WaitGroup)
 					if m.hooks != nil && m.hooks.OnLeadershipChanged != nil {
-						go func() {
-							if err := m.hooks.OnLeadershipChanged(m.ctx, true); err != nil {
-								m.logger.Warn("hook_error", "hook", "OnLeadershipChanged", "error", err)
-							}
-						}()
+						m.invokeHook("leadership gained", func() error {
+							return m.hooks.OnLeadershipChanged(m.ctx, true)
+						})
 					}
 
 					// Start calculator

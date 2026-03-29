@@ -141,22 +141,22 @@ func (m *Manager) enterDegraded(reason string) {
 		"time", now,
 	)
 
-	// Trigger state change hook
+	// Trigger state change hook (tracked by WaitGroup so Stop waits for completion)
 	if m.hooks.OnStateChanged != nil {
-		go func() {
+		m.wg.Go(func() {
 			if err := m.hooks.OnStateChanged(m.ctx, oldState, types.StateDegraded); err != nil {
 				m.logError("state change hook error", "error", err)
 			}
-		}()
+		})
 	}
 
-	// Trigger degraded hook
+	// Trigger degraded hook (tracked by WaitGroup)
 	if m.hooks.OnDegraded != nil {
-		go func() {
+		m.wg.Go(func() {
 			if err := m.hooks.OnDegraded(m.ctx, reason); err != nil {
 				m.logError("degraded hook error", "error", err)
 			}
-		}()
+		})
 	}
 
 	// Record metrics
@@ -187,13 +187,13 @@ func (m *Manager) exitDegraded() {
 		"next_state", StateStable,
 	)
 
-	// Trigger state change hook
+	// Trigger state change hook (tracked by WaitGroup so Stop waits for completion)
 	if m.hooks.OnStateChanged != nil {
-		go func() {
+		m.wg.Go(func() {
 			if err := m.hooks.OnStateChanged(m.ctx, oldState, StateStable); err != nil {
 				m.logError("state change hook error", "error", err)
 			}
-		}()
+		})
 	}
 
 	// Record metrics
