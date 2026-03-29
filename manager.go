@@ -296,7 +296,13 @@ func (m *Manager) Start(ctx context.Context) (startErr error) {
 	// so callers do not need to call Stop after a failed Start.
 	defer func() {
 		if startErr != nil {
-			_ = m.Stop(context.Background())
+			shutdownTimeout := m.cfg.ShutdownTimeout
+			if shutdownTimeout <= 0 {
+				shutdownTimeout = 10 * time.Second
+			}
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+			defer stopCancel()
+			_ = m.Stop(stopCtx)
 		}
 	}()
 

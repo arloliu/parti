@@ -204,7 +204,7 @@ func (m *Manager) stopCalculator() bool {
 	// Stop calculator with fresh context for cleanup
 	// IMPORTANT: Cannot use m.ctx here because it's already cancelled during Stop()
 	// Creating a timeout from cancelled context would result in immediate cancellation
-	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), m.cfg.OperationTimeout)
 	defer stopCancel()
 
 	if err := calc.Stop(stopCtx); err != nil {
