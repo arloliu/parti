@@ -143,6 +143,7 @@ func main() {
 
 ## Documentation
 
+- **[Migrating from v1 to v2](docs/MIGRATING_TO_V2.md)**: Breaking changes, import paths, and step-by-step checklist.
 - **Guides**
     - [User Guide](docs/USER_GUIDE.md): Introduction, quick start, and core concepts.
     - [Configuration](docs/CONFIGURATION.md): Configuration options, presets, and tuning.
