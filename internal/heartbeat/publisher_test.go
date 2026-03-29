@@ -105,6 +105,35 @@ func TestPublisher_Stop(t *testing.T) {
 		err := publisher.Stop()
 		require.ErrorIs(t, err, ErrNotStarted)
 	})
+
+	t.Run("restart after stop succeeds without panic", func(t *testing.T) {
+		ctx := t.Context()
+
+		_, nc := partitest.StartEmbeddedNATS(t)
+		kv := partitest.CreateJetStreamKV(t, nc, "test-hb-stop-restart")
+
+		publisher := New(kv, "worker-hb", "worker-1", 100*time.Millisecond, nil, nil)
+
+		// First start/stop cycle
+		require.NoError(t, publisher.Start(ctx))
+		require.True(t, publisher.IsStarted())
+		require.NoError(t, publisher.Stop())
+		require.False(t, publisher.IsStarted())
+
+		// Second start/stop cycle — must not panic
+		require.NoError(t, publisher.Start(ctx))
+		require.True(t, publisher.IsStarted())
+
+		// Verify heartbeat is actually being published after restart
+		time.Sleep(250 * time.Millisecond)
+		key := fmt.Sprintf("worker-hb.%s", "worker-1")
+		entry, err := kv.Get(ctx, key)
+		require.NoError(t, err)
+		require.NotEmpty(t, entry.Value())
+
+		require.NoError(t, publisher.Stop())
+		require.False(t, publisher.IsStarted())
+	})
 }
 
 func TestPublisher_PeriodicHeartbeats(t *testing.T) {

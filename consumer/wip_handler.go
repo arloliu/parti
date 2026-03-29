@@ -144,6 +144,19 @@ func (w *WIPHandler) startHeartbeat(ctx context.Context, msg jetstream.Msg) func
 
 	stopCh := make(chan struct{})
 	timer := time.AfterFunc(w.interval, func() {
+		// Send first heartbeat immediately when the timer fires (at 1×Interval),
+		// then use a ticker for subsequent calls at regular intervals.
+		select {
+		case <-stopCh:
+			return
+		case <-ctx.Done():
+			return
+		default:
+			if err := msg.InProgress(); err != nil && w.logger != nil {
+				w.logger.Warn("failed to extend message ack deadline", "error", err)
+			}
+		}
+
 		ticker := time.NewTicker(w.interval)
 		defer ticker.Stop()
 

@@ -115,11 +115,15 @@ func (p *Publisher) Start(ctx context.Context) error {
 		return ErrNoWorkerID
 	}
 
+	// Re-create channels so Publisher can be restarted after Stop().
+	p.stopCh = make(chan struct{})
+	p.doneCh = make(chan struct{})
 	p.started = true
 	p.ticker = time.NewTicker(p.interval)
 
 	// Publish first heartbeat immediately with provided context (prevents startup hang)
 	if err := p.publish(ctx); err != nil {
+		p.ticker.Stop()
 		p.started = false
 		return fmt.Errorf("failed to publish initial heartbeat: %w", err)
 	}
