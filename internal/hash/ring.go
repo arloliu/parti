@@ -180,7 +180,7 @@ func (r *Ring) addWorker(workerID string, workerIdx int, virtualNodes int) {
 		}
 
 		var ib [8]byte
-		binary.LittleEndian.PutUint64(ib[:], uint64(i))
+		binary.LittleEndian.PutUint64(ib[:], uint64(i)) //nolint:gosec // G115: i is a bounded virtual node index
 		h = xxh3.HashSeed(ib[:], h)
 
 		r.nodes = append(r.nodes, virtualNode{

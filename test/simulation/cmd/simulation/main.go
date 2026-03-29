@@ -418,7 +418,6 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 		if err != nil {
 			return fmt.Errorf("failed to create NATS connection for worker %d: %w", i, err)
 		}
-		netCtrl.SetConnection(workerNC)
 
 		workerCfg := worker.Config{
 			ID:                  workerID,
@@ -465,7 +464,6 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 				wcancel()
 				return
 			}
-			netCtrl.SetConnection(newNC)
 
 			newCfg := workerCfg
 			newCfg.NC = newNC
@@ -1279,7 +1277,6 @@ func spawnAllInOneWorker(parent context.Context, workerID string) bool {
 		log.Printf("[ScaleUp] failed to create NATS connection for worker %s: %v", workerID, err)
 		return false
 	}
-	netCtrl.SetConnection(workerNC)
 
 	wcfg := worker.Config{
 		ID:                          workerID,
@@ -1323,7 +1320,6 @@ func spawnAllInOneWorker(parent context.Context, workerID string) bool {
 			pcancel()
 			return
 		}
-		netCtrl.SetConnection(newNC)
 
 		newCfg := wcfg
 		newCfg.NC = newNC

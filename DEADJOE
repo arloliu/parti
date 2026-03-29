@@ -1,0 +1,27 @@
+
+*** These modified files were found in JOE when it aborted on Sun Mar 29 12:37:22 2026
+*** JOE was aborted by UNIX signal 1
+
+*** File '(Unnamed)'
+hotk
+bind
+
+*** File '(Unnamed)'
+/home/arlo/projects/parti/.git/COMMIT_EDITMSG
+/home/arlo/projects/parti/.git/rebase-merge/git-rebase-todo
+/home/arlo/projects/parti/.git/COMMIT_EDITMSG
+/home/arlo/projects/parti/.git/COMMIT_EDITMSG
+/home/arlo/projects/parti/.git/COMMIT_EDITMSG
+/home/arlo/projects/parti/.git/COMMIT_EDITMSG
+/home/arlo/projects/parti/.git/COMMIT_EDITMSG
+/home/arlo/projects/parti/.git/COMMIT_EDITMSG
+/home/arlo/projects/parti/.git/COMMIT_EDITMSG
+/home/arlo/projects/parti/.git/COMMIT_EDITMSG
+/home/arlo/projects/parti/.git/COMMIT_EDITMSG
+
+*** File '* Startup Log *'
+Warning: /etc/joe/joerc is newer than your /home/arlo/.joerc.
+Processing '/home/arlo/.joerc'...
+Processing '/etc/joe/ftyperc'...
+Finished processing /etc/joe/ftyperc
+Finished processing /home/arlo/.joerc

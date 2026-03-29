@@ -95,7 +95,7 @@ func newKeyDispatcher(
 		idleTimeout = 30 * time.Second
 	}
 
-	ctx, cancel := context.WithCancel(context.Background()) //nolint:gosec // G118: root lifecycle context for dispatcher
+	ctx, cancel := context.WithCancel(context.Background())
 
 	return &keyDispatcher{
 		logger:       logger,

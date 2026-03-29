@@ -129,7 +129,7 @@ func (p *Publisher) Start(ctx context.Context) error {
 	}
 
 	// Start background publisher
-	go p.publishLoop() //nolint:gosec // G118: background publisher; lifetime managed by Stop()
+	go p.publishLoop()
 
 	return nil
 }

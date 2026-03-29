@@ -134,7 +134,6 @@ func TestChaos_NetworkDisconnect(t *testing.T) {
 	}
 	nc, err := nats.Connect(srv.ClientURL(), opts...)
 	require.NoError(t, err)
-	netCtrl.SetConnection(nc)
 	defer nc.Close()
 
 	js, err := jetstream.New(nc)
