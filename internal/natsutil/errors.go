@@ -9,6 +9,27 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
+// IsConsumerNotFound reports whether err indicates a "consumer not found" error.
+//
+// Both sentinels are checked because the root nats package and the jetstream
+// sub-package define separate, non-overlapping error types with the same
+// semantics. In particular, [jetstream.KeyWatcher.Stop] goes through
+// nats.Subscription.Unsubscribe → deleteConsumer, which returns the root
+// nats sentinel, whereas other JetStream paths return the jetstream sentinel.
+func IsConsumerNotFound(err error) bool {
+	return errors.Is(err, nats.ErrConsumerNotFound) ||
+		errors.Is(err, jetstream.ErrConsumerNotFound)
+}
+
+// IsStreamNotFound reports whether err indicates a "stream not found" error.
+//
+// Both the root nats and jetstream sentinels are checked for the same reason
+// described in [IsConsumerNotFound].
+func IsStreamNotFound(err error) bool {
+	return errors.Is(err, nats.ErrStreamNotFound) ||
+		errors.Is(err, jetstream.ErrStreamNotFound)
+}
+
 // IsConnectivityError checks if an error is caused by connectivity issues.
 //
 // This includes NATS timeouts, connection refused, disconnections, etc.

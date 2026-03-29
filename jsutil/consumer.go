@@ -2,11 +2,11 @@ package jsutil
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math/rand"
 	"time"
 
+	"github.com/arloliu/parti/v2/internal/natsutil"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -48,7 +48,7 @@ func EnsureConsumer(ctx context.Context, js jetstream.JetStream, streamName stri
 
 		lastErr = err
 		// If stream not found, it's a configuration error, not transient.
-		if errors.Is(err, jetstream.ErrStreamNotFound) {
+		if natsutil.IsStreamNotFound(err) {
 			return nil, fmt.Errorf("stream %q not found: %w", streamName, err)
 		}
 

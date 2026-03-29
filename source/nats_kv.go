@@ -11,6 +11,7 @@ import (
 	"slices"
 	"sync"
 
+	"github.com/arloliu/parti/v2/internal/natsutil"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -120,6 +121,11 @@ func (s *NatsKV) Stop(_ context.Context) error {
 	var err error
 	if s.watcher != nil {
 		err = s.watcher.Stop()
+		// Ignore "consumer not found" — cancelling the context above may
+		// cause the NATS library to auto-delete the consumer before Stop() runs.
+		if natsutil.IsConsumerNotFound(err) {
+			err = nil
+		}
 	}
 	s.running = false
 

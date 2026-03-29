@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/arloliu/parti/v2/internal/natsutil"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -414,7 +415,7 @@ func (pc *partitionConsumer) ensureConsumer(ctx context.Context) (jetstream.Cons
 
 		lastErr = err
 		// If stream not found, it's a configuration error, not transient.
-		if errors.Is(err, jetstream.ErrStreamNotFound) {
+		if natsutil.IsStreamNotFound(err) {
 			return nil, err
 		}
 

@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/arloliu/parti/v2/internal/natsutil"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -244,7 +245,7 @@ func (m *WorkerMonitor) stopWatcher() {
 	defer m.watcherMu.Unlock()
 
 	if m.watcher != nil {
-		if err := m.watcher.Stop(); err != nil {
+		if err := m.watcher.Stop(); err != nil && !natsutil.IsConsumerNotFound(err) {
 			m.logger.Warn("failed to stop watcher", "error", err)
 		}
 		m.watcher = nil

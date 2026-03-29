@@ -1039,7 +1039,7 @@ func handleGoroutineChaos( //nolint:cyclop,gocyclo
 
 	switch event {
 	case coordinator.WorkerCrashEvent:
-		handleWorkerGoroutineCrash(registry, metricsCollector, checkpointMgr)
+		handleWorkerGoroutineCrash(ctx, registry, metricsCollector, checkpointMgr)
 
 	case coordinator.LeaderFailureEvent:
 		handleLeaderGoroutineFailure(ctx, registry, metricsCollector, checkpointMgr)
@@ -1222,8 +1222,11 @@ func handleWorkerGoroutineRestart(
 	}
 }
 
-// handleWorkerGoroutineCrash cancels a random worker goroutine.
+// handleWorkerGoroutineCrash cancels a random worker goroutine and restarts it
+// after a brief delay, simulating supervisor/k8s restart behavior.
+// Respects min_workers guard to prevent the fleet from shrinking too far.
 func handleWorkerGoroutineCrash(
+	ctx context.Context,
 	registry *coordinator.GoroutineRegistry,
 	metricsCollector *metrics.Collector,
 	checkpointMgr *coordinator.CheckpointManager,
@@ -1234,20 +1237,31 @@ func handleWorkerGoroutineCrash(
 		return
 	}
 
+	// Respect min_workers guard (same as scale_down)
+	minWorkers := max(aioMinWorkers, 0)
+	if len(workers) <= minWorkers {
+		log.Printf("[Chaos] Skipping worker_crash: active=%d <= min_workers=%d", len(workers), minWorkers)
+		return
+	}
+
 	// Select random worker
 	target := workers[time.Now().UnixNano()%int64(len(workers))]
 
 	log.Printf("[Chaos] Crashing worker goroutine: %s", target.ID)
 
-	// Cancel the worker's context
+	// Cancel the worker's context (ungraceful crash)
 	target.Cancel()
 	registry.MarkInactive(target.ID)
+
+	// Auto-restart after a brief delay to simulate supervisor restart.
+	// In production, crashed workers are restarted by k8s/systemd/etc.
+	registry.Restart(ctx, target.ID)
 
 	// Update metrics
 	if metricsCollector != nil {
 		newCount := registry.GetActiveCount(coordinator.WorkerGoroutine)
 		metricsCollector.SetWorkersActive(newCount)
-		log.Printf("[Chaos] Updated worker count after crash: %d", newCount)
+		log.Printf("[Chaos] Updated worker count after crash/restart: %d", newCount)
 	}
 
 	// Update checkpoint manager
@@ -1258,10 +1272,18 @@ func handleWorkerGoroutineCrash(
 }
 
 // handleProducerGoroutineCrash cancels a random producer goroutine.
+// Keeps at least 1 producer alive to prevent total message production halt.
 func handleProducerGoroutineCrash(registry *coordinator.GoroutineRegistry) {
 	producers := registry.GetByType(coordinator.ProducerGoroutine)
 	if len(producers) == 0 {
 		log.Println("[Chaos] No active producer goroutines to crash")
+		return
+	}
+
+	// Keep at least 1 producer alive to avoid permanent message production halt.
+	// In production, producers are independent services and rarely all crash simultaneously.
+	if len(producers) <= 1 {
+		log.Printf("[Chaos] Skipping producer_crash: only %d producer(s) remaining", len(producers))
 		return
 	}
 

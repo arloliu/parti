@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"time"
 
+	"github.com/arloliu/parti/v2/internal/natsutil"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -76,7 +77,7 @@ func EnsureStreamWithRetry(
 	}
 
 	// If stream doesn't exist, try to create it
-	if !errors.Is(err, jetstream.ErrStreamNotFound) {
+	if !natsutil.IsStreamNotFound(err) {
 		return nil, fmt.Errorf("failed to open stream %q: %w", config.Name, err)
 	}
 

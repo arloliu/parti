@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/arloliu/parti/v2/internal/assignment"
+	"github.com/arloliu/parti/v2/internal/natsutil"
 	"github.com/arloliu/parti/v2/kvutil"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
@@ -265,7 +266,7 @@ func (m *Manager) monitorAssignmentChanges(ctx context.Context, kv jetstream.Key
 	}
 
 	defer func() {
-		if err := watcher.Stop(); err != nil {
+		if err := watcher.Stop(); err != nil && !natsutil.IsConsumerNotFound(err) {
 			m.logError("failed to stop watcher", "error", err)
 		}
 	}()
