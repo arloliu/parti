@@ -85,7 +85,7 @@ func EnsureKVBucketWithRetry(
 
 		// Exponential backoff: 10ms, 20ms, 40ms...
 		if attempt < maxRetries-1 {
-			backoff := time.Duration(1<<uint(attempt)) * 10 * time.Millisecond //nolint:gosec // attempt is bounded by maxRetries (5), no overflow risk
+			backoff := time.Duration(1<<uint(attempt)) * 10 * time.Millisecond
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
@@ -182,7 +182,7 @@ func CreateKVBucket(
 
 		// Exponential backoff for transient errors
 		if attempt < maxRetries-1 {
-			backoff := time.Duration(1<<uint(attempt)) * 10 * time.Millisecond //nolint:gosec // attempt bounded
+			backoff := time.Duration(1<<uint(attempt)) * 10 * time.Millisecond
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()

@@ -23,7 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -106,8 +106,8 @@ func main() {
 	}
 
 	// 3. Sort by Timestamp
-	sort.Slice(events, func(i, j int) bool {
-		return events[i].Timestamp.Before(events[j].Timestamp)
+	slices.SortFunc(events, func(a, b TimelineEvent) int {
+		return a.Timestamp.Compare(b.Timestamp)
 	})
 
 	// 4. Generate Summary

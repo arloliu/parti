@@ -433,7 +433,7 @@ func (wc *WorkerConsumer) addSubjectLoop(ctx context.Context, workerID string, s
 	wc.subjects[subject] = pc
 	wc.mu.Unlock()
 
-	go pc.Run(context.Background(), effectiveHandler)
+	go pc.Run(context.Background(), effectiveHandler) //nolint:gosec // G118: long-lived goroutine; lifetime managed by pc.Stop()
 
 	return nil
 }

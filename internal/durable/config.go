@@ -122,7 +122,7 @@ type WorkerConsumerConfig struct {
 	// exclusivity is required. Without this, ownership transitions may be "loose",
 	// resulting in brief periods where a partition is processed by a worker that
 	// is no longer the assigned owner (though duplicates are rare).
-	ProcessingGate *ProcessingGateConfig `validate:"omitempty"` //nolint:revive
+	ProcessingGate *ProcessingGateConfig `validate:"omitempty"`
 
 	// Resolver configures the ownership resolver when ProcessingGate is enabled.
 	Resolver ResolverConfig

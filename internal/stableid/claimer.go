@@ -319,7 +319,10 @@ func (c *Claimer) Release(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(5 * time.Second):
-			// timeout; proceed to attempt delete anyway
+			// Safety fallback: if renewal goroutine is stuck (e.g., blocked on NATS I/O),
+			// proceed to delete the KV key anyway so the ID is freed. 5s is chosen to be
+			// well above typical NATS operation timeouts (100ms-5s) while still allowing
+			// timely shutdown.
 		}
 	}
 

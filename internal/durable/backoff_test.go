@@ -3,7 +3,6 @@ package durable
 import (
 	"math"
 	"slices"
-	"sort"
 	"testing"
 	"time"
 
@@ -162,7 +161,7 @@ func TestJitterBackoff_DistributionOrdering(t *testing.T) {
 		samples = append(samples, prev)
 	}
 	sorted := slices.Clone(samples)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	slices.Sort(sorted)
 	t.Logf("jitter sample unsorted=%v", samples)
 	t.Logf("jitter sample sorted=%v", sorted)
 }

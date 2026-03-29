@@ -41,8 +41,11 @@ var (
 //	mgr, err := parti.NewManager(&cfg, js, src, strategy.NewConsistentHash())
 //	if err != nil { /* handle */ }
 func NewStatic(partitions []types.Partition) *Static {
+	cp := make([]types.Partition, len(partitions))
+	copy(cp, partitions)
+
 	return &Static{
-		partitions: partitions,
+		partitions: cp,
 	}
 }
 

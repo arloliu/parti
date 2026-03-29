@@ -25,7 +25,7 @@ type ProcessingGateConfig struct {
 	// Common configurations:
 	//  - [types.StateStable]: Strict consistency (default). Messages only processed when ownership is stable.
 	//  - [types.StateStable, types.StateHandoff]: Higher availability. Allows processing during handoff.
-	AllowedStates []types.HandoffState `validate:"omitempty,min=1"` //nolint:revive
+	AllowedStates []types.HandoffState `validate:"omitempty,min=1"`
 
 	// WarmupDuration, when >0, enables a warm-up phase during which only
 	// WarmupAllowedStates are permitted. After the duration elapses, AllowedStates

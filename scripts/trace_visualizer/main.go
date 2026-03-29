@@ -8,7 +8,7 @@ import (
 	"html/template"
 	"os"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 )
@@ -161,8 +161,8 @@ func parseLog(path string, partitionID int) ([]LogEvent, error) {
 		}
 	}
 
-	sort.Slice(events, func(i, j int) bool {
-		return events[i].Timestamp.Before(events[j].Timestamp)
+	slices.SortFunc(events, func(a, b LogEvent) int {
+		return a.Timestamp.Compare(b.Timestamp)
 	})
 
 	return events, scanner.Err()

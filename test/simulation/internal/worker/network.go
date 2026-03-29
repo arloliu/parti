@@ -23,6 +23,7 @@ func NewNetworkControl() *NetworkControl {
 }
 
 // SetConnection sets the NATS connection to control.
+//
 // Deprecated: No longer needed as we control net.Conn directly.
 func (n *NetworkControl) SetConnection(_ any) {
 	// No-op

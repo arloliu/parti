@@ -31,12 +31,13 @@ package main
 // This tool does not modify state; safe to run in production.
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -140,7 +141,7 @@ func main() {
 		_, _ = fmt.Fprintf(os.Stderr, "consumer listing error: %v\n", err)
 	}
 
-	sort.Slice(summaries, func(i, j int) bool { return summaries[i].Name < summaries[j].Name })
+	slices.SortFunc(summaries, func(a, b consumerSummary) int { return cmp.Compare(a.Name, b.Name) })
 
 	if emitJSON {
 		enc := json.NewEncoder(os.Stdout)

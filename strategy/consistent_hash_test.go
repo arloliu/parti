@@ -69,19 +69,21 @@ func TestConsistentHash_Assign(t *testing.T) {
 
 	t.Run("preserves cache affinity when adding worker", func(t *testing.T) {
 		strategy := NewConsistentHash()
-		workers := []string{"worker-0", "worker-1"}
+		initialWorkers := []string{"worker-0", "worker-1"}
+		scaledWorkers := make([]string, 0, 3)
+		scaledWorkers = append(scaledWorkers, initialWorkers...)
+		scaledWorkers = append(scaledWorkers, "worker-2")
 		partitions := make([]types.Partition, 100)
 		for i := range partitions {
 			partitions[i] = types.Partition{Keys: []string{string(rune('a' + i))}, Weight: 100}
 		}
 
 		// Initial assignment with 2 workers
-		initialAssignments, err := strategy.Assign(workers, partitions)
+		initialAssignments, err := strategy.Assign(initialWorkers, partitions)
 		require.NoError(t, err)
 
 		// Add a third worker
-		workers = append(workers, "worker-2")
-		newAssignments, err := strategy.Assign(workers, partitions)
+		newAssignments, err := strategy.Assign(scaledWorkers, partitions)
 		require.NoError(t, err)
 
 		// Count how many partitions stayed with their original worker

@@ -8,6 +8,9 @@ import (
 )
 
 // ConsistentHash implements consistent hashing with virtual nodes.
+//
+// ConsistentHash is safe for concurrent use: Assign creates a fresh hash ring
+// on every call and reads only immutable configuration fields set at construction.
 type ConsistentHash struct {
 	virtualNodes int
 	hashSeed     uint64

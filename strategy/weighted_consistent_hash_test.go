@@ -112,12 +112,13 @@ func TestWeightedConsistentHash_EqualWeightsMatchesConsistentHash(t *testing.T) 
 
 func TestWeightedConsistentHash_DistributesExtremesEvenly(t *testing.T) {
 	workers := []string{"worker-0", "worker-1", "worker-2", "worker-3"}
-	partitions := []types.Partition{
-		{Keys: []string{"extreme-0"}, Weight: 5000},
-		{Keys: []string{"extreme-1"}, Weight: 4000},
-		{Keys: []string{"extreme-2"}, Weight: 3000},
-		{Keys: []string{"extreme-3"}, Weight: 2000},
-	}
+	partitions := make([]types.Partition, 0, 16)
+	partitions = append(partitions,
+		types.Partition{Keys: []string{"extreme-0"}, Weight: 5000},
+		types.Partition{Keys: []string{"extreme-1"}, Weight: 4000},
+		types.Partition{Keys: []string{"extreme-2"}, Weight: 3000},
+		types.Partition{Keys: []string{"extreme-3"}, Weight: 2000},
+	)
 
 	for i := range 12 {
 		partitions = append(partitions, types.Partition{

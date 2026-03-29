@@ -30,7 +30,13 @@ type NatsKV struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 	running    bool
-	listeners  []chan struct{}
+	listeners  []*natsKVListener
+}
+
+// natsKVListener wraps a channel with a sync.Once to prevent double-close panics.
+type natsKVListener struct {
+	ch   chan struct{}
+	once sync.Once
 }
 
 var (
@@ -117,9 +123,9 @@ func (s *NatsKV) Stop(_ context.Context) error {
 	}
 	s.running = false
 
-	// Close all listeners
-	for _, ch := range s.listeners {
-		close(ch)
+	// Close all listeners (Once-guarded to prevent double-close panics)
+	for _, l := range s.listeners {
+		l.once.Do(func() { close(l.ch) })
 	}
 	s.listeners = nil
 
@@ -128,9 +134,9 @@ func (s *NatsKV) Stop(_ context.Context) error {
 
 // Watch returns a channel that emits a signal when the partition list changes.
 func (s *NatsKV) Watch(ctx context.Context) <-chan struct{} {
-	ch := make(chan struct{}, 1)
+	l := &natsKVListener{ch: make(chan struct{}, 1)}
 	s.mu.Lock()
-	s.listeners = append(s.listeners, ch)
+	s.listeners = append(s.listeners, l)
 	s.mu.Unlock()
 
 	go func() {
@@ -138,15 +144,15 @@ func (s *NatsKV) Watch(ctx context.Context) <-chan struct{} {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		for i, listener := range s.listeners {
-			if listener == ch {
+			if listener == l {
 				s.listeners = append(s.listeners[:i], s.listeners[i+1:]...)
-				close(ch)
+				l.once.Do(func() { close(l.ch) })
 				break
 			}
 		}
 	}()
 
-	return ch
+	return l.ch
 }
 
 // List returns the current list of partitions.
@@ -239,9 +245,9 @@ func (s *NatsKV) watchLoop(ctx context.Context, watcher jetstream.KeyWatcher) {
 
 			s.partitions = partitions
 			// Notify listeners
-			for _, ch := range s.listeners {
+			for _, l := range s.listeners {
 				select {
-				case ch <- struct{}{}:
+				case l.ch <- struct{}{}:
 				default:
 					// Skip if full
 				}

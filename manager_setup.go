@@ -19,11 +19,11 @@ func (m *Manager) prepareStart(ctx context.Context) (context.Context, context.Ca
 		m.mu.Unlock()
 		return nil, func() {}, types.ErrAlreadyStarted
 	}
-	m.ctx, m.cancel = context.WithCancel(context.Background())
+	m.ctx, m.cancel = context.WithCancel(context.Background()) //nolint:gosec // G118: manager root lifecycle context
 	m.mu.Unlock()
 
 	if m.cfg.StartupTimeout > 0 {
-		sctx, cancel := context.WithTimeout(ctx, m.cfg.StartupTimeout)
+		sctx, cancel := context.WithTimeout(ctx, m.cfg.StartupTimeout) //nolint:gosec // G118: cancel returned to caller
 		return sctx, cancel, nil
 	}
 	// No startup timeout; return passthrough context and no-op cancel
