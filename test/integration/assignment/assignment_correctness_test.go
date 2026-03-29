@@ -8,9 +8,6 @@ import (
 	"time"
 
 	"github.com/arloliu/parti/v2"
-	"github.com/arloliu/parti/v2/internal/logging"
-	"github.com/arloliu/parti/v2/internal/testutil"
-	"github.com/arloliu/parti/v2/partitest"
 	"github.com/arloliu/parti/v2/source"
 	"github.com/arloliu/parti/v2/strategy"
 	"github.com/arloliu/parti/v2/types"
@@ -32,44 +29,31 @@ func TestAssignmentCorrectness_AllPartitionsAssigned(t *testing.T) {
 		numWorkers    = 5
 	)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
+	env := newTestEnv(t, 60*time.Second)
 
-	// Start embedded NATS server
-	srv, conn := partitest.StartEmbeddedNATS(t)
-	defer srv.Shutdown()
-	defer conn.Close()
-
-	debugLogger := logging.NewNop()
-
-	// Create partitions with unique IDs
-	partitions := make([]types.Partition, numPartitions)
-	for i := range partitions {
-		partitions[i] = types.Partition{
-			Keys:   []string{"partition", fmt.Sprintf("%03d", i)},
-			Weight: 100,
-		}
-	}
+	partitions := makePartitions(numPartitions, 0)
 
 	// Create config with test-optimized timings
 	cfg := parti.TestConfig()
 	cfg.WorkerIDPrefix = "test-worker"
-	cfg.WorkerIDTTL = 10 * time.Second // Longer TTL to prevent expiration during test
+	cfg.WorkerIDTTL = 10 * time.Second
 	cfg.ColdStartWindow = 2 * time.Second
 	cfg.PlannedScaleWindow = 1 * time.Second
 
-	// Create managers with SHARED NATS connection and debug logger
+	// Create managers with SHARED JetStream handle
 	managers := make([]*parti.Manager, numWorkers)
-	js, err := jetstream.New(conn)
+	js, err := jetstream.New(env.Conn)
 	require.NoError(t, err)
+
 	for i := range managers {
-		mgr, err := parti.NewManager(&cfg, js, source.NewStatic(partitions), strategy.NewConsistentHash(), parti.WithLogger(debugLogger))
+		mgr, err := parti.NewManager(&cfg, js, source.NewStatic(partitions), strategy.NewConsistentHash(), parti.WithLogger(env.Logger))
 		require.NoError(t, err)
 		managers[i] = mgr
 	}
 
+	defer cleanupManagers(t, managers)
+
 	// Start all managers CONCURRENTLY (simulates real deployment)
-	// This prevents stable ID TTL expiration during sequential startup
 	startTime := time.Now()
 	var wg sync.WaitGroup
 	startErrors := make([]error, numWorkers)
@@ -79,7 +63,7 @@ func TestAssignmentCorrectness_AllPartitionsAssigned(t *testing.T) {
 		m := mgr
 		wg.Go(func() {
 			t.Logf("Starting manager %d at T+%v", idx, time.Since(startTime))
-			if err := m.Start(ctx); err != nil {
+			if err := m.Start(env.Ctx); err != nil {
 				startErrors[idx] = err
 				t.Logf("Manager %d failed to start: %v", idx, err)
 			} else {
@@ -90,65 +74,22 @@ func TestAssignmentCorrectness_AllPartitionsAssigned(t *testing.T) {
 
 	wg.Wait()
 
-	// Check for start errors
 	for i, err := range startErrors {
 		require.NoError(t, err, "manager %d failed to start", i)
 	}
 
-	// Wait for all managers to reach stable state
-	mgrWaiters := make([]testutil.ManagerWaiter, numWorkers)
-	for i, mgr := range managers {
-		mgrWaiters[i] = mgr
-	}
-	err = testutil.WaitAllManagersState(ctx, mgrWaiters, parti.StateStable, 15*time.Second)
-	require.NoError(t, err, "not all managers reached stable state")
+	waitForStableWithTimeout(t, env.Ctx, managers, 15*time.Second)
 
-	// Collect assignments from all workers
-	assignmentMap := make(map[string][]string) // partition key -> worker IDs
-	totalAssigned := 0
-
-	for i, mgr := range managers {
-		assignments := mgr.CurrentAssignment()
-		require.NotNil(t, assignments, "manager %d has nil assignment", i)
-
-		workerID := mgr.WorkerID()
-		t.Logf("Worker %d (%s): %d partitions assigned", i, workerID, len(assignments.Partitions))
-
-		for _, partition := range assignments.Partitions {
-			partKey := partitionKey(partition)
-			assignmentMap[partKey] = append(assignmentMap[partKey], workerID)
-			totalAssigned++
-		}
-	}
-
-	// Verify all partitions assigned
-	require.Equal(t, numPartitions, len(assignmentMap),
-		"Not all partitions were assigned. Expected %d, got %d", numPartitions, len(assignmentMap))
-
-	// Verify no duplicates
-	duplicates := make([]string, 0)
-	orphans := make([]string, 0)
-
-	for _, partition := range partitions {
-		partKey := partitionKey(partition)
-		workers := assignmentMap[partKey]
-		if len(workers) == 0 {
-			orphans = append(orphans, partKey)
-		} else if len(workers) > 1 {
-			duplicates = append(duplicates, partKey)
-			t.Logf("Partition %s assigned to multiple workers: %v", partKey, workers)
-		}
-	}
-
-	require.Empty(t, orphans, "Orphaned partitions (not assigned to any worker): %v", orphans)
-	require.Empty(t, duplicates, "Duplicate assignments (assigned to multiple workers): %v", duplicates)
+	// Poll until assignments converge (no duplicates, correct total)
+	verifyAssignments(t, managers, numPartitions)
 
 	// Verify distribution is reasonable (no worker has 0 or too many)
+	totalAssigned := 0
 	for i, mgr := range managers {
-		assignments := mgr.CurrentAssignment()
-		count := len(assignments.Partitions)
-		expectedMin := numPartitions / (numWorkers * 2) // At least 10 partitions per worker
-		expectedMax := numPartitions / numWorkers * 2   // At most 40 partitions per worker
+		count := len(mgr.CurrentAssignment().Partitions)
+		totalAssigned += count
+		expectedMin := numPartitions / (numWorkers * 2) // At least 10
+		expectedMax := numPartitions / numWorkers * 2   // At most 40
 
 		require.GreaterOrEqual(t, count, expectedMin,
 			"Worker %d has too few partitions (%d < %d)", i, count, expectedMin)
@@ -159,14 +100,6 @@ func TestAssignmentCorrectness_AllPartitionsAssigned(t *testing.T) {
 	t.Log("All partitions assigned exactly once")
 	t.Logf("Distribution: total=%d, workers=%d, avg=%.1f per worker",
 		totalAssigned, numWorkers, float64(totalAssigned)/float64(numWorkers))
-
-	// Cleanup
-	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer stopCancel()
-	for i, mgr := range managers {
-		_ = mgr.Stop(stopCtx)
-		t.Logf("Stopped manager %d", i)
-	}
 }
 
 // TestAssignmentCorrectness_StableAssignments verifies that assignments remain
@@ -181,18 +114,12 @@ func TestAssignmentCorrectness_StableAssignments(t *testing.T) {
 	const (
 		numPartitions = 50
 		numWorkers    = 3
-		observePeriod = 7 * time.Second // shortened from 10s
+		observePeriod = 7 * time.Second
 	)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	env := newTestEnv(t, 30*time.Second)
 
-	// Start embedded NATS server
-	srv, conn := partitest.StartEmbeddedNATS(t)
-	defer srv.Shutdown()
-	defer conn.Close()
-
-	// Create partitions
+	// Use different key prefix to avoid collision with other tests
 	partitions := make([]types.Partition, numPartitions)
 	for i := range partitions {
 		partitions[i] = types.Partition{
@@ -201,51 +128,26 @@ func TestAssignmentCorrectness_StableAssignments(t *testing.T) {
 		}
 	}
 
-	// Create config with test-optimized timings
 	cfg := parti.TestConfig()
 	cfg.WorkerIDPrefix = "test-worker"
-	// Stabilization tuning: lengthen windows to suppress early micro-rebalances
-	// Reduced windows for faster test execution while retaining stability safeguards
 	cfg.ColdStartWindow = 3 * time.Second
 	cfg.PlannedScaleWindow = 3 * time.Second
 	cfg.RebalanceCooldown = 2 * time.Second
 
-	// Create managers
-	managers := make([]*parti.Manager, numWorkers)
-	js, err := jetstream.New(conn)
-	require.NoError(t, err)
-	for i := range managers {
-		mgr, err := parti.NewManager(&cfg, js, source.NewStatic(partitions), strategy.NewConsistentHash())
-		require.NoError(t, err)
-		managers[i] = mgr
-	}
+	managers := env.SetupManagers(t, &cfg, source.NewStatic(partitions), strategy.NewConsistentHash(), numWorkers)
+	startManagersConcurrently(t, env.Ctx, managers)
+	waitForStableWithTimeout(t, env.Ctx, managers, 25*time.Second)
 
-	// Start all managers concurrently
-	mgrWaiters := make([]testutil.ManagerWaiter, numWorkers)
-	for i, mgr := range managers {
-		mgrWaiters[i] = mgr
-		go func(m *parti.Manager, idx int) {
-			err := m.Start(ctx)
-			require.NoError(t, err, "manager %d failed to start", idx)
-		}(mgr, i)
-	}
+	// Poll until assignments converge before recording the baseline
+	verifyAssignments(t, managers, numPartitions)
 
-	// Wait for all managers to reach stable state
-	err = testutil.WaitAllManagersState(ctx, mgrWaiters, parti.StateStable, 25*time.Second)
-	require.NoError(t, err, "not all managers reached stable state")
-
-	// Record initial assignments after an extra stabilization delay to avoid transient leader catch-up
-	stabilizeSleep := 1500 * time.Millisecond
-	t.Logf("Sleeping %s for post-stable convergence before observation", stabilizeSleep)
-	time.Sleep(stabilizeSleep)
-	initialAssignments := make(map[int][]types.Partition) // worker index -> partitions
+	initialAssignments := make(map[int][]types.Partition, numWorkers)
 	for i, mgr := range managers {
 		initialAssignments[i] = mgr.CurrentAssignment().Partitions
 		t.Logf("Worker %d initial: %d partitions", i, len(initialAssignments[i]))
 	}
 
-	// Observe assignments over time
-	// Observation cadence slowed and initial samples ignored to filter transitional splits
+	// Observe assignments over time — they should not change
 	ticker := time.NewTicker(1500 * time.Millisecond)
 	ignoreSamples := 3
 	defer ticker.Stop()
@@ -253,7 +155,7 @@ func TestAssignmentCorrectness_StableAssignments(t *testing.T) {
 	changeCount := 0
 	observations := 0
 
-	observeCtx, observeCancel := context.WithTimeout(ctx, observePeriod)
+	observeCtx, observeCancel := context.WithTimeout(env.Ctx, observePeriod)
 	defer observeCancel()
 
 	for {
@@ -266,7 +168,6 @@ func TestAssignmentCorrectness_StableAssignments(t *testing.T) {
 				current := mgr.CurrentAssignment().Partitions
 				initial := initialAssignments[i]
 				if observations <= ignoreSamples {
-					// Refresh baseline during ignore window
 					initialAssignments[i] = current
 					continue
 				}
@@ -274,7 +175,7 @@ func TestAssignmentCorrectness_StableAssignments(t *testing.T) {
 					changeCount++
 					t.Logf("Worker %d assignment changed at observation %d: %d -> %d partitions",
 						i, observations, len(initial), len(current))
-					initialAssignments[i] = current // Update for next comparison
+					initialAssignments[i] = current
 				}
 			}
 		}
@@ -283,48 +184,5 @@ func TestAssignmentCorrectness_StableAssignments(t *testing.T) {
 done:
 	require.Equal(t, 0, changeCount,
 		"Assignments changed %d times during %s with no topology changes", changeCount, observePeriod)
-
 	t.Logf("Assignments remained stable for %s (%d observations)", observePeriod, observations)
-
-	// Cleanup
-	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer stopCancel()
-	for i, mgr := range managers {
-		_ = mgr.Stop(stopCtx)
-		t.Logf("Stopped manager %d", i)
-	}
-}
-
-// partitionKey generates a unique key for a partition based on its Keys field.
-func partitionKey(p types.Partition) string {
-	if len(p.Keys) == 0 {
-		return ""
-	}
-	// Join keys with a delimiter
-	result := p.Keys[0]
-	for i := 1; i < len(p.Keys); i++ {
-		result += ":" + p.Keys[i]
-	}
-
-	return result
-}
-
-// partitionSetsEqual compares two partition slices for equality (ignoring order).
-func partitionSetsEqual(a, b []types.Partition) bool {
-	if len(a) != len(b) {
-		return false
-	}
-
-	aMap := make(map[string]bool)
-	for _, p := range a {
-		aMap[partitionKey(p)] = true
-	}
-
-	for _, p := range b {
-		if !aMap[partitionKey(p)] {
-			return false
-		}
-	}
-
-	return true
 }
