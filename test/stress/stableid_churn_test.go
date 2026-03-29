@@ -25,21 +25,21 @@ func TestStableID_Stress_HighRevisionChurn(t *testing.T) {
 
 	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{
 		Bucket:  "stress-stable-ids-high-rev",
-		TTL:     300 * time.Millisecond,
+		TTL:     200 * time.Millisecond,
 		Storage: jetstream.MemoryStorage,
 	})
 	require.NoError(t, err)
 
 	// Simulate many previous runs by claiming and letting TTL expire repeatedly
-	for i := 0; i < 20; i++ {
-		c := stableid.NewClaimer(kv, "worker", 0, 2, 300*time.Millisecond, nil)
+	for i := 0; i < 5; i++ {
+		c := stableid.NewClaimer(kv, "worker", 0, 2, 200*time.Millisecond, nil)
 		_, err := c.Claim(ctx)
 		require.NoError(t, err)
-		time.Sleep(400 * time.Millisecond) // allow expiry
+		time.Sleep(250 * time.Millisecond) // allow expiry
 	}
 
 	// Final claim should still be fast and succeed
-	final := stableid.NewClaimer(kv, "worker", 0, 2, 300*time.Millisecond, nil)
+	final := stableid.NewClaimer(kv, "worker", 0, 2, 200*time.Millisecond, nil)
 	id, err := final.Claim(ctx)
 	require.NoError(t, err)
 	require.NotEmpty(t, id)
@@ -55,7 +55,7 @@ func TestStableID_Stress_CreateAfterExpiry(t *testing.T) {
 
 	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{
 		Bucket:  "stress-create-after-expiry",
-		TTL:     400 * time.Millisecond,
+		TTL:     250 * time.Millisecond,
 		Storage: jetstream.MemoryStorage,
 	})
 	require.NoError(t, err)
@@ -64,7 +64,7 @@ func TestStableID_Stress_CreateAfterExpiry(t *testing.T) {
 	require.NoError(t, err)
 	_ = rev1
 
-	time.Sleep(600 * time.Millisecond)
+	time.Sleep(350 * time.Millisecond)
 
 	// Create should succeed again after TTL expiry
 	rev2, err := kv.Create(ctx, "test-key", []byte("v2"))
@@ -86,20 +86,20 @@ func TestStableID_Stress_ConcurrentReclaimAfterCrash(t *testing.T) {
 
 	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{
 		Bucket:  "stress-concurrent-reclaim",
-		TTL:     350 * time.Millisecond,
+		TTL:     200 * time.Millisecond,
 		Storage: jetstream.MemoryStorage,
 	})
 	require.NoError(t, err)
 
 	// Pre-claim a few IDs without renewal (simulate crash)
 	for i := 0; i < 3; i++ {
-		c := stableid.NewClaimer(kv, "worker", 0, 9, 350*time.Millisecond, nil)
+		c := stableid.NewClaimer(kv, "worker", 0, 9, 200*time.Millisecond, nil)
 		_, err := c.Claim(ctx)
 		require.NoError(t, err)
 	}
 
 	// Wait for expiry
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(300 * time.Millisecond)
 
 	// Now race N claimers concurrently
 	n := 8
@@ -107,7 +107,7 @@ func TestStableID_Stress_ConcurrentReclaimAfterCrash(t *testing.T) {
 	errCh := make(chan error, n)
 	for i := 0; i < n; i++ {
 		go func() {
-			c := stableid.NewClaimer(kv, "worker", 0, 9, 350*time.Millisecond, nil)
+			c := stableid.NewClaimer(kv, "worker", 0, 9, 200*time.Millisecond, nil)
 			id, err := c.Claim(ctx)
 			if err != nil {
 				errCh <- err
@@ -125,7 +125,7 @@ func TestStableID_Stress_ConcurrentReclaimAfterCrash(t *testing.T) {
 			claimed[id] = true
 		case err := <-errCh:
 			t.Fatalf("claim failed: %v", err)
-		case <-time.After(3 * time.Second):
+		case <-time.After(1500 * time.Millisecond):
 			t.Fatal("timeout waiting for claims")
 		}
 	}

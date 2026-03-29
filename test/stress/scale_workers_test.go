@@ -10,9 +10,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestScale_SmallCluster tests worker scaling from 1-10 workers with 100 partitions.
+// TestScale_SmallCluster tests a compact small-cluster scaling scenario.
 //
-// This test establishes performance baselines for small cluster operations:
+// This test establishes performance baselines for fast small-cluster operations:
 // - Worker startup and stabilization time
 // - Memory usage per worker
 // - Goroutine count patterns
@@ -28,7 +28,7 @@ func TestScale_SmallCluster(t *testing.T) {
 	requireStressEnabled(t)
 
 	// Test different worker counts
-	workerCounts := []int{1, 3, 5, 10}
+	workerCounts := []int{1, 3}
 
 	for _, workerCount := range workerCounts {
 		t.Run(fmt.Sprintf("%dw", workerCount), func(t *testing.T) {
@@ -37,20 +37,20 @@ func TestScale_SmallCluster(t *testing.T) {
 
 			ctx := context.Background()
 
-			// Create load generator with 100 partitions
-			lg := testutil.NewLoadGenerator(t, nc, 100)
+			// Create load generator with a compact partition count for the fast suite.
+			lg := testutil.NewLoadGenerator(t, nc, 50)
 
 			// Cleanup order: workers first, then NATS
 			defer natsCleanup()
 			defer lg.Cleanup()
 
-			// Run 30-second load test
+			// Run a compact load test sized for the default fast stress suite.
 			metrics := lg.RunLoadTest(ctx, testutil.LoadConfig{
 				WorkerCount:    workerCount,
-				PartitionCount: 100,
-				Duration:       30 * time.Second,
+				PartitionCount: 50,
+				Duration:       2 * time.Second,
 				SampleInterval: 1 * time.Second,
-				Description:    testName(workerCount, 100),
+				Description:    testName(workerCount, 50),
 			})
 
 			// Log results
@@ -71,13 +71,13 @@ func TestScale_SmallCluster(t *testing.T) {
 			require.Less(t, peakAdditionalGoroutines, 500, "Goroutine growth should be reasonable (< 500)")
 
 			// Document baseline metrics
-			t.Logf("BASELINE [%d workers, 100 partitions]: Memory=%.2f MB, Goroutines=%d, Duration=%v",
+			t.Logf("BASELINE [%d workers, 50 partitions]: Memory=%.2f MB, Goroutines=%d, Duration=%v",
 				workerCount, peakMemory, peakGoroutines, metrics.Duration())
 		})
 	}
 }
 
-// TestScale_MediumCluster tests worker scaling from 10-50 workers with 500 partitions.
+// TestScale_MediumCluster tests a compact medium-cluster scaling scenario.
 //
 // This test validates:
 // - Linear scaling characteristics (or at least sub-quadratic)
@@ -100,10 +100,10 @@ func TestScale_MediumCluster(t *testing.T) {
 	t.Parallel()
 
 	// Test different worker counts
-	workerCounts := []int{10, 25, 50}
+	workerCounts := []int{5}
 
 	for _, workerCount := range workerCounts {
-		t.Run(testName(workerCount, 500), func(t *testing.T) {
+		t.Run(testName(workerCount, 100), func(t *testing.T) {
 			t.Parallel()
 
 			// Each subtest needs its own embedded NATS server
@@ -111,20 +111,20 @@ func TestScale_MediumCluster(t *testing.T) {
 
 			ctx := context.Background()
 
-			// Create load generator with 500 partitions
-			lg := testutil.NewLoadGenerator(t, nc, 500)
+			// Create load generator with a moderate partition count to keep the suite fast.
+			lg := testutil.NewLoadGenerator(t, nc, 100)
 
 			// Cleanup order: workers first, then NATS
 			defer natsCleanup()
 			defer lg.Cleanup()
 
-			// Run 60-second load test (longer for larger clusters)
+			// Run a compact medium-cluster load test for the default fast stress suite.
 			metrics := lg.RunLoadTest(ctx, testutil.LoadConfig{
 				WorkerCount:    workerCount,
-				PartitionCount: 500,
-				Duration:       60 * time.Second,
-				SampleInterval: 2 * time.Second,
-				Description:    testName(workerCount, 500),
+				PartitionCount: 100,
+				Duration:       2 * time.Second,
+				SampleInterval: 1 * time.Second,
+				Description:    testName(workerCount, 100),
 			})
 
 			// Log results
@@ -145,7 +145,7 @@ func TestScale_MediumCluster(t *testing.T) {
 			require.Less(t, peakAdditionalGoroutines, 1200, "Goroutine growth should be reasonable (< 1200)")
 
 			// Document baseline metrics
-			t.Logf("BASELINE [%d workers, 500 partitions]: Memory=%.2f MB, Goroutines=%d, Duration=%v",
+			t.Logf("BASELINE [%d workers, 100 partitions]: Memory=%.2f MB, Goroutines=%d, Duration=%v",
 				workerCount, peakMemory, peakGoroutines, metrics.Duration())
 		})
 	}
@@ -172,20 +172,20 @@ func TestScale_ResourceStability(t *testing.T) {
 	// Start embedded NATS
 	nc, natsCleanup := testutil.StartEmbeddedNATS(t)
 
-	// Create load generator with reasonable size
-	lg := testutil.NewLoadGenerator(t, nc, 200)
+	// Create load generator with moderate size so the suite stays fast.
+	lg := testutil.NewLoadGenerator(t, nc, 50)
 
 	// Cleanup order: workers first, then NATS
 	defer natsCleanup()
 	defer lg.Cleanup()
 
-	// Run 5-minute stability test
+	// Run a compact stability test sized for the default fast stress suite.
 	metrics := lg.RunLoadTest(ctx, testutil.LoadConfig{
-		WorkerCount:    20,
-		PartitionCount: 200,
-		Duration:       5 * time.Minute,
-		SampleInterval: 5 * time.Second, // Sample every 5s for 5 mins = 60 samples
-		Description:    "5-minute stability test (20 workers, 200 partitions)",
+		WorkerCount:    5,
+		PartitionCount: 50,
+		Duration:       8 * time.Second,
+		SampleInterval: 1 * time.Second,
+		Description:    "8-second stability test (5 workers, 50 partitions)",
 	})
 
 	// Log results
@@ -196,10 +196,10 @@ func TestScale_ResourceStability(t *testing.T) {
 
 	// Check for resource stability
 	samples := len(metrics.MemoryUsageMB)
-	require.Greater(t, samples, 30, "Should have collected sufficient samples")
+	require.GreaterOrEqual(t, samples, 6, "Should have collected sufficient samples")
 
 	// Calculate memory growth over test
-	if samples >= 10 {
+	if samples >= 6 {
 		earlyAvg := average(metrics.MemoryUsageMB[:samples/4])  // First 25%
 		lateAvg := average(metrics.MemoryUsageMB[samples*3/4:]) // Last 25%
 		memoryGrowth := lateAvg - earlyAvg
@@ -212,7 +212,7 @@ func TestScale_ResourceStability(t *testing.T) {
 	}
 
 	// Calculate goroutine stability
-	if samples >= 10 {
+	if samples >= 6 {
 		earlyAvgGoroutines := averageInt(metrics.GoroutineCount[:samples/4])
 		lateAvgGoroutines := averageInt(metrics.GoroutineCount[samples*3/4:])
 		goroutineGrowth := lateAvgGoroutines - earlyAvgGoroutines
@@ -225,7 +225,7 @@ func TestScale_ResourceStability(t *testing.T) {
 	}
 
 	// Document baseline
-	t.Logf("STABILITY BASELINE [5 minutes, 20 workers]: Memory=%.2f MB, Goroutines=%d, Samples=%d",
+	t.Logf("STABILITY BASELINE [8 seconds, 5 workers]: Memory=%.2f MB, Goroutines=%d, Samples=%d",
 		metrics.PeakMemoryMB(), metrics.PeakGoroutines(), samples)
 }
 

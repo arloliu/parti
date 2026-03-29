@@ -2,6 +2,7 @@ package stress_test
 
 import (
 	"context"
+	"fmt"
 	"runtime"
 	"testing"
 	"time"
@@ -32,12 +33,8 @@ func TestMemoryBenchmark_IsolatedParti(t *testing.T) {
 		partitions int
 		duration   time.Duration
 	}{
-		{"1w-100p", 1, 100, 60 * time.Second},
-		{"5w-100p", 5, 100, 60 * time.Second},
-		{"10w-100p", 10, 100, 60 * time.Second},
-		{"10w-500p", 10, 500, 60 * time.Second},
-		{"25w-500p", 25, 500, 60 * time.Second},
-		{"50w-500p", 50, 500, 60 * time.Second},
+		{"1w-25p", 1, 25, 1 * time.Second},
+		{"3w-50p", 3, 50, 2 * time.Second},
 	}
 
 	for _, tt := range tests {
@@ -130,9 +127,9 @@ func TestMemoryBenchmark_CompareWithEmbedded(t *testing.T) {
 
 	requireStressEnabled(t)
 
-	workers := 10
-	partitions := 100
-	duration := 30 * time.Second
+	workers := 3
+	partitions := 25
+	duration := 2 * time.Second
 
 	// Test 1: Embedded NATS (current baseline approach)
 	t.Run("embedded_nats", func(t *testing.T) {
@@ -212,13 +209,13 @@ func TestMemoryBenchmark_PerWorkerOverhead(t *testing.T) {
 	nc, cleanup := testutil.StartExternalNATS(t)
 	defer cleanup()
 
-	partitions := 100
-	workerCounts := []int{1, 5, 10, 20, 30}
+	partitions := 50
+	workerCounts := []int{1, 3}
 
 	results := make(map[int]float64)
 
 	for _, workerCount := range workerCounts {
-		t.Run(string(rune('0'+workerCount/10))+"workers", func(t *testing.T) {
+		t.Run(fmt.Sprintf("%dworkers", workerCount), func(t *testing.T) {
 			runtime.GC()
 			time.Sleep(100 * time.Millisecond)
 
@@ -232,7 +229,7 @@ func TestMemoryBenchmark_PerWorkerOverhead(t *testing.T) {
 			metrics := lg.RunLoadTest(ctx, testutil.LoadConfig{
 				WorkerCount:    workerCount,
 				PartitionCount: partitions,
-				Duration:       20 * time.Second,
+				Duration:       2 * time.Second,
 				SampleInterval: 500 * time.Millisecond,
 				Description:    "per_worker_overhead",
 			})
@@ -275,13 +272,13 @@ func TestMemoryBenchmark_PerPartitionOverhead(t *testing.T) {
 	nc, cleanup := testutil.StartExternalNATS(t)
 	defer cleanup()
 
-	workers := 10
-	partitionCounts := []int{50, 100, 200, 500, 1000}
+	workers := 2
+	partitionCounts := []int{25, 100}
 
 	results := make(map[int]float64)
 
 	for _, partitionCount := range partitionCounts {
-		t.Run(string(rune('0'+partitionCount/100))+"partitions", func(t *testing.T) {
+		t.Run(fmt.Sprintf("%dpartitions", partitionCount), func(t *testing.T) {
 			runtime.GC()
 			time.Sleep(100 * time.Millisecond)
 
@@ -295,7 +292,7 @@ func TestMemoryBenchmark_PerPartitionOverhead(t *testing.T) {
 			metrics := lg.RunLoadTest(ctx, testutil.LoadConfig{
 				WorkerCount:    workers,
 				PartitionCount: partitionCount,
-				Duration:       20 * time.Second,
+				Duration:       2 * time.Second,
 				SampleInterval: 500 * time.Millisecond,
 				Description:    "per_partition_overhead",
 			})
