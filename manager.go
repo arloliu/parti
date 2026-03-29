@@ -452,13 +452,15 @@ func (m *Manager) Stop(ctx context.Context) error {
 		}
 	}
 
-	// Step 3: Release election if we hold leadership
-	if m.IsLeader() {
-		if err := m.election.ReleaseLeadership(ctx); err != nil {
-			m.logError("failed to release leadership", "error", err)
-			if shutdownErr == nil {
-				shutdownErr = fmt.Errorf("leadership release failed: %w", err)
-			}
+	// Step 3: Release election leadership unconditionally.
+	// Always attempt release to avoid TOCTOU race where leadership flag is cleared
+	// by monitorLeadership between the check and the release call.
+	// ErrNotLeader is benign — it simply means we weren't the leader.
+	if err := m.election.ReleaseLeadership(ctx); err != nil &&
+		!errors.Is(err, election.ErrNotLeader) {
+		m.logError("failed to release leadership", "error", err)
+		if shutdownErr == nil {
+			shutdownErr = fmt.Errorf("leadership release failed: %w", err)
 		}
 	}
 
