@@ -217,7 +217,7 @@ func (m *Manager) stopCalculator() bool {
 }
 
 // calculateAndPublish calculates and publishes assignments.
-func (m *Manager) calculateAndPublish(_ context.Context) error {
+func (m *Manager) calculateAndPublish(ctx context.Context) error {
 	m.mu.RLock()
 	calc := m.calculator
 	m.mu.RUnlock()
@@ -226,9 +226,13 @@ func (m *Manager) calculateAndPublish(_ context.Context) error {
 		return errors.New("calculator not started")
 	}
 
-	// Calculator runs in background and publishes automatically
-	// Just wait a bit for initial calculation
-	time.Sleep(500 * time.Millisecond)
+	// Calculator runs in background and publishes automatically.
+	// Wait briefly for the initial calculation, respecting the context.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(500 * time.Millisecond):
+	}
 
 	return nil
 }
