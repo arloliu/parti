@@ -19,6 +19,9 @@ var ErrInvalidConfig = errors.New("invalid consumer configuration")
 
 // Re-exported sentinel errors from internal packages.
 // Use [errors.Is] to check for these errors in [Dynamic.Update] return values.
+//
+// IMPORTANT: These variables must not be reassigned. Treat them as read-only
+// constants. Reassigning any sentinel will break all errors.Is() checks.
 var (
 	// ErrWorkerIDMutation is returned by [Dynamic.Update] when the workerID
 	// changes and [DynamicConfig.AllowWorkerIDChange] is false.

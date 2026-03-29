@@ -53,6 +53,7 @@ type Calculator struct {
 	// Lifecycle
 	stopCh chan struct{}
 	doneCh chan struct{}
+	wg     sync.WaitGroup // Tracks background goroutines (e.g., monitorPartitions)
 }
 
 // cachedWorkerList bundles worker data with its timestamp for atomic operations.
@@ -210,7 +211,11 @@ func (c *Calculator) Start(ctx context.Context) error {
 	// Start partition monitoring if supported
 	if watchable, ok := c.Source.(types.WatchablePartitionSource); ok {
 		c.Logger.Info("starting partition monitor")
-		go c.monitorPartitions(ctx, watchable)
+		c.wg.Add(1)
+		go func() {
+			defer c.wg.Done()
+			c.monitorPartitions(ctx, watchable)
+		}()
 	}
 
 	// Step 2: Enter scaling state for stabilization
@@ -256,6 +261,9 @@ func (c *Calculator) Stop(ctx context.Context) error {
 
 	// 3. Wait for state machine shutdown
 	c.stateMach.WaitForShutdown()
+
+	// 4. Wait for background goroutines (e.g., monitorPartitions)
+	c.wg.Wait()
 
 	return nil
 }

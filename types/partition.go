@@ -13,11 +13,13 @@ import (
 // A partition is the unit of work assignment. Each partition can contain
 // multiple keys and has an associated weight for load balancing.
 type Partition struct {
-	// Keys uniquely identify this partition.
+	// Keys uniquely identify this partition. Must contain at least one non-empty key.
 	// For Kafka: ["topic", "partition_id"]
 	Keys []string `json:"keys"`
 
-	// Weight represents the relative processing cost (default: 100).
+	// Weight represents the relative processing cost.
+	// A zero value means "use the strategy's default weight" (typically 1).
+	// Negative values are treated as zero (strategy default).
 	// Used by weighted assignment strategies for load balancing.
 	Weight int64 `json:"weight"`
 }
@@ -30,7 +32,7 @@ type Partition struct {
 //   - Keys must not be empty.
 func (p Partition) Validate() error {
 	if len(p.Keys) == 0 {
-		return nil // Empty partition is technically valid, though unusual
+		return errors.New("partition must have at least one key")
 	}
 
 	for i, key := range p.Keys {

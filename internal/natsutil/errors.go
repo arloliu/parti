@@ -26,13 +26,22 @@ func IsConnectivityError(err error) bool {
 		return false
 	}
 
-	// Check for known connectivity error types
-	return errors.Is(err, types.ErrConnectivity) ||
+	// Check for known connectivity error types via errors.Is (preferred).
+	if errors.Is(err, types.ErrConnectivity) ||
 		errors.Is(err, nats.ErrTimeout) ||
 		errors.Is(err, nats.ErrNoServers) ||
 		errors.Is(err, nats.ErrDisconnected) ||
 		errors.Is(err, nats.ErrConnectionClosed) ||
-		errors.Is(err, jetstream.ErrNoStreamResponse) ||
-		strings.Contains(err.Error(), "connection refused") ||
-		strings.Contains(err.Error(), "i/o timeout")
+		errors.Is(err, nats.ErrConnectionDraining) ||
+		errors.Is(err, nats.ErrConnectionReconnecting) ||
+		errors.Is(err, jetstream.ErrNoStreamResponse) {
+		return true
+	}
+
+	// Fallback: OS-level socket errors that NATS surfaces as wrapped text.
+	// These strings come from Go's net package, not NATS, so they are stable.
+	errMsg := err.Error()
+
+	return strings.Contains(errMsg, "connection refused") ||
+		strings.Contains(errMsg, "i/o timeout")
 }

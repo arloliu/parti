@@ -11,6 +11,10 @@ import (
 // All components should use these sentinel errors for known error conditions
 // and wrap external errors with context using fmt.Errorf("%s: %w", msg, err).
 //
+// IMPORTANT: These variables must not be reassigned. Treat them as read-only
+// constants. Reassigning any sentinel will break all errors.Is() checks across
+// the library and any downstream code.
+//
 // Error Naming Convention:
 //   - Use descriptive names with Err prefix
 //   - Group by component (Manager, Calculator, WorkerMonitor, etc.)

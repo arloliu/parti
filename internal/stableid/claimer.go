@@ -50,6 +50,7 @@ type Claimer struct {
 	maxID  int
 	ttl    time.Duration
 
+	mu       sync.RWMutex  // Protects workerID field for concurrent access
 	workerID string        // Claimed worker ID
 	stopCh   chan struct{} // Signal to stop renewal goroutine
 	doneCh   chan struct{} // Signal that renewal has stopped
@@ -140,7 +141,9 @@ func (c *Claimer) Claim(ctx context.Context) (string, error) {
 
 		if err == nil {
 			// Successfully claimed this ID
+			c.mu.Lock()
 			c.workerID = workerID
+			c.mu.Unlock()
 			c.logger.Info("stable ID claimed successfully", "worker_id", workerID, "key", key, "revision", revision, "attempts", id-c.minID+1)
 
 			return workerID, nil
@@ -161,7 +164,9 @@ func (c *Claimer) Claim(ctx context.Context) (string, error) {
 			c.logger.Debug("key disappeared after Create failed, attempting Put", "worker_id", workerID)
 			revision, putErr := c.kv.Put(ctx, key, []byte(value))
 			if putErr == nil {
+				c.mu.Lock()
 				c.workerID = workerID
+				c.mu.Unlock()
 				c.logger.Info("stable ID claimed via Put after expiry", "worker_id", workerID, "key", key, "revision", revision)
 
 				return workerID, nil
@@ -202,7 +207,11 @@ func (c *Claimer) Claim(ctx context.Context) (string, error) {
 // Safe: returns ErrNotClaimed if called before successful Claim. Returns ErrAlreadyClosed
 // if the claimer has been closed.
 func (c *Claimer) StartRenewal() error {
-	if c.workerID == "" {
+	c.mu.RLock()
+	hasID := c.workerID != ""
+	c.mu.RUnlock()
+
+	if !hasID {
 		return ErrNotClaimed
 	}
 	if c.closed.Load() == 1 {
@@ -240,7 +249,10 @@ func (c *Claimer) renewalLoop() {
 			}
 			opCtx, cancel := context.WithTimeout(context.Background(), opTimeout)
 			if err := c.renew(opCtx); err != nil {
-				c.logger.Error("stable ID renewal failed", "worker_id", c.workerID, "error", err)
+				c.mu.RLock()
+				wid := c.workerID
+				c.mu.RUnlock()
+				c.logger.Error("stable ID renewal failed", "worker_id", wid, "error", err)
 			}
 			cancel()
 		}
@@ -249,19 +261,23 @@ func (c *Claimer) renewalLoop() {
 
 // renew updates the claimed ID's timestamp to maintain the lease.
 func (c *Claimer) renew(ctx context.Context) error {
-	if c.workerID == "" {
+	c.mu.RLock()
+	wid := c.workerID
+	c.mu.RUnlock()
+
+	if wid == "" {
 		return ErrNotClaimed
 	}
 	if c.kv == nil {
 		return errors.New("kv bucket is nil")
 	}
 
-	key := c.keyForID(c.workerID)
+	key := c.keyForID(wid)
 	value := time.Now().Format(time.RFC3339)
 
 	_, err := c.kv.Put(ctx, key, []byte(value))
 	if err != nil {
-		return fmt.Errorf("failed to renew ID %s: %w", c.workerID, err)
+		return fmt.Errorf("failed to renew ID %s: %w", wid, err)
 	}
 
 	return nil
@@ -284,7 +300,11 @@ func (c *Claimer) renew(ctx context.Context) error {
 //	    log.Printf("Warning: failed to release ID: %v", err)
 //	}
 func (c *Claimer) Release(ctx context.Context) error {
-	if c.workerID == "" {
+	c.mu.RLock()
+	wid := c.workerID
+	c.mu.RUnlock()
+
+	if wid == "" {
 		return ErrNotClaimed
 	}
 	if c.closed.CompareAndSwap(0, 1) {
@@ -303,14 +323,16 @@ func (c *Claimer) Release(ctx context.Context) error {
 		}
 	}
 
-	key := c.keyForID(c.workerID)
+	key := c.keyForID(wid)
 	if c.kv != nil {
 		if err := c.kv.Delete(ctx, key); err != nil {
-			return fmt.Errorf("failed to delete ID %s: %w", c.workerID, err)
+			return fmt.Errorf("failed to delete ID %s: %w", wid, err)
 		}
 	}
 
+	c.mu.Lock()
 	c.workerID = ""
+	c.mu.Unlock()
 
 	return nil
 }
@@ -329,6 +351,9 @@ func (c *Claimer) Close() {
 // Returns:
 //   - string: Claimed worker ID (empty if not claimed)
 func (c *Claimer) WorkerID() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
 	return c.workerID
 }
 

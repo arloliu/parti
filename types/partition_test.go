@@ -56,7 +56,7 @@ func TestPartitionValidate(t *testing.T) {
 		{
 			name:      "EmptyPartition",
 			partition: Partition{},
-			wantErr:   false,
+			wantErr:   true,
 		},
 	}
 

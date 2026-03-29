@@ -1,4 +1,4 @@
-module github.com/arloliu/mebo
+module github.com/arloliu/parti/v2/tools
 
 go 1.25.0
 
