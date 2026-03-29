@@ -129,6 +129,11 @@ func (m *Manager) enterDegraded(reason string) {
 		return
 	}
 
+	// Reject degraded entry from terminal Shutdown state.
+	if m.State() == StateShutdown {
+		return
+	}
+
 	now := time.Now()
 	m.degradedSince.Store(&now)
 
@@ -179,8 +184,11 @@ func (m *Manager) exitDegraded() {
 	duration := time.Since(*tVal)
 	m.degradedSince.Store((*time.Time)(nil))
 
-	// Restore previous state (typically Stable or WaitingAssignment)
-	oldState := State(m.state.Swap(int32(StateStable)))
+	// Atomically transition from Degraded to Stable.
+	// If the state was already changed (e.g., to Shutdown), do nothing.
+	if !m.state.CompareAndSwap(int32(StateDegraded), int32(StateStable)) {
+		return
+	}
 
 	m.logger.Info("exiting degraded mode",
 		"duration", duration,
@@ -190,14 +198,14 @@ func (m *Manager) exitDegraded() {
 	// Trigger state change hook (tracked by WaitGroup so Stop waits for completion)
 	if m.hooks.OnStateChanged != nil {
 		m.wg.Go(func() {
-			if err := m.hooks.OnStateChanged(m.ctx, oldState, StateStable); err != nil {
+			if err := m.hooks.OnStateChanged(m.ctx, StateDegraded, StateStable); err != nil {
 				m.logError("state change hook error", "error", err)
 			}
 		})
 	}
 
 	// Record metrics
-	m.metrics.RecordStateTransition(oldState, StateStable, duration.Seconds())
+	m.metrics.RecordStateTransition(StateDegraded, StateStable, duration.Seconds())
 	m.metrics.RecordDegradedDuration(duration.Seconds())
 	m.metrics.SetDegradedMode(0.0)
 	m.metrics.SetCacheAge(0.0)
