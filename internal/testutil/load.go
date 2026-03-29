@@ -57,6 +57,9 @@ type LoadMetrics struct {
 	// Test configuration
 	Config LoadConfig
 
+	// BaselineGoroutines is the goroutine count before the workload starts.
+	BaselineGoroutines int
+
 	// Rebalance metrics
 	RebalanceCount   int
 	RebalanceLatency []time.Duration
@@ -144,8 +147,9 @@ func (lg *LoadGenerator) RunLoadTest(ctx context.Context, config LoadConfig) *Lo
 
 	// Initialize metrics
 	lg.metrics = &LoadMetrics{
-		Config:    config,
-		StartTime: time.Now(),
+		Config:             config,
+		BaselineGoroutines: runtime.NumGoroutine(),
+		StartTime:          time.Now(),
 	}
 
 	lg.t.Logf("Starting load test: %s", config.Description)
@@ -360,6 +364,16 @@ func (lm *LoadMetrics) PeakGoroutines() int {
 	}
 
 	return peak
+}
+
+// PeakAdditionalGoroutines returns the peak goroutine growth above the test baseline.
+func (lm *LoadMetrics) PeakAdditionalGoroutines() int {
+	peak := lm.PeakGoroutines()
+	if peak <= lm.BaselineGoroutines {
+		return 0
+	}
+
+	return peak - lm.BaselineGoroutines
 }
 
 // Report generates a formatted report of the load test metrics.

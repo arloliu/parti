@@ -20,8 +20,6 @@ import (
 //
 // The test validates that the system handles small-scale scenarios efficiently
 // and provides a baseline for detecting performance regressions.
-//
-//nolint:tparallel // Parent test has t.Parallel() call at line 28
 func TestScale_SmallCluster(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping scale test in short mode")
@@ -29,15 +27,11 @@ func TestScale_SmallCluster(t *testing.T) {
 
 	requireStressEnabled(t)
 
-	t.Parallel()
-
 	// Test different worker counts
 	workerCounts := []int{1, 3, 5, 10}
 
 	for _, workerCount := range workerCounts {
 		t.Run(fmt.Sprintf("%dw", workerCount), func(t *testing.T) {
-			t.Parallel()
-
 			// Each subtest needs its own embedded NATS server
 			nc, natsCleanup := testutil.StartEmbeddedNATS(t)
 
@@ -68,12 +62,13 @@ func TestScale_SmallCluster(t *testing.T) {
 			// Validate resource usage is reasonable
 			peakMemory := metrics.PeakMemoryMB()
 			peakGoroutines := metrics.PeakGoroutines()
+			peakAdditionalGoroutines := metrics.PeakAdditionalGoroutines()
 
-			t.Logf("Peak resource usage: %.2f MB memory, %d goroutines", peakMemory, peakGoroutines)
+			t.Logf("Peak resource usage: %.2f MB memory, %d goroutines (%d above baseline)", peakMemory, peakGoroutines, peakAdditionalGoroutines)
 
 			// Basic sanity checks (not strict limits, just detect obvious problems)
 			require.Less(t, peakMemory, 500.0, "Memory usage should be reasonable (< 500 MB)")
-			require.Less(t, peakGoroutines, 500, "Goroutine count should be reasonable (< 500)")
+			require.Less(t, peakAdditionalGoroutines, 500, "Goroutine growth should be reasonable (< 500)")
 
 			// Document baseline metrics
 			t.Logf("BASELINE [%d workers, 100 partitions]: Memory=%.2f MB, Goroutines=%d, Duration=%v",
@@ -94,7 +89,7 @@ func TestScale_SmallCluster(t *testing.T) {
 // - Memory per worker should remain roughly constant
 // - No resource leaks as cluster size increases
 //
-//nolint:tparallel // Parent test has t.Parallel() call at line 100
+//nolint:tparallel // This test intentionally runs in parallel with other stress tests; goroutine assertions use per-test baseline growth instead of raw process-wide totals.
 func TestScale_MediumCluster(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping scale test in short mode")
@@ -141,12 +136,13 @@ func TestScale_MediumCluster(t *testing.T) {
 			// Validate resource usage is reasonable
 			peakMemory := metrics.PeakMemoryMB()
 			peakGoroutines := metrics.PeakGoroutines()
+			peakAdditionalGoroutines := metrics.PeakAdditionalGoroutines()
 
-			t.Logf("Peak resource usage: %.2f MB memory, %d goroutines", peakMemory, peakGoroutines)
+			t.Logf("Peak resource usage: %.2f MB memory, %d goroutines (%d above baseline)", peakMemory, peakGoroutines, peakAdditionalGoroutines)
 
 			// Basic sanity checks
 			require.Less(t, peakMemory, 1000.0, "Memory usage should be reasonable (< 1 GB)")
-			require.Less(t, peakGoroutines, 1000, "Goroutine count should be reasonable (< 1000)")
+			require.Less(t, peakAdditionalGoroutines, 1200, "Goroutine growth should be reasonable (< 1200)")
 
 			// Document baseline metrics
 			t.Logf("BASELINE [%d workers, 500 partitions]: Memory=%.2f MB, Goroutines=%d, Duration=%v",

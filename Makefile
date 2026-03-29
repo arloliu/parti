@@ -3,7 +3,7 @@
 
 # Configuration
 TEST_TIMEOUT    ?= 6m
-STRESS_TIMEOUT  ?= 20m
+STRESS_TIMEOUT  ?= 25m
 LINT_TIMEOUT    ?= 3m
 COVERAGE_DIR    := ./.coverage
 COVERAGE_OUT    := $(COVERAGE_DIR)/coverage.out

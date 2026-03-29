@@ -15,7 +15,7 @@ import (
 // Uses external NATS server in separate process to isolate memory measurements.
 // This provides accurate baseline for parti library's actual memory consumption.
 //
-//nolint:tparallel // Parent test has t.Parallel() call at line 23
+//nolint:tparallel // This test intentionally runs in parallel with other stress tests; goroutine assertions use per-test baseline growth instead of raw process-wide totals.
 func TestMemoryBenchmark_IsolatedParti(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping memory benchmark in short mode")
@@ -89,10 +89,15 @@ func TestMemoryBenchmark_IsolatedParti(t *testing.T) {
 			t.Logf("  Start: %d", report.StartGoroutines)
 			t.Logf("  End:   %d", report.EndGoroutines)
 			t.Logf("  Peak:  %d", report.PeakGoroutines)
+			peakAdditionalGoroutines := report.PeakGoroutines - report.StartGoroutines
+			if peakAdditionalGoroutines < 0 {
+				peakAdditionalGoroutines = 0
+			}
+			t.Logf("  Peak Additional: %d", peakAdditionalGoroutines)
 			t.Logf("  Leak:  %d", report.GoroutineLeak)
 			if tt.workers > 0 {
 				t.Logf("  Per Worker Avg: %.1f goroutines",
-					float64(report.PeakGoroutines)/float64(tt.workers))
+					float64(peakAdditionalGoroutines)/float64(tt.workers))
 			}
 			t.Log("\nLoad Test Metrics:")
 			t.Logf("  Total Duration: %v", metrics.Duration())
@@ -109,8 +114,8 @@ func TestMemoryBenchmark_IsolatedParti(t *testing.T) {
 			} // Basic sanity checks (generous limits for isolated measurements)
 			require.Less(t, report.PeakMemoryMB, 200.0,
 				"Isolated parti library should use < 200 MB")
-			require.Less(t, report.PeakGoroutines, 1000,
-				"Isolated parti library should use < 1000 goroutines")
+			require.Less(t, peakAdditionalGoroutines, 1000,
+				"Isolated parti library should add < 1000 goroutines above baseline")
 		})
 	}
 }
