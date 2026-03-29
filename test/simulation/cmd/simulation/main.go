@@ -634,17 +634,22 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 	for {
 		select {
 		case <-ctx.Done():
-			// Escalate aged holes to gaps before final report
-			cutoff := time.Now().Add(-cfg.Coordinator.GapAging)
-			if escalations := coord.GetTracker().AgeOut(cutoff); len(escalations) > 0 {
-				for range escalations {
-					if metricsCollector != nil {
-						metricsCollector.RecordGap()
+			// Escalate aged holes to gaps before final report, but only when NOT in cooldown.
+			// During cooldown, hole escalation is deliberately suppressed to allow healing.
+			// Re-escalating at shutdown would contradict the cooldown intent and count
+			// holes that are expected to remain (e.g., messages in-flight from stopped producers).
+			if !inCooldown.Load() {
+				cutoff := time.Now().Add(-cfg.Coordinator.GapAging)
+				if escalations := coord.GetTracker().AgeOut(cutoff); len(escalations) > 0 {
+					for range escalations {
+						if metricsCollector != nil {
+							metricsCollector.RecordGap()
+						}
 					}
-				}
-				// If gaps are found at the end, trigger failure report if configured
-				if cfg.Coordinator.StopOnFailure {
-					coord.TriggerFailure("Gap detected (final scan)", escalations[0])
+					// If gaps are found at the end, trigger failure report if configured
+					if cfg.Coordinator.StopOnFailure {
+						coord.TriggerFailure("Gap detected (final scan)", escalations[0])
+					}
 				}
 			}
 			coord.PrintReport()

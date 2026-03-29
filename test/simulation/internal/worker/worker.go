@@ -59,11 +59,6 @@ type Worker struct {
 	shardCount int
 	shardChans []chan jetstream.Msg
 
-	// ordering enforcement per partition
-	orderMu      sync.Mutex
-	expectedNext map[int]int
-	orderBuf     map[int]map[int]struct{}
-
 	// pause control
 	pauseMu     sync.RWMutex
 	pausedUntil time.Time
@@ -224,8 +219,6 @@ func NewWorker(cfg Config) (*Worker, error) { //nolint:cyclop
 		currentPartitions:   0,
 		handlerConcurrency:  cfg.HandlerConcurrency,
 		consumerBatchSize:   cfg.ConsumerBatchSize,
-		expectedNext:        make(map[int]int),
-		orderBuf:            make(map[int]map[int]struct{}),
 	}
 
 	perSubMaxAckPending := worker.consumerBatchSize * 2
@@ -504,7 +497,7 @@ func partitionIDFromSubject(subject string) (int, bool) {
 	return id, true
 }
 
-func (w *Worker) processAndAck(msg jetstream.Msg) error { //nolint:cyclop
+func (w *Worker) processAndAck(msg jetstream.Msg) error {
 	// Record start time for metrics
 	startTime := time.Now()
 
@@ -541,38 +534,6 @@ func (w *Worker) processAndAck(msg jetstream.Msg) error { //nolint:cyclop
 			}
 		}
 	}
-
-	// Enforce per-partition ordering before reporting. We ACK out-of-order
-	// messages and buffer their sequences to emit to the coordinator later
-	// in order, avoiding redelivery storms and global disorder.
-	pid := simMsg.PartitionID
-	seq := int(simMsg.PartitionSequence)
-	w.orderMu.Lock()
-	next := w.expectedNext[pid]
-	if next == 0 {
-		// Baseline to first observed sequence for this partition on this worker.
-		// We'll report from this baseline and keep local order via buffering.
-		next = seq
-		w.expectedNext[pid] = next
-	}
-	if seq > next {
-		// Buffer and ACK; do not report yet
-		if w.orderBuf[pid] == nil {
-			w.orderBuf[pid] = make(map[int]struct{})
-		}
-		w.orderBuf[pid][seq] = struct{}{}
-		w.orderMu.Unlock()
-		_ = msg.Ack()
-		return nil
-	}
-	if seq < next {
-		// Duplicate/old message: ack and drop without reporting
-		w.orderMu.Unlock()
-		_ = msg.Ack()
-		return nil
-	}
-	// seq == next: we'll report this and then flush any buffered consecutive seqs
-	w.orderMu.Unlock()
 
 	// Simulate processing delay (with optional slow consumer multiplier)
 	delay := w.processingDelayMin
@@ -630,35 +591,6 @@ func (w *Worker) processAndAck(msg jetstream.Msg) error { //nolint:cyclop
 		log.Printf("[%s] ACK failed: partition=%d seq=%d subject=%s stream_seq=%d err=%v", w.id, simMsg.PartitionID, simMsg.PartitionSequence, msg.Subject(), meta.Sequence.Stream, err)
 		return err
 	}
-
-	// Advance expected sequence after successful ack/report and flush buffered
-	w.orderMu.Lock()
-	next++
-	w.expectedNext[pid] = next
-	// Flush buffered consecutive sequences in order, reporting to coordinator
-	for {
-		if _, ok := w.orderBuf[pid][next]; !ok {
-			break
-		}
-		// Emit buffered report
-		if w.coordinatorReportCh != nil {
-			select {
-			case <-w.ctx.Done():
-				// Context cancelled; stop flushing
-				w.orderMu.Unlock()
-				return nil
-			case w.coordinatorReportCh <- coordinator.ReceivedMessage{
-				PartitionID:       pid,
-				PartitionSequence: int64(next),
-				WorkerID:          w.id,
-			}:
-			}
-		}
-		delete(w.orderBuf[pid], next)
-		next++
-		w.expectedNext[pid] = next
-	}
-	w.orderMu.Unlock()
 
 	return nil
 }
