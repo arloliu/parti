@@ -364,9 +364,7 @@ func (m *Manager) Start(ctx context.Context) (startErr error) {
 	// Step 5: Wait for assignment
 	m.transitionState(m.State(), StateWaitingAssignment)
 	m.logger.Info("startup: waiting for assignment")
-	waitCtx, waitCancel := context.WithTimeout(m.ctx, 30*time.Second)
-	defer waitCancel()
-	if err := m.waitForAssignment(waitCtx, assignmentKV, heartbeatKV); err != nil {
+	if err := m.waitForAssignment(startupCtx, assignmentKV, heartbeatKV); err != nil {
 		return fmt.Errorf("failed to get assignment: %w", err)
 	}
 	m.logger.Info("startup: initial assignment received")
