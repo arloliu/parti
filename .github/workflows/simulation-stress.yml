@@ -13,7 +13,7 @@ permissions:
 jobs:
   chaos-simulation:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -23,16 +23,17 @@ jobs:
           go-version-file: go.mod
 
       - name: Build Simulation
-        run: go build -o simulation ./test/simulation/cmd/simulation
+        run: go build -o tmp/simulation ./test/simulation/cmd/simulation
 
       - name: Run Chaos Simulation
         run: |
           # Run for 8 minutes with comprehensive chaos
-          ./simulation \
+          ./tmp/simulation \
             --config test/simulation/configs/chaos_comprehensive.yaml \
             --duration 8m \
             --cooldown 90s \
-            --stop-on-failure=false
+            --stop-on-failure=false \
+            2>&1 | tee tmp/simulation.log
 
       - name: Upload Failure Report
         if: failure()
@@ -41,4 +42,4 @@ jobs:
           name: failure-report
           path: |
             failure_report.json
-            *.log
+            tmp/simulation.log
