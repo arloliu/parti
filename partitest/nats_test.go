@@ -57,9 +57,9 @@ func TestStartEmbeddedNATSCluster(t *testing.T) {
 	require.NotNil(t, nc)
 	require.True(t, nc.IsConnected())
 
-	// Verify cluster formation
+	// Verify cluster formation (use generous timeout — race detector slows things down)
 	for i, s := range servers {
-		require.True(t, s.ReadyForConnections(1*time.Second), "server %d not ready", i)
+		require.True(t, s.ReadyForConnections(5*time.Second), "server %d not ready", i)
 		// NumRoutes returns the number of registered routes.
 		// Since we provide full mesh routes to all servers, and they might establish
 		// multiple connections during formation, we just verify we have at least
