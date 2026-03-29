@@ -1,15 +1,19 @@
 # 300 - Testing Guidelines
 
 ## Organization
-- **Unit:** Co-located in `*_test.go`. Package `foo` or `foo_test`.
-- **Integration:** `tests/` directory (root level). Use `testing.Short()` guard.
+- **Unit:** Co-located in `*_test.go`. Same package or `_test` suffix.
+- **Integration:** `test/integration/` directory. Package `integration_test`. Use `testing.Short()` guard.
+- **Simulation:** `test/simulation/` directory. Long-running simulation scenarios.
+- **Stress:** `test/stress/` directory. Enabled with `PARTI_STRESS=1` env var.
 
 ## Rules
-- **No Emojis:** Do not use emojis in test logs.
+- **No Emojis:** Do not use emojis in test log messages.
 - **Context:** Use `t.Context()`.
 - **Env:** Use `t.Setenv()` (not `os.Setenv`).
 - **Benchmarks:** Use `for b.Loop()` (Go 1.24+).
 - **Assertions:** Use `testify` (`require`, `assert`).
+- **Embedded NATS:** Use `partitest.StartEmbeddedNATS(t)` for integration tests.
+- **Cleanup:** Always use `defer` for resource cleanup.
 
 ## Async Testing (CRITICAL)
 - ❌ **NEVER** use `time.Sleep()` to wait for state.
@@ -17,6 +21,7 @@
     1. Subscribe BEFORE triggering action.
     2. Collect all state transitions.
     3. Assert on complete history.
+- See `internal/assignment/calculator_state_test.go` for reference implementation.
 
 ## Test Patterns
 **Table-Driven** — Use ONLY for multiple cases:
@@ -31,4 +36,16 @@ func TestOneThing(t *testing.T) {
     got := Do()
     require.Equal(t, want, got)
 }
+```
+
+## Running Tests
+```bash
+make test              # Unit tests with race detector
+make test-unit         # Same as test
+make test-quick        # Unit tests without race detector (fast)
+make test-integration  # Integration tests with embedded NATS
+make test-stress       # Stress tests (PARTI_STRESS=1)
+make test-all          # Unit + integration + stress
+make test-smoke        # Quick stress smoke test
+make coverage          # Generate coverage report
 ```

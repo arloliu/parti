@@ -22,8 +22,8 @@
 //
 // Example:
 //
-//result, err := FunctionName(input)
-//if err != nil { ... }
+//	result, err := FunctionName(input)
+//	if err != nil { ... }
 func FunctionName(param1 T1, param2 T2) (Result, error) { }
 ```
 
@@ -31,27 +31,28 @@ func FunctionName(param1 T1, param2 T2) (Result, error) { }
 
 **Constructor:**
 ```go
-// NewLoader creates a Loader from config.
+// NewConsistentHash creates a consistent hash assignment strategy.
 //
 // Parameters:
-//   - cfg: Configuration options
+//   - opts: Functional options (e.g., WithVirtualNodes)
 //
 // Returns:
-//   - *Loader: Ready-to-use loader instance
-func NewLoader(cfg Config) *Loader { }
+//   - *ConsistentHash: Ready-to-use strategy instance
+func NewConsistentHash(opts ...Option) *ConsistentHash { }
 ```
 
 **Method with Multiple Returns:**
 ```go
-// Get retrieves value by key.
+// Assign calculates partition assignments for the given workers.
 //
 // Parameters:
-//   - key: Lookup key (case-sensitive)
+//   - workers: Worker IDs to assign partitions to
+//   - partitions: Available partitions
 //
 // Returns:
-//   - string: The value if found
-//   - bool: true if key exists
-func (c *Cache) Get(key string) (string, bool) { }
+//   - map[string][]Partition: Worker ID to assigned partitions
+//   - error: If assignment calculation fails
+func (c *ConsistentHash) Assign(workers []string, partitions []Partition) (map[string][]Partition, error) { }
 ```
 
 ## Omit When Appropriate
