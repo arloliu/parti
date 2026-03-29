@@ -522,6 +522,10 @@ func (m *Manager) IsLeader() bool {
 
 // CurrentAssignment returns the current partition assignment for this worker.
 //
+// The returned Assignment shares its Partitions backing array with the
+// Manager's internal state. Callers MUST NOT modify the returned slice
+// or its elements. If mutation is needed, make a copy first.
+//
 // Returns:
 //   - Assignment: The current assignment. Returns empty assignment if none received.
 func (m *Manager) CurrentAssignment() Assignment {

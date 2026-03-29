@@ -210,7 +210,7 @@ func (m *Manager) runHandoffResume(ctx context.Context) {
 //   - error: Any failure opening the bucket or listing/decoding entries
 func (m *Manager) InspectHandoffClaims(ctx context.Context) ([]HandoffClaim, error) {
 	if !m.cfg.EnableTwoPhaseHandoff {
-		return nil, errors.New("two-phase handoff is disabled")
+		return nil, types.ErrTwoPhaseHandoffDisabled
 	}
 	bucket := m.cfg.KVBuckets.HandoffBucket
 	if strings.TrimSpace(bucket) == "" {

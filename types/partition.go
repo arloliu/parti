@@ -103,8 +103,8 @@ func (p Partition) HashID() uint64 {
 		return 0
 	}
 	var h uint64
-	for _, k := range p.Keys {
-		if h == 0 {
+	for i, k := range p.Keys {
+		if i == 0 {
 			h = xxh3.HashString(k)
 			continue
 		}

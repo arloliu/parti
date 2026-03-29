@@ -69,6 +69,10 @@ var (
 
 	// ErrInvalidPreset is returned when an unrecognized preset name is passed to DegradedBehaviorPreset.
 	ErrInvalidPreset = errors.New("invalid degraded behavior preset")
+
+	// ErrTwoPhaseHandoffDisabled is returned when two-phase handoff operations are
+	// invoked but EnableTwoPhaseHandoff is not set in the configuration.
+	ErrTwoPhaseHandoffDisabled = errors.New("two-phase handoff is disabled")
 )
 
 // Calculator errors - Internal assignment calculator component errors.
