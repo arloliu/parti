@@ -143,6 +143,17 @@ func validateConfig(cfg *Config) error { //nolint:cyclop,gocyclo
 		return fmt.Errorf("invalid NATS mode: %s (must be one of: embedded, external)", cfg.NATS.Mode)
 	}
 
+	// Validate optional chaos worker bounds
+	if cfg.Chaos.MinWorkers < 0 {
+		return errors.New("chaos.min_workers cannot be negative")
+	}
+	if cfg.Chaos.MaxWorkers < 0 {
+		return errors.New("chaos.max_workers cannot be negative")
+	}
+	if cfg.Chaos.MinWorkers > 0 && cfg.Chaos.MaxWorkers > 0 && cfg.Chaos.MinWorkers > cfg.Chaos.MaxWorkers {
+		return errors.New("chaos.min_workers must be less than or equal to chaos.max_workers")
+	}
+
 	// Validate metrics
 	if cfg.Metrics.Prometheus.Enabled {
 		if cfg.Metrics.Prometheus.Port <= 0 || cfg.Metrics.Prometheus.Port > 65535 {

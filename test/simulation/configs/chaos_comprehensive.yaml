@@ -23,6 +23,8 @@ workers:
 chaos:
   enabled: true
   interval: "15s-25s"
+  min_workers: 8
+  max_workers: 14
   burst_enabled: true
   burst_probability: 0.3
   events:

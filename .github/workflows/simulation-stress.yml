@@ -31,6 +31,7 @@ jobs:
                   ./simulation \
                     --config test/simulation/configs/chaos_comprehensive.yaml \
                     --duration 15m \
+                    --cooldown 90s \
                     --stop-on-failure=false
 
             - name: Upload Failure Report

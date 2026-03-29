@@ -168,6 +168,11 @@ type ChaosConfig struct {
 	Events   []string `yaml:"events"`   // ["worker_crash", "worker_restart", ...]
 	Interval string   `yaml:"interval"` // "10-30m" (random between 10-30 minutes)
 
+	// MinWorkers and MaxWorkers bound worker count during chaos scale events in
+	// all-in-one mode. Values <= 0 disable the bound.
+	MinWorkers int `yaml:"min_workers"`
+	MaxWorkers int `yaml:"max_workers"`
+
 	// Burst mode: periodic rapid-fire events followed by quiet periods
 	BurstEnabled     bool    `yaml:"burst_enabled"`     // Enable variable intensity
 	BurstProbability float64 `yaml:"burst_probability"` // 0.0-1.0, default 0.2 (20%)

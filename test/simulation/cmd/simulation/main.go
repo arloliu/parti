@@ -40,6 +40,8 @@ var (
 	aioRegistry       *coordinator.GoroutineRegistry
 	aioWeights        []int64
 	aioScaleUpOnce    int
+	aioMinWorkers     int
+	aioMaxWorkers     int
 )
 
 // parseChaosInterval parses a chaos interval string like "10-30m" into min and max durations.
@@ -338,6 +340,8 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 	aioMetrics = metricsCollector
 	aioCheckpoint = checkpointMgr
 	aioRegistry = goroutineRegistry
+	aioMinWorkers = cfg.Chaos.MinWorkers
+	aioMaxWorkers = cfg.Chaos.MaxWorkers
 
 	// Create chaos controller if enabled
 	var chaosCtrl *coordinator.ChaosController
@@ -1052,6 +1056,20 @@ func handleGoroutineChaos( //nolint:cyclop,gocyclo
 			log.Println("[Chaos] Invalid count parameter for scale_down event")
 			return
 		}
+		if count <= 0 {
+			return
+		}
+		current := registry.GetActiveCount(coordinator.WorkerGoroutine)
+		minWorkers := max(aioMinWorkers, 0)
+		maxRemovable := current - minWorkers
+		if maxRemovable <= 0 {
+			log.Printf("[Chaos] Skipping scale_down: active=%d min_workers=%d", current, minWorkers)
+			return
+		}
+		if count > maxRemovable {
+			log.Printf("[Chaos] Clamping scale_down from %d to %d to respect min_workers=%d", count, maxRemovable, minWorkers)
+			count = maxRemovable
+		}
 		handleWorkerGoroutineScaleDown(count, registry, metricsCollector, checkpointMgr)
 
 	case coordinator.ScaleUpEvent:
@@ -1059,6 +1077,18 @@ func handleGoroutineChaos( //nolint:cyclop,gocyclo
 		count, ok := params["count"].(int)
 		if !ok || count <= 0 {
 			count = 1
+		}
+		if aioMaxWorkers > 0 {
+			current := registry.GetActiveCount(coordinator.WorkerGoroutine)
+			available := aioMaxWorkers - current
+			if available <= 0 {
+				log.Printf("[Chaos] Skipping scale_up: active=%d max_workers=%d", current, aioMaxWorkers)
+				return
+			}
+			if count > available {
+				log.Printf("[Chaos] Clamping scale_up from %d to %d to respect max_workers=%d", count, available, aioMaxWorkers)
+				count = available
+			}
 		}
 		spawned := 0
 		for i := 0; i < count; i++ {
