@@ -2,8 +2,9 @@
 
 > The `partition` package for application-level partitioning.
 
-> **Note:** For JetStream consumers, use the `consumer` package instead. The `partition.JSConsumer` has been moved to `internal/partition` and is no longer part of the public API.
-> is deprecated in favor of `consumer.Static`. See [Consumer Package](CONSUMERS.md).
+> **Note:** For JetStream consumers, use the `consumer` package instead.
+> `partition.JSConsumer` is no longer part of the public API in v2; use
+> `consumer.Static` for static JetStream consumption. See [Consumer Package](CONSUMERS.md).
 
 **Related Documentation:**
 - [Docs README](README.md) - Documentation map

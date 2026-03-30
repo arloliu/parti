@@ -1,7 +1,7 @@
 # Parti Documentation
 
-**Version**: 1.6.0
-**Last Updated**: January 27, 2026
+**Version**: 2.0.0
+**Last Updated**: March 30, 2026
 
 ---
 
@@ -46,7 +46,7 @@ mgr.Start(context.Background())
 | [Lifecycle](LIFECYCLE.md)                     | Worker states, stable IDs, two-phase handoff, degraded mode |
 | [Consumer Package](CONSUMERS.md)              | Queue, Static, Dynamic, Broadcast consumers                 |
 | [Strategies & Sources](STRATEGIES.md)         | Assignment strategies, partition sources                    |
-| [Static Partitioning](STATIC_PARTITIONING.md) | Key-based routing utilities (deprecated for consumers)      |
+| [Static Partitioning](STATIC_PARTITIONING.md) | Key-based routing plus static partition publisher/subscriber helpers |
 
 ### Reference
 

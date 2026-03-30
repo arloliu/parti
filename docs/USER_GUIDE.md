@@ -2,8 +2,8 @@
 
 > **Let's parti(tion), work, scale effortlessly**
 
-**Version**: 1.7.0
-**Last Updated**: January 27, 2026
+**Version**: 2.0.0
+**Last Updated**: March 30, 2026
 **Library**: `github.com/arloliu/parti/v2`
 
 ---
@@ -17,7 +17,7 @@ This user guide provides an introduction to Parti. For detailed documentation, s
 | [Architecture](ARCHITECTURE.md)                | System architecture, components, data flow       |
 | [Configuration Guide](CONFIGURATION.md)        | Configuration options, presets, tuning           |
 | [Lifecycle Guide](LIFECYCLE.md)                | Worker states, stable IDs, handoff, degraded mode|
-| [Consumer Helpers](CONSUMERS.md)               | WorkerConsumer, BroadcastConsumer, ProcessingGate|
+| [Consumer Helpers](CONSUMERS.md)               | Queue, Dynamic, Broadcast, and ProcessingGate helpers |
 | [Strategies & Sources](STRATEGIES.md)          | Assignment strategies, partition sources         |
 | [Static Partitioning](STATIC_PARTITIONING.md)  | The partition package for key-based routing      |
 | [Reference](REFERENCE.md)                      | Hooks, errors, best practices, glossary          |
@@ -96,20 +96,21 @@ See [Architecture Guide](ARCHITECTURE.md) for detailed documentation.
 ### Installation
 
 ```bash
-go get github.com/arloliu/parti
+go get github.com/arloliu/parti/v2
 ```
 
 ### Package Structure
 
 ```
-github.com/arloliu/parti
-├── parti          # Core: Manager, Config, types
-├── consumer       # Unified consumers: Queue, Static, Dynamic, Broadcast
-├── strategy       # Assignment strategies: ConsistentHash, RoundRobin
-├── source         # Partition sources: Static, NatsKV
-├── types          # Shared types: State, Hooks, Partition
-├── subscription   # (Deprecated) Use consumer package instead
-└── partition      # (Deprecated) Use consumer package instead
+github.com/arloliu/parti/v2    # Root package `parti`: Manager, Config, hooks, errors
+├── consumer                   # JetStream consumers: Queue, Static, Dynamic, Broadcast
+├── partition                  # Static partition routing and publisher/subscriber helpers
+├── strategy                   # Assignment strategies: ConsistentHash, RoundRobin
+├── source                     # Partition sources: Static, NatsKV
+├── types                      # Shared interfaces and metric contracts
+├── jsutil                     # JetStream helper utilities
+├── kvutil                     # Key-value helper utilities
+└── partitest                  # Test helpers for Parti-based systems
 ```
 
 ---
@@ -289,14 +290,14 @@ See [Lifecycle Guide](LIFECYCLE.md) for complete state documentation.
 
 **Order Processing System:**
 - 16 partitions by order ID hash
-- WorkerConsumer for order events
+- `consumer.Dynamic` for order events
 - Two-phase handoff for in-flight orders
 - ConsistentHash strategy for cache affinity
 
 **Multi-Tenant SaaS:**
 - Partitions per tenant
 - WeightedConsistentHash (large tenants = higher weight)
-- BroadcastConsumer for global config updates
+- `consumer.Broadcast` for global config updates
 
 **Real-Time Analytics:**
 - Time-window partitions

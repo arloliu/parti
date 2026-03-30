@@ -21,8 +21,8 @@
    - [Broadcast](#broadcast)
 4. [Message Handler](#message-handler)
 5. [Functional Options](#functional-options)
-6. [Migrating from Legacy Packages](#migrating-from-legacy-packages)
-7. [Legacy Packages (Deprecated)](#legacy-packages-deprecated)
+6. [Migrating from Legacy Consumer APIs](#migrating-from-legacy-consumer-apis)
+7. [Legacy Consumer APIs](#legacy-consumer-apis)
 
 ---
 
@@ -43,8 +43,9 @@ The `consumer` package provides a unified API for JetStream consumers in partiti
 import "github.com/arloliu/parti/v2/consumer"
 ```
 
-> **Migration Note:** The `consumer` package replaces the legacy `subscription` and `partition`
-> packages, which are now deprecated. See [Migrating from Legacy Packages](#migrating-from-legacy-packages).
+> **Migration Note:** The `consumer` package replaces the legacy `subscription`
+> package and the old `partition.JSConsumer` API. The `partition` package
+> remains public in v2 for static routing and publishing helpers.
 
 ---
 
@@ -354,9 +355,10 @@ c, _ := consumer.NewQueue(js, "stream", "consumer", "subject.>", handler,
 
 ---
 
-## Migrating from Legacy Packages
+## Migrating from Legacy Consumer APIs
 
-The `consumer` package replaces the legacy `subscription` and `partition` packages with a unified API.
+The `consumer` package unifies the legacy consumer APIs that previously lived in
+the `subscription` package and in `partition.JSConsumer`.
 
 ### subscription.WorkerConsumer → consumer.Dynamic
 
@@ -428,10 +430,12 @@ defer c.Stop(ctx)
 
 ---
 
-## Legacy Packages (Deprecated)
+## Legacy Consumer APIs
 
-> **Note:** The `subscription` and `partition` consumer APIs were removed in v2.
-> Use the `consumer` package instead. The functionality has been moved to `internal/durable`.
+> **Note:** The `subscription` package was removed in v2, and the old
+> `partition.JSConsumer` API was replaced by `consumer.Static`. The public
+> `partition` package still exists for static routing and publisher/subscriber
+> helpers.
 
 ### subscription Package
 
@@ -441,9 +445,11 @@ The `subscription` package provided `WorkerConsumer` and `BroadcastConsumer` for
 
 ### partition Package
 
-The `partition` package provided `JSConsumer` for static partitioning scenarios (e.g., StatefulSet ordinal-based assignment).
+The `partition` package previously exposed `JSConsumer` for static partitioning
+scenarios (for example, StatefulSet ordinal-based assignment).
 
-**Status:** Deprecated. Use `consumer.Static` instead.
+**Status:** `partition.JSConsumer` was removed. Use `consumer.Static` instead;
+other `partition` APIs remain supported.
 
 ### CompositeConsumerUpdater
 
