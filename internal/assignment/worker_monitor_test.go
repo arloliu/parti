@@ -122,11 +122,10 @@ func TestWorkerMonitor_DetectsWorkerDisappearance(t *testing.T) {
 	}()
 
 	// Wait for initial detection
-	time.Sleep(100 * time.Millisecond)
+	require.Eventually(t, func() bool {
+		return callCount.Load() > 0
+	}, 1*time.Second, 25*time.Millisecond, "onChange should be called for the initial worker")
 	initialCalls := callCount.Load()
-
-	// Let the heartbeat expire (TTL = 200ms)
-	time.Sleep(300 * time.Millisecond)
 
 	// Should detect disappearance
 	require.Eventually(t, func() bool {

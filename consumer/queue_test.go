@@ -224,24 +224,15 @@ func TestQueue_ReceivesMessages(t *testing.T) {
 	require.NoError(t, q.Start(ctx))
 	t.Cleanup(func() { _ = q.Stop(ctx) })
 
-	// Wait for consumer to be ready
-	time.Sleep(100 * time.Millisecond)
-
 	// Publish messages
 	for i := 0; i < 5; i++ {
 		require.NoError(t, nc.Publish("qmsg.events", []byte("msg")))
 	}
 	_ = nc.Flush()
 
-	// Wait for messages to be handled
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if atomic.LoadInt32(&handled) >= 5 {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	require.GreaterOrEqual(t, atomic.LoadInt32(&handled), int32(5))
+	require.Eventually(t, func() bool {
+		return atomic.LoadInt32(&handled) >= 5
+	}, 5*time.Second, 50*time.Millisecond)
 }
 
 func TestQueue_DoubleStartFails(t *testing.T) {
@@ -315,20 +306,11 @@ func TestQueue_ManualAck(t *testing.T) {
 	require.NoError(t, q.Start(ctx))
 	t.Cleanup(func() { _ = q.Stop(ctx) })
 
-	// Wait for consumer to be ready
-	time.Sleep(100 * time.Millisecond)
-
 	// Publish a message
 	require.NoError(t, nc.Publish("manual.events", []byte("msg")))
 	_ = nc.Flush()
 
-	// Wait for message to be handled
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if atomic.LoadInt32(&handled) >= 1 {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	require.GreaterOrEqual(t, atomic.LoadInt32(&handled), int32(1))
+	require.Eventually(t, func() bool {
+		return atomic.LoadInt32(&handled) >= 1
+	}, 5*time.Second, 50*time.Millisecond)
 }

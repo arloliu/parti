@@ -11,6 +11,19 @@ import (
 	"github.com/arloliu/parti/v2/partitest"
 )
 
+func requireHeartbeatEntry(t *testing.T, kv jetstream.KeyValue, key string, wait time.Duration) jetstream.KeyValueEntry {
+	t.Helper()
+
+	var entry jetstream.KeyValueEntry
+	require.Eventually(t, func() bool {
+		var err error
+		entry, err = kv.Get(t.Context(), key)
+		return err == nil && entry != nil && len(entry.Value()) > 0
+	}, wait, 25*time.Millisecond, "heartbeat %s should be published", key)
+
+	return entry
+}
+
 func TestPublisher_SetWorkerID(t *testing.T) {
 	t.Run("sets worker ID successfully", func(t *testing.T) {
 		_, nc := partitest.StartEmbeddedNATS(t)
@@ -125,10 +138,8 @@ func TestPublisher_Stop(t *testing.T) {
 		require.True(t, publisher.IsStarted())
 
 		// Verify heartbeat is actually being published after restart
-		time.Sleep(250 * time.Millisecond)
 		key := fmt.Sprintf("worker-hb.%s", "worker-1")
-		entry, err := kv.Get(ctx, key)
-		require.NoError(t, err)
+		entry := requireHeartbeatEntry(t, kv, key, 500*time.Millisecond)
 		require.NotEmpty(t, entry.Value())
 
 		require.NoError(t, publisher.Stop())
@@ -150,27 +161,25 @@ func TestPublisher_PeriodicHeartbeats(t *testing.T) {
 		require.NoError(t, err)
 		defer func() { _ = publisher.Stop() }()
 
-		// Wait for a few heartbeats
-		time.Sleep(350 * time.Millisecond)
-
-		// Get the heartbeat
-		entry, err := kv.Get(ctx, "worker-hb.worker-1")
-		require.NoError(t, err)
-		require.NotNil(t, entry)
-
-		// Parse the timestamp
-		firstTimestamp, err := time.Parse(time.RFC3339Nano, string(entry.Value()))
+		firstEntry := requireHeartbeatEntry(t, kv, "worker-hb.worker-1", 500*time.Millisecond)
+		firstTimestamp, err := time.Parse(time.RFC3339Nano, string(firstEntry.Value()))
 		require.NoError(t, err)
 
-		// Wait for another heartbeat
-		time.Sleep(150 * time.Millisecond)
+		var secondTimestamp time.Time
+		require.Eventually(t, func() bool {
+			entry := requireHeartbeatEntry(t, kv, "worker-hb.worker-1", 200*time.Millisecond)
+			parsed, parseErr := time.Parse(time.RFC3339Nano, string(entry.Value()))
+			if parseErr != nil {
+				return false
+			}
+			if !parsed.After(firstTimestamp) {
+				return false
+			}
 
-		// Get updated heartbeat
-		entry, err = kv.Get(ctx, "worker-hb.worker-1")
-		require.NoError(t, err)
+			secondTimestamp = parsed
 
-		secondTimestamp, err := time.Parse(time.RFC3339Nano, string(entry.Value()))
-		require.NoError(t, err)
+			return true
+		}, 500*time.Millisecond, 25*time.Millisecond, "heartbeat timestamp should advance")
 
 		// Second timestamp should be after first
 		require.True(t, secondTimestamp.After(firstTimestamp))
@@ -235,14 +244,10 @@ func TestPublisher_MultipleWorkers(t *testing.T) {
 			require.NoError(t, err)
 		}
 
-		// Wait for heartbeats
-		time.Sleep(200 * time.Millisecond)
-
 		// Verify all heartbeats exist
 		for i := range publishers {
 			key := fmt.Sprintf("worker-hb.worker-%d", i+1)
-			entry, err := kv.Get(ctx, key)
-			require.NoError(t, err)
+			entry := requireHeartbeatEntry(t, kv, key, 500*time.Millisecond)
 			require.NotNil(t, entry)
 		}
 

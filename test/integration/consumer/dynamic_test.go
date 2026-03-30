@@ -200,20 +200,26 @@ func TestDynamic_PartitionContraction(t *testing.T) {
 	require.NoError(t, dc.Update(ctx, "worker-1", []types.Partition{
 		{Keys: []string{"a"}},
 	}))
-	time.Sleep(1 * time.Second) // Wait for b to be torn down
 
 	receivedA.Store(0)
 	receivedB.Store(0)
 
-	// Publish to both -- only a should be received
-	_, err = js.Publish(ctx, "dyncon.a", []byte("after-contract"))
-	require.NoError(t, err)
+	// Give the consumer enough time to shut down b's goroutine
+	// before publishing, so we can assert b doesn't receive.
+	require.Eventually(t, func() bool {
+		// Publish to a and verify it's still working — this also
+		// gives b's consumer time to be torn down.
+		_, pubErr := js.Publish(ctx, "dyncon.a", []byte("after-contract"))
+		if pubErr != nil {
+			return false
+		}
+		return receivedA.Load() >= 1
+	}, 5*time.Second, 200*time.Millisecond, "partition a should still receive messages")
+
+	// Now publish to b and verify it does NOT receive (consumer was torn down)
 	_, err = js.Publish(ctx, "dyncon.b", []byte("should-not-receive"))
 	require.NoError(t, err)
 
-	require.Eventually(t, func() bool {
-		return receivedA.Load() >= 1
-	}, 5*time.Second, 50*time.Millisecond, "partition a should still receive messages")
 	require.Never(t, func() bool {
 		return receivedB.Load() > 0
 	}, 1*time.Second, 50*time.Millisecond, "partition b should NOT receive messages after removal")
@@ -274,22 +280,15 @@ func TestDynamic_ManagerIntegration(t *testing.T) {
 	workerID := mgr.WorkerID()
 	require.NotEmpty(t, workerID)
 
-	// Wait for assignment to propagate
-	time.Sleep(2 * time.Second)
-
 	// Publish to assigned partitions
 	_, err = js.Publish(ctx, "dynmgr.x", []byte("mgr-x"))
 	require.NoError(t, err)
 	_, err = js.Publish(ctx, "dynmgr.y", []byte("mgr-y"))
 	require.NoError(t, err)
 
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if received.Load() >= 2 {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	require.Eventually(t, func() bool {
+		return received.Load() >= 2
+	}, 10*time.Second, 50*time.Millisecond)
 
 	require.GreaterOrEqual(t, received.Load(), int32(2),
 		"dynamic consumer should receive messages via manager assignment")
@@ -349,9 +348,9 @@ func TestDynamic_StopAllPartitions(t *testing.T) {
 	_, err = js.Publish(ctx, "dynstop.b", []byte("after"))
 	require.NoError(t, err)
 
-	time.Sleep(1 * time.Second)
-
-	require.Equal(t, beforeStop, received.Load(), "no messages after stop")
+	require.Never(t, func() bool {
+		return received.Load() != beforeStop
+	}, 1*time.Second, 25*time.Millisecond, "no messages after stop")
 }
 
 // TestDynamic_ConcurrentUpdateConvergence verifies that multiple concurrent
@@ -479,21 +478,22 @@ func TestDynamic_WithDrainOnRemove(t *testing.T) {
 		{Keys: []string{"a"}},
 	}))
 
-	// Wait for drain to complete
-	time.Sleep(1 * time.Second)
-
-	// Verify a still works, b is stopped
+	// Verify a still works, b is stopped.
+	// Use Eventually for a to absorb any brief teardown delay.
 	receivedA.Store(0)
 	receivedB.Store(0)
 
-	_, err = js.Publish(ctx, "dyndrain.a", []byte("after"))
-	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		_, pubErr := js.Publish(ctx, "dyndrain.a", []byte("after"))
+		if pubErr != nil {
+			return false
+		}
+		return receivedA.Load() >= 1
+	}, 5*time.Second, 200*time.Millisecond, "partition a should still be active")
+
+	// Publish to b and verify it does NOT receive (drained and stopped)
 	_, err = js.Publish(ctx, "dyndrain.b", []byte("should-not"))
 	require.NoError(t, err)
-
-	require.Eventually(t, func() bool {
-		return receivedA.Load() >= 1
-	}, 5*time.Second, 50*time.Millisecond, "partition a should still be active")
 
 	require.Never(t, func() bool {
 		return receivedB.Load() > 0

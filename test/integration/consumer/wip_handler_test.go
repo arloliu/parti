@@ -81,10 +81,9 @@ func TestWIPHandler_PreventsRedelivery(t *testing.T) {
 		t.Fatal("processing did not complete in time")
 	}
 
-	// Give time for potential redelivery (should not happen)
-	time.Sleep(500 * time.Millisecond)
-
-	require.Equal(t, int32(1), processCount.Load(),
+	require.Never(t, func() bool {
+		return processCount.Load() != int32(1)
+	}, 500*time.Millisecond, 25*time.Millisecond,
 		"message should be processed exactly once with WIP heartbeats")
 }
 
@@ -143,9 +142,9 @@ func TestWIPHandler_WithQueueConsumer(t *testing.T) {
 		t.Fatal("processing did not complete in time")
 	}
 
-	time.Sleep(500 * time.Millisecond)
-
-	require.Equal(t, int32(1), processCount.Load(),
+	require.Never(t, func() bool {
+		return processCount.Load() != int32(1)
+	}, 500*time.Millisecond, 25*time.Millisecond,
 		"message should be processed exactly once with WIP heartbeats on Queue consumer")
 }
 

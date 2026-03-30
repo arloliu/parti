@@ -116,7 +116,9 @@ func TestWIPHandler_ContextCancellation(t *testing.T) {
 	}()
 
 	<-handlerStarted
-	time.Sleep(60 * time.Millisecond) // Allow some heartbeats
+	require.Eventually(t, func() bool {
+		return msg.inProgressCalls.Load() >= 1
+	}, 200*time.Millisecond, 10*time.Millisecond, "expected at least one heartbeat before cancel")
 	cancel()
 
 	err := <-errCh

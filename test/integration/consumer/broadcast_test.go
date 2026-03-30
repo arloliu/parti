@@ -189,9 +189,9 @@ func TestBroadcast_StopPreventsDelivery(t *testing.T) {
 		require.NoError(t, nc.Publish("bcs.test.events", []byte("msg2")))
 	}
 	require.NoError(t, nc.Flush())
-	time.Sleep(500 * time.Millisecond)
-
-	require.Equal(t, beforeStop, handled.Load(), "no messages should be handled after stop")
+	require.Never(t, func() bool {
+		return handled.Load() != beforeStop
+	}, 500*time.Millisecond, 25*time.Millisecond, "no messages should be handled after stop")
 }
 
 // TestBroadcast_TwoInstancesFanOut verifies that two Broadcast consumers with

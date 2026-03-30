@@ -133,9 +133,9 @@ func TestStatic_StopPreventsDelivery(t *testing.T) {
 		_, err = js.Publish(ctx, "sts.0", []byte("after-stop"))
 		require.NoError(t, err)
 	}
-	time.Sleep(500 * time.Millisecond)
-
-	require.Equal(t, beforeStop, handled.Load(), "no messages after stop")
+	require.Never(t, func() bool {
+		return handled.Load() != beforeStop
+	}, 500*time.Millisecond, 25*time.Millisecond, "no messages after stop")
 }
 
 // TestStatic_MultiplePartitions verifies that Static consumers for different

@@ -220,20 +220,17 @@ func TestCalculator_WorkerMonitoring(t *testing.T) {
 		_, err = heartbeatKV.Put(ctx, "worker-hb.worker-2", []byte(time.Now().Format(time.RFC3339Nano)))
 		require.NoError(t, err)
 
-		// Wait for monitoring cycle to detect change (TTL/2 + processing = 1s + margin)
-		time.Sleep(1200 * time.Millisecond)
+		// Version should increase due to rebalance and both workers should receive assignments.
+		require.Eventually(t, func() bool {
+			if calc.CurrentVersion() <= initialVersion {
+				return false
+			}
 
-		// Version should increase due to rebalance
-		require.Greater(t, calc.CurrentVersion(), initialVersion)
+			entry1, err1 := assignmentKV.Get(ctx, "assignment.worker-1")
+			entry2, err2 := assignmentKV.Get(ctx, "assignment.worker-2")
 
-		// Verify both workers got assignments
-		entry1, err := assignmentKV.Get(ctx, "assignment.worker-1")
-		require.NoError(t, err)
-		require.NotNil(t, entry1)
-
-		entry2, err := assignmentKV.Get(ctx, "assignment.worker-2")
-		require.NoError(t, err)
-		require.NotNil(t, entry2)
+			return err1 == nil && entry1 != nil && err2 == nil && entry2 != nil
+		}, 1500*time.Millisecond, 25*time.Millisecond, "rebalance should publish assignments for both workers")
 	})
 }
 
@@ -288,11 +285,10 @@ func TestCalculator_CooldownPreventsRebalancing(t *testing.T) {
 		_, err = heartbeatKV.Put(ctx, "worker-hb.worker-2", []byte(time.Now().Format(time.RFC3339Nano)))
 		require.NoError(t, err)
 
-		// Wait for monitoring cycle (TTL/2 + margin = 1s + 200ms)
-		time.Sleep(1200 * time.Millisecond)
-
-		// Version should NOT change due to cooldown
-		require.Equal(t, initialVersion, calc.CurrentVersion())
+		// Version should NOT change during the first monitoring cycle due to cooldown.
+		require.Never(t, func() bool {
+			return calc.CurrentVersion() > initialVersion
+		}, 1200*time.Millisecond, 25*time.Millisecond, "version should not change while cooldown is active")
 	})
 }
 
@@ -571,19 +567,22 @@ func TestCalculator_Stop_PreserveAssignments(t *testing.T) {
 	err = calc.Start(ctx)
 	require.NoError(t, err)
 
-	// Wait a bit for initial assignment to complete
-	time.Sleep(200 * time.Millisecond)
-
-	// Verify assignments exist in KV
-	keys, err := assignmentKV.Keys(ctx)
-	require.NoError(t, err)
-	assignmentKeysCount := 0
-	for _, key := range keys {
-		if key == "assignment.w1" || key == "assignment.w2" || key == "assignment.w3" {
-			assignmentKeysCount++
+	// Verify assignments exist in KV.
+	require.Eventually(t, func() bool {
+		keys, err := assignmentKV.Keys(ctx)
+		if err != nil {
+			return false
 		}
-	}
-	require.Equal(t, 3, assignmentKeysCount, "expected 3 workers to have assignments")
+
+		assignmentKeysCount := 0
+		for _, key := range keys {
+			if key == "assignment.w1" || key == "assignment.w2" || key == "assignment.w3" {
+				assignmentKeysCount++
+			}
+		}
+
+		return assignmentKeysCount == 3
+	}, 1*time.Second, 25*time.Millisecond, "expected 3 workers to have assignments")
 
 	t.Log("Verified: Assignments exist before Stop()")
 

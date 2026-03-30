@@ -98,7 +98,7 @@ func TestIntegration_K8sRollingUpdate_PreservesAssignments(t *testing.T) {
 		startWait := time.Now()
 		stabilized := false
 		for time.Since(startWait) < maxWaitTime {
-			time.Sleep(250 * time.Millisecond)
+			time.Sleep(250 * time.Millisecond) // intentional: polling interval for partition coverage check
 			uniqDuring := make(map[string]struct{})
 			// Only count workers from original slice (0 to originalWorkerCount-1)
 			for j := 0; j < originalWorkerCount; j++ {
@@ -132,8 +132,8 @@ func TestIntegration_K8sRollingUpdate_PreservesAssignments(t *testing.T) {
 		// Truncate to remove the duplicate
 		cluster.Workers = cluster.Workers[:originalWorkerCount]
 
-		// Brief settle time after replacement
-		time.Sleep(2 * time.Second)
+		// Wait for the replacement worker set to stabilize before the next step.
+		cluster.WaitForStableState(10 * time.Second)
 	}
 
 	t.Log("Rolling update complete, waiting for final stabilization...")
@@ -452,7 +452,7 @@ func TestIntegration_HighChurn_SystemStable(t *testing.T) { //nolint:cyclop
 
 	// Wait for final stabilization
 	t.Log("Churn complete, waiting for final stabilization...")
-	time.Sleep(10 * time.Second)
+	cluster.WaitForStableState(20 * time.Second)
 
 	// Final verification (unique partitions across workers)
 	afterAssignments := make(map[string][]types.Partition)
@@ -575,7 +575,7 @@ func TestIntegration_MassWorkerFailure_Recovers(t *testing.T) {
 		newWorkers[i] = mgr
 		t.Logf("Restarted worker %s", mgr.WorkerID())
 
-		// Wait a bit between restarts (simulate gradual recovery)
+		// intentional: simulate gradual recovery by spacing out restarts
 		time.Sleep(2 * time.Second)
 	}
 
@@ -658,14 +658,22 @@ func TestIntegration_LeaderFailover_DuringRebalance(t *testing.T) {
 
 	// Add 3 new workers to trigger rebalancing
 	t.Log("Adding 3 new workers to trigger rebalancing...")
+	initialVersion := leaderMgr.CurrentAssignment().Version
 	for i := 0; i < 3; i++ {
 		mgr := cluster.AddWorker(ctx)
 		err := mgr.Start(ctx)
 		require.NoError(t, err)
 	}
 
-	// Wait briefly for rebalancing to start
-	time.Sleep(3 * time.Second)
+	// Wait for leader to notice the new workers. With fast config the leader may
+	// complete the rebalance so quickly that it returns to Stable before we can
+	// observe the transient Scaling/Rebalancing state. Accept a version bump as
+	// evidence that the new workers were detected and rebalancing was initiated.
+	require.Eventually(t, func() bool {
+		s := leaderMgr.State()
+		v := leaderMgr.CurrentAssignment().Version
+		return s == types.StateScaling || s == types.StateRebalancing || v > initialVersion
+	}, 10*time.Second, 100*time.Millisecond, "leader should detect new workers and begin rebalancing")
 
 	// Stop the leader during rebalancing
 	t.Logf("Stopping leader %s during rebalancing...", leaderID)
@@ -677,21 +685,31 @@ func TestIntegration_LeaderFailover_DuringRebalance(t *testing.T) {
 	// Remove stopped leader from cluster
 	cluster.Workers = append(cluster.Workers[:leaderIdx], cluster.Workers[leaderIdx+1:]...)
 	cluster.StateTrackers = append(cluster.StateTrackers[:leaderIdx], cluster.StateTrackers[leaderIdx+1:]...)
+	if leaderIdx < len(cluster.AssignmentTrackers) {
+		cluster.AssignmentTrackers = append(cluster.AssignmentTrackers[:leaderIdx], cluster.AssignmentTrackers[leaderIdx+1:]...)
+	}
+	if leaderIdx < len(cluster.LeadershipTrackers) {
+		cluster.LeadershipTrackers = append(cluster.LeadershipTrackers[:leaderIdx], cluster.LeadershipTrackers[leaderIdx+1:]...)
+	}
 
 	t.Log("Leader stopped, waiting for new leader election...")
-
-	// Wait for new leader election and rebalancing completion
-	time.Sleep(15 * time.Second)
 
 	// Verify new leader exists
 	newLeaderCount := 0
 	var newLeaderID string
-	for _, mgr := range cluster.Workers {
-		if mgr.IsLeader() {
-			newLeaderID = mgr.WorkerID()
-			newLeaderCount++
+	require.Eventually(t, func() bool {
+		newLeaderCount = 0
+		newLeaderID = ""
+		for _, mgr := range cluster.Workers {
+			if mgr.IsLeader() {
+				newLeaderID = mgr.WorkerID()
+				newLeaderCount++
+			}
 		}
-	}
+
+		return newLeaderCount == 1 && newLeaderID != "" && newLeaderID != leaderID
+	}, 20*time.Second, 100*time.Millisecond, "expected exactly one new leader after failover")
+
 	require.Equal(t, 1, newLeaderCount, "expected exactly one new leader")
 	require.NotEmpty(t, newLeaderID, "expected new leader to be identified")
 	require.NotEqual(t, leaderID, newLeaderID, "expected different leader")
@@ -702,15 +720,23 @@ func TestIntegration_LeaderFailover_DuringRebalance(t *testing.T) {
 	cluster.WaitForStableState(20 * time.Second)
 	t.Log("System stabilized")
 
-	// Verify all partitions are assigned (unique across workers)
+	// Verify all partitions are assigned (unique across workers).
 	uniq := make(map[string]struct{})
-	for _, mgr := range cluster.Workers {
-		assignment := mgr.CurrentAssignment()
-		for _, p := range assignment.Partitions {
-			if id := p.ID(); id != "" {
-				uniq[id] = struct{}{}
+	require.Eventually(t, func() bool {
+		uniq = make(map[string]struct{})
+		for _, mgr := range cluster.Workers {
+			assignment := mgr.CurrentAssignment()
+			for _, p := range assignment.Partitions {
+				if id := p.ID(); id != "" {
+					uniq[id] = struct{}{}
+				}
 			}
 		}
+
+		return len(uniq) == 50
+	}, 5*time.Second, 100*time.Millisecond, "expected all 50 partitions assigned after failover")
+	for _, mgr := range cluster.Workers {
+		assignment := mgr.CurrentAssignment()
 		t.Logf("Worker %s: %d partitions", mgr.WorkerID(), len(assignment.Partitions))
 	}
 	require.Equal(t, 50, len(uniq), "expected all 50 partitions assigned after failover")
@@ -782,18 +808,12 @@ func TestScenario_RapidScaling_StabilizationWindows(t *testing.T) {
 		}(mgr, i+3)
 	}
 
-	// Small wait to ensure all workers have started
-	time.Sleep(500 * time.Millisecond)
 	scaleEnd := time.Now()
 	t.Logf("Added 7 workers in %v", scaleEnd.Sub(scaleStart))
 
-	// Wait for PlannedScaleWindow to expire (3s window + margin)
-	t.Log("Waiting for planned scale stabilization window (3s + margin)")
-	time.Sleep(4 * time.Second)
-
-	// Now wait for rebalance to complete
-	t.Log("Waiting for rebalance to complete")
-	time.Sleep(3 * time.Second)
+	// Wait for the burst scale-up to converge.
+	t.Log("Waiting for planned scale stabilization and rebalance")
+	cluster.WaitForStableState(15 * time.Second)
 
 	// Get final version
 	leader = cluster.GetLeader()
@@ -870,9 +890,17 @@ func TestScenario_SlowHeartbeats_NearExpiryBoundary(t *testing.T) {
 	initialVersion := cluster.GetLeader().CurrentAssignment().Version
 	t.Logf("Initial cluster stable, version %d", initialVersion)
 
-	// Wait and observe that no emergency is triggered despite slow network
+	// Observe that no emergency is triggered despite slow network.
 	t.Log("Observing system for 15 seconds (5 heartbeat intervals)")
-	time.Sleep(15 * time.Second)
+	require.Never(t, func() bool {
+		leader := cluster.GetLeader()
+		if leader == nil {
+			return true
+		}
+
+		return leader.CurrentAssignment().Version != initialVersion
+	}, 15*time.Second, 100*time.Millisecond,
+		"no rebalance should occur with slow but valid heartbeats")
 
 	// Verify no emergency rebalance occurred
 	finalVersion := cluster.GetLeader().CurrentAssignment().Version
@@ -933,24 +961,27 @@ func TestScenario_ConcurrentLeaderElection_RaceCondition(t *testing.T) {
 		}(mgr, i)
 	}
 
-	// Wait a bit for all workers to start attempting election
-	time.Sleep(500 * time.Millisecond)
 	t.Log("All workers started, waiting for election to resolve")
 
-	// Wait for election to resolve
-	t.Log("Waiting for leader election to resolve (10 seconds)")
-	time.Sleep(10 * time.Second)
-
 	// Verify exactly one leader
-	leader := cluster.GetLeader()
-	require.NotNil(t, leader, "should have exactly one leader")
-
 	leaderCount := 0
-	for _, worker := range cluster.Workers {
-		if worker.IsLeader() {
-			leaderCount++
+	var leader *parti.Manager
+	require.Eventually(t, func() bool {
+		leader = cluster.GetLeader()
+		if leader == nil {
+			return false
 		}
-	}
+
+		leaderCount = 0
+		for _, worker := range cluster.Workers {
+			if worker.IsLeader() {
+				leaderCount++
+			}
+		}
+
+		return leaderCount == 1
+	}, 10*time.Second, 100*time.Millisecond, "should have exactly one leader, not multiple")
+	require.NotNil(t, leader, "should have exactly one leader")
 	require.Equal(t, 1, leaderCount, "should have exactly one leader, not multiple")
 
 	t.Logf("Leader elected: %s", leader.WorkerID())

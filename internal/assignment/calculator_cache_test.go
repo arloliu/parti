@@ -56,24 +56,30 @@ func TestCalculator_CacheFallback_ConnectivityError(t *testing.T) {
 		_ = calc.Stop(ctx)
 	}()
 
-	// Wait for initial assignment to complete
-	time.Sleep(300 * time.Millisecond)
-
-	// Verify cache is populated
-	cached, age, ok := calc.getCachedWorkers()
-	require.True(t, ok, "cache should be populated after successful fetch")
-	require.Len(t, cached, 3)
-	require.Less(t, age, 1*time.Second)
+	// Verify cache is populated.
+	require.Eventually(t, func() bool {
+		cached, age, ok := calc.getCachedWorkers()
+		return ok && len(cached) == 3 && age < 1*time.Second
+	}, 1*time.Second, 25*time.Millisecond, "cache should be populated after successful fetch")
 
 	// Close NATS connection to simulate connectivity error
 	ncConn.Close()
 
-	// Wait a bit to ensure connection is closed
-	time.Sleep(100 * time.Millisecond)
-
 	// Try to fetch workers - should fall back to cache
-	workers, err := calc.getActiveWorkers(ctx)
-	require.NoError(t, err, "should use cache when connectivity error occurs")
+	var workers []string
+	require.Eventually(t, func() bool {
+		fetched, err := calc.getActiveWorkers(ctx)
+		if err != nil {
+			return false
+		}
+		if len(fetched) != 3 {
+			return false
+		}
+
+		workers = fetched
+
+		return true
+	}, 1*time.Second, 25*time.Millisecond, "should use cache when connectivity error occurs")
 	require.Len(t, workers, 3, "should return cached workers")
 	require.ElementsMatch(t, initialWorkers, workers)
 }
@@ -115,13 +121,15 @@ func TestCalculator_CacheFallback_NoCacheAvailable(t *testing.T) {
 	// Close NATS connection to simulate connectivity error
 	ncConn.Close()
 
-	// Wait a bit to ensure connection is closed
-	time.Sleep(100 * time.Millisecond)
-
 	// Try to fetch workers - should return ErrDegraded
-	workers, err := calc.getActiveWorkers(ctx)
-	require.Error(t, err, "should return error when no cache available")
-	require.True(t, errors.Is(err, types.ErrDegraded), "should return ErrDegraded")
+	var workers []string
+	var gotErr error
+	require.Eventually(t, func() bool {
+		workers, gotErr = calc.getActiveWorkers(ctx)
+		return errors.Is(gotErr, types.ErrDegraded)
+	}, 1*time.Second, 25*time.Millisecond, "should return ErrDegraded when no cache is available")
+	require.Error(t, gotErr, "should return error when no cache available")
+	require.True(t, errors.Is(gotErr, types.ErrDegraded), "should return ErrDegraded")
 	require.Nil(t, workers)
 }
 
@@ -178,13 +186,16 @@ func TestCalculator_CacheUpdate_OnSuccess(t *testing.T) {
 	_, err = heartbeatKV.Put(ctx, "worker-hb.worker-3", []byte("active"))
 	require.NoError(t, err)
 
-	// Wait a moment
-	time.Sleep(50 * time.Millisecond)
-
 	// Fetch workers again - should update cache
-	workers, err = calc.getActiveWorkers(ctx)
-	require.NoError(t, err)
-	require.Len(t, workers, 3)
+	require.Eventually(t, func() bool {
+		workers, err = calc.getActiveWorkers(ctx)
+		if err != nil || len(workers) != 3 {
+			return false
+		}
+
+		cached2, age2, ok2 := calc.getCachedWorkers()
+		return ok2 && len(cached2) == 3 && age2 < 1*time.Second
+	}, 1*time.Second, 25*time.Millisecond, "cache should update after a successful fetch")
 
 	// Verify cache was updated with new data
 	cached2, age2, ok2 := calc.getCachedWorkers()

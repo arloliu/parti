@@ -72,9 +72,9 @@ func TestQueue_StartStopMessages(t *testing.T) {
 
 	_, err = js.Publish(ctx, "q.events", []byte("after-stop"))
 	require.NoError(t, err)
-	time.Sleep(500 * time.Millisecond)
-
-	require.Equal(t, int32(5), received.Load(), "no messages should be received after stop")
+	require.Never(t, func() bool {
+		return received.Load() != int32(5)
+	}, 500*time.Millisecond, 25*time.Millisecond, "no messages should be received after stop")
 }
 
 // TestQueue_LoadBalanceAcrossInstances verifies that two Queue consumers sharing

@@ -193,7 +193,7 @@ func TestRefreshPartitions_Cooldown(t *testing.T) {
 	require.NoError(t, err, "First RefreshPartitions failed")
 	t.Log("First RefreshPartitions() succeeded")
 
-	time.Sleep(100 * time.Millisecond) // Brief delay to ensure first call processed
+	time.Sleep(100 * time.Millisecond) // intentional: ensure first RefreshPartitions call is processed before second
 
 	refreshCtx2, cancel2 := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel2()

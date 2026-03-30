@@ -162,15 +162,17 @@ func (st *StateTracker) GetStates() []types.State {
 
 // WorkerCluster manages a cluster of workers for testing.
 type WorkerCluster struct {
-	Workers       []*parti.Manager
-	StateTrackers []*StateTracker
-	Config        parti.Config
-	Source        types.PartitionSource
-	Strategy      types.AssignmentStrategy
-	NC            *nats.Conn
-	JS            jetstream.JetStream
-	T             *testing.T
-	mu            sync.RWMutex // Protects Workers and StateTrackers
+	Workers            []*parti.Manager
+	StateTrackers      []*StateTracker
+	AssignmentTrackers []*AssignmentTracker
+	LeadershipTrackers []*LeadershipTracker
+	Config             parti.Config
+	Source             types.PartitionSource
+	Strategy           types.AssignmentStrategy
+	NC                 *nats.Conn
+	JS                 jetstream.JetStream
+	T                  *testing.T
+	mu                 sync.RWMutex // Protects Workers and trackers
 }
 
 // NewWorkerCluster creates a new worker cluster for testing.
@@ -183,14 +185,16 @@ func NewWorkerCluster(t *testing.T, nc *nats.Conn, numPartitions int) *WorkerClu
 	require.NoError(t, err, "failed to init jetstream context")
 
 	return &WorkerCluster{
-		Workers:       make([]*parti.Manager, 0),
-		StateTrackers: make([]*StateTracker, 0),
-		Config:        cfg,
-		Source:        src,
-		Strategy:      assignmentStrategy,
-		NC:            nc,
-		JS:            js,
-		T:             t,
+		Workers:            make([]*parti.Manager, 0),
+		StateTrackers:      make([]*StateTracker, 0),
+		AssignmentTrackers: make([]*AssignmentTracker, 0),
+		LeadershipTrackers: make([]*LeadershipTracker, 0),
+		Config:             cfg,
+		Source:             src,
+		Strategy:           assignmentStrategy,
+		NC:                 nc,
+		JS:                 js,
+		T:                  t,
 	}
 }
 
@@ -205,14 +209,16 @@ func NewFastWorkerCluster(t *testing.T, nc *nats.Conn, numPartitions int) *Worke
 	require.NoError(t, err, "failed to init jetstream context")
 
 	return &WorkerCluster{
-		Workers:       make([]*parti.Manager, 0),
-		StateTrackers: make([]*StateTracker, 0),
-		Config:        cfg,
-		Source:        src,
-		Strategy:      assignmentStrategy,
-		NC:            nc,
-		JS:            js,
-		T:             t,
+		Workers:            make([]*parti.Manager, 0),
+		StateTrackers:      make([]*StateTracker, 0),
+		AssignmentTrackers: make([]*AssignmentTracker, 0),
+		LeadershipTrackers: make([]*LeadershipTracker, 0),
+		Config:             cfg,
+		Source:             src,
+		Strategy:           assignmentStrategy,
+		NC:                 nc,
+		JS:                 js,
+		T:                  t,
 	}
 }
 
@@ -236,14 +242,22 @@ func (wc *WorkerCluster) AddWorker(ctx context.Context, opts ...types.Logger) *p
 	defer wc.mu.Unlock()
 
 	workerIdx := len(wc.Workers)
-	tracker := CreateStateTracker(wc.T, workerIdx)
-	wc.StateTrackers = append(wc.StateTrackers, tracker)
-	// Ensure we stop logging state transitions once the test ends to avoid panics
-	// from goroutines attempting to log after test completion.
-	wc.T.Cleanup(func() { tracker.Close() })
+	stateTracker := CreateStateTracker(wc.T, workerIdx)
+	wc.StateTrackers = append(wc.StateTrackers, stateTracker)
+	wc.T.Cleanup(func() { stateTracker.Close() })
+
+	assignmentTracker := CreateAssignmentTracker(wc.T, workerIdx)
+	wc.AssignmentTrackers = append(wc.AssignmentTrackers, assignmentTracker)
+	wc.T.Cleanup(func() { assignmentTracker.Close() })
+
+	leadershipTracker := CreateLeadershipTracker(wc.T, workerIdx)
+	wc.LeadershipTrackers = append(wc.LeadershipTrackers, leadershipTracker)
+	wc.T.Cleanup(func() { leadershipTracker.Close() })
 
 	hooks := &parti.Hooks{
-		OnStateChanged: tracker.Hook(),
+		OnStateChanged:      stateTracker.Hook(),
+		OnAssignmentChanged: assignmentTracker.Hook(),
+		OnLeadershipChanged: leadershipTracker.Hook(),
 	}
 
 	// Build manager options
@@ -327,23 +341,34 @@ func (wc *WorkerCluster) StopWorkers() {
 	}
 }
 
-// WaitForStableState waits for all workers to reach Stable state.
+// WaitForStableState waits for all active (non-shutdown) workers to reach Stable state.
+// Uses channel-based WaitState() for each worker rather than polling, so it reacts
+// immediately to state transitions.
 func (wc *WorkerCluster) WaitForStableState(timeout time.Duration) {
-	require.Eventually(wc.T, func() bool {
-		stableCount := 0
-		for i, mgr := range wc.Workers {
-			state := mgr.State()
-			if state != types.StateStable {
-				wc.T.Logf("Worker %d (%s) in state: %s (leader: %v)",
-					i, mgr.WorkerID(), state.String(), mgr.IsLeader())
-			} else {
-				stableCount++
-			}
-		}
-		wc.T.Logf("Stable workers: %d/%d", stableCount, len(wc.Workers))
+	wc.mu.RLock()
+	workers := make([]*parti.Manager, len(wc.Workers))
+	copy(workers, wc.Workers)
+	wc.mu.RUnlock()
 
-		return stableCount == len(wc.Workers)
-	}, timeout, 500*time.Millisecond, "workers did not reach Stable state")
+	// Collect active workers that need to reach Stable.
+	active := make([]ManagerWaiter, 0, len(workers))
+	for _, mgr := range workers {
+		if mgr.State() == types.StateShutdown {
+			continue
+		}
+		// Already stable? Skip to avoid redundant wait.
+		if mgr.State() == types.StateStable {
+			continue
+		}
+		active = append(active, mgr)
+	}
+
+	if len(active) == 0 {
+		return
+	}
+
+	err := WaitAllManagersState(context.Background(), active, types.StateStable, timeout)
+	require.NoError(wc.T, err, "workers did not reach Stable state")
 }
 
 // VerifyExactlyOneLeader verifies that exactly one worker is the leader.
@@ -550,6 +575,12 @@ func (wc *WorkerCluster) RemoveWorker(index int) {
 	wc.mu.Lock()
 	wc.Workers = append(wc.Workers[:index], wc.Workers[index+1:]...)
 	wc.StateTrackers = append(wc.StateTrackers[:index], wc.StateTrackers[index+1:]...)
+	if index < len(wc.AssignmentTrackers) {
+		wc.AssignmentTrackers = append(wc.AssignmentTrackers[:index], wc.AssignmentTrackers[index+1:]...)
+	}
+	if index < len(wc.LeadershipTrackers) {
+		wc.LeadershipTrackers = append(wc.LeadershipTrackers[:index], wc.LeadershipTrackers[index+1:]...)
+	}
 	wc.mu.Unlock()
 
 	wc.T.Logf("Removed worker %d (%s) from cluster", index, mgr.WorkerID())

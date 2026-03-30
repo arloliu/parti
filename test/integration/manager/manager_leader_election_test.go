@@ -240,13 +240,26 @@ func TestLeaderElection_LeaderRenewal(t *testing.T) {
 	initialLeaderID := initialLeader.WorkerID()
 	t.Logf("Initial leader: %s", initialLeaderID)
 
-	// Wait for 6x ElectionTimeout (ElectionTimeout is 1s, so wait 6s for multiple renewals)
-	t.Log("Waiting 6s for leader to renew lease...")
-	time.Sleep(6 * time.Second)
+	// Ensure the same leader is maintained for multiple renewal periods.
+	t.Log("Verifying leader renews lease for 6s...")
+	require.Never(t, func() bool {
+		leaderCount := 0
+		currentLeaderID := ""
+		for _, mgr := range cluster.Workers {
+			if mgr.State() == types.StateShutdown {
+				continue
+			}
+			if mgr.IsLeader() {
+				leaderCount++
+				currentLeaderID = mgr.WorkerID()
+			}
+		}
 
-	// Verify same leader is still the leader (lease renewed)
-	currentLeader := cluster.VerifyExactlyOneLeader()
-	currentLeaderID := currentLeader.WorkerID()
+		return leaderCount != 1 || currentLeaderID != initialLeaderID
+	}, 6*time.Second, 100*time.Millisecond,
+		"leader should remain the same across lease renewals")
+
+	currentLeaderID := cluster.VerifyExactlyOneLeader().WorkerID()
 
 	require.Equal(t, initialLeaderID, currentLeaderID,
 		"leader should remain the same after lease renewals")
@@ -338,22 +351,26 @@ func TestLeaderElection_AssignmentPreservation(t *testing.T) {
 	err := originalLeader.Stop(ctx)
 	require.NoError(t, err)
 
-	// Wait for new leader election (should be fast with 1s timeout)
-	time.Sleep(3 * time.Second)
-
-	// Verify new leader elected (only check alive workers)
+	// Verify new leader elected (only check alive workers).
 	leaderCount := 0
 	var newLeaderID string
-	for _, mgr := range cluster.Workers {
-		if mgr.State() == types.StateShutdown {
-			continue // Skip dead workers
+	require.Eventually(t, func() bool {
+		leaderCount = 0
+		newLeaderID = ""
+		for _, mgr := range cluster.Workers {
+			if mgr.State() == types.StateShutdown {
+				continue
+			}
+			if mgr.IsLeader() {
+				leaderCount++
+				newLeaderID = mgr.WorkerID()
+			}
 		}
-		if mgr.IsLeader() {
-			leaderCount++
-			newLeaderID = mgr.WorkerID()
-			t.Logf("New leader elected: %s", newLeaderID)
-		}
-	}
+
+		return leaderCount == 1 && newLeaderID != "" && newLeaderID != originalLeaderID
+	}, 5*time.Second, 100*time.Millisecond, "expected exactly one new leader after failover")
+	t.Logf("New leader elected: %s", newLeaderID)
+
 	require.Equal(t, 1, leaderCount, "expected exactly one leader after failover")
 	require.NotEqual(t, originalLeaderID, newLeaderID, "new leader should be different")
 
@@ -490,21 +507,25 @@ func TestLeaderElection_AssignmentVersioning(t *testing.T) {
 	err := originalLeader.Stop(ctx)
 	require.NoError(t, err)
 
-	// Wait for new leader election (1-2s with fast config)
-	time.Sleep(2 * time.Second)
-
 	// Find new leader (must be different manager instance, not just different worker ID)
 	leaderCount := 0
 	var newLeader *parti.Manager
-	for _, mgr := range cluster.Workers {
-		if mgr.State() == types.StateShutdown {
-			continue
+	require.Eventually(t, func() bool {
+		leaderCount = 0
+		newLeader = nil
+		for _, mgr := range cluster.Workers {
+			if mgr.State() == types.StateShutdown {
+				continue
+			}
+			if mgr.IsLeader() {
+				leaderCount++
+				newLeader = mgr
+			}
 		}
-		if mgr.IsLeader() {
-			leaderCount++
-			newLeader = mgr
-		}
-	}
+
+		return leaderCount == 1 && newLeader != nil && newLeader != originalLeader
+	}, 5*time.Second, 100*time.Millisecond, "expected a new leader after failover")
+
 	require.Equal(t, 1, leaderCount, "expected exactly one leader after failover")
 	require.NotSame(t, originalLeader, newLeader, "new leader must be a different manager instance")
 	t.Logf("New leader elected: %s", newLeader.WorkerID())
@@ -617,64 +638,31 @@ func TestLeaderElection_NoOrphansOnFailover(t *testing.T) {
 		err := currentLeader.Stop(ctx)
 		require.NoError(t, err)
 
-		// Wait for:
-		// 1. Leader election (1-2s with fast config)
-		// 2. Old leader's heartbeat to be deleted (happens in Stop())
-		// 3. New leader to discover updated heartbeat list
-		// Total: 4 seconds ensures heartbeat cleanup + election + discovery
-		time.Sleep(4 * time.Second)
-
-		// Verify exactly one new leader (different manager instance)
 		aliveWorkers := 0
 		leaderCount := 0
 		var newLeader *parti.Manager
-		for _, mgr := range cluster.Workers {
-			if mgr.State() == types.StateShutdown {
-				continue
+		require.Eventually(t, func() bool {
+			aliveWorkers, leaderCount, newLeader = countAliveLeaders(cluster.Workers)
+
+			if leaderCount != 1 || newLeader == nil || newLeader == currentLeader {
+				return false
 			}
-			aliveWorkers++
-			if mgr.IsLeader() {
-				leaderCount++
-				newLeader = mgr
-			}
-		}
+
+			return len(collectAlivePartitionKeys(cluster.Workers)) == 20
+		}, 8*time.Second, 100*time.Millisecond, "expected leader election and partition recovery after round %d", round)
+
 		require.Equal(t, 1, leaderCount, "expected exactly one leader after round %d", round)
 		require.NotSame(t, currentLeader, newLeader, "new leader must be different manager instance in round %d", round)
 		t.Logf("New leader elected: %s (%d workers alive)", newLeader.WorkerID(), aliveWorkers)
 
-		// Wait for emergency rebalance to complete
-		time.Sleep(3 * time.Second)
-
 		// Verify no orphaned partitions: all 20 should still be assigned
-		currentPartitions := make(map[string]bool)
-		for _, worker := range cluster.Workers {
-			if worker.State() == types.StateShutdown {
-				continue
-			}
-			assignment := worker.CurrentAssignment()
-			for _, part := range assignment.Partitions {
-				for _, key := range part.Keys {
-					currentPartitions[key] = true
-				}
-			}
-		}
+		currentPartitions := collectAlivePartitionKeys(cluster.Workers)
 		require.Len(t, currentPartitions, 20,
 			"all 20 partitions should remain assigned after failover round %d (found %d)",
 			round, len(currentPartitions))
 
 		// Verify no duplicates
-		partitionCounts := make(map[string]int)
-		for _, mgr := range cluster.Workers {
-			if mgr.State() == types.StateShutdown {
-				continue
-			}
-			assignment := mgr.CurrentAssignment()
-			for _, partition := range assignment.Partitions {
-				for _, key := range partition.Keys {
-					partitionCounts[key]++
-				}
-			}
-		}
+		partitionCounts := collectAlivePartitionCounts(cluster.Workers)
 
 		duplicates := 0
 		for key, count := range partitionCounts {
@@ -745,21 +733,31 @@ func TestLeaderElection_RapidChurn(t *testing.T) {
 		err := currentLeader.Stop(ctx)
 		require.NoError(t, err, "failed to stop leader in round %d", round)
 
-		// Wait for new leader election (2-3 seconds with fast config)
-		time.Sleep(3 * time.Second)
-
-		// Verify new leader elected (only check alive workers)
 		leaderCount := 0
 		var newLeaderID string
-		for _, mgr := range cluster.Workers {
-			if mgr.State() == types.StateShutdown {
-				continue
+		require.Eventually(t, func() bool {
+			leaderCount = 0
+			newLeaderID = ""
+			uniq := make(map[string]struct{})
+			for _, mgr := range cluster.Workers {
+				if mgr.State() == types.StateShutdown {
+					continue
+				}
+				if mgr.IsLeader() {
+					leaderCount++
+					newLeaderID = mgr.WorkerID()
+				}
+				assignment := mgr.CurrentAssignment()
+				for _, p := range assignment.Partitions {
+					if id := p.ID(); id != "" {
+						uniq[id] = struct{}{}
+					}
+				}
 			}
-			if mgr.IsLeader() {
-				leaderCount++
-				newLeaderID = mgr.WorkerID()
-			}
-		}
+
+			return leaderCount == 1 && newLeaderID != "" && newLeaderID != leaderID && len(uniq) == 20
+		}, 8*time.Second, 100*time.Millisecond, "expected leader election and partition coverage after round %d", round)
+
 		require.Equal(t, 1, leaderCount, "expected exactly one leader after round %d", round)
 		require.NotEqual(t, leaderID, newLeaderID, "new leader should be different in round %d", round)
 		t.Logf("New leader elected: %s", newLeaderID)
@@ -783,8 +781,8 @@ func TestLeaderElection_RapidChurn(t *testing.T) {
 			"after round %d: expected 20 partitions, got %d (alive workers: %d)",
 			round, len(uniq), aliveWorkers)
 
-		// Brief pause before next round
-		time.Sleep(2 * time.Second)
+		// Wait for system to stabilize before next round
+		cluster.WaitForStableState(8 * time.Second)
 	}
 
 	t.Log("System remained stable through 3 rapid leader transitions")
@@ -834,30 +832,56 @@ func TestLeaderElection_ShutdownDuringRebalancing(t *testing.T) {
 
 	t.Logf("New worker %s reached Stable state", newWorker.WorkerID())
 
-	// Wait briefly for leader to detect the new worker and enter Scaling state
-	time.Sleep(500 * time.Millisecond)
+	// Wait for leader to detect the new worker and enter Scaling/Rebalancing/Stable state
+	require.Eventually(t, func() bool {
+		s := leader.State()
+		return s == types.StateScaling || s == types.StateRebalancing || s == types.StateStable
+	}, 5*time.Second, 100*time.Millisecond, "leader should detect new worker")
 
-	// Verify leader is in Scaling or Rebalancing state
 	leaderState := leader.State()
 	t.Logf("Leader state before shutdown: %s", leaderState)
-	require.Contains(t, []types.State{types.StateScaling, types.StateRebalancing, types.StateStable},
-		leaderState, "leader should be in scaling/rebalancing/stable state")
 
 	// Kill leader immediately (during or just after rebalancing)
 	t.Logf("Killing leader %s during rebalancing", leaderID)
 	err = leader.Stop(ctx)
 	require.NoError(t, err)
 
-	// Wait for new leader election and rebalancing
-	time.Sleep(4 * time.Second)
+	// Verify new leader elected and remaining workers fully recover.
+	var newLeader *parti.Manager
+	require.Eventually(t, func() bool {
+		leaderCount := 0
+		newLeader = nil
+		for _, mgr := range cluster.Workers {
+			if mgr.State() == types.StateShutdown {
+				continue
+			}
+			if mgr.IsLeader() {
+				leaderCount++
+				newLeader = mgr
+			}
+		}
 
-	// Verify new leader elected
-	newLeader := cluster.VerifyExactlyOneLeader()
+		if leaderCount != 1 || newLeader == nil || newLeader.WorkerID() == leaderID {
+			return false
+		}
+
+		aliveWorkers := 0
+		totalPartitions := 0
+		for _, mgr := range cluster.Workers {
+			if mgr.State() == types.StateShutdown {
+				continue
+			}
+			if mgr.State() != types.StateStable {
+				return false
+			}
+			aliveWorkers++
+			totalPartitions += len(mgr.CurrentAssignment().Partitions)
+		}
+
+		return aliveWorkers == 2 && totalPartitions == 20
+	}, 8*time.Second, 100*time.Millisecond, "system should recover from leader shutdown during rebalancing")
 	require.NotEqual(t, leaderID, newLeader.WorkerID(), "new leader should be different")
 	t.Logf("New leader elected: %s", newLeader.WorkerID())
-
-	// Wait for system to stabilize after leadership change
-	time.Sleep(3 * time.Second)
 
 	// Verify remaining 2 workers have partitions (worker-0 killed, workers 1-2 remain)
 	aliveWorkers := 0
@@ -927,24 +951,58 @@ func TestLeaderElection_ShutdownDuringEmergency(t *testing.T) {
 	err := victimWorker.Stop(ctx)
 	require.NoError(t, err)
 
-	// Wait just long enough for leader to detect (heartbeat TTL is 3s, poll is faster)
-	time.Sleep(500 * time.Millisecond)
+	// Wait for leader to notice the follower death. With FastConfig the leader
+	// may complete the emergency rebalance so quickly that it returns to Stable
+	// before we can observe it. Accept any state change OR a version bump as
+	// evidence that the follower death was detected.
+	initialVersion := leader.CurrentAssignment().Version
+	require.Eventually(t, func() bool {
+		s := leader.State()
+		v := leader.CurrentAssignment().Version
+		return s != types.StateStable || v > initialVersion
+	}, 8*time.Second, 50*time.Millisecond, "leader should detect follower death")
 
-	// Now kill the leader during emergency rebalancing
+	// Now kill the leader during (or shortly after) emergency rebalancing
 	t.Logf("Killing leader %s during emergency rebalancing", leaderID)
 	err = leader.Stop(ctx)
 	require.NoError(t, err)
 
-	// Wait for new leader election
-	time.Sleep(4 * time.Second)
+	// Verify new leader elected and remaining workers fully recover.
+	var newLeader *parti.Manager
+	require.Eventually(t, func() bool {
+		leaderCount := 0
+		newLeader = nil
+		for _, mgr := range cluster.Workers {
+			if mgr.State() == types.StateShutdown {
+				continue
+			}
+			if mgr.IsLeader() {
+				leaderCount++
+				newLeader = mgr
+			}
+		}
 
-	// Verify new leader elected
-	newLeader := cluster.VerifyExactlyOneLeader()
+		if leaderCount != 1 || newLeader == nil || newLeader.WorkerID() == leaderID {
+			return false
+		}
+
+		aliveWorkers := 0
+		totalPartitions := 0
+		for _, mgr := range cluster.Workers {
+			if mgr.State() == types.StateShutdown {
+				continue
+			}
+			if mgr.State() != types.StateStable {
+				return false
+			}
+			aliveWorkers++
+			totalPartitions += len(mgr.CurrentAssignment().Partitions)
+		}
+
+		return aliveWorkers == 2 && totalPartitions == 20
+	}, 8*time.Second, 100*time.Millisecond, "system should recover from cascading failures")
 	require.NotEqual(t, leaderID, newLeader.WorkerID(), "new leader should be different")
 	t.Logf("New leader elected: %s", newLeader.WorkerID())
-
-	// Wait for system to stabilize
-	time.Sleep(3 * time.Second)
 
 	// Verify remaining 2 workers have all partitions
 	aliveWorkers := 0
@@ -975,6 +1033,55 @@ func getKeys(m map[int64]bool) []int64 {
 	}
 
 	return keys
+}
+
+func countAliveLeaders(workers []*parti.Manager) (aliveWorkers int, leaderCount int, leader *parti.Manager) {
+	for _, mgr := range workers {
+		if mgr.State() == types.StateShutdown {
+			continue
+		}
+		aliveWorkers++
+		if mgr.IsLeader() {
+			leaderCount++
+			leader = mgr
+		}
+	}
+
+	return aliveWorkers, leaderCount, leader
+}
+
+func collectAlivePartitionKeys(workers []*parti.Manager) map[string]bool {
+	partitionKeys := make(map[string]bool)
+	for _, worker := range workers {
+		if worker.State() == types.StateShutdown {
+			continue
+		}
+		assignment := worker.CurrentAssignment()
+		for _, part := range assignment.Partitions {
+			for _, key := range part.Keys {
+				partitionKeys[key] = true
+			}
+		}
+	}
+
+	return partitionKeys
+}
+
+func collectAlivePartitionCounts(workers []*parti.Manager) map[string]int {
+	partitionCounts := make(map[string]int)
+	for _, mgr := range workers {
+		if mgr.State() == types.StateShutdown {
+			continue
+		}
+		assignment := mgr.CurrentAssignment()
+		for _, partition := range assignment.Partitions {
+			for _, key := range partition.Keys {
+				partitionCounts[key]++
+			}
+		}
+	}
+
+	return partitionCounts
 }
 
 // TestLeaderElection_FollowersKeepAssignmentDuringCleanup verifies that followers
@@ -1052,14 +1159,42 @@ func TestLeaderElection_FollowersKeepAssignmentDuringCleanup(t *testing.T) {
 	err := originalLeader.Stop(ctx)
 	require.NoError(t, err)
 
-	// Wait for new leader election and rebalancing
-	// With FastConfig: Election ~1s + Rebalance ~1s = ~2-3s total
-	t.Log("Waiting 5s for new leader election and rebalancing...")
-	time.Sleep(5 * time.Second)
-
 	// VERIFICATION 1: Followers should have received NEW assignments from new leader
 	// Version should have increased (new leader published next version)
-	newLeader := cluster.VerifyExactlyOneLeader()
+	var newLeader *parti.Manager
+	require.Eventually(t, func() bool {
+		leaderCount := 0
+		newLeader = nil
+		for _, mgr := range cluster.Workers {
+			if mgr.State() == types.StateShutdown {
+				continue
+			}
+			if mgr.IsLeader() {
+				leaderCount++
+				newLeader = mgr
+			}
+		}
+		if leaderCount != 1 || newLeader == nil || newLeader.WorkerID() == leaderID {
+			return false
+		}
+
+		for _, follower := range followers {
+			workerID := follower.WorkerID()
+			currentAssignment := follower.CurrentAssignment()
+			originalAssignment := followerAssignmentsBefore[workerID]
+			if currentAssignment.Version <= originalAssignment.Version {
+				return false
+			}
+			if len(currentAssignment.Partitions) == 0 {
+				return false
+			}
+			if follower.State() != types.StateStable {
+				return false
+			}
+		}
+
+		return true
+	}, 8*time.Second, 100*time.Millisecond, "followers should receive new assignments from the new leader")
 	t.Logf("New leader elected: %s", newLeader.WorkerID())
 
 	for _, follower := range followers {
