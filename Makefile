@@ -153,7 +153,7 @@ gomod-tidy:
 ## update-pkg-cache: Update Go package cache with latest git tag
 update-pkg-cache:
 	@echo "Updating package cache with latest git tag: $(LATEST_GIT_TAG)"
-	@curl -sf https://proxy.golang.org/github.com/arloliu/parti/@v/$(LATEST_GIT_TAG).info > /dev/null || \
+	@curl -sf https://proxy.golang.org/github.com/arloliu/parti/v2/@v/$(LATEST_GIT_TAG).info > /dev/null || \
 		echo "Warning: Failed to update package cache"
 
 ##@ Cleanup
