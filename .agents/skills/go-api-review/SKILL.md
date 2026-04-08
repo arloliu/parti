@@ -1,5 +1,5 @@
 ---
-name: go_api_review
+name: go-api-review
 description: Performs a critical review focused on discoverability, clarity, and ease of use (Developer Experience) of a Go package, relying exclusively on the exported API (Godoc) and the README, without reading internal source code.
 ---
 

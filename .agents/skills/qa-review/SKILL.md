@@ -1,5 +1,5 @@
 ---
-name: QA Review - Go Library Robustness and Correctness
+name: qa-review
 description: Perform a critical review focused on correctness, fault tolerance, and performance implications of a Go library from the perspective of external users.
 ---
 
