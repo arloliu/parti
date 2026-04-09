@@ -17,14 +17,13 @@ type BurstDetector struct {
 	threshold int
 }
 
-// DefaultBurstThreshold is the default number of iterator failures within
-// DefaultBurstWindow that triggers burst detection.
-const DefaultBurstThreshold = 3
+// defaultBurstThreshold is the number of ErrNoHeartbeat failures within
+// the burst window before a consumer.Info() confirmation is triggered.
+const defaultBurstThreshold = 3
 
-// DefaultBurstWindow returns the default sliding window for burst detection
-// based on the consumer's fetch timeout.
-func DefaultBurstWindow(fetchTimeout time.Duration) time.Duration {
-	return fetchTimeout*time.Duration(DefaultBurstThreshold+1) + 3*time.Second
+// defaultBurstWindow computes the burst detection window from FetchTimeout.
+func defaultBurstWindow(fetchTimeout time.Duration) time.Duration {
+	return fetchTimeout*time.Duration(defaultBurstThreshold+1) + 3*time.Second
 }
 
 // NewBurstDetector creates a burst detector with the given window and threshold.

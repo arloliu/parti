@@ -233,11 +233,10 @@ func NewQueue(
 		retryRNG:    newRetryRNG(cfg.Retry.Seed),
 		iterFactory: iterFactory,
 		recovery: recovery.NewController(recovery.ControllerConfig{
-			Strategy:       cfg.RecoveryStrategy,
-			BurstThreshold: recovery.DefaultBurstThreshold,
-			BurstWindow:    recovery.DefaultBurstWindow(cfg.FetchTimeout),
-			Logger:         cfg.Logger,
-			Metrics:        cfg.Metrics,
+			Strategy:     cfg.RecoveryStrategy,
+			FetchTimeout: cfg.FetchTimeout,
+			Logger:       cfg.Logger,
+			Metrics:      cfg.Metrics,
 		}),
 	}, nil
 }

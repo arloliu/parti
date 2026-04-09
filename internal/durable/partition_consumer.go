@@ -107,11 +107,10 @@ func newPartitionConsumer(
 		checkPullSuppression: opts.checkPullSuppression,
 		done:                 make(chan struct{}),
 		recovery: recovery.NewController(recovery.ControllerConfig{
-			Strategy:       config.RecoveryStrategy,
-			BurstThreshold: recovery.DefaultBurstThreshold,
-			BurstWindow:    recovery.DefaultBurstWindow(config.FetchTimeout),
-			Logger:         logger,
-			Metrics:        config.Metrics,
+			Strategy:     config.RecoveryStrategy,
+			FetchTimeout: config.FetchTimeout,
+			Logger:       logger,
+			Metrics:      config.Metrics,
 		}),
 	}
 }
@@ -350,18 +349,7 @@ func (pc *partitionConsumer) processIterator(
 			continue
 		}
 
-		if pc.config.ManualAck {
-			_ = handler.Handle(ctx, pc.recovery.WrapForTracking(msg))
-			continue
-		}
-
-		if err := handler.Handle(ctx, msg); err != nil {
-			_ = msg.Nak()
-		} else {
-			if err := msg.Ack(); err == nil {
-				pc.recovery.AdvanceCheckpoint(msg)
-			}
-		}
+		pc.recovery.Dispatch(ctx, msg, pc.config.ManualAck, handler.Handle)
 	}
 }
 

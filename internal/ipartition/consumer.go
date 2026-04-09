@@ -103,11 +103,10 @@ func NewJSConsumer(
 	}
 
 	c.rc = recovery.NewController(recovery.ControllerConfig{
-		Strategy:       config.RecoveryStrategy,
-		BurstThreshold: recovery.DefaultBurstThreshold,
-		BurstWindow:    recovery.DefaultBurstWindow(config.FetchTimeout),
-		Logger:         config.Logger,
-		Metrics:        config.Metrics,
+		Strategy:     config.RecoveryStrategy,
+		FetchTimeout: config.FetchTimeout,
+		Logger:       config.Logger,
+		Metrics:      config.Metrics,
 	})
 
 	// Initialize key dispatcher if DispatchByKey is enabled
@@ -343,18 +342,7 @@ func (c *JSConsumer) processIterator(ctx context.Context, iter jetstream.Message
 		}
 
 		// Sequential processing (DispatchByKey disabled)
-		if c.config.ManualAck {
-			_ = c.handler.Handle(ctx, c.rc.WrapForTracking(msg))
-			continue
-		}
-
-		if err := c.handler.Handle(ctx, msg); err != nil {
-			_ = msg.Nak()
-		} else {
-			if err := msg.Ack(); err == nil {
-				c.rc.AdvanceCheckpoint(msg)
-			}
-		}
+		c.rc.Dispatch(ctx, msg, c.config.ManualAck, c.handler.Handle)
 	}
 }
 

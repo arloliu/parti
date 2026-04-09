@@ -121,11 +121,10 @@ func NewBroadcastConsumer(js jetstream.JetStream, cfg BroadcastConsumerConfig, f
 		iterFactory:      defaultIterFactory,
 		loopDone:         make(chan struct{}),
 		recovery: recovery.NewController(recovery.ControllerConfig{
-			Strategy:       cfg.RecoveryStrategy,
-			BurstThreshold: recovery.DefaultBurstThreshold,
-			BurstWindow:    recovery.DefaultBurstWindow(cfg.FetchTimeout),
-			Logger:         cfg.Logger,
-			Metrics:        cfg.Metrics,
+			Strategy:     cfg.RecoveryStrategy,
+			FetchTimeout: cfg.FetchTimeout,
+			Logger:       cfg.Logger,
+			Metrics:      cfg.Metrics,
 		}),
 	}
 
@@ -394,16 +393,7 @@ func (bc *BroadcastConsumer) processIterator(ctx context.Context, iter jetstream
 			continue
 		}
 
-		if bc.config.ManualAck {
-			_ = bc.handler.Handle(ctx, bc.recovery.WrapForTracking(msg))
-			continue
-		}
-
-		if err := bc.handler.Handle(ctx, msg); err != nil {
-			_ = msg.Nak()
-		} else if err := msg.Ack(); err == nil {
-			bc.recovery.AdvanceCheckpoint(msg)
-		}
+		bc.recovery.Dispatch(ctx, msg, bc.config.ManualAck, bc.handler.Handle)
 	}
 }
 

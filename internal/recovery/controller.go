@@ -25,12 +25,17 @@ type ControllerConfig struct {
 	// Strategy determines how the consumer is recreated after deletion.
 	Strategy Strategy
 
+	// FetchTimeout is the consumer's pull fetch timeout. Used to auto-compute
+	// BurstWindow when BurstWindow is zero.
+	FetchTimeout time.Duration
+
 	// BurstThreshold is the number of ErrNoHeartbeat failures within BurstWindow
-	// before a consumer.Info() confirmation is triggered. Default: 3.
+	// before a consumer.Info() confirmation is triggered.
+	// If zero, defaults to defaultBurstThreshold (3).
 	BurstThreshold int
 
 	// BurstWindow is the sliding window for burst detection.
-	// Typically derived from FetchTimeout: FetchTimeout * (BurstThreshold+1) + headroom.
+	// If zero, auto-computed from FetchTimeout: FetchTimeout*(BurstThreshold+1)+3s.
 	BurstWindow time.Duration
 
 	Logger  types.Logger
@@ -74,13 +79,17 @@ func NewController(cfg ControllerConfig) *Controller {
 
 	threshold := cfg.BurstThreshold
 	if threshold <= 0 {
-		threshold = 3
+		threshold = defaultBurstThreshold
+	}
+	window := cfg.BurstWindow
+	if window <= 0 {
+		window = defaultBurstWindow(cfg.FetchTimeout)
 	}
 
 	return &Controller{
 		strategy:            cfg.Strategy,
 		checkpoint:          newCheckpoint(cfg.Logger),
-		burst:               NewBurstDetector(cfg.BurstWindow, threshold),
+		burst:               NewBurstDetector(window, threshold),
 		minRecoveryInterval: defaultRecoveryMinInterval,
 		logger:              cfg.Logger,
 		metrics:             cfg.Metrics,
@@ -164,6 +173,25 @@ func (c *Controller) WrapForTracking(msg jetstream.Msg) jetstream.Msg {
 	}
 
 	return &trackingMsg{Msg: msg, controller: c}
+}
+
+// Dispatch delivers msg to handle with the recovery-aware dispatch policy:
+//   - ManualAck=true:  msg is passed through WrapForTracking; Ack/DoubleAck
+//     calls inside the handler advance the checkpoint automatically.
+//   - ManualAck=false: handle is called, then msg is Acked or Nacked;
+//     the checkpoint advances on a successful Ack.
+//
+// Dispatch is safe to call on a nil *Controller.
+func (c *Controller) Dispatch(ctx context.Context, msg jetstream.Msg, manualAck bool, handle func(context.Context, jetstream.Msg) error) {
+	if manualAck {
+		_ = handle(ctx, c.WrapForTracking(msg))
+		return
+	}
+	if err := handle(ctx, msg); err != nil {
+		_ = msg.Nak()
+	} else if err := msg.Ack(); err == nil {
+		c.AdvanceCheckpoint(msg)
+	}
 }
 
 // AdvanceCheckpoint should be called after a successful helper-owned msg.Ack()
