@@ -4,7 +4,6 @@ import (
 	"time"
 
 	"github.com/arloliu/parti/v2/internal/natsutil"
-	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go"
 )
 
@@ -39,15 +38,15 @@ func (m *Manager) checkConnectionHealth() {
 
 	if !isConnected {
 		// Connection is down
-		if val := m.connDownSince.Load(); val == nil {
+		if m.connDownSince.Load() == 0 {
 			// First detection of disconnection
-			m.connDownSince.Store(&now)
-			m.connUpSince.Store((*time.Time)(nil))
+			m.connDownSince.Store(now.UnixNano())
+			m.connUpSince.Store(0)
 			m.logger.Warn("NATS connection lost", "time", now)
 		} else {
 			// Check if we should enter degraded mode
-			downSince, _ := val.(*time.Time)
-			if downSince != nil && time.Since(*downSince) >= m.cfg.DegradedBehavior.EnterThreshold {
+			downSince := time.Unix(0, m.connDownSince.Load())
+			if time.Since(downSince) >= m.cfg.DegradedBehavior.EnterThreshold {
 				m.enterDegraded("NATS connection down")
 			}
 		}
@@ -56,15 +55,15 @@ func (m *Manager) checkConnectionHealth() {
 	}
 
 	// Connection is up
-	if val := m.connUpSince.Load(); val == nil {
+	if m.connUpSince.Load() == 0 {
 		// First detection of reconnection
-		m.connUpSince.Store(&now)
-		m.connDownSince.Store((*time.Time)(nil))
+		m.connUpSince.Store(now.UnixNano())
+		m.connDownSince.Store(0)
 		m.logger.Info("NATS connection restored", "time", now)
 	} else {
 		// Check if we should exit degraded mode
-		upSince, _ := val.(*time.Time)
-		if upSince != nil && time.Since(*upSince) >= m.cfg.DegradedBehavior.ExitThreshold {
+		upSince := time.Unix(0, m.connUpSince.Load())
+		if time.Since(upSince) >= m.cfg.DegradedBehavior.ExitThreshold {
 			m.attemptRecoveryFromDegraded()
 		}
 	}
@@ -123,49 +122,45 @@ func (m *Manager) recordKVSuccess() {
 }
 
 // enterDegraded transitions the manager to degraded mode.
+//
+// Uses a CAS on degradedSince (int64 UnixNano; 0 = unset) as the entry gate,
+// ensuring exactly one goroutine performs the transition even under concurrent calls.
+// After a successful exitDegraded, degradedSince is reset to 0, so future
+// enterDegraded calls succeed without the re-entry bug that typed-nil atomic.Value
+// storage caused previously.
 func (m *Manager) enterDegraded(reason string) {
-	// Check if already in degraded mode
-	if val := m.degradedSince.Load(); val != nil {
-		return
-	}
-
 	// Reject degraded entry from terminal Shutdown state.
 	if m.State() == StateShutdown {
 		return
 	}
 
+	// Atomically claim the degraded-entry slot.
+	// If degradedSince is already non-zero, we (or another goroutine) already entered.
 	now := time.Now()
-	m.degradedSince.Store(&now)
+	if !m.degradedSince.CompareAndSwap(0, now.UnixNano()) {
+		return
+	}
 
-	// Update state
-	oldState := State(m.state.Swap(int32(types.StateDegraded)))
+	// Attempt validated state transition. Roll back degradedSince on failure
+	// (can only happen from Init/ClaimingID states that forbid degraded entry).
+	if !m.transitionState(StateDegraded) {
+		m.degradedSince.Store(0)
+		return
+	}
 
 	m.logger.Warn("entering degraded mode",
 		"reason", reason,
-		"previous_state", oldState,
 		"time", now,
 	)
 
-	// Trigger state change hook (tracked by WaitGroup so Stop waits for completion)
-	if m.hooks.OnStateChanged != nil {
-		m.wg.Go(func() {
-			if err := m.hooks.OnStateChanged(m.ctx, oldState, types.StateDegraded); err != nil {
-				m.logError("state change hook error", "error", err)
-			}
-		})
-	}
-
-	// Trigger degraded hook (tracked by WaitGroup)
+	// OnDegraded hook (OnStateChanged already fired by transitionState)
 	if m.hooks.OnDegraded != nil {
-		m.wg.Go(func() {
-			if err := m.hooks.OnDegraded(m.ctx, reason); err != nil {
-				m.logError("degraded hook error", "error", err)
-			}
+		m.invokeHook("degraded", func() error {
+			return m.hooks.OnDegraded(m.ctx, reason)
 		})
 	}
 
-	// Record metrics
-	m.metrics.RecordStateTransition(oldState, types.StateDegraded, 0)
+	// Record degraded mode metric (state transition already recorded by transitionState)
 	m.metrics.SetDegradedMode(1.0)
 
 	// Start alert monitoring
@@ -174,38 +169,29 @@ func (m *Manager) enterDegraded(reason string) {
 
 // exitDegraded transitions the manager out of degraded mode.
 func (m *Manager) exitDegraded() {
-	// Check if in degraded mode
-	val := m.degradedSince.Load()
-	if val == nil {
+	since := m.degradedSince.Load()
+	if since == 0 {
 		return
 	}
 
-	tVal, _ := val.(*time.Time)
-	duration := time.Since(*tVal)
-	m.degradedSince.Store((*time.Time)(nil))
+	duration := time.Since(time.Unix(0, since))
 
-	// Atomically transition from Degraded to Stable.
-	// If the state was already changed (e.g., to Shutdown), do nothing.
-	if !m.state.CompareAndSwap(int32(StateDegraded), int32(StateStable)) {
+	// Transition out of degraded mode via validated CAS.
+	// If already Shutdown, transitionState returns false and we skip cleanup.
+	if !m.transitionState(StateStable) {
 		return
 	}
+
+	// Clear degradedSince after a successful state transition so that future
+	// enterDegraded calls can re-arm correctly (fixes the re-entry bug).
+	m.degradedSince.Store(0)
 
 	m.logger.Info("exiting degraded mode",
 		"duration", duration,
 		"next_state", StateStable,
 	)
 
-	// Trigger state change hook (tracked by WaitGroup so Stop waits for completion)
-	if m.hooks.OnStateChanged != nil {
-		m.wg.Go(func() {
-			if err := m.hooks.OnStateChanged(m.ctx, StateDegraded, StateStable); err != nil {
-				m.logError("state change hook error", "error", err)
-			}
-		})
-	}
-
-	// Record metrics
-	m.metrics.RecordStateTransition(StateDegraded, StateStable, duration.Seconds())
+	// Record metrics (state transition already recorded by transitionState)
 	m.metrics.RecordDegradedDuration(duration.Seconds())
 	m.metrics.SetDegradedMode(0.0)
 	m.metrics.SetCacheAge(0.0)
@@ -220,7 +206,7 @@ func (m *Manager) exitDegraded() {
 // attemptRecoveryFromDegraded checks if recovery conditions are met and exits degraded mode.
 func (m *Manager) attemptRecoveryFromDegraded() {
 	// Check if in degraded mode
-	if val := m.degradedSince.Load(); val == nil {
+	if m.degradedSince.Load() == 0 {
 		return
 	}
 
@@ -238,8 +224,7 @@ func (m *Manager) attemptRecoveryFromDegraded() {
 
 // enterRecoveryGracePeriod starts the recovery grace period for the leader.
 func (m *Manager) enterRecoveryGracePeriod() {
-	now := time.Now()
-	m.recoveryGraceStart.Store(&now)
+	m.recoveryGraceStart.Store(time.Now().UnixNano())
 	m.inRecoveryGrace.Store(true)
 
 	m.logger.Info("entering recovery grace period",
@@ -266,13 +251,11 @@ func (m *Manager) exitRecoveryGracePeriod() {
 	}
 
 	duration := time.Duration(0)
-	if val := m.recoveryGraceStart.Load(); val != nil {
-		if timePtr, ok := val.(*time.Time); ok {
-			duration = time.Since(*timePtr)
-		}
+	if startNano := m.recoveryGraceStart.Load(); startNano != 0 {
+		duration = time.Since(time.Unix(0, startNano))
 	}
 
-	m.recoveryGraceStart.Store((*time.Time)(nil))
+	m.recoveryGraceStart.Store(0)
 	m.inRecoveryGrace.Store(false)
 
 	m.logger.Info("exiting recovery grace period", "duration", duration)
@@ -302,21 +285,21 @@ func (m *Manager) monitorDegradedAlerts() {
 			return
 		case <-ticker.C:
 			// Check if still in degraded mode
-			val := m.degradedSince.Load()
-			if val == nil {
+			since := m.degradedSince.Load()
+			if since == 0 {
 				return // Exited degraded mode
 			}
 
-			degradedSince, _ := val.(*time.Time)
-			duration := time.Since(*degradedSince)
-			level := m.calculateAlertLevel(*degradedSince)
+			degradedAt := time.Unix(0, since)
+			duration := time.Since(degradedAt)
+			level := m.calculateAlertLevel(degradedAt)
 
 			// Update cache age metric
 			m.metrics.SetCacheAge(duration.Seconds())
 
 			// Only emit if level increased
 			if level > lastAlertLevel {
-				m.emitDegradedAlert(level, *degradedSince)
+				m.emitDegradedAlert(level, degradedAt)
 				lastAlertLevel = level
 			}
 		}

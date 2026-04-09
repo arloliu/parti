@@ -52,14 +52,18 @@ func TestManager_recordKVError(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		m := &Manager{logger: logger, cfg: cfg, hooks: &Hooks{}, metrics: nopMetrics, ctx: ctx, cancel: cancel}
+		m.state.Store(int32(StateStable)) // must be a state that allows Degraded entry
 
 		// Trigger threshold
 		for i := 0; i < 3; i++ {
 			m.recordKVError(nats.ErrTimeout)
 		}
+		// Cancel to stop the monitorDegradedAlerts goroutine started by enterDegraded
+		cancel()
+		m.wg.Wait()
 
 		require.Equal(t, int32(3), m.kvErrorCount.Load())
-		require.NotNil(t, m.degradedSince.Load())
+		require.NotZero(t, m.degradedSince.Load())
 		require.Equal(t, StateDegraded, m.State())
 	})
 
@@ -95,8 +99,8 @@ func TestManager_enterDegraded_rejectsShutdown(t *testing.T) {
 
 		require.Equal(t, StateShutdown, m.State(),
 			"enterDegraded must not override StateShutdown")
-		require.Nil(t, m.degradedSince.Load(),
-			"degradedSince must remain nil when enterDegraded is rejected")
+		require.Zero(t, m.degradedSince.Load(),
+			"degradedSince must remain zero when enterDegraded is rejected")
 	})
 
 	t.Run("allows degraded entry from Stable state", func(t *testing.T) {
@@ -112,7 +116,7 @@ func TestManager_enterDegraded_rejectsShutdown(t *testing.T) {
 		m.wg.Wait()
 
 		require.Equal(t, StateDegraded, m.State())
-		require.NotNil(t, m.degradedSince.Load())
+		require.NotZero(t, m.degradedSince.Load())
 	})
 }
 
@@ -131,8 +135,7 @@ func TestManager_exitDegraded_safeWithCAS(t *testing.T) {
 		m := &Manager{logger: logger, cfg: cfg, hooks: &Hooks{}, metrics: nopMetrics, ctx: ctx, cancel: cancel}
 
 		// Simulate: entered degraded mode, then Stop set StateShutdown
-		now := time.Now()
-		m.degradedSince.Store(&now)
+		m.degradedSince.Store(time.Now().UnixNano())
 		m.state.Store(int32(StateShutdown))
 
 		m.exitDegraded()
@@ -146,14 +149,58 @@ func TestManager_exitDegraded_safeWithCAS(t *testing.T) {
 		defer cancel()
 		m := &Manager{logger: logger, cfg: cfg, hooks: &Hooks{}, metrics: nopMetrics, ctx: ctx, cancel: cancel}
 
-		now := time.Now()
-		m.degradedSince.Store(&now)
+		m.degradedSince.Store(time.Now().UnixNano())
 		m.state.Store(int32(StateDegraded))
 
 		m.exitDegraded()
 		m.wg.Wait()
 
 		require.Equal(t, StateStable, m.State())
-		require.Nil(t, m.degradedSince.Load())
+		require.Zero(t, m.degradedSince.Load())
 	})
+}
+
+// TestEnterDegraded_ReentryAfterExit verifies that enterDegraded works correctly
+// after exitDegraded resets degradedSince to 0. This tests the fix for the
+// atomic.Value typed-nil re-entry bug where Store((*time.Time)(nil)) produced a
+// non-nil interface, permanently blocking future enterDegraded calls.
+func TestEnterDegraded_ReentryAfterExit(t *testing.T) {
+	logger := logging.NewNop()
+	nopMetrics := metrics.NewNop()
+	cfg := Config{
+		DegradedAlert: DegradedAlertConfig{
+			AlertInterval: 1 * time.Minute,
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := &Manager{logger: logger, cfg: cfg, hooks: &Hooks{}, metrics: nopMetrics, ctx: ctx, cancel: cancel}
+	m.state.Store(int32(StateStable))
+
+	// First degraded entry
+	m.enterDegraded("first failure")
+	cancel()    // stop monitorDegradedAlerts
+	m.wg.Wait() // wait for goroutines to exit
+
+	require.Equal(t, StateDegraded, m.State(), "must enter Degraded")
+	require.NotZero(t, m.degradedSince.Load())
+
+	// Recovery: exit degraded
+	m.exitDegraded()
+	require.Equal(t, StateStable, m.State(), "must return to Stable")
+	require.Zero(t, m.degradedSince.Load(), "degradedSince must be 0 after exit")
+
+	// Re-entry: must succeed after reset (the core bug fix)
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	m.ctx = ctx2
+	m.cancel = cancel2
+
+	m.enterDegraded("second failure")
+	cancel2()
+	m.wg.Wait()
+
+	require.Equal(t, StateDegraded, m.State(), "re-entry into Degraded must work after recovery")
+	require.NotZero(t, m.degradedSince.Load(), "degradedSince must be set on re-entry")
 }

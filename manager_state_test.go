@@ -2,9 +2,12 @@ package parti
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/arloliu/parti/v2/internal/logging"
+	"github.com/arloliu/parti/v2/internal/metrics"
 	"github.com/stretchr/testify/require"
 )
 
@@ -194,17 +197,35 @@ func TestManager_isValidTransition(t *testing.T) {
 		to   State
 		want bool
 	}{
+		// Happy-path startup sequence
 		{"Init -> ClaimingID", StateInit, StateClaimingID, true},
 		{"ClaimingID -> Election", StateClaimingID, StateElection, true},
 		{"Election -> WaitingAssignment", StateElection, StateWaitingAssignment, true},
 		{"WaitingAssignment -> Stable", StateWaitingAssignment, StateStable, true},
+		// Leader-driven rebalancing
 		{"Stable -> Scaling", StateStable, StateScaling, true},
 		{"Scaling -> Rebalancing", StateScaling, StateRebalancing, true},
 		{"Rebalancing -> Stable", StateRebalancing, StateStable, true},
+		// Shutdown from anywhere
 		{"Stable -> Shutdown", StateStable, StateShutdown, true},
 		{"Init -> Shutdown", StateInit, StateShutdown, true},
-		{"Init -> Stable", StateInit, StateStable, false}, // Invalid jump
-		{"Stable -> Init", StateStable, StateInit, false}, // Cannot go back to Init
+		{"Degraded -> Shutdown", StateDegraded, StateShutdown, true},
+		// Degraded mode entry from active states
+		{"Stable -> Degraded", StateStable, StateDegraded, true},
+		{"Scaling -> Degraded", StateScaling, StateDegraded, true},
+		{"Rebalancing -> Degraded", StateRebalancing, StateDegraded, true},
+		{"Emergency -> Degraded", StateEmergency, StateDegraded, true},
+		{"WaitingAssignment -> Degraded", StateWaitingAssignment, StateDegraded, true},
+		// Degraded mode exit
+		{"Degraded -> Stable", StateDegraded, StateStable, true},
+		// Invalid transitions
+		{"Init -> Stable", StateInit, StateStable, false},           // Skip stages
+		{"Stable -> Init", StateStable, StateInit, false},           // Cannot go back to Init
+		{"Shutdown -> Stable", StateShutdown, StateStable, false},   // Terminal state
+		{"Degraded -> Scaling", StateDegraded, StateScaling, false}, // Must go through Stable
+		// Init/ClaimingID cannot enter Degraded (no NATS operations happen yet)
+		{"Init -> Degraded", StateInit, StateDegraded, false},
+		{"ClaimingID -> Degraded", StateClaimingID, StateDegraded, false},
 	}
 
 	for _, tt := range tests {
@@ -212,5 +233,88 @@ func TestManager_isValidTransition(t *testing.T) {
 			got := m.isValidTransition(tt.from, tt.to)
 			require.Equal(t, tt.want, got)
 		})
+	}
+}
+
+func TestManager_transitionState_CAS(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns true on valid transition", func(t *testing.T) {
+		t.Parallel()
+		m := minimalTestManager(t)
+		m.state.Store(int32(StateInit))
+		ok := m.transitionState(StateClaimingID)
+		require.True(t, ok)
+		require.Equal(t, StateClaimingID, m.State())
+	})
+
+	t.Run("returns false on invalid transition", func(t *testing.T) {
+		t.Parallel()
+		m := minimalTestManager(t)
+		m.state.Store(int32(StateInit))
+		ok := m.transitionState(StateStable) // invalid jump
+		require.False(t, ok)
+		require.Equal(t, StateInit, m.State()) // unchanged
+	})
+
+	t.Run("returns true when already in target state", func(t *testing.T) {
+		t.Parallel()
+		m := minimalTestManager(t)
+		m.state.Store(int32(StateStable))
+		ok := m.transitionState(StateStable)
+		require.True(t, ok)
+		require.Equal(t, StateStable, m.State())
+	})
+
+	t.Run("concurrent transitions are safe", func(t *testing.T) {
+		t.Parallel()
+		var transitionCount atomic.Int32
+		m := minimalTestManager(t)
+		m.hooks = &Hooks{
+			OnStateChanged: func(_ context.Context, _, _ State) error {
+				transitionCount.Add(1)
+				return nil
+			},
+		}
+		m.state.Store(int32(StateStable))
+
+		const goroutines = 50
+		results := make(chan bool, goroutines)
+		for range goroutines {
+			go func() {
+				results <- m.transitionState(StateScaling)
+			}()
+		}
+
+		successCount := 0
+		for range goroutines {
+			if <-results {
+				successCount++
+			}
+		}
+		m.wg.Wait() // wait for hook goroutines
+
+		// transitionState is idempotent: once the first CAS wins (Stable→Scaling), subsequent
+		// callers see from==to and return true. All goroutines observe eventual success.
+		require.Equal(t, goroutines, successCount, "all callers observe eventual success")
+		require.Equal(t, StateScaling, m.State())
+		// The actual state change (and hook invocation) happens exactly once.
+		require.Equal(t, int32(1), transitionCount.Load(), "state change hook must fire exactly once")
+	})
+}
+
+// minimalTestManager returns a Manager wired with Nop dependencies, suitable for unit tests
+// that don't exercise NATS.
+func minimalTestManager(t *testing.T) *Manager {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	return &Manager{
+		logger:  logging.NewNop(),
+		metrics: metrics.NewNop(),
+		hooks:   &Hooks{},
+		ctx:     ctx,
+		cancel:  cancel,
 	}
 }

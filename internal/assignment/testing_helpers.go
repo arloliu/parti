@@ -2,9 +2,27 @@ package assignment
 
 import (
 	"context"
+	"sync/atomic"
 
 	"github.com/arloliu/parti/v2/types"
 )
+
+// mockStateProvider implements types.StateProvider for testing.
+type mockStateProvider struct {
+	inGrace atomic.Bool
+}
+
+func (m *mockStateProvider) State() types.State {
+	return types.StateStable
+}
+
+func (m *mockStateProvider) IsInRecoveryGrace() bool {
+	return m.inGrace.Load()
+}
+
+func (m *mockStateProvider) SetGrace(v bool) {
+	m.inGrace.Store(v)
+}
 
 // mockSource implements types.PartitionSource for testing.
 //

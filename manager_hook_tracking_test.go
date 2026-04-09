@@ -62,7 +62,7 @@ func TestHookGoroutinesTrackedByWaitGroup(t *testing.T) {
 		defer m.cancel()
 
 		// Trigger transition that fires the hook
-		m.transitionState(StateInit, StateClaimingID)
+		m.transitionState(StateClaimingID)
 
 		// Wait for all tracked goroutines
 		m.wg.Wait()
@@ -79,7 +79,7 @@ func TestHookGoroutinesTrackedByWaitGroup(t *testing.T) {
 
 		// Must not panic
 		require.NotPanics(t, func() {
-			m.transitionState(StateInit, StateClaimingID)
+			m.transitionState(StateClaimingID)
 		})
 
 		m.wg.Wait()
@@ -174,8 +174,7 @@ func TestHookGoroutinesTrackedByWaitGroup(t *testing.T) {
 		m := newHookTestManager(hooks)
 		defer m.cancel()
 		// Put into degraded state first
-		now := time.Now()
-		m.degradedSince.Store(&now)
+		m.degradedSince.Store(time.Now().UnixNano())
 		m.state.Store(int32(StateDegraded))
 
 		m.exitDegraded()
@@ -202,10 +201,10 @@ func TestHookGoroutinesTrackedByWaitGroup(t *testing.T) {
 		m := newHookTestManager(hooks)
 		defer m.cancel()
 
-		// Trigger several state transitions rapidly
-		m.transitionState(StateInit, StateClaimingID)
-		m.transitionState(StateClaimingID, StateElection)
-		m.transitionState(StateElection, StateWaitingAssignment)
+		// Trigger several state transitions rapidly (state machine starts at Init)
+		m.transitionState(StateClaimingID)
+		m.transitionState(StateElection)
+		m.transitionState(StateWaitingAssignment)
 
 		m.wg.Wait()
 

@@ -591,6 +591,13 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 		return nil
 	}
 
+	// Recovery Grace: defer non-emergency rebalancing while the leader is stabilizing
+	// after exiting degraded mode. Emergencies (Tier 0) still proceed immediately.
+	if c.stateProvider != nil && c.stateProvider.IsInRecoveryGrace() {
+		c.Logger.Info("skipping rebalance: leader is in recovery grace period after degraded mode")
+		return nil
+	}
+
 	// TIER 3: Rate limiting - Enforce RebalanceCooldown for NON-EMERGENCY changes
 	// This prevents thrashing during rapid successive changes (flapping)
 	if time.Since(c.publisher.LastRebalanceTime()) < c.Cooldown {

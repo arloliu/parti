@@ -86,35 +86,66 @@ func (m *Manager) WaitState(expectedState State, timeout time.Duration) <-chan e
 	return ch
 }
 
-// transitionState transitions to a new state and triggers hooks.
-func (m *Manager) transitionState(from, to State) {
-	// Validate state transition
-	if !m.isValidTransition(from, to) {
-		m.logError("invalid state transition attempted",
-			"from", from.String(),
-			"to", to.String(),
-		)
+// transitionState atomically transitions to the given state using CAS.
+//
+// It reads the current state, validates the transition, and attempts CAS.
+// On CAS failure caused by a concurrent state change, it retries with the
+// newly observed current state. Returns true on success, false if the
+// transition is invalid from every observed current state or if the
+// manager has already reached the target state.
+//
+// This approach eliminates the TOCTOU race where the caller read the state,
+// validated it, and then stored unconditionally — allowing concurrent writers
+// to silently overwrite each other.
+func (m *Manager) transitionState(to State) bool {
+	const maxRetries = 16
 
-		return
+	for i := range maxRetries {
+		from := m.State()
+		if from == to {
+			return true // Already in target state; treat as success
+		}
+		if !m.isValidTransition(from, to) {
+			if i == 0 {
+				// Only log on first attempt to avoid noise from CAS retries
+				m.logError("invalid state transition attempted",
+					"from", from.String(),
+					"to", to.String(),
+				)
+			}
+
+			return false
+		}
+
+		if m.state.CompareAndSwap(int32(from), int32(to)) { //nolint:gosec // State values are controlled enum
+			m.logger.Info("state transition",
+				"from", from.String(),
+				"to", to.String(),
+				"worker_id", m.WorkerID(),
+			)
+
+			// Trigger state change hook (tracked by WaitGroup so Stop waits for completion)
+			if m.hooks.OnStateChanged != nil {
+				capturedFrom := from // Capture for closure
+				m.invokeHook("state change", func() error {
+					return m.hooks.OnStateChanged(m.ctx, capturedFrom, to)
+				})
+			}
+
+			// Record metrics (always non-nil, defaults to nopMetrics)
+			m.metrics.RecordStateTransition(from, to, 0)
+
+			return true
+		}
+		// CAS failed: another goroutine changed state concurrently; retry
 	}
 
-	m.state.Store(int32(to)) //nolint:gosec // State values are controlled enum
-
-	m.logger.Info("state transition",
-		"from", from.String(),
+	m.logError("state transition abandoned: too many concurrent attempts",
 		"to", to.String(),
-		"worker_id", m.WorkerID(),
+		"current", m.State().String(),
 	)
 
-	// Trigger state change hook (tracked by WaitGroup so Stop waits for completion)
-	if m.hooks.OnStateChanged != nil {
-		m.invokeHook("state change", func() error {
-			return m.hooks.OnStateChanged(m.ctx, from, to)
-		})
-	}
-
-	// Record metrics (always non-nil, defaults to nopMetrics)
-	m.metrics.RecordStateTransition(from, to, 0)
+	return false
 }
 
 // isValidTransition validates that a state transition is allowed.
@@ -122,16 +153,19 @@ func (m *Manager) transitionState(from, to State) {
 // Returns:
 //   - bool: true if transition is valid, false otherwise
 func (m *Manager) isValidTransition(from, to State) bool {
-	// Define valid state transitions
+	// Define valid state transitions.
+	// StateDegraded is a first-class state reachable from any active (non-Init/Shutdown)
+	// state, and exits only to Stable or Shutdown.
 	validTransitions := map[State][]State{
 		StateInit:              {StateClaimingID, StateShutdown},
 		StateClaimingID:        {StateElection, StateShutdown},
 		StateElection:          {StateWaitingAssignment, StateShutdown},
-		StateWaitingAssignment: {StateStable, StateScaling, StateRebalancing, StateEmergency, StateShutdown},
-		StateStable:            {StateScaling, StateRebalancing, StateEmergency, StateShutdown},
-		StateScaling:           {StateRebalancing, StateWaitingAssignment, StateStable, StateShutdown},
-		StateRebalancing:       {StateStable, StateWaitingAssignment, StateShutdown},
-		StateEmergency:         {StateStable, StateWaitingAssignment, StateShutdown},
+		StateWaitingAssignment: {StateStable, StateScaling, StateRebalancing, StateEmergency, StateDegraded, StateShutdown},
+		StateStable:            {StateScaling, StateRebalancing, StateEmergency, StateDegraded, StateShutdown},
+		StateScaling:           {StateRebalancing, StateWaitingAssignment, StateStable, StateDegraded, StateShutdown},
+		StateRebalancing:       {StateStable, StateWaitingAssignment, StateDegraded, StateShutdown},
+		StateEmergency:         {StateStable, StateWaitingAssignment, StateDegraded, StateShutdown},
+		StateDegraded:          {StateStable, StateShutdown},
 		StateShutdown:          {}, // Terminal state - no transitions allowed
 	}
 
@@ -208,9 +242,9 @@ func (m *Manager) syncStateFromCalculator(calcState types.CalculatorState) error
 		return fmt.Errorf("unknown calculator state: %v", calcState)
 	}
 
-	// Only transition if state actually changed
+	// Only transition if state actually changed; CAS inside transitionState handles concurrent modifications
 	if currentState != targetState {
-		m.transitionState(currentState, targetState)
+		m.transitionState(targetState)
 	}
 
 	return nil

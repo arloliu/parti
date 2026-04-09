@@ -156,23 +156,29 @@ func (c *Claimer) Claim(ctx context.Context) (string, error) {
 			return "", fmt.Errorf("failed to claim ID %s: %w", workerID, err)
 		}
 
-		// Key exists - check if it's stale (expired but not yet purged)
-		// This can happen with file storage after NATS restart
+		// Key exists - check if it's stale (expired but not yet purged).
+		// This can happen with file storage after NATS restart.
 		entry, getErr := c.kv.Get(ctx, key)
 		if getErr != nil {
-			// Key was deleted/expired between Create and Get - try to claim it
-			c.logger.Debug("key disappeared after Create failed, attempting Put", "worker_id", workerID)
-			revision, putErr := c.kv.Put(ctx, key, []byte(value))
-			if putErr == nil {
+			// Key was deleted/expired between Create and Get.
+			// Retry Create atomically — NOT Put, which is non-atomic and allows
+			// two concurrent workers to both "win" the same ID (split-brain).
+			c.logger.Debug("key disappeared after Create failed, retrying Create", "worker_id", workerID)
+			revision, createErr := c.kv.Create(ctx, key, []byte(value))
+			if createErr == nil {
 				c.mu.Lock()
 				c.workerID = workerID
 				c.mu.Unlock()
-				c.logger.Info("stable ID claimed via Put after expiry", "worker_id", workerID, "key", key, "revision", revision)
+				c.logger.Info("stable ID claimed via Create retry after expiry", "worker_id", workerID, "key", key, "revision", revision)
 
 				return workerID, nil
 			}
-			// Put failed, someone else got it - try next ID
-			c.logger.Debug("Put failed, trying next ID", "worker_id", workerID, "error", putErr, "next_id", id+1)
+			if !errors.Is(createErr, jetstream.ErrKeyExists) {
+				c.logger.Error("stable ID Create retry failed with unexpected error", "worker_id", workerID, "error", createErr)
+				return "", fmt.Errorf("failed to claim ID %s: %w", workerID, createErr)
+			}
+			// Another worker won the Create retry - try next ID
+			c.logger.Debug("Create retry lost race, trying next ID", "worker_id", workerID, "next_id", id+1)
 		} else {
 			// Key exists and is valid - skip to next ID
 			c.logger.Debug("stable ID actively claimed by another worker", "worker_id", workerID, "revision", entry.Revision(), "next_id", id+1)

@@ -58,7 +58,8 @@ func TestNewManager_NilSafety(t *testing.T) {
 		// Verify internal methods don't panic even without custom implementations
 		require.NotPanics(t, func() {
 			mgr.logError("test error", "key", "value")
-			mgr.transitionState(StateInit, StateStable)
+			// StateInit -> StateStable is invalid; transitionState must not panic
+			mgr.transitionState(StateStable)
 		})
 	})
 

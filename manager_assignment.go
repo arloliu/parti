@@ -102,13 +102,13 @@ func (m *Manager) startCalculator(assignmentKV, heartbeatKV jetstream.KeyValue) 
 
 	m.calculator = calc
 
-	// Start monitoring calculator state BEFORE starting the calculator
-	// This ensures we don't miss any state transitions that happen during startup
-	m.wg.Go(m.monitorCalculatorState)
-
-	// Give the monitor goroutine a moment to set up its subscription
-	// This prevents race conditions where calculator state changes before monitor is ready
-	time.Sleep(10 * time.Millisecond)
+	// Start monitoring calculator state BEFORE starting the calculator.
+	// Pass calc directly (not via m.mu) so the goroutine can subscribe without
+	// waiting for the write lock that startCalculator holds.
+	// The ready channel blocks until the subscription is established.
+	readyCh := make(chan struct{})
+	m.wg.Go(func() { m.monitorCalculatorState(calc, readyCh) })
+	<-readyCh
 
 	// Start calculator in background
 	if err := calc.Start(m.ctx); err != nil {
@@ -127,20 +127,19 @@ func (m *Manager) startCalculator(assignmentKV, heartbeatKV jetstream.KeyValue) 
 // the Manager's state machine accordingly. Replaces the previous polling-based
 // approach (200ms ticker) with event-driven synchronization for zero-lag updates.
 //
+// readyCh is closed once the subscription is established, signalling the caller
+// that no state changes can be missed from that point onward.
+//
 // This method runs only on the leader and translates calculator states to Manager states:
 //   - types.CalcStateScaling → StateScaling
 //   - types.CalcStateRebalancing → StateRebalancing
 //   - types.CalcStateEmergency → StateEmergency
 //   - types.CalcStateIdle (after rebalancing) → StateStable
-func (m *Manager) monitorCalculatorState() {
+func (m *Manager) monitorCalculatorState(calc assignmentCalculator, readyCh chan struct{}) {
 	m.logger.Info("starting calculator state monitor")
 
-	// Subscribe to calculator state changes with mutex protection
-	m.mu.RLock()
-	calc := m.calculator
-	m.mu.RUnlock()
-
 	stateCh, unsubscribe := calc.SubscribeToStateChanges()
+	close(readyCh) // Subscription established — caller may now start the calculator
 	defer unsubscribe()
 
 	for {
@@ -185,13 +184,13 @@ func (m *Manager) stopCalculator() bool {
 		// Transition to Stable if we have an assignment, otherwise WaitingAssignment
 		currentAssignment := m.CurrentAssignment()
 		if len(currentAssignment.Partitions) > 0 {
-			m.transitionState(currentState, StateStable)
+			m.transitionState(StateStable)
 			m.logger.Info("transitioned to Stable after losing leadership",
 				"worker_id", m.WorkerID(),
 				"from_state", currentState.String(),
 			)
 		} else {
-			m.transitionState(currentState, StateWaitingAssignment)
+			m.transitionState(StateWaitingAssignment)
 			m.logger.Info("transitioned to WaitingAssignment after losing leadership",
 				"worker_id", m.WorkerID(),
 				"from_state", currentState.String(),
@@ -251,18 +250,36 @@ func (m *Manager) fetchAssignment(ctx context.Context, kv jetstream.KeyValue) (*
 	return asgn, nil
 }
 
-// monitorAssignmentChanges monitors for assignment changes.
+// monitorAssignmentChanges monitors for assignment changes with automatic retry.
+//
+// If the watcher fails to start (e.g., transient NATS error), the monitor
+// waits 2 seconds and retries. A clean exit (context cancelled or watcher closed)
+// stops the retry loop immediately.
 func (m *Manager) monitorAssignmentChanges(ctx context.Context, kv jetstream.KeyValue) {
+	for {
+		err := m.watchAssignment(ctx, kv)
+		if err == nil || ctx.Err() != nil {
+			return
+		}
+		m.logError("assignment watcher failed, retrying in 2s", "error", err)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+// watchAssignment runs one watch session on this worker's assignment key.
+// Returns nil on clean exit (context cancelled or channel closed normally),
+// error if the watcher could not be established.
+func (m *Manager) watchAssignment(ctx context.Context, kv jetstream.KeyValue) error {
 	workerID := m.WorkerID()
 	key := fmt.Sprintf("assignment.%s", workerID) // Match calculator's key format
 
-	// Watch for updates to this worker's assignment key
-	// The watcher will deliver initial value, then a nil entry marker, then future updates
 	watcher, err := kv.Watch(ctx, key)
 	if err != nil {
-		m.logError("failed to watch assignments", "error", err)
-
-		return
+		return fmt.Errorf("failed to watch assignments: %w", err)
 	}
 
 	defer func() {
@@ -275,11 +292,11 @@ func (m *Manager) monitorAssignmentChanges(ctx context.Context, kv jetstream.Key
 		select {
 		case <-ctx.Done():
 			m.logger.Debug("assignment monitor stopping (context cancelled)", "worker_id", workerID)
-			return
+			return nil
 		case entry, ok := <-watcher.Updates():
 			if !ok {
 				m.logger.Debug("assignment watcher closed", "worker_id", workerID)
-				return
+				return nil
 			}
 			if entry == nil {
 				// Nil entry indicates end of initial values replay
@@ -378,15 +395,8 @@ func (m *Manager) applyHandoffAndHooks(workerID string, oldAssignment, newAssign
 }
 
 func (m *Manager) recordAssignmentMetrics(oldAssignment, newAssignment Assignment) {
-	added := len(newAssignment.Partitions) - len(oldAssignment.Partitions)
-	if added < 0 {
-		added = 0
-	}
-	removed := len(oldAssignment.Partitions) - len(newAssignment.Partitions)
-	if removed < 0 {
-		removed = 0
-	}
-	m.metrics.RecordAssignmentChange(added, removed, newAssignment.Version)
+	added, removed := diffPartitions(oldAssignment.Partitions, newAssignment.Partitions)
+	m.metrics.RecordAssignmentChange(len(added), len(removed), newAssignment.Version)
 }
 
 // refreshAssignmentFromNATS attempts to fetch the current assignment from NATS KV.
@@ -407,9 +417,8 @@ func (m *Manager) refreshAssignmentFromNATS() error {
 		return fmt.Errorf("failed to unmarshal assignment: %w", err)
 	}
 
-	now := time.Now()
 	m.assignment.Store(curAssignment)
-	m.lastAssignmentAt.Store(&now)
+	m.lastAssignmentAt.Store(time.Now().UnixNano())
 	m.lastAssignment.Store(m.clonePartitions(curAssignment.Partitions))
 
 	m.logger.Info("assignment refreshed from NATS",

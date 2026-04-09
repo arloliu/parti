@@ -87,16 +87,16 @@ type Manager struct {
 	assignment atomic.Value // Assignment
 
 	// Degraded mode tracking
-	degradedSince      atomic.Value  // *time.Time - when degraded mode entered
-	lastAssignmentAt   atomic.Value  // *time.Time - last successful assignment fetch
+	degradedSince      atomic.Int64  // UnixNano when degraded mode entered; 0 = not degraded
+	lastAssignmentAt   atomic.Int64  // UnixNano of last successful assignment fetch; 0 = never
 	lastAssignment     atomic.Value  // []Partition - cached assignment during degraded
 	connMonitorOnce    sync.Once     // ensures single connection monitor goroutine
 	connMonitorStop    chan struct{} // channel to stop connection monitor
-	connDownSince      atomic.Value  // *time.Time - when connectivity lost
-	connUpSince        atomic.Value  // *time.Time - when connectivity restored
+	connDownSince      atomic.Int64  // UnixNano when connectivity lost; 0 = up
+	connUpSince        atomic.Int64  // UnixNano when connectivity restored; 0 = none
 	kvErrorCount       atomic.Int32  // consecutive KV error count
 	kvErrorWindow      []time.Time   // timestamps of recent KV errors (protected by mu)
-	recoveryGraceStart atomic.Value  // *time.Time - when recovery grace period started
+	recoveryGraceStart atomic.Int64  // UnixNano when recovery grace period started; 0 = not in grace
 	inRecoveryGrace    atomic.Bool   // true during recovery grace period
 
 	// Lifecycle management
@@ -318,7 +318,7 @@ func (m *Manager) Start(ctx context.Context) (startErr error) {
 		return err
 	}
 	m.logger.Info("startup: claiming stable worker ID")
-	m.transitionState(m.State(), StateClaimingID)
+	m.transitionState(StateClaimingID)
 	if err := m.claimWorkerID(startupCtx, stableIDKV); err != nil {
 		return fmt.Errorf("failed to claim worker ID: %w", err)
 	}
@@ -348,7 +348,7 @@ func (m *Manager) Start(ctx context.Context) (startErr error) {
 	m.logger.Info("startup: KV buckets ready")
 
 	// Step 2: Participate in leader election
-	m.transitionState(m.State(), StateElection)
+	m.transitionState(StateElection)
 	m.logger.Info("startup: participating in election")
 	if err := m.participateElection(startupCtx, electionKV); err != nil {
 		return fmt.Errorf("failed to participate in election: %w", err)
@@ -368,7 +368,7 @@ func (m *Manager) Start(ctx context.Context) (startErr error) {
 	}
 
 	// Step 5: Wait for assignment
-	m.transitionState(m.State(), StateWaitingAssignment)
+	m.transitionState(StateWaitingAssignment)
 	m.logger.Info("startup: waiting for assignment")
 	if err := m.waitForAssignment(startupCtx, assignmentKV, heartbeatKV); err != nil {
 		return fmt.Errorf("failed to get assignment: %w", err)
@@ -380,7 +380,7 @@ func (m *Manager) Start(ctx context.Context) (startErr error) {
 	m.applyInitialHandoffAsync()
 
 	// Step 6: Transition to stable state
-	m.transitionState(m.State(), StateStable)
+	m.transitionState(StateStable)
 
 	// Start background workers
 	m.wg.Go(func() { m.monitorAssignmentChanges(m.ctx, assignmentKV) })
@@ -417,7 +417,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 	}
 
 	// Transition to shutdown state
-	m.transitionState(currentState, StateShutdown)
+	m.transitionState(StateShutdown)
 
 	// Cancel manager context to stop all background goroutines
 	// This will cause monitorAssignmentChanges watcher to close
