@@ -176,7 +176,7 @@ A logical unit of work identified by a list of keys (e.g., `["orders", "0"]`). P
 ```go
 type Partition struct {
     Keys   []string  // Unique identifier (e.g., ["orders", "region-us"])
-    Weight int64     // Relative processing cost (default: 100)
+  Weight int64     // Relative processing cost (0 = strategy default)
 }
 
 // Helper methods

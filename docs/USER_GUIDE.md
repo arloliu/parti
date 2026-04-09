@@ -17,7 +17,7 @@ This user guide provides an introduction to Parti. For detailed documentation, s
 | [Architecture](ARCHITECTURE.md)                | System architecture, components, data flow       |
 | [Configuration Guide](CONFIGURATION.md)        | Configuration options, presets, tuning           |
 | [Lifecycle Guide](LIFECYCLE.md)                | Worker states, stable IDs, handoff, degraded mode|
-| [Consumer Helpers](CONSUMERS.md)               | Queue, Dynamic, Broadcast, and ProcessingGate helpers |
+| [Consumer Helpers](CONSUMERS.md)               | Queue, Dynamic, Broadcast, ProcessingGate, and auto-recovery |
 | [Strategies & Sources](STRATEGIES.md)          | Assignment strategies, partition sources         |
 | [Static Partitioning](STATIC_PARTITIONING.md)  | The partition package for key-based routing      |
 | [Reference](REFERENCE.md)                      | Hooks, errors, best practices, glossary          |
@@ -54,6 +54,7 @@ Parti is a Go library for NATS-based work partitioning that provides dynamic par
 | **Cache Affinity**       | Preserves >80% partition locality during rebalancing     |
 | **Weighted Assignment**  | Partition weights for uneven workload distribution       |
 | **Static Partitioning**  | Zero-coordination mode for StatefulSet deployments       |
+| **Auto-Recovery**        | Consumers recreate deleted durables automatically        |
 
 ### Architecture at a Glance
 
@@ -149,7 +150,10 @@ func main() {
 
     // Define partitions
     partitions := []parti.Partition{
-        {ID: "0"}, {ID: "1"}, {ID: "2"}, {ID: "3"},
+        {Keys: []string{"0"}},
+        {Keys: []string{"1"}},
+        {Keys: []string{"2"}},
+        {Keys: []string{"3"}},
     }
     src := source.NewStatic(partitions)
 
@@ -285,6 +289,7 @@ See [Lifecycle Guide](LIFECYCLE.md) for complete state documentation.
 | Load-balanced workers (queue group)                 | `consumer.Queue`                          |
 | Stateful partition processing (caches, connections) | Enable two-phase handoff                  |
 | High availability during NATS outages               | Configure degraded mode                   |
+| Consumer durables deleted by server or admin        | `consumer.WithRecoveryStrategy(consumer.RecoverFromNew)` or `consumer.WithRecoveryStrategy(consumer.RecoverFromLastProcessed)` |
 
 ### Use Case Examples
 

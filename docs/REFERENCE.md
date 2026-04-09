@@ -182,11 +182,11 @@ cfg := &parti.Config{
     WorkerIDMax:     99,               // Allow 100 workers
     WorkerIDTTL:     30 * time.Second,
 
-    HeartbeatInterval:     5 * time.Second,
-    HeartbeatMissThreshold: 3,
+    HeartbeatInterval: 5 * time.Second,
+    HeartbeatTTL:      15 * time.Second,  // 3× interval
 
-    ColdStartWindow:   30 * time.Second,
-    ScalingWindow:     10 * time.Second,
+    ColdStartWindow:    30 * time.Second,
+    PlannedScaleWindow: 10 * time.Second,
 
     EnableTwoPhaseHandoff: true,
 }
@@ -202,11 +202,11 @@ cfg := &parti.Config{
     WorkerIDMax:     9,
     WorkerIDTTL:     10 * time.Second,
 
-    HeartbeatInterval:     1 * time.Second,
-    HeartbeatMissThreshold: 2,
+    HeartbeatInterval: 1 * time.Second,
+    HeartbeatTTL:      3 * time.Second,   // 3× interval
 
-    ColdStartWindow:   5 * time.Second,
-    ScalingWindow:     2 * time.Second,
+    ColdStartWindow:    5 * time.Second,
+    PlannedScaleWindow: 2 * time.Second,
 
     EnableTwoPhaseHandoff: false,
 }
@@ -301,13 +301,18 @@ func TestPartitionProcessing(t *testing.T) {
         WorkerIDPrefix:    "test-worker",
         WorkerIDMax:       9,
         WorkerIDTTL:       2 * time.Second,
-        HeartbeatInterval: 500 * time.Millisecond,
-        ColdStartWindow:   1 * time.Second,
-        ScalingWindow:     500 * time.Millisecond,
+        HeartbeatInterval:  500 * time.Millisecond,
+        HeartbeatTTL:       1500 * time.Millisecond,
+        ColdStartWindow:    1 * time.Second,
+        PlannedScaleWindow: 500 * time.Millisecond,
     }
 
     // Define test partitions
-    partitions := []parti.Partition{{ID: "0"}, {ID: "1"}, {ID: "2"}}
+    partitions := []parti.Partition{
+        {Keys: []string{"0"}},
+        {Keys: []string{"1"}},
+        {Keys: []string{"2"}},
+    }
     src := source.NewStatic(partitions)
 
     // Create manager with positional args

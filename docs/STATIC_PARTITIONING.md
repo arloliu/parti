@@ -123,7 +123,7 @@ partitioner := partition.NewHashPartitioner(partitionCount)
 // Generate partition definitions for the manager
 partitions := make([]parti.Partition, partitionCount)
 for i := range partitions {
-    partitions[i] = parti.Partition{ID: strconv.Itoa(i)}
+    partitions[i] = parti.Partition{Keys: []string{strconv.Itoa(i)}}
 }
 src := source.NewStatic(partitions)
 
@@ -183,7 +183,7 @@ ids := partition.GeneratePartitionIDs(16)
 // Convert to Partition slice
 partitions := make([]parti.Partition, len(ids))
 for i, id := range ids {
-    partitions[i] = parti.Partition{ID: id}
+    partitions[i] = parti.Partition{Keys: []string{id}}
 }
 ```
 
@@ -318,7 +318,7 @@ partitioner := partition.NewHashPartitioner(partitionCount)
 // Source for manager - MUST match partitioner count
 partitions := make([]parti.Partition, partitionCount)
 for i := range partitions {
-    partitions[i] = parti.Partition{ID: strconv.Itoa(i)}
+    partitions[i] = parti.Partition{Keys: []string{strconv.Itoa(i)}}
 }
 src := source.NewStatic(partitions)
 

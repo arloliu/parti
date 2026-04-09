@@ -163,9 +163,9 @@ s := strategy.NewWeightedConsistentHash()
 
 // Define partitions with weights
 partitions := []parti.Partition{
-    {ID: "0", Weight: 1.0},  // Light load
-    {ID: "1", Weight: 3.0},  // Heavy load (3x partition 0)
-    {ID: "2", Weight: 1.5},  // Medium load
+    {Keys: []string{"0"}, Weight: 1},  // Light load
+    {Keys: []string{"1"}, Weight: 3},  // Heavy load (3x partition 0)
+    {Keys: []string{"2"}, Weight: 2},  // Medium load (approx 1.5x)
 }
 
 // Use with static source
@@ -326,26 +326,26 @@ import (
     "github.com/arloliu/parti/v2/source"
 )
 
-// Simple: just partition IDs
+// Simple: single-key partitions
 partitions := []parti.Partition{
-    {ID: "0"},
-    {ID: "1"},
-    {ID: "2"},
+    {Keys: []string{"0"}},
+    {Keys: []string{"1"}},
+    {Keys: []string{"2"}},
 }
 src := source.NewStatic(partitions)
 
-// With weights
+// With weights (int64; 0 means "use strategy default", typically 1)
 partitions := []parti.Partition{
-    {ID: "tenant-a", Weight: 2.0},
-    {ID: "tenant-b", Weight: 1.0},
-    {ID: "tenant-c", Weight: 3.0},
+    {Keys: []string{"tenant-a"}, Weight: 2},
+    {Keys: []string{"tenant-b"}, Weight: 1},
+    {Keys: []string{"tenant-c"}, Weight: 3},
 }
 src := source.NewStatic(partitions)
 
-// With metadata
+// Multi-key partitions (ID() joins with "-", Subject() joins with ".")
 partitions := []parti.Partition{
-    {ID: "0", Metadata: map[string]string{"region": "us-east"}},
-    {ID: "1", Metadata: map[string]string{"region": "us-west"}},
+    {Keys: []string{"us-east", "0"}},
+    {Keys: []string{"us-west", "0"}},
 }
 src := source.NewStatic(partitions)
 

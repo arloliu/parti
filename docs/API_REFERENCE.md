@@ -475,36 +475,39 @@ func (a *ConsulElectionAgent) RequestLeadership(
 Collects metrics for observability.
 
 ```go
+// MetricsCollector is a composite interface; it embeds ManagerMetrics,
+// CalculatorMetrics, WorkerMetrics, AssignmentMetrics, and WorkerConsumerMetrics.
 type MetricsCollector interface {
     // Manager Metrics
-    RecordStateTransition(from, to State, duration time.Duration)
-    RecordStateDuration(state State, duration time.Duration)
+    RecordStateTransition(from, to State, duration float64)
+    RecordLeadershipChange(newLeader string)
+    RecordDegradedDuration(duration float64) // Seconds spent in degraded mode
+    SetDegradedMode(value float64)           // 1.0 = degraded, 0.0 = normal
+    SetCacheAge(age float64)                 // Age of cached assignment in seconds
+    SetAlertLevel(level int)                 // Current alert level (0-3)
+    IncrementAlertEmitted(level string)      // Count alerts by level
+
+    // Assignment Metrics
     RecordAssignmentChange(added, removed int, version int64)
-    RecordAssignmentCalculationTime(duration time.Duration)
-    RecordAffinityScore(score float64)
+
+    // Worker Metrics
     RecordHeartbeat(workerID string, success bool)
-    RecordLeadershipChange(newLeader string, duration time.Duration)
 
-    // Degraded Mode Metrics (NEW)
-    RecordDegradedDuration(duration time.Duration)    // Total time in degraded mode
-    SetDegradedMode(value float64)                    // Current degraded state (1.0 = degraded, 0.0 = normal)
-    SetCacheAge(duration time.Duration)               // Age of cached assignment
-    SetAlertLevel(level int)                          // Current alert level (0-3)
-    IncrementAlertEmitted(level string)               // Count alerts by level
+    // Calculator Metrics
+    RecordCacheUsage(cacheType string, age float64) // Type ("workers","assignments") and age in seconds
+    IncrementCacheFallback(reason string)            // Reason ("connectivity_error","timeout","unknown")
 
-    // Calculator Metrics (NEW)
-    RecordCacheUsage(hit bool)                        // Cache hit/miss tracking
-    IncrementCacheFallback()                          // Count cache fallback operations
+    // ... see types.WorkerConsumerMetrics for consumer-specific methods
 }
 ```
 
 **New Degraded Mode Metrics**:
 
 #### RecordDegradedDuration
-Records total time spent in degraded mode.
+Records total time spent in degraded mode (value in seconds).
 ```go
-// Called on exit from degraded mode
-collector.RecordDegradedDuration(5 * time.Minute)
+// Called on exit from degraded mode (300 seconds = 5 minutes)
+collector.RecordDegradedDuration(300)
 ```
 
 #### SetDegradedMode
@@ -516,10 +519,10 @@ collector.SetDegradedMode(0.0) // Exiting degraded
 ```
 
 #### SetCacheAge
-Sets age of cached assignment (gauge).
+Sets age of cached assignment data in seconds (gauge).
 ```go
-// Updated periodically while in degraded mode
-collector.SetCacheAge(2 * time.Minute)
+// Updated periodically while in degraded mode (120 seconds = 2 minutes)
+collector.SetCacheAge(120)
 ```
 
 #### SetAlertLevel
@@ -536,16 +539,16 @@ collector.IncrementAlertEmitted("Critical")
 ```
 
 #### RecordCacheUsage
-Records calculator cache hit/miss.
+Records when cached data is used instead of fresh KV data.
 ```go
-collector.RecordCacheUsage(true)  // Cache hit
-collector.RecordCacheUsage(false) // Cache miss
+collector.RecordCacheUsage("workers", 5.2)      // Using cached workers list, 5.2s old
+collector.RecordCacheUsage("assignments", 0.5)  // Using cached assignments, 0.5s old
 ```
 
 #### IncrementCacheFallback
 Increments counter when calculator falls back to cache.
 ```go
-collector.IncrementCacheFallback() // Using stale cache
+collector.IncrementCacheFallback("connectivity_error") // Network connectivity issue
 ```
 
 **Methods**: See [Observability Section](#observability) for details.
@@ -570,7 +573,7 @@ func (c *PrometheusCollector) IncrementAlertEmitted(level string) {
     c.alertsTotal.WithLabelValues(level).Inc()
 }
 
-func (c *PrometheusCollector) IncrementCacheFallback() {
+func (c *PrometheusCollector) IncrementCacheFallback(reason string) {
     c.cacheFallbackTotal.Inc()
 }
 ```
@@ -871,7 +874,7 @@ type DegradedBehaviorConfig struct {
 - `ExitThreshold`: Time with restored NATS before exiting degraded mode (default: 5s)
 - `KVErrorThreshold`: Number of consecutive KV errors to trigger degraded mode (default: 5)
 - `KVErrorWindow`: Time window for counting KV errors (default: 30s)
-- `RecoveryGracePeriod`: Time after recovery before leaders can trigger emergency rebalancing (default: 30s)
+- `RecoveryGracePeriod`: Time after recovery before leaders can trigger emergency rebalancing (default: 15s)
 
 ---
 
@@ -914,10 +917,10 @@ type KVBucketConfig struct {
 ```
 
 **Defaults**:
-- `StableIDBucket`: "parti-stable-ids"
+- `StableIDBucket`: "parti-stableid"
 - `ElectionBucket`: "parti-election"
-- `HeartbeatBucket`: "parti-heartbeats"
-- `AssignmentBucket`: "parti-assignments"
+- `HeartbeatBucket`: "parti-heartbeat"
+- `AssignmentBucket`: "parti-assignment"
 - `HandoffBucket`: "parti-handoff"
 - `AssignmentTTL`: 0 (no expiration - assignments persist)
 
@@ -938,25 +941,24 @@ type DegradedAlertConfig struct {
 ```
 
 **Fields**:
-- `InfoThreshold`: Duration in degraded mode before Info alert (default: 1 minute)
-- `WarnThreshold`: Duration before Warn alert (default: 5 minutes)
-- `ErrorThreshold`: Duration before Error alert (default: 15 minutes)
-- `CriticalThreshold`: Duration before Critical alert (default: 30 minutes)
-- `AlertInterval`: Minimum time between repeated alerts (default: 30 seconds)
+- `InfoThreshold`: Duration in degraded mode before Info alert (default: 30s)
+- `WarnThreshold`: Duration before Warn alert (default: 2m)
+- `ErrorThreshold`: Duration before Error alert (default: 5m)
+- `CriticalThreshold`: Duration before Critical alert (default: 10m)
+- `AlertInterval`: Minimum time between repeated alerts (default: 1m)
 
 **Alert Escalation**:
 Alerts escalate as degraded mode persists:
 ```
-1 min: [INFO] Degraded mode active
-5 min: [WARN] Degraded mode persisting
-15 min: [ERROR] Prolonged degraded mode
-30 min: [CRITICAL] Extended degraded mode
+30s: [INFO] Degraded mode active
+ 2m: [WARN] Degraded mode persisting
+ 5m: [ERROR] Prolonged degraded mode
+10m: [CRITICAL] Extended degraded mode
 ```
 
 **Validation Rules**:
 - Thresholds must be in ascending order: Info ≤ Warn ≤ Error ≤ Critical
-- AlertInterval must be positive (> 0)
-- Zero thresholds are valid (disables that alert level)
+- All threshold values and AlertInterval must be positive (> 0)
 
 **Example**:
 ```go
@@ -967,18 +969,6 @@ cfg.DegradedAlert = parti.DegradedAlertConfig{
     CriticalThreshold: 10 * time.Minute,
     AlertInterval:     1 * time.Minute,
 }
-```
-
-**Preset Configurations**:
-```go
-// Conservative (longer thresholds, less noisy)
-cfg.DegradedAlert = parti.DegradedAlertPreset("conservative")
-
-// Balanced (default)
-cfg.DegradedAlert = parti.DegradedAlertPreset("balanced")
-
-// Aggressive (shorter thresholds, early detection)
-cfg.DegradedAlert = parti.DegradedAlertPreset("aggressive")
 ```
 
 ---
@@ -1002,7 +992,7 @@ type DegradedBehaviorConfig struct {
 - `ExitThreshold`: Time with restored NATS before exiting degraded mode (default: 5s)
 - `KVErrorThreshold`: Number of consecutive KV errors to trigger degraded mode (default: 5)
 - `KVErrorWindow`: Time window for counting KV errors (default: 30s)
-- `RecoveryGracePeriod`: Time after recovery before leaders can trigger emergency rebalancing (default: 30s)
+- `RecoveryGracePeriod`: Time after recovery before leaders can trigger emergency rebalancing (default: 15s)
 
 **Behavior**:
 - **Enter Degraded**: Triggered by sustained NATS disconnection or repeated KV errors
@@ -1027,16 +1017,14 @@ cfg.DegradedBehavior = parti.DegradedBehaviorConfig{
 **Preset Configurations**:
 ```go
 // Conservative (longer thresholds, slower degraded entry)
-cfg.DegradedBehavior = parti.DegradedBehaviorPreset("conservative")
+cfg.DegradedBehavior, _ = parti.DegradedBehaviorPreset("conservative")
 
 // Balanced (default)
-cfg.DegradedBehavior = parti.DegradedBehaviorPreset("balanced")
+cfg.DegradedBehavior, _ = parti.DegradedBehaviorPreset("balanced")
 
 // Aggressive (shorter thresholds, faster degraded entry)
-cfg.DegradedBehavior = parti.DegradedBehaviorPreset("aggressive")
+cfg.DegradedBehavior, _ = parti.DegradedBehaviorPreset("aggressive")
 ```
-- `AssignmentBucket`: "parti-assignments"
-- `AssignmentTTL`: 0 (no expiration)
 
 ---
 
@@ -1110,13 +1098,13 @@ Represents a logical work partition.
 ```go
 type Partition struct {
     Keys   []string  // Hierarchical partition keys
-    Weight int64     // Relative processing cost (default: 100)
+    Weight int64     // Relative processing cost (0 = strategy default)
 }
 ```
 
 **Fields**:
 - `Keys`: Uniquely identify this partition (e.g., ["topic", "partition_id"])
-- `Weight`: Relative processing cost for load balancing (default: 100)
+- `Weight`: Relative processing cost for load balancing. `0` means "use the strategy's default weight"; negative values are treated as `0`.
 
 **Example**:
 ```go
@@ -1360,7 +1348,7 @@ func NewQueue(
     consumerName string,
     filterSubject string,
     handler MessageHandler,
-    opts ...Option,
+    opts ...QueueOption,
 ) (*Queue, error)
 ```
 
@@ -1404,7 +1392,7 @@ func NewStatic(
     numPartitions int,
     partition int,
     handler MessageHandler,
-    opts ...Option,
+    opts ...StaticOption,
 ) (*Static, error)
 ```
 
@@ -1444,7 +1432,7 @@ func NewDynamic(
     consumerPrefix string,
     subjectTemplate string,
     handler MessageHandler,
-    opts ...Option,
+    opts ...DynamicOption,
 ) (*Dynamic, error)
 ```
 
@@ -1483,7 +1471,7 @@ func NewBroadcast(
     consumerPrefix string,
     filterSubject string,
     handler MessageHandler,
-    opts ...Option,
+    opts ...BroadcastOption,
 ) (*Broadcast, error)
 ```
 
@@ -1518,7 +1506,7 @@ Interface for processing messages.
 
 ```go
 type MessageHandler interface {
-    HandleMessage(ctx context.Context, msg jetstream.Msg) error
+    Handle(ctx context.Context, msg jetstream.Msg) error
 }
 ```
 
@@ -1526,7 +1514,7 @@ type MessageHandler interface {
 ```go
 type MessageHandlerFunc func(ctx context.Context, msg jetstream.Msg) error
 
-func (f MessageHandlerFunc) HandleMessage(ctx context.Context, msg jetstream.Msg) error {
+func (f MessageHandlerFunc) Handle(ctx context.Context, msg jetstream.Msg) error {
     return f(ctx, msg)
 }
 ```
@@ -1593,6 +1581,7 @@ c, _ := consumer.NewQueue(js, "stream", "consumer", "subject.>", handler,
 | `WithFetchTimeout(duration)`     | Max wait when pulling batch                    |
 | `WithManualAck(bool)`            | Disable auto-acknowledgement                   |
 | `WithInactiveThreshold(duration)`| Consumer cleanup threshold                     |
+| `WithRecoveryStrategy(strategy)` | Auto-recovery on unexpected consumer deletion  |
 
 **Type-Specific Options**:
 
@@ -1613,16 +1602,15 @@ Package `github.com/arloliu/parti/v2/partitest` provides utilities for testing.
 Starts an embedded NATS server for testing.
 
 ```go
-func StartEmbeddedNATS(t *testing.T, opts ...Option) *nats.Conn
+func StartEmbeddedNATS(t *testing.T) (*server.Server, *nats.Conn)
 ```
 
 **Example**:
 ```go
 func TestMyFeature(t *testing.T) {
-    nc := partitesting.StartEmbeddedNATS(t)
-    defer nc.Close()
+    _, nc := partitesting.StartEmbeddedNATS(t)
 
-    // Use nc for testing
+    // Use nc for testing. Cleanup is automatic via t.Cleanup().
 }
 ```
 

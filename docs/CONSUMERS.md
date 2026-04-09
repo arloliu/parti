@@ -20,9 +20,11 @@
    - [Dynamic](#dynamic)
    - [Broadcast](#broadcast)
 4. [Message Handler](#message-handler)
-5. [Functional Options](#functional-options)
-6. [Migrating from Legacy Consumer APIs](#migrating-from-legacy-consumer-apis)
-7. [Legacy Consumer APIs](#legacy-consumer-apis)
+5. [WIPHandler — Long-Running Processing](#wiphandler--long-running-processing)
+6. [Auto-Recovery](#auto-recovery)
+7. [Functional Options](#functional-options)
+8. [Migrating from Legacy Consumer APIs](#migrating-from-legacy-consumer-apis)
+9. [Legacy Consumer APIs](#legacy-consumer-apis)
 
 ---
 
@@ -30,12 +32,12 @@
 
 The `consumer` package provides a unified API for JetStream consumers in partitioned workloads:
 
-| Consumer    | Purpose                                    | Coordination | Lifecycle        |
-|-------------|--------------------------------------------|--------------|------------------|
-| `Queue`     | Load-balanced workers (queue group)        | None         | Start → Stop     |
-| `Static`    | Fixed partition (StatefulSet ordinal)      | None         | Start → Stop     |
-| `Dynamic`   | Manager-assigned partitions (Parti core)   | Via Manager  | Update → Stop    |
-| `Broadcast` | Fan-out to all instances                   | None         | Start → Stop     |
+| Consumer    | Purpose                                  | Coordination | Lifecycle     |
+|-------------|------------------------------------------|--------------|---------------|
+| `Queue`     | Load-balanced workers (queue group)      | None         | Start → Stop  |
+| `Static`    | Fixed partition (StatefulSet ordinal)    | None         | Start → Stop  |
+| `Dynamic`   | Manager-assigned partitions (Parti core) | Via Manager  | Update → Stop |
+| `Broadcast` | Fan-out to all instances                 | None         | Start → Stop  |
 
 ### Import
 
@@ -121,10 +123,10 @@ if err := c.Start(ctx); err != nil {
 
 **Key Methods:**
 
-| Method        | Description                                    |
-|---------------|------------------------------------------------|
-| `Start(ctx)`  | Begin consuming messages                       |
-| `Stop(ctx)`   | Gracefully stop with context timeout           |
+| Method       | Description                          |
+|--------------|--------------------------------------|
+| `Start(ctx)` | Begin consuming messages             |
+| `Stop(ctx)`  | Gracefully stop with context timeout |
 
 ---
 
@@ -166,12 +168,12 @@ if err := c.Start(ctx); err != nil {
 
 **Key Methods:**
 
-| Method        | Description                                    |
-|---------------|------------------------------------------------|
-| `Start(ctx)`  | Begin consuming messages                       |
-| `Stop(ctx)`   | Gracefully stop with context timeout           |
-| `Partition()` | Returns the partition index                    |
-| `Subject()`   | Returns the filter subject                     |
+| Method        | Description                          |
+|---------------|--------------------------------------|
+| `Start(ctx)`  | Begin consuming messages             |
+| `Stop(ctx)`   | Gracefully stop with context timeout |
+| `Partition()` | Returns the partition index          |
+| `Subject()`   | Returns the filter subject           |
 
 ---
 
@@ -220,11 +222,11 @@ if err := c.Update(ctx, "worker-0", partitions); err != nil {
 
 **Key Methods:**
 
-| Method                                      | Description                                    |
-|---------------------------------------------|------------------------------------------------|
-| `Update(ctx, workerID, partitions)`         | Update partition assignments                   |
-| `Stop(ctx)`                                 | Gracefully stop all partition consumers        |
-| `UpdateWorkerConsumer(ctx, id, partitions)` | Implements `WorkerConsumerUpdater` interface   |
+| Method                                      | Description                                  |
+|---------------------------------------------|----------------------------------------------|
+| `Update(ctx, workerID, partitions)`         | Update partition assignments                 |
+| `Stop(ctx)`                                 | Gracefully stop all partition consumers      |
+| `UpdateWorkerConsumer(ctx, id, partitions)` | Implements `WorkerConsumerUpdater` interface |
 
 ---
 
@@ -263,10 +265,10 @@ if err := c.Start(ctx); err != nil {
 
 **Key Methods:**
 
-| Method        | Description                                    |
-|---------------|------------------------------------------------|
-| `Start(ctx)`  | Begin consuming messages                       |
-| `Stop(ctx)`   | Gracefully stop with context timeout           |
+| Method       | Description                          |
+|--------------|--------------------------------------|
+| `Start(ctx)` | Begin consuming messages             |
+| `Stop(ctx)`  | Gracefully stop with context timeout |
 
 ---
 
@@ -276,7 +278,7 @@ All consumer types use the unified `MessageHandler` interface:
 
 ```go
 type MessageHandler interface {
-    HandleMessage(ctx context.Context, msg jetstream.Msg) error
+    Handle(ctx context.Context, msg jetstream.Msg) error
 }
 ```
 
@@ -312,6 +314,228 @@ msg.Term()          // Terminate (no redeliver)
 
 ---
 
+## WIPHandler — Long-Running Processing
+
+`WIPHandler` wraps any `MessageHandler` and periodically calls `msg.InProgress()` while the handler is running. This extends the JetStream `AckWait` deadline, preventing the server from redelivering the message before processing finishes.
+
+```go
+wrapped := consumer.NewWIPHandler(myHandler, consumer.WIPConfig{
+    Interval: 10 * time.Second, // AckWait is 30s, so 10s (AckWait/3) is safe
+    Logger:   logger,           // optional — receives heartbeat errors
+})
+
+q, err := consumer.NewQueue(js, "LONG-JOBS", "slow-processor", "jobs.slow.>", wrapped,
+    consumer.WithAckWait(30*time.Second),
+)
+```
+
+### Interval Selection
+
+| AckWait | Recommended Interval | Formula     |
+|---------|----------------------|-------------|
+| 30 s    | 10 s                 | AckWait / 3 |
+| 60 s    | 20 s                 | AckWait / 3 |
+| 5 min   | 100 s                | AckWait / 3 |
+
+- **Maximum safe**: `AckWait / 2` (minimum margin — any slower and the server may redeliver)
+- **Recommended**: `AckWait / 3` (one missed heartbeat still keeps the message alive)
+- **Minimum**: 100 ms (intervals below `DefaultWIPMinInterval` are clamped automatically)
+
+### Performance Characteristics
+
+`WIPHandler` uses lazy initialization:
+- **Fast handlers** (finish before `Interval`): only a timer is allocated — no goroutine is spawned.
+- **Slow handlers** (run past `Interval`): one goroutine per message is started to send periodic heartbeats.
+
+### Compatibility
+
+`WIPHandler` works with all consumer types (`Queue`, `Static`, `Dynamic`, `Broadcast`) and both auto-ack and manual-ack modes. In manual-ack mode the handler is still responsible for calling `msg.Ack/Nak/Term` exactly once; the wrapper only calls `msg.InProgress()`.
+
+```go
+// Manual-ack + WIPHandler: handler controls ack, wrapper keeps the message alive
+handler := consumer.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+    result, err := doLongWork(ctx, msg.Data())
+    if err != nil {
+        _ = msg.Term() // permanent failure — don't redeliver
+        return err
+    }
+    _ = msg.Ack()
+    return nil
+})
+
+wrapped := consumer.NewWIPHandler(handler, consumer.WIPConfig{
+    Interval: 20 * time.Second,
+})
+```
+
+### Disabling WIPHandler
+
+Passing `Interval <= 0` returns the original handler unchanged — no allocation, no wrapping:
+
+```go
+wrapped := consumer.NewWIPHandler(handler, consumer.WIPConfig{Interval: 0})
+// wrapped == handler (no-op)
+```
+
+---
+
+## Auto-Recovery
+
+All consumer types can automatically recreate their durable JetStream consumer when it is unexpectedly deleted — for example, after a server restart, an administrative deletion, or an `InactiveThreshold` expiry. Recovery is **disabled by default**; enable it with a single option:
+
+```go
+c, err := consumer.NewQueue(js, "JOBS", "job-workers", "jobs.>", handler,
+    consumer.WithRecoveryStrategy(consumer.RecoverFromNew),
+)
+```
+
+### Recovery Strategies
+
+| Strategy                   | Behavior on recreation                                | Risk                          |
+|----------------------------|-------------------------------------------------------|-------------------------------|
+| `RecoveryDisabled`         | No recreation (default)                               | None                          |
+| `RecoverFromNew`           | Skip messages published during the outage             | Message loss during outage    |
+| `RecoverFromLastProcessed` | Resume from the message after the last acked one      | Works with any `ManualAck`    |
+| `RecoverFromBeginning`     | Replay the entire stream from the start               | Replay storm on large streams |
+
+### Per-Consumer Support
+
+| Consumer    | `RecoveryDisabled` | `RecoverFromNew` | `RecoverFromLastProcessed`       | `RecoverFromBeginning` |
+|-------------|--------------------|------------------|----------------------------------|------------------------|
+| `Queue`     | ✓                  | ✓                | ✗ (shared durable — unsafe)      | ✓                      |
+| `Static`    | ✓                  | ✓                | ✓ (any `ManualAck`)              | ✓                      |
+| `Dynamic`   | ✓                  | ✓                | ✓ (any `ManualAck`)              | ✓                      |
+| `Broadcast` | ✓                  | ✓                | ✓ (any `ManualAck`)              | ✓                      |
+
+### Queue Consumer Restriction
+
+`RecoverFromLastProcessed` is **not supported** for `Queue`. Queue shares one durable consumer across all replicas — each instance processes a different subset of messages, so each would advance the checkpoint independently. The resulting resume position is nondeterministic and could cause some messages to be silently skipped by every instance. Passing `RecoverFromLastProcessed` to `NewQueue` returns `ErrInvalidConfig` immediately.
+
+Use `RecoverFromNew` (skip messages published during the outage) or `RecoverFromBeginning` (full replay) instead.
+
+### Dynamic Consumer — Two Recovery Mechanisms
+
+`Dynamic` has **two independent recovery mechanisms** that complement each other:
+
+1. **Iterator escalation** — when repeated iterator errors occur within a sliding time window (default: 3 errors in 60 s), the consumer rebinds to the *existing* durable without recreating it. This handles transient network blips and JetStream server restarts where the durable itself survived.
+
+2. **`RecoveryStrategy`** — when the durable consumer has been *deleted* (detected via a consumer-not-found error), `RecoveryStrategy` controls how the recreated consumer resumes delivery.
+
+Both mechanisms operate independently. Iterator escalation fires first for transient failures; `RecoveryStrategy` fires only when the durable is confirmed gone. You can enable both on the same consumer:
+
+```go
+c, err := consumer.NewDynamic(js, "ORDERS", "processor", "orders.{{.PartitionID}}", handler,
+    consumer.WithRecoveryStrategy(consumer.RecoverFromLastProcessed),
+    // Iterator escalation is always active; configure its window if needed via DynamicConfig.
+)
+```
+
+### Strategy Examples
+
+**Skip missed messages (safest for Queue):**
+
+```go
+q, err := consumer.NewQueue(js, "JOBS", "job-workers", "jobs.>", handler,
+    consumer.WithRecoveryStrategy(consumer.RecoverFromNew),
+)
+```
+
+**Resume from last processed (at-least-once delivery) — `ManualAck=false` (default):**
+
+```go
+c, err := consumer.NewStatic(js, "EVENTS", "processor-0", "events.{{partition}}", 10, 0, handler,
+    consumer.WithRecoveryStrategy(consumer.RecoverFromLastProcessed),
+)
+```
+
+When `ManualAck=false`, the framework intercepts every successful handler return, calls `msg.Ack()`, and records the stream sequence number as the checkpoint:
+
+```
+Handler returns nil
+       │
+       ▼
+ Framework calls msg.Ack()
+       │
+       ▼
+ Checkpoint = this sequence number  ← advanced in memory
+       │
+       ▼
+ Next message...
+```
+
+**Resume from last processed — `ManualAck=true`:**
+
+```go
+handler := consumer.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+    // process...
+    return msg.Ack() // calling Ack() here advances the checkpoint transparently
+})
+
+c, err := consumer.NewStatic(js, "EVENTS", "processor-0", "events.{{partition}}", 10, 0, handler,
+    consumer.WithManualAck(true),
+    consumer.WithRecoveryStrategy(consumer.RecoverFromLastProcessed),
+)
+```
+
+With `ManualAck=true`, the framework wraps the message before passing it to the handler. The wrapper intercepts `msg.Ack()` and `msg.DoubleAck()` to advance the checkpoint before forwarding the call. From the handler's perspective nothing changes — it still receives a `jetstream.Msg` and calls `Ack()` as usual.
+
+```
+Handler calls msg.Ack()
+       │
+       ▼
+ Wrapper intercepts → Checkpoint = this sequence number
+       │
+       ▼
+ Underlying msg.Ack() called
+       │
+       ▼
+ Handler receives the error (or nil)
+```
+
+Calling `msg.Nak()`, `msg.Term()`, or `msg.NakWithDelay()` does **not** advance the checkpoint in either mode — only a successful `Ack()` or `DoubleAck()` does.
+
+When the durable consumer is deleted and needs to be recreated, the framework creates a new consumer starting at `checkpoint + 1`, skipping already-processed messages and avoiding a full replay.
+
+> **Note:** The checkpoint is per-process and in-memory. If the process itself restarts, the checkpoint resets and the consumer falls back to stream-level state (`AckFloor`).
+
+**Full stream replay (use sparingly):**
+
+```go
+c, err := consumer.NewBroadcast(js, "AUDIT", "audit-logger", "events.>", handler,
+    consumer.WithRecoveryStrategy(consumer.RecoverFromBeginning),
+)
+```
+
+### Validation
+
+Incompatible combinations are rejected at construction time with [`ErrInvalidConfig`](https://pkg.go.dev/github.com/arloliu/parti/v2/consumer#ErrInvalidConfig) — you can detect them with `errors.Is`:
+
+```go
+// RecoverFromLastProcessed on a Queue is rejected (shared durable, unsafe checkpointing).
+_, err := consumer.NewQueue(js, "JOBS", "job-workers", "jobs.>", handler,
+    consumer.WithRecoveryStrategy(consumer.RecoverFromLastProcessed),
+)
+if errors.Is(err, consumer.ErrInvalidConfig) {
+    log.Fatal("incompatible configuration:", err)
+}
+```
+
+You can also validate a config struct directly without a NATS connection:
+
+```go
+cfg := consumer.QueueConfig{
+    StreamName:       "JOBS",
+    ConsumerName:     "job-workers",
+    FilterSubject:    "jobs.>",
+    RecoveryStrategy: consumer.RecoverFromLastProcessed,
+}
+if err := cfg.Validate(); err != nil {
+    // err wraps ErrInvalidConfig
+}
+```
+
+---
+
 ## Functional Options
 
 All consumers accept functional options for customization:
@@ -328,30 +552,31 @@ c, _ := consumer.NewQueue(js, "stream", "consumer", "subject.>", handler,
 
 **Common Options:**
 
-| Option                           | Description                                    |
-|----------------------------------|------------------------------------------------|
-| `WithLogger(logger)`             | Set custom logger                              |
-| `WithMetrics(collector)`         | Set metrics collector                          |
-| `WithAckWait(duration)`          | Time before message redelivery                 |
-| `WithBatchSize(n)`               | Messages per fetch                             |
-| `WithMaxDeliver(n)`              | Max redelivery attempts                        |
-| `WithMaxAckPending(n)`           | Max unacked messages                           |
-| `WithFetchTimeout(duration)`     | Max wait when pulling batch                    |
-| `WithManualAck(bool)`            | Disable auto-acknowledgement                   |
-| `WithInactiveThreshold(duration)`| Consumer cleanup threshold                     |
+| Option                            | Description                                   |
+|-----------------------------------|-----------------------------------------------|
+| `WithLogger(logger)`              | Set custom logger                             |
+| `WithMetrics(collector)`          | Set metrics collector                         |
+| `WithAckWait(duration)`           | Time before message redelivery                |
+| `WithBatchSize(n)`                | Messages per fetch                            |
+| `WithMaxDeliver(n)`               | Max redelivery attempts                       |
+| `WithMaxAckPending(n)`            | Max unacked messages                          |
+| `WithFetchTimeout(duration)`      | Max wait when pulling batch                   |
+| `WithManualAck(bool)`             | Disable auto-acknowledgement                  |
+| `WithInactiveThreshold(duration)` | Consumer cleanup threshold                    |
+| `WithRecoveryStrategy(strategy)`  | Auto-recovery on unexpected consumer deletion |
 
 **Broadcast-Specific Options:**
 
-| Option                           | Description                                    |
-|----------------------------------|------------------------------------------------|
-| `WithInstanceID(id)`             | Set unique instance identifier                 |
+| Option               | Description                    |
+|----------------------|--------------------------------|
+| `WithInstanceID(id)` | Set unique instance identifier |
 
 **Dynamic-Specific Options:**
 
-| Option                           | Description                                    |
-|----------------------------------|------------------------------------------------|
-| `WithProcessingGate(cfg)`        | Enable processing gate for ownership control   |
-| `WithDrainOnRemove(bool)`        | Drain messages when partitions are removed     |
+| Option                    | Description                                  |
+|---------------------------|----------------------------------------------|
+| `WithProcessingGate(cfg)` | Enable processing gate for ownership control |
+| `WithDrainOnRemove(bool)` | Drain messages when partitions are removed   |
 
 ---
 
@@ -421,12 +646,12 @@ defer c.Stop(ctx)
 
 ### Key Differences
 
-| Aspect              | Legacy Packages                    | consumer Package                  |
-|---------------------|------------------------------------|-----------------------------------|
-| API Style           | Config struct + constructor        | Positional args + options         |
-| Method Names        | `Close()` / mixed                  | `Stop()` (consistent)             |
-| Package Count       | 2 packages                         | 1 unified package                 |
-| Message Handler     | Package-specific                   | Unified `MessageHandler`          |
+| Aspect          | Legacy Packages             | consumer Package          |
+|-----------------|-----------------------------|---------------------------|
+| API Style       | Config struct + constructor | Positional args + options |
+| Method Names    | `Close()` / mixed           | `Stop()` (consistent)     |
+| Package Count   | 2 packages                  | 1 unified package         |
+| Message Handler | Package-specific            | Unified `MessageHandler`  |
 
 ---
 
@@ -522,20 +747,19 @@ mgr, _ := parti.NewManager(cfg, js, src, strategy.NewConsistentHash(),
 
 All consumer types are thread-safe. Lifecycle methods (`Start`, `Stop`, `Update`) are serialized internally to prevent race conditions.
 
-| Method             | Thread Safety                                 |
-|--------------------|-----------------------------------------------|
-| `Start(ctx)`       | Serialized, call once                         |
-| `Stop(ctx)`        | Serialized, idempotent                        |
-| `Update(...)`      | Serialized, can call multiple times           |
-| Message Handler    | Called from single goroutine per consumer     |
+| Method          | Thread Safety                             |
+|-----------------|-------------------------------------------|
+| `Start(ctx)`    | Serialized, call once                     |
+| `Stop(ctx)`     | Serialized, idempotent                    |
+| `Update(...)`   | Serialized, can call multiple times       |
+| Message Handler | Called from single goroutine per consumer |
 
 ---
 
 ## Error Handling
 
 **Constructor Errors:**
-- Validation failures (nil JetStream, missing required fields)
-- Not exported as sentinel errors; use string matching if needed
+- Validation failures (nil JetStream, missing required fields, incompatible option combinations) wrap `consumer.ErrInvalidConfig` — use `errors.Is(err, consumer.ErrInvalidConfig)` to detect them programmatically.
 
 **Runtime Errors:**
 - `context.DeadlineExceeded` - Stop timed out

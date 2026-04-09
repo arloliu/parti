@@ -20,7 +20,11 @@ cfg := &parti.Config{
     WorkerIDPrefix: "worker",
     WorkerIDMax:    99,
 }
-partitions := []parti.Partition{{ID: "0"}, {ID: "1"}, {ID: "2"}}
+partitions := []parti.Partition{
+    {Keys: []string{"0"}},
+    {Keys: []string{"1"}},
+    {Keys: []string{"2"}},
+}
 src := source.NewStatic(partitions)
 
 mgr, _ := parti.NewManager(cfg, js, src, strategy.NewConsistentHash())

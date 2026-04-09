@@ -515,9 +515,9 @@ if err := mgr.Stop(ctx); err != nil {
 
 ```go
 cfg := &parti.Config{
-    ScalingWindow:     10 * time.Second,  // Wait for stability
-    ColdStartWindow:   30 * time.Second,  // Fresh cluster
-    WorkerIDTTL:       30 * time.Second,  // ID claim duration
+    PlannedScaleWindow: 10 * time.Second,  // Wait for stability
+    ColdStartWindow:    30 * time.Second,  // Fresh cluster
+    WorkerIDTTL:        30 * time.Second,  // ID claim duration
 }
 ```
 
@@ -584,8 +584,8 @@ nats kv get parti-<cluster>-assignment current
 **Resolution:**
 ```go
 cfg := &parti.Config{
-    ScalingWindow:   15 * time.Second,  // Increase from 10s
-    ColdStartWindow: 45 * time.Second,  // Increase from 30s
+    PlannedScaleWindow: 15 * time.Second,  // Increase from 10s
+    ColdStartWindow:    45 * time.Second,  // Increase from 30s
 }
 ```
 
@@ -700,9 +700,9 @@ For high-throughput scenarios:
 
 ```go
 cfg := &parti.Config{
-    HeartbeatInterval:      3 * time.Second,   // Faster detection
-    HeartbeatMissThreshold: 2,                  // Quicker failover
-    ScalingWindow:          5 * time.Second,   // Faster rebalancing
+    HeartbeatInterval:  3 * time.Second,   // Faster detection
+    HeartbeatTTL:       6 * time.Second,   // 2× interval — quicker failover
+    PlannedScaleWindow: 5 * time.Second,   // Faster rebalancing
 }
 ```
 
@@ -710,9 +710,9 @@ For stability over speed:
 
 ```go
 cfg := &parti.Config{
-    HeartbeatInterval:      10 * time.Second,  // Less network traffic
-    HeartbeatMissThreshold: 4,                  // Tolerate brief issues
-    ScalingWindow:          20 * time.Second,  // Avoid churn
+    HeartbeatInterval:  10 * time.Second,  // Less network traffic
+    HeartbeatTTL:       40 * time.Second,  // 4× interval — tolerate brief issues
+    PlannedScaleWindow: 20 * time.Second,  // Avoid churn
 }
 ```
 
