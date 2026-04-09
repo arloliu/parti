@@ -139,6 +139,35 @@
 //	defer c.Stop(ctx)
 //	_ = c.Start(ctx)
 //
+// # Auto-Recovery
+//
+// All consumer types can automatically recreate their durable JetStream consumer
+// when it is unexpectedly deleted (e.g., after an InactiveThreshold expiry or
+// server-side administrative deletion). Use [WithRecoveryStrategy] to enable it:
+//
+//	c, err := consumer.NewQueue(js, "stream", "workers", "jobs.>", handler,
+//	    consumer.WithRecoveryStrategy(consumer.RecoverFromNew),
+//	)
+//
+// Choose a strategy based on your delivery guarantee requirements:
+//
+//	Strategy                    Behavior on recreation          Risk
+//	[RecoveryDisabled]          No recreation (default)         None
+//	[RecoverFromNew]            Skip missed messages            Message loss during outage
+//	[RecoverFromLastProcessed]  Resume from last acked msg      Works with any ManualAck
+//	[RecoverFromBeginning]      Full stream replay from start   Replay storm on large streams
+//
+// Per-consumer support:
+//
+//	Consumer     RecoveryDisabled  RecoverFromNew  RecoverFromLastProcessed  RecoverFromBeginning
+//	[Queue]      ✓                 ✓               ✗ (shared durable)        ✓
+//	[Broadcast]  ✓                 ✓               ✓ (any ManualAck)         ✓
+//	[Static]     ✓                 ✓               ✓ (any ManualAck)         ✓
+//	[Dynamic]    ✓                 ✓               ✓ (any ManualAck)         ✓
+//
+// The only invalid combination is [RecoverFromLastProcessed] on a [Queue], which
+// returns [ErrInvalidConfig] at construction time.
+//
 // # Options
 //
 // All constructors accept functional options for customization:

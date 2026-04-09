@@ -121,6 +121,16 @@ func TestUniversalOptions(t *testing.T) {
 	require.NotNil(t, d)
 }
 
+func TestNewStatic_RejectsRecoveryStrategy(t *testing.T) {
+	handler := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error { return nil })
+	js := &mockJS{}
+
+	_, err := NewStatic(js, "STREAM", "static", "subj.{{partition}}", 1, 0, handler,
+		WithRecoveryStrategy(RecoverFromNew),
+	)
+	require.NoError(t, err)
+}
+
 // Helpers to convert []Option to specific slices (since Go doesn't have covariance for slices)
 func convertToQueueOpts(opts []Option) []QueueOption {
 	out := make([]QueueOption, len(opts))

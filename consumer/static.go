@@ -87,6 +87,13 @@ type StaticConfig struct {
 	// Using a consistent seed ensures that the same message key always maps to
 	// the same partition index across restarts/redeployments.
 	HashSeed uint64
+
+	// RecoveryStrategy defines how a recreated consumer resumes after an unexpected deletion.
+	//
+	// All strategies are supported. [RecoverFromLastProcessed] works with both
+	// ManualAck=false (checkpoint advances automatically) and ManualAck=true
+	// (checkpoint advances when the handler calls msg.Ack() or msg.DoubleAck()).
+	RecoveryStrategy RecoveryStrategy
 }
 
 // NewStatic creates a new static partition consumer.
@@ -140,12 +147,13 @@ func NewStatic(
 			InactiveThreshold: o.inactiveThreshold,
 			AckPolicy:         o.ackPolicy,
 		},
-		StreamName:     streamName,
-		ConsumerName:   consumerName,
-		SubjectPattern: subjectPattern,
-		NumPartitions:  numPartitions,
-		Partition:      partitionIndex,
-		HashSeed:       o.hashSeed,
+		StreamName:       streamName,
+		ConsumerName:     consumerName,
+		SubjectPattern:   subjectPattern,
+		NumPartitions:    numPartitions,
+		Partition:        partitionIndex,
+		HashSeed:         o.hashSeed,
+		RecoveryStrategy: o.recoveryStrategy,
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -178,6 +186,7 @@ func NewStatic(
 		AckPolicy:         cfg.AckPolicy,
 		Metrics:           o.metrics,
 		MaxWaiting:        cfg.MaxWaiting,
+		RecoveryStrategy:  cfg.RecoveryStrategy,
 	}
 
 	inner, err := ipartition.NewJSConsumer(js, partitionCfg, handler.Handle)

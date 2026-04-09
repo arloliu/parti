@@ -13,6 +13,7 @@ import (
 
 	"github.com/arloliu/parti/v2/internal/logging"
 	"github.com/arloliu/parti/v2/internal/metrics"
+	"github.com/arloliu/parti/v2/internal/recovery"
 	"github.com/arloliu/parti/v2/jsutil"
 	"github.com/arloliu/parti/v2/types"
 )
@@ -54,6 +55,10 @@ type Queue struct {
 	loopStarted bool
 
 	iterFactory func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error)
+
+	// Recovery
+	recovery       *recovery.Controller     // nil when recovery is disabled
+	consumerConfig jetstream.ConsumerConfig // base config stored at ensureConsumer time
 }
 
 // QueueConfig configures a Queue consumer.
@@ -83,6 +88,16 @@ type QueueConfig struct {
 	// IteratorFactory optionally overrides the internal iterator creation logic.
 	// This is primarily used for testing to inject mock iterators.
 	IteratorFactory func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error)
+
+	// RecoveryStrategy defines how a recreated consumer resumes after an unexpected deletion.
+	//
+	// [RecoverFromLastProcessed] is not supported for Queue consumers because Queue shares
+	// one durable across all replicas. Per-process checkpointing is nondeterministic when
+	// multiple instances compete for the same messages — different replicas would advance
+	// the checkpoint independently, causing unpredictable resume positions.
+	//
+	// Use [RecoverFromNew] (skip missed messages) or [RecoverFromBeginning] (full replay).
+	RecoveryStrategy RecoveryStrategy
 }
 
 // DefaultQueueConfig returns a QueueConfig with sensible defaults.
@@ -139,6 +154,10 @@ func (c *QueueConfig) Validate() error {
 	if err := validateSubjectTokens(c.FilterSubject, true); err != nil {
 		return fmt.Errorf("filter subject is invalid: %w", err)
 	}
+	if c.RecoveryStrategy == RecoverFromLastProcessed {
+		return fmt.Errorf("%w: RecoverFromLastProcessed is not supported for Queue consumers"+
+			" (per-process checkpoint tracking is unsafe when multiple instances share one durable)", ErrInvalidConfig)
+	}
 
 	return nil
 }
@@ -187,11 +206,12 @@ func NewQueue(
 			InactiveThreshold: o.inactiveThreshold,
 			AckPolicy:         o.ackPolicy,
 		},
-		StreamName:      streamName,
-		ConsumerName:    consumerName,
-		FilterSubject:   filterSubject,
-		Retry:           o.retry,
-		IteratorFactory: o.iteratorFactory,
+		StreamName:       streamName,
+		ConsumerName:     consumerName,
+		FilterSubject:    filterSubject,
+		Retry:            o.retry,
+		IteratorFactory:  o.iteratorFactory,
+		RecoveryStrategy: o.recoveryStrategy,
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -203,6 +223,9 @@ func NewQueue(
 		iterFactory = defaultIterFactory
 	}
 
+	burstThreshold := 3
+	burstWindow := cfg.FetchTimeout*time.Duration(burstThreshold+1) + 3*time.Second
+
 	return &Queue{
 		js:          js,
 		config:      cfg,
@@ -212,6 +235,13 @@ func NewQueue(
 		loopDone:    make(chan struct{}),
 		retryRNG:    newRetryRNG(cfg.Retry.Seed),
 		iterFactory: iterFactory,
+		recovery: recovery.NewController(recovery.ControllerConfig{
+			Strategy:       cfg.RecoveryStrategy,
+			BurstThreshold: burstThreshold,
+			BurstWindow:    burstWindow,
+			Logger:         cfg.Logger,
+			Metrics:        cfg.Metrics,
+		}),
 	}, nil
 }
 
@@ -297,6 +327,7 @@ func (q *Queue) Stop(ctx context.Context) error {
 }
 
 // ensureConsumer creates or retrieves the shared durable consumer.
+// Callers must hold q.mu (write lock); stores the base config for recovery.
 func (q *Queue) ensureConsumer(ctx context.Context) (jetstream.Consumer, error) {
 	cfg := jetstream.ConsumerConfig{
 		Durable:           q.config.ConsumerName,
@@ -307,6 +338,11 @@ func (q *Queue) ensureConsumer(ctx context.Context) (jetstream.Consumer, error) 
 		MaxWaiting:        q.config.MaxWaiting,
 		MaxAckPending:     q.config.MaxAckPending,
 		InactiveThreshold: q.config.InactiveThreshold,
+	}
+
+	// Store base config once for recovery.
+	if q.consumerConfig.Durable == "" {
+		q.consumerConfig = cfg
 	}
 
 	return jsutil.EnsureConsumer(ctx, q.js, q.config.StreamName, cfg)
@@ -327,6 +363,7 @@ func (q *Queue) runLoop(ctx context.Context) {
 
 		q.mu.RLock()
 		cons := q.consumer
+		consumerConfig := q.consumerConfig
 		q.mu.RUnlock()
 
 		if cons == nil {
@@ -337,28 +374,60 @@ func (q *Queue) runLoop(ctx context.Context) {
 		if err != nil {
 			q.metrics.IncrementWorkerConsumerIteratorRestart("create_error")
 			q.logger.Error("failed to create iterator", "error", err)
-			if !q.delayWithBackoffOrExit(ctx, &backoff) {
+			if q.delayWithBackoffOrExit(ctx, &backoff) {
 				return
 			}
 			continue
 		}
 		backoff = 0
 
-		hadError := q.processIterator(ctx, iter)
-		if hadError {
-			q.metrics.IncrementWorkerConsumerIteratorRestart("transient_error")
-			if !q.delayWithBackoffOrExit(ctx, &backoff) {
-				return
-			}
+		iterErr := q.processIterator(ctx, iter)
+		if iterErr == nil {
 			continue
 		}
-		backoff = 0
+
+		action, newCons := q.recovery.Classify(ctx, iterErr, q.consumerInfoFn(), consumerConfig, q.recreateFn())
+		switch action {
+		case recovery.ActionExit:
+			return
+		case recovery.ActionContinue:
+			q.mu.Lock()
+			q.consumer = newCons
+			q.mu.Unlock()
+			backoff = 0
+			continue
+		case recovery.ActionBackoff:
+			if q.delayWithBackoffOrExit(ctx, &backoff) {
+				return
+			}
+		}
+	}
+}
+
+// consumerInfoFn returns a function that calls consumer.Info() on the current consumer.
+func (q *Queue) consumerInfoFn() recovery.InfoFunc {
+	return func(ctx context.Context) (*jetstream.ConsumerInfo, error) {
+		q.mu.RLock()
+		cons := q.consumer
+		q.mu.RUnlock()
+		if cons == nil {
+			return nil, errors.New("no consumer")
+		}
+		return cons.Info(ctx)
+	}
+}
+
+// recreateFn returns a function that recreates the consumer via EnsureConsumer.
+func (q *Queue) recreateFn() recovery.RecreateFunc {
+	return func(ctx context.Context, cfg jetstream.ConsumerConfig) (jetstream.Consumer, error) {
+		return jsutil.EnsureConsumer(ctx, q.js, q.config.StreamName, cfg)
 	}
 }
 
 // processIterator processes messages from an iterator.
-// Returns true if it exits due to a transient iterator error.
-func (q *Queue) processIterator(ctx context.Context, iter jetstream.MessagesContext) bool {
+// Returns nil on graceful exit (context canceled or ErrMsgIteratorClosed).
+// Returns the iterator error so the caller can classify and handle recovery.
+func (q *Queue) processIterator(ctx context.Context, iter jetstream.MessagesContext) error {
 	// Stop the iterator when the context is cancelled so that iter.Next()
 	// unblocks with ErrMsgIteratorClosed instead of hanging indefinitely.
 	stop := context.AfterFunc(ctx, iter.Stop)
@@ -369,23 +438,25 @@ func (q *Queue) processIterator(ctx context.Context, iter jetstream.MessagesCont
 
 	for {
 		if ctx.Err() != nil {
-			return false
+			return nil
 		}
 
 		msg, err := iter.Next()
 		if err != nil {
-			if errors.Is(err, jetstream.ErrMsgIteratorClosed) {
-				return false
+			if errors.Is(err, jetstream.ErrMsgIteratorClosed) || errors.Is(err, context.Canceled) {
+				return nil // graceful shutdown
 			}
-			// Transient error, will retry with new iterator
 			q.logger.Debug("iterator error", "error", err)
-			return true
+			return err // caller classifies for recovery or backoff
 		}
 
 		// Process the message
 		handleErr := q.handler.Handle(ctx, msg)
 
-		// Auto ack/nak if ManualAck is disabled
+		// Auto ack/nak if ManualAck is disabled.
+		// Note: Queue does not call recovery.AdvanceCheckpoint after ack. Queue rejects
+		// RecoverFromLastProcessed at construction time (shared durables make per-process
+		// checkpoint tracking unsafe), so the checkpoint value is never read. Intentional.
 		if !q.config.ManualAck {
 			if handleErr != nil {
 				if nakErr := msg.Nak(); nakErr != nil {
@@ -400,6 +471,10 @@ func (q *Queue) processIterator(ctx context.Context, iter jetstream.MessagesCont
 	}
 }
 
+// delayWithBackoffOrExit applies jittered exponential backoff.
+// Returns true when the caller should exit (context cancelled),
+// false when the delay completed and the caller may continue.
+// This matches the convention used by partitionConsumer and broadcastConsumer.
 func (q *Queue) delayWithBackoffOrExit(ctx context.Context, prev *time.Duration) bool {
 	base := q.config.Retry.Base
 	if base <= 0 {
@@ -408,15 +483,15 @@ func (q *Queue) delayWithBackoffOrExit(ctx context.Context, prev *time.Duration)
 
 	*prev = jitterBackoff(*prev, base, q.config.Retry.Multiplier, q.config.Retry.Max, q.retryRNG)
 	if *prev <= 0 {
-		return ctx.Err() == nil
+		return ctx.Err() != nil
 	}
 
 	timer := time.NewTimer(*prev)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		return false
-	case <-timer.C:
 		return true
+	case <-timer.C:
+		return false
 	}
 }

@@ -3,10 +3,62 @@ package consumer
 import (
 	"time"
 
+	"github.com/arloliu/parti/v2/internal/durable"
 	"github.com/arloliu/parti/v2/internal/logging"
 	"github.com/arloliu/parti/v2/internal/metrics"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
+)
+
+// RecoveryStrategy defines how a recreated consumer decides where to resume
+// after an unexpected deletion. It is a type alias for the internal durable type.
+//
+// Use [WithRecoveryStrategy] to enable auto-recovery on consumer types that
+// support durable recreation semantics.
+type RecoveryStrategy = durable.RecoveryStrategy
+
+// Recovery strategy constants control how a consumer resumes after its underlying
+// durable is unexpectedly deleted. The zero value [RecoveryDisabled] is safe and
+// preserves the pre-existing behavior (backoff-retry only, no durable recreation).
+//
+// Note: [Dynamic] consumers have a separate sliding-window iterator-failure detector
+// that attempts consumer rebind independently of this setting. That mechanism is always
+// active and is not affected by the recovery strategy.
+const (
+	// RecoveryDisabled is the zero value. No strategy-aware consumer recreation is
+	// performed on deletion. The consumer retries transient errors with backoff but
+	// does not recreate the durable with an adjusted DeliverPolicy.
+	RecoveryDisabled = durable.RecoveryDisabled
+
+	// RecoverFromNew recreates the consumer to deliver only newly published messages.
+	// Messages that arrived while the consumer was absent are skipped entirely.
+	//
+	// Pros: zero replay risk; safe for Queue consumers and any consumer where
+	// missing a window of messages is acceptable.
+	// Cons: messages published between deletion and recreation are lost.
+	RecoverFromNew = durable.RecoverFromNew
+
+	// RecoverFromLastProcessed recreates the consumer starting at the sequence
+	// immediately after the last acknowledged message. This provides at-least-once
+	// delivery without a full replay storm.
+	//
+	// Works with both ManualAck modes:
+	//   - ManualAck=false (default): checkpoint advances automatically after each
+	//     successful handler return (auto-ack path).
+	//   - ManualAck=true: the message passed to the handler intercepts msg.Ack()
+	//     and msg.DoubleAck(); the checkpoint advances when the handler calls either.
+	//     Calling msg.Nak(), msg.Term(), or msg.NakWithDelay() does not advance it.
+	//
+	// Not supported by [Queue] consumers (shared durable makes per-process
+	// checkpointing nondeterministic across replicas).
+	RecoverFromLastProcessed = durable.RecoverFromLastProcessed
+
+	// RecoverFromBeginning recreates the consumer to replay all messages from
+	// the beginning of the stream.
+	//
+	// WARNING: causes a full backlog replay. Use only for small or bounded streams
+	// where complete reprocessing is intentional and safe.
+	RecoverFromBeginning = durable.RecoverFromBeginning
 )
 
 // Option is a functional option that applies to all consumer types.
@@ -75,6 +127,9 @@ type options struct {
 	// Queue / Broadcast / Dynamic shared
 	retry           RetryConfig
 	iteratorFactory func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error)
+
+	// Recovery
+	recoveryStrategy RecoveryStrategy // zero value = RecoveryDisabled
 
 	// Dynamic specific
 	iteratorEscalationWindow    time.Duration
@@ -208,6 +263,13 @@ func WithMetrics(m types.WorkerConsumerMetrics) Option {
 }
 
 // WithManualAck enables manual acknowledgement.
+//
+// When true, the handler must call msg.Ack(), msg.Nak(), or msg.Term() explicitly.
+// When false (default), returning nil auto-acks and returning an error auto-naks.
+//
+// [RecoverFromLastProcessed] is compatible with both modes. When ManualAck=true
+// the framework intercepts msg.Ack() / msg.DoubleAck() to advance the checkpoint;
+// the handler still controls when to ack.
 func WithManualAck(enabled bool) Option {
 	return universalOpt(func(o *options) {
 		o.manualAck = enabled
@@ -294,6 +356,34 @@ func WithInactiveThreshold(d time.Duration) Option {
 func WithAckPolicy(p jetstream.AckPolicy) Option {
 	return universalOpt(func(o *options) {
 		o.ackPolicy = p
+	})
+}
+
+// WithRecoveryStrategy enables strategy-aware auto-recovery on consumer deletion
+// and controls the DeliverPolicy used when recreating the consumer.
+//
+// By default, recovery is disabled ([RecoveryDisabled]). When a strategy is set,
+// iterator errors that confirm durable deletion trigger automatic recreation using
+// the chosen DeliverPolicy. Without a strategy, the consumer retries with backoff
+// but does not recreate the durable.
+//
+// Strategy trade-offs:
+//   - [RecoverFromNew]: no data loss risk, but messages published during the outage
+//     are skipped. Good default for most cases.
+//   - [RecoverFromLastProcessed]: at-least-once delivery from the last acked message.
+//     No full replay. Works with both ManualAck modes — see [RecoverFromLastProcessed].
+//   - [RecoverFromBeginning]: full stream replay from message 1. Safe only for
+//     small or idempotent workloads; causes a replay storm on large streams.
+//
+// Per-consumer support:
+//   - [Queue]: [RecoverFromNew], [RecoverFromBeginning] only. [RecoverFromLastProcessed]
+//     is rejected because multiple replicas share one durable, making per-process
+//     checkpointing nondeterministic.
+//   - [Broadcast], [Static], [Dynamic]: all strategies supported, including
+//     [RecoverFromLastProcessed] with ManualAck=true.
+func WithRecoveryStrategy(strategy RecoveryStrategy) Option {
+	return universalOpt(func(o *options) {
+		o.recoveryStrategy = strategy
 	})
 }
 

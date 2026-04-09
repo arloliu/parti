@@ -134,6 +134,18 @@ type DynamicConfig struct {
 	// IteratorFactory optionally overrides the internal iterator creation logic.
 	// This is primarily used for testing to inject mock iterators.
 	IteratorFactory func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error)
+
+	// RecoveryStrategy defines how a recreated consumer resumes after an unexpected deletion.
+	//
+	// All strategies are supported. [RecoverFromLastProcessed] works with both
+	// ManualAck=false (checkpoint advances automatically) and ManualAck=true
+	// (checkpoint advances when the handler calls msg.Ack() or msg.DoubleAck()).
+	//
+	// Note: Dynamic consumers have a separate iterator-escalation detector (see
+	// [DynamicConfig.IteratorEscalationWindow]) that rebinds to the existing durable
+	// on repeated failures. RecoveryStrategy controls a distinct, complementary mechanism
+	// that recreates the durable itself when it has been deleted.
+	RecoveryStrategy RecoveryStrategy
 }
 
 // NewDynamic creates a new dynamic partition consumer.
@@ -195,6 +207,7 @@ func NewDynamic(
 		IteratorEscalationThreshold: o.iteratorEscalationThreshold,
 		PartitionRefreshMinInterval: o.partitionRefreshMinInterval,
 		IteratorFactory:             o.iteratorFactory,
+		RecoveryStrategy:            o.recoveryStrategy,
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -227,6 +240,7 @@ func NewDynamic(
 		PartitionRefreshMinInterval: cfg.PartitionRefreshMinInterval,
 		IteratorEscalationWindow:    cfg.IteratorEscalationWindow,
 		IteratorEscalationThreshold: cfg.IteratorEscalationThreshold,
+		RecoveryStrategy:            cfg.RecoveryStrategy,
 		IteratorFactory:             cfg.IteratorFactory,
 		Retry: durable.RetryConfig{
 			Backoff:    cfg.Retry.Backoff,

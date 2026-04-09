@@ -219,6 +219,137 @@ func processMessage(_ jetstream.Msg) error {
 	return nil
 }
 
+// This example demonstrates enabling auto-recovery on a Queue consumer.
+// When the durable consumer is unexpectedly deleted (e.g., server restart,
+// InactiveThreshold expiry), the consumer automatically recreates it and
+// resumes processing new messages — no restart required.
+//
+// RecoverFromNew is the safest choice for Queue consumers: messages published
+// during the outage are skipped, but there is no replay storm risk.
+func Example_queueConsumerWithRecovery() {
+	var js jetstream.JetStream
+
+	handler := consumer.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+		fmt.Printf("Processing job: %s\n", string(msg.Data()))
+		return nil
+	})
+
+	q, err := consumer.NewQueue(
+		js,
+		"JOBS",
+		"job-processor",
+		"jobs.>",
+		handler,
+		consumer.WithRecoveryStrategy(consumer.RecoverFromNew),
+	)
+	if err != nil {
+		fmt.Printf("Failed to create queue: %v\n", err)
+		return
+	}
+
+	ctx := context.Background()
+	if err := q.Start(ctx); err != nil {
+		fmt.Printf("Failed to start: %v\n", err)
+		return
+	}
+	_ = q.Stop(ctx)
+
+	// Output: Failed to create queue: invalid consumer configuration: JetStream context is required
+}
+
+// This example demonstrates RecoverFromLastProcessed on a Static consumer
+// with the default ManualAck=false. After recovery, the consumer resumes
+// from the message immediately after the last auto-acknowledged one —
+// providing at-least-once delivery without a full stream replay.
+func Example_staticConsumerWithLastProcessedRecovery() {
+	var js jetstream.JetStream
+
+	handler := consumer.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+		fmt.Printf("Processing event: %s\n", string(msg.Data()))
+		return nil // auto-ack: advances the recovery checkpoint
+	})
+
+	c, err := consumer.NewStatic(
+		js,
+		"EVENTS",
+		"processor-0",
+		"events.{{partition}}",
+		10, // numPartitions
+		0,  // partitionIndex
+		handler,
+		consumer.WithRecoveryStrategy(consumer.RecoverFromLastProcessed),
+	)
+	if err != nil {
+		fmt.Printf("Failed to create static consumer: %v\n", err)
+		return
+	}
+
+	ctx := context.Background()
+	if err := c.Start(ctx); err != nil {
+		fmt.Printf("Failed to start: %v\n", err)
+		return
+	}
+	_ = c.Stop(ctx)
+
+	// Output: Failed to create static consumer: invalid consumer configuration: JetStream context is required
+}
+
+// This example demonstrates RecoverFromLastProcessed with ManualAck=true.
+// The framework intercepts msg.Ack() to advance the checkpoint, so the handler
+// retains explicit control over when acknowledgement happens.
+func Example_staticConsumerWithLastProcessedRecovery_ManualAck() {
+	var js jetstream.JetStream
+
+	handler := consumer.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+		fmt.Printf("Processing event: %s\n", string(msg.Data()))
+		// Calling msg.Ack() advances the recovery checkpoint automatically.
+		return msg.Ack()
+	})
+
+	c, err := consumer.NewStatic(
+		js,
+		"EVENTS",
+		"processor-0",
+		"events.{{partition}}",
+		10, // numPartitions
+		0,  // partitionIndex
+		handler,
+		consumer.WithManualAck(true),
+		consumer.WithRecoveryStrategy(consumer.RecoverFromLastProcessed),
+	)
+	if err != nil {
+		fmt.Printf("Failed to create static consumer: %v\n", err)
+		return
+	}
+
+	ctx := context.Background()
+	if err := c.Start(ctx); err != nil {
+		fmt.Printf("Failed to start: %v\n", err)
+		return
+	}
+	_ = c.Stop(ctx)
+
+	// Output: Failed to create static consumer: invalid consumer configuration: JetStream context is required
+}
+
+// This example shows that RecoverFromLastProcessed on a Queue consumer
+// returns ErrInvalidConfig at construction time. Queue shares one durable
+// across replicas, making per-process checkpoint tracking nondeterministic.
+func Example_recoveryStrategyValidation() {
+	cfg := consumer.QueueConfig{
+		StreamName:       "JOBS",
+		ConsumerName:     "job-workers",
+		FilterSubject:    "jobs.>",
+		RecoveryStrategy: consumer.RecoverFromLastProcessed,
+	}
+
+	if err := cfg.Validate(); err != nil {
+		fmt.Printf("config error: %v\n", err)
+	}
+
+	// Output: config error: invalid consumer configuration: RecoverFromLastProcessed is not supported for Queue consumers (per-process checkpoint tracking is unsafe when multiple instances share one durable)
+}
+
 // This example demonstrates how to wrap a message handler with automatic
 // heartbeats for long-running processing using WIPHandler.
 //

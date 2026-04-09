@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arloliu/parti/v2/internal/logging"
+	"github.com/arloliu/parti/v2/internal/recovery"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
@@ -313,4 +315,154 @@ func TestQueue_ManualAck(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return atomic.LoadInt32(&handled) >= 1
 	}, 5*time.Second, 50*time.Millisecond)
+}
+
+// --- delayWithBackoffOrExit semantics test ---
+
+func TestQueue_DelayWithBackoffOrExit_ReturnsTrueOnCancel(t *testing.T) {
+	q := &Queue{
+		config: QueueConfig{
+			Retry: RetryConfig{
+				Base:       10 * time.Millisecond,
+				Multiplier: 1.0,
+				Max:        50 * time.Millisecond,
+			},
+		},
+	}
+
+	// Already-cancelled context should return true (=exit).
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var prev time.Duration
+	result := q.delayWithBackoffOrExit(ctx, &prev)
+	require.True(t, result, "should return true (exit) when context is cancelled")
+}
+
+func TestQueue_DelayWithBackoffOrExit_ReturnsFalseAfterDelay(t *testing.T) {
+	q := &Queue{
+		config: QueueConfig{
+			Retry: RetryConfig{
+				Base:       1 * time.Millisecond,
+				Multiplier: 1.0,
+				Max:        5 * time.Millisecond,
+			},
+		},
+	}
+
+	ctx := context.Background()
+	var prev time.Duration
+	result := q.delayWithBackoffOrExit(ctx, &prev)
+	require.False(t, result, "should return false (continue) after delay completes")
+}
+
+type mockRecoveryJetStream struct {
+	jetstream.JetStream
+	createOrUpdateConsumerFunc func(ctx context.Context, stream string, cfg jetstream.ConsumerConfig) (jetstream.Consumer, error)
+}
+
+func (m *mockRecoveryJetStream) CreateOrUpdateConsumer(ctx context.Context, stream string, cfg jetstream.ConsumerConfig) (jetstream.Consumer, error) {
+	return m.createOrUpdateConsumerFunc(ctx, stream, cfg)
+}
+
+type stubConsumer struct {
+	jetstream.Consumer
+}
+
+type queueErrorIter struct {
+	err error
+}
+
+func (e *queueErrorIter) Next(opts ...jetstream.NextOpt) (jetstream.Msg, error) {
+	return nil, e.err
+}
+
+func (e *queueErrorIter) Stop() {}
+
+func (e *queueErrorIter) Drain() {}
+
+type queueRecoveryMetrics struct {
+	attemptReasons []string
+	results        []string
+	resultReasons  []string
+	durations      []float64
+}
+
+func (m *queueRecoveryMetrics) IncrementWorkerConsumerControlRetry(string)       {}
+func (m *queueRecoveryMetrics) RecordWorkerConsumerRetryBackoff(string, float64) {}
+func (m *queueRecoveryMetrics) SetWorkerConsumerSubjectsCurrent(int)             {}
+func (m *queueRecoveryMetrics) IncrementWorkerConsumerSubjectChange(string, int) {}
+func (m *queueRecoveryMetrics) IncrementWorkerConsumerGuardrailViolation(string) {}
+func (m *queueRecoveryMetrics) IncrementWorkerConsumerSubjectThresholdWarning()  {}
+func (m *queueRecoveryMetrics) RecordWorkerConsumerUpdate(string)                {}
+func (m *queueRecoveryMetrics) ObserveWorkerConsumerUpdateLatency(float64)       {}
+func (m *queueRecoveryMetrics) IncrementWorkerConsumerIteratorRestart(string)    {}
+func (m *queueRecoveryMetrics) IncrementWorkerConsumerIteratorEscalation(string) {}
+func (m *queueRecoveryMetrics) SetWorkerConsumerConsecutiveIteratorFailures(int) {}
+func (m *queueRecoveryMetrics) SetWorkerConsumerHealthStatus(bool)               {}
+func (m *queueRecoveryMetrics) IncrementWorkerConsumerPullSuppressed(string)     {}
+func (m *queueRecoveryMetrics) IncrementWorkerConsumerRecreationAttempt(reason string) {
+	m.attemptReasons = append(m.attemptReasons, reason)
+}
+
+func (m *queueRecoveryMetrics) RecordWorkerConsumerRecreation(result string, reason string) {
+	m.results = append(m.results, result)
+	m.resultReasons = append(m.resultReasons, reason)
+}
+
+func (m *queueRecoveryMetrics) ObserveWorkerConsumerRecreationDuration(seconds float64) {
+	m.durations = append(m.durations, seconds)
+}
+
+func TestQueue_RunLoop_FailedRecoveryUsesBackoff(t *testing.T) {
+	m := &queueRecoveryMetrics{}
+	var iterFactoryCalls atomic.Int32
+
+	q := &Queue{
+		js: &mockRecoveryJetStream{createOrUpdateConsumerFunc: func(ctx context.Context, stream string, cfg jetstream.ConsumerConfig) (jetstream.Consumer, error) {
+			return nil, jetstream.ErrStreamNotFound
+		}},
+		config: QueueConfig{
+			CommonConfig: CommonConfig{
+				BatchSize:    1,
+				FetchTimeout: time.Second,
+			},
+			StreamName:   "QUEUE",
+			ConsumerName: "queue-workers",
+			Retry: RetryConfig{
+				Base:       20 * time.Millisecond,
+				Backoff:    20 * time.Millisecond,
+				Multiplier: 1.0,
+				Max:        20 * time.Millisecond,
+			},
+		},
+		logger:   logging.NewNop(),
+		metrics:  m,
+		consumer: &stubConsumer{},
+		loopDone: make(chan struct{}),
+		iterFactory: func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error) {
+			iterFactoryCalls.Add(1)
+			return &queueErrorIter{err: jetstream.ErrConsumerDeleted}, nil
+		},
+		consumerConfig: jetstream.ConsumerConfig{Durable: "queue-workers"},
+		recovery: recovery.NewController(recovery.ControllerConfig{
+			Strategy:       RecoverFromNew,
+			BurstThreshold: 3,
+			BurstWindow:    10 * time.Second,
+			Logger:         logging.NewNop(),
+			Metrics:        m,
+		}),
+		retryRNG: newRetryRNG(1),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go q.runLoop(ctx)
+
+	time.Sleep(55 * time.Millisecond)
+	cancel()
+	<-q.loopDone
+
+	require.Less(t, iterFactoryCalls.Load(), int32(5), "failed recovery should back off instead of hot-looping")
+	require.NotEmpty(t, m.attemptReasons)
+	require.Equal(t, []string{"failure"}, m.results[:1])
 }

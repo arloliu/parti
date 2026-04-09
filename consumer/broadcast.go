@@ -79,6 +79,13 @@ type BroadcastConfig struct {
 	// IteratorFactory optionally overrides the internal iterator creation logic.
 	// This is primarily used for testing to inject mock iterators.
 	IteratorFactory func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error)
+
+	// RecoveryStrategy defines how a recreated consumer resumes after an unexpected deletion.
+	//
+	// All strategies are supported. [RecoverFromLastProcessed] works with both
+	// ManualAck=false (checkpoint advances automatically) and ManualAck=true
+	// (checkpoint advances when the handler calls msg.Ack() or msg.DoubleAck()).
+	RecoveryStrategy RecoveryStrategy
 }
 
 // NewBroadcast creates a new broadcast fan-out consumer.
@@ -125,12 +132,13 @@ func NewBroadcast(
 			InactiveThreshold: o.inactiveThreshold,
 			AckPolicy:         o.ackPolicy,
 		},
-		StreamName:      streamName,
-		ConsumerPrefix:  consumerPrefix,
-		FilterSubject:   filterSubject,
-		InstanceID:      o.instanceID,
-		Retry:           o.retry,
-		IteratorFactory: o.iteratorFactory,
+		StreamName:       streamName,
+		ConsumerPrefix:   consumerPrefix,
+		FilterSubject:    filterSubject,
+		InstanceID:       o.instanceID,
+		Retry:            o.retry,
+		IteratorFactory:  o.iteratorFactory,
+		RecoveryStrategy: o.recoveryStrategy,
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -154,6 +162,7 @@ func NewBroadcast(
 		MaxAckPending:     cfg.MaxAckPending,
 		InactiveThreshold: cfg.InactiveThreshold,
 		AckPolicy:         cfg.AckPolicy,
+		RecoveryStrategy:  cfg.RecoveryStrategy,
 		IteratorFactory:   cfg.IteratorFactory,
 		Retry: durable.RetryConfig{
 			Backoff:    cfg.Retry.Backoff,
