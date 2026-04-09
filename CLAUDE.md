@@ -14,6 +14,10 @@ Key public packages:
 
 Internal packages under `internal/` are private implementation details — do not reference them in public API or docs.
 
+## Git Conventions
+
+**Never add `Co-Authored-By` or any other attribution trailers to git commit messages.**
+
 ## How to Work in This Codebase
 
 All coding rules, testing conventions, documentation standards, workflow steps, and performance/security guidelines are in numbered rule files. **Read them before making changes.**
