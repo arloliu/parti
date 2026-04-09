@@ -23,6 +23,28 @@ type twoPhaseCoordinator struct {
 	lastSweep time.Time
 }
 
+// Start launches a background goroutine that sweeps stale claims at SweepInterval.
+//
+// This ensures stale/expired claims are cleaned up even in idle systems where
+// Apply is rarely called. The goroutine exits when ctx is cancelled.
+func (t *twoPhaseCoordinator) Start(ctx context.Context) {
+	if t.cfg.SweepInterval <= 0 {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(t.cfg.SweepInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				t.maybeSweepClaims(ctx)
+			}
+		}
+	}()
+}
+
 // Apply performs the multi-phase handoff application for the worker's new assignment.
 // Steps: prepare -> (optional delay) -> apply consumer -> commit -> (optional delay) -> stabilize.
 func (t *twoPhaseCoordinator) Apply(ctx context.Context, workerID string, previous, next types.Assignment) error {

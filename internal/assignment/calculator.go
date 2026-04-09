@@ -2,6 +2,7 @@ package assignment
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -913,8 +914,23 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 	}
 	c.Metrics.RecordActiveWorkers(len(workers))
 
+	// P9.2: Pre-publish leadership check — abort if manager is shutting down to
+	// avoid publishing stale assignments after leadership has been relinquished.
+	if c.stateProvider != nil && c.stateProvider.State() == types.StateShutdown {
+		c.Logger.Info("rebalance aborted: manager is shutting down")
+		c.Metrics.RecordRebalanceAttempt(lifecycle, false)
+		return errors.New("rebalance aborted: leader is shutting down")
+	}
+
+	// P9.1: Embed the current leader epoch so workers can discard assignments
+	// from a former leader after a split-brain or leadership change.
+	var leaderEpoch uint64
+	if c.LeaderEpoch != nil {
+		leaderEpoch = c.LeaderEpoch()
+	}
+
 	// Publish assignments via publisher component
-	if err := c.publisher.Publish(ctx, workers, assignments, workersToRemove, lifecycle); err != nil {
+	if err := c.publisher.Publish(ctx, workers, assignments, workersToRemove, lifecycle, leaderEpoch); err != nil {
 		c.Metrics.RecordRebalanceAttempt(lifecycle, false)
 		return fmt.Errorf("failed to publish assignments: %w", err)
 	}

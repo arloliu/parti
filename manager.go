@@ -341,6 +341,8 @@ func (m *Manager) Start(ctx context.Context) (startErr error) {
 			return err
 		}
 	}
+	// Start background maintenance (periodic claim sweep for two-phase; no-op for direct).
+	m.handoffCoordinator.Start(m.ctx)
 
 	// Store KV buckets for later use
 	m.assignmentKV = assignmentKV

@@ -179,6 +179,7 @@ func (p *AssignmentPublisher) CleanupAllAssignments(ctx context.Context) error {
 //   - assignments: Map of worker ID to partition assignments
 //   - workersToRemove: List of worker IDs that have left the cluster and need cleanup
 //   - lifecycle: Lifecycle phase ("cold_start", "planned_scale", "emergency", "restart")
+//   - leaderEpoch: NATS KV revision of the leader key at publish time (0 if unknown)
 //
 // Returns:
 //   - error: Nil on success, error on marshaling or KV operation failure
@@ -189,13 +190,14 @@ func (p *AssignmentPublisher) CleanupAllAssignments(ctx context.Context) error {
 //	    "worker-1": {{Keys: []string{"p1"}}, {Keys: []string{"p2"}}},
 //	    "worker-2": {{Keys: []string{"p3"}}, {Keys: []string{"p4"}}},
 //	}
-//	err := publisher.Publish(ctx, []string{"worker-1", "worker-2"}, assignments, nil, "planned_scale")
+//	err := publisher.Publish(ctx, []string{"worker-1", "worker-2"}, assignments, nil, "planned_scale", 0)
 func (p *AssignmentPublisher) Publish(
 	ctx context.Context,
 	workers []string,
 	assignments map[string][]types.Partition,
 	workersToRemove []string,
 	lifecycle string,
+	leaderEpoch uint64,
 ) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -218,9 +220,10 @@ func (p *AssignmentPublisher) Publish(
 	// Publish assignments to KV
 	for workerID, parts := range assignments {
 		assignment := types.Assignment{
-			Version:    p.currentVersion,
-			Lifecycle:  lifecycle,
-			Partitions: parts,
+			Version:     p.currentVersion,
+			Lifecycle:   lifecycle,
+			Partitions:  parts,
+			LeaderEpoch: leaderEpoch,
 		}
 
 		key := p.keyPrefix + workerID

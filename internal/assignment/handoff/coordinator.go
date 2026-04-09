@@ -37,6 +37,11 @@ import (
 //
 //go:generate echo "handoff.Coordinator generated placeholder"
 type Coordinator interface {
+	// Start begins any background maintenance goroutines (e.g., periodic claim sweep).
+	// The provided ctx controls the lifetime of those goroutines.
+	// Implementations that have no background work may treat this as a no-op.
+	Start(ctx context.Context)
+
 	// Apply performs the handoff-aware application of a new assignment for a worker.
 	//
 	// Parameters:

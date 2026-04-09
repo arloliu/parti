@@ -12,6 +12,9 @@ type direct struct {
 	cfg Config
 }
 
+// Start is a no-op for the direct coordinator (no background maintenance needed).
+func (d *direct) Start(_ context.Context) {}
+
 // Apply executes the consumer update immediately.
 //
 // Parameters:

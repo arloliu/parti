@@ -10,10 +10,15 @@ import (
 // mockStateProvider implements types.StateProvider for testing.
 type mockStateProvider struct {
 	inGrace atomic.Bool
+	state   atomic.Int64 // stores types.State; int64 avoids G115 overflow warnings
 }
 
 func (m *mockStateProvider) State() types.State {
-	return types.StateStable
+	return types.State(m.state.Load())
+}
+
+func (m *mockStateProvider) SetState(s types.State) {
+	m.state.Store(int64(s))
 }
 
 func (m *mockStateProvider) IsInRecoveryGrace() bool {

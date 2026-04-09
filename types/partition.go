@@ -190,4 +190,10 @@ type Assignment struct {
 
 	// Partitions is the list of partitions assigned to this worker.
 	Partitions []Partition `json:"partitions"`
+
+	// LeaderEpoch is the NATS KV revision of the leader key at publish time.
+	// Workers can use this to detect and discard assignments from a former leader
+	// after a split-brain or leadership change event.
+	// Zero when leader epoch tracking is not configured.
+	LeaderEpoch uint64 `json:"leader_epoch,omitempty"`
 }

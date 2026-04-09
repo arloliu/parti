@@ -36,3 +36,8 @@ func (n *NopElection) ReleaseLeadership(ctx context.Context) error {
 func (n *NopElection) IsLeader(ctx context.Context) (bool, error) {
 	return false, nil
 }
+
+// Revision returns 0; the no-op election never acquires leadership.
+func (n *NopElection) Revision() uint64 {
+	return 0
+}

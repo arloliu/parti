@@ -50,6 +50,11 @@ type Config struct {
 	Metrics       CalculatorAndAssignmentMetrics // Metrics collector (default: no-op)
 	Logger        types.Logger                   // Logger (default: no-op)
 	StateProvider types.StateProvider            // Manager state provider for degraded mode checks (default: nil)
+	// LeaderEpoch, if set, is called before each rebalance to obtain the current
+	// leader epoch (NATS KV revision of the leader key). The value is embedded in
+	// every published assignment so workers can detect stale assignments from a
+	// former leader. When nil, LeaderEpoch defaults to 0 in published assignments.
+	LeaderEpoch func() uint64
 }
 
 // Validate checks configuration validity.

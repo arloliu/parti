@@ -280,6 +280,19 @@ func (e *NATSElection) WorkerID() string {
 	return workerID
 }
 
+// Revision returns the NATS KV revision of the current leader key.
+//
+// This monotonically increasing value changes on each successful leadership
+// acquisition or renewal. It can be embedded in published assignments so
+// workers can detect and discard assignments from a former leader.
+//
+// Returns:
+//   - uint64: Current leader key revision, or 0 if not the leader
+func (e *NATSElection) Revision() uint64 {
+	_, _, revision := e.getLeaderState()
+	return revision
+}
+
 // getLeaderState returns the current leadership state (thread-safe).
 func (e *NATSElection) getLeaderState() (isLeader bool, workerID string, revision uint64) {
 	e.mu.RLock()

@@ -100,7 +100,7 @@ func TestAssignmentPublisher_Publish(t *testing.T) {
 	}
 
 	beforePublish := time.Now()
-	err := publisher.Publish(ctx, []string{"w1", "w2"}, assignments, nil, "test")
+	err := publisher.Publish(ctx, []string{"w1", "w2"}, assignments, nil, "test", 0)
 	require.NoError(t, err)
 
 	// Version should be incremented to 1
@@ -145,7 +145,7 @@ func TestAssignmentPublisher_Publish_IncrementsVersion(t *testing.T) {
 	assignments1 := map[string][]types.Partition{
 		"w1": {{Keys: []string{"p1"}}},
 	}
-	err := publisher.Publish(ctx, []string{"w1"}, assignments1, nil, "test")
+	err := publisher.Publish(ctx, []string{"w1"}, assignments1, nil, "test", 0)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), publisher.CurrentVersion())
 
@@ -154,7 +154,7 @@ func TestAssignmentPublisher_Publish_IncrementsVersion(t *testing.T) {
 		"w1": {{Keys: []string{"p1"}}},
 		"w2": {{Keys: []string{"p2"}}},
 	}
-	err = publisher.Publish(ctx, []string{"w1", "w2"}, assignments2, nil, "test")
+	err = publisher.Publish(ctx, []string{"w1", "w2"}, assignments2, nil, "test", 0)
 	require.NoError(t, err)
 	require.Equal(t, int64(2), publisher.CurrentVersion())
 }
@@ -178,7 +178,7 @@ func TestAssignmentPublisher_Publish_RemovesOldWorkers(t *testing.T) {
 		"w2": {{Keys: []string{"p2"}}},
 		"w3": {{Keys: []string{"p3"}}},
 	}
-	err := publisher.Publish(ctx, []string{"w1", "w2", "w3"}, assignments1, nil, "test")
+	err := publisher.Publish(ctx, []string{"w1", "w2", "w3"}, assignments1, nil, "test", 0)
 	require.NoError(t, err)
 
 	// Verify all workers have assignments
@@ -194,7 +194,7 @@ func TestAssignmentPublisher_Publish_RemovesOldWorkers(t *testing.T) {
 		"w1": {{Keys: []string{"p1", "p3"}}},
 		"w2": {{Keys: []string{"p2"}}},
 	}
-	err = publisher.Publish(ctx, []string{"w1", "w2"}, assignments2, []string{"w3"}, "test")
+	err = publisher.Publish(ctx, []string{"w1", "w2"}, assignments2, []string{"w3"}, "test", 0)
 	require.NoError(t, err)
 
 	// w1 and w2 should still exist with updated assignments
@@ -227,7 +227,7 @@ func TestAssignmentPublisher_Publish_EmptyAssignments(t *testing.T) {
 	ctx := context.Background()
 
 	// Publish empty assignments (no workers)
-	err := publisher.Publish(ctx, []string{}, map[string][]types.Partition{}, nil, "test")
+	err := publisher.Publish(ctx, []string{}, map[string][]types.Partition{}, nil, "test", 0)
 	require.NoError(t, err)
 
 	// Version should NOT be incremented when there are no workers
@@ -270,7 +270,7 @@ func TestAssignmentPublisher_LastRebalanceTime(t *testing.T) {
 		"w1": {{Keys: []string{"p1"}}},
 	}
 	beforePublish := time.Now()
-	err := publisher.Publish(ctx, []string{"w1"}, assignments, nil, "test")
+	err := publisher.Publish(ctx, []string{"w1"}, assignments, nil, "test", 0)
 	require.NoError(t, err)
 
 	lastRebalance := publisher.LastRebalanceTime()
@@ -306,7 +306,7 @@ func TestAssignmentPublisher_VersionMonotonicity(t *testing.T) {
 	assignments := map[string][]types.Partition{
 		"w1": {{Keys: []string{"p1"}}},
 	}
-	err = publisher.Publish(ctx, []string{"w1"}, assignments, nil, "test")
+	err = publisher.Publish(ctx, []string{"w1"}, assignments, nil, "test", 0)
 	require.NoError(t, err)
 	require.Equal(t, int64(101), publisher.CurrentVersion())
 }
@@ -330,7 +330,7 @@ func TestAssignmentPublisher_CleanupAllAssignments(t *testing.T) {
 		"w2": {{Keys: []string{"p2"}}},
 		"w3": {{Keys: []string{"p3"}}},
 	}
-	err := publisher.Publish(ctx, []string{"w1", "w2", "w3"}, assignments, nil, "test")
+	err := publisher.Publish(ctx, []string{"w1", "w2", "w3"}, assignments, nil, "test", 0)
 	require.NoError(t, err)
 
 	// Verify all assignments exist
@@ -376,7 +376,7 @@ func TestAssignmentPublisher_CleanupStaleAssignments_Selective(t *testing.T) {
 		"w3": {{Keys: []string{"p3"}}},
 		"w4": {{Keys: []string{"p4"}}},
 	}
-	err := publisher.Publish(ctx, []string{"w1", "w2", "w3", "w4"}, assignments1, nil, "test")
+	err := publisher.Publish(ctx, []string{"w1", "w2", "w3", "w4"}, assignments1, nil, "test", 0)
 	require.NoError(t, err)
 
 	// Verify all assignments exist
@@ -397,7 +397,7 @@ func TestAssignmentPublisher_CleanupStaleAssignments_Selective(t *testing.T) {
 			{Keys: []string{"p4"}},
 		}, // w2 gets partitions p2 and p4
 	}
-	err = publisher.Publish(ctx, []string{"w1", "w2"}, assignments2, []string{"w3", "w4"}, "test")
+	err = publisher.Publish(ctx, []string{"w1", "w2"}, assignments2, []string{"w3", "w4"}, "test", 0)
 	require.NoError(t, err)
 
 	// Verify w1 and w2 still exist with updated assignments
@@ -422,4 +422,34 @@ func TestAssignmentPublisher_CleanupStaleAssignments_Selective(t *testing.T) {
 	require.Error(t, err, "w4 assignment should be deleted")
 
 	t.Log("Verified: Selective cleanup removes only stale workers")
+}
+
+// TestAssignmentPublisher_Publish_LeaderEpoch verifies that the leaderEpoch
+// parameter is embedded in every published Assignment.
+func TestAssignmentPublisher_Publish_LeaderEpoch(t *testing.T) {
+	_, nc := partitest.StartEmbeddedNATS(t)
+	assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-publisher-epoch")
+
+	publisher := NewAssignmentPublisher(
+		assignmentKV,
+		"assignment",
+		logging.NewNop(),
+		metrics.NewNop(),
+	)
+
+	ctx := context.Background()
+
+	assignments := map[string][]types.Partition{
+		"w1": {{Keys: []string{"p1"}}},
+	}
+	const wantEpoch uint64 = 42
+	err := publisher.Publish(ctx, []string{"w1"}, assignments, nil, "test", wantEpoch)
+	require.NoError(t, err)
+
+	entry, err := assignmentKV.Get(ctx, "assignment.w1")
+	require.NoError(t, err)
+
+	var asgn types.Assignment
+	require.NoError(t, json.Unmarshal(entry.Value(), &asgn))
+	require.Equal(t, wantEpoch, asgn.LeaderEpoch, "LeaderEpoch must be embedded in the published assignment")
 }

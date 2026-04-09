@@ -170,6 +170,21 @@ func (m *Manager) monitorLeadership() {
 	}
 }
 
+// leaderReviser is satisfied by election implementations that expose their
+// current KV revision (e.g. NATSElection). Checked via type assertion.
+type leaderReviser interface {
+	Revision() uint64
+}
+
+// electionEpoch returns the current leader KV revision, or 0 if the election
+// implementation does not expose one. Used to populate Assignment.LeaderEpoch.
+func (m *Manager) electionEpoch() uint64 {
+	if r, ok := m.election.(leaderReviser); ok {
+		return r.Revision()
+	}
+	return 0
+}
+
 // startHeartbeat starts publishing heartbeats.
 func (m *Manager) startHeartbeat(kv jetstream.KeyValue) error {
 	workerID := m.WorkerID()
