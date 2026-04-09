@@ -9,6 +9,16 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
+// IsConsumerGone reports whether err is an unambiguous "consumer deleted" signal
+// from iter.Next() (HTTP 409). This is the fast path — no API confirmation needed.
+//
+// Do NOT use this for [jetstream.ErrNoHeartbeat]: that error is ambiguous (could be
+// a transient network blip) and requires a [jetstream.Consumer.Info] check before
+// triggering recovery.
+func IsConsumerGone(err error) bool {
+	return errors.Is(err, jetstream.ErrConsumerDeleted)
+}
+
 // IsConsumerNotFound reports whether err indicates a "consumer not found" error.
 //
 // Both sentinels are checked because the root nats package and the jetstream
