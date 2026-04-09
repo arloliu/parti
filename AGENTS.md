@@ -24,3 +24,4 @@ Skills are invocable agent capabilities in [`.agents/skills/`](.agents/skills/).
 |-------|-------------|
 | [`go-api-review`](.agents/skills/go-api-review/SKILL.md) | Reviews a Go package's exported API (Godoc) and README for discoverability, clarity, and developer experience — without reading internal source code |
 | [`qa-review`](.agents/skills/qa-review/SKILL.md) | QA-focused review for correctness, fault tolerance, and performance from the perspective of external users |
+| [`doc-sync`](.agents/skills/doc-sync/SKILL.md) | Audits and updates `docs/` files and public-package Godoc to match the current API — fixes stale signatures, phantom symbols, and missing entries |

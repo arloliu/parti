@@ -28,5 +28,6 @@ To run a skill, ask Claude to use it by name:
 
 - `/go-api-review [package]` — Review exported API and README for DX, discoverability, and clarity. Does not read internal source.
 - `/qa-review [package]` — Review for correctness, fault tolerance, error propagation, and concurrency safety from a user perspective.
+- `/doc-sync [scope]` — Audit and fix `docs/` files and Godoc to match the current API: corrects stale signatures, removes phantom symbols, adds missing entries.
 
-Both skills scope to Parti's public packages by default; you can specify a subset (e.g., `consumer/`, `types/`).
+All skills scope to Parti's public packages by default; you can specify a subset (e.g., `consumer/`, `docs/CONSUMERS.md`).
