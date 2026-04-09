@@ -3,6 +3,7 @@ package assignment
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -217,13 +218,25 @@ func (p *AssignmentPublisher) Publish(
 	// Delete assignments for workers that are no longer active
 	p.cleanupStaleAssignments(ctx, workersToRemove)
 
-	// Publish assignments to KV
-	for workerID, parts := range assignments {
+	// Publish assignments in sorted worker order for deterministic write sequence.
+	// Note: NATS KV does not support multi-key atomic writes; a crash between
+	// individual puts may leave a partial batch in KV. The TotalWorkers field
+	// lets workers detect that some assignments may still be in flight.
+	totalWorkers := len(assignments)
+	sortedWorkers := make([]string, 0, totalWorkers)
+	for wid := range assignments {
+		sortedWorkers = append(sortedWorkers, wid)
+	}
+	sort.Strings(sortedWorkers)
+
+	for _, workerID := range sortedWorkers {
+		parts := assignments[workerID]
 		assignment := types.Assignment{
-			Version:     p.currentVersion,
-			Lifecycle:   lifecycle,
-			Partitions:  parts,
-			LeaderEpoch: leaderEpoch,
+			Version:      p.currentVersion,
+			Lifecycle:    lifecycle,
+			Partitions:   parts,
+			LeaderEpoch:  leaderEpoch,
+			TotalWorkers: totalWorkers,
 		}
 
 		key := p.keyPrefix + workerID

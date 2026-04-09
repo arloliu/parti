@@ -196,4 +196,11 @@ type Assignment struct {
 	// after a split-brain or leadership change event.
 	// Zero when leader epoch tracking is not configured.
 	LeaderEpoch uint64 `json:"leader_epoch,omitempty"`
+
+	// TotalWorkers is the number of active workers in the assignment batch.
+	// Workers can use this as a consistency hint: if TotalWorkers > number of
+	// assignment keys observed in KV, some assignments may still be in flight
+	// (NATS KV does not support multi-key atomic writes).
+	// Zero when not set by the publisher.
+	TotalWorkers int `json:"total_workers,omitempty"`
 }
