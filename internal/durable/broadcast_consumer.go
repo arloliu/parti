@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/arloliu/parti/v2/internal/recovery"
 	"github.com/arloliu/parti/v2/jsutil"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
@@ -60,8 +61,9 @@ type BroadcastConsumer struct {
 	consumerIDSource consumerIDSource
 
 	// Consumer state
-	consumer   jetstream.Consumer
-	consumerMu sync.RWMutex
+	consumer       jetstream.Consumer
+	consumerMu     sync.RWMutex
+	consumerConfig jetstream.ConsumerConfig // stored base config for recovery
 
 	// Loop control
 	loopCancel  context.CancelFunc
@@ -70,6 +72,9 @@ type BroadcastConsumer struct {
 
 	// Iterator factory
 	iterFactory func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error)
+
+	// Recovery
+	recovery *recovery.Controller
 }
 
 // NewBroadcastConsumer creates a new broadcast fan-out consumer.
@@ -106,6 +111,9 @@ func NewBroadcastConsumer(js jetstream.JetStream, cfg BroadcastConsumerConfig, f
 		return nil, err
 	}
 
+	burstThreshold := 3
+	burstWindow := cfg.FetchTimeout*time.Duration(burstThreshold+1) + 3*time.Second
+
 	bc := &BroadcastConsumer{
 		js:               js,
 		config:           cfg,
@@ -115,6 +123,13 @@ func NewBroadcastConsumer(js jetstream.JetStream, cfg BroadcastConsumerConfig, f
 		consumerIDSource: consumerIDSource,
 		iterFactory:      defaultIterFactory,
 		loopDone:         make(chan struct{}),
+		recovery: recovery.NewController(recovery.ControllerConfig{
+			Strategy:       cfg.RecoveryStrategy,
+			BurstThreshold: burstThreshold,
+			BurstWindow:    burstWindow,
+			Logger:         cfg.Logger,
+			Metrics:        cfg.Metrics,
+		}),
 	}
 
 	// Allow injection for tests
@@ -185,6 +200,7 @@ func (bc *BroadcastConsumer) Close(ctx context.Context) error {
 func (bc *BroadcastConsumer) startConsumerLoop(ctx context.Context) error {
 	var (
 		cons     jetstream.Consumer
+		consCfg  jetstream.ConsumerConfig
 		err      error
 		lastErr  error
 		attempts = 3
@@ -192,10 +208,11 @@ func (bc *BroadcastConsumer) startConsumerLoop(ctx context.Context) error {
 
 	for i := 0; i < attempts; i++ {
 		durableName := bc.durableName()
-		cons, err = bc.ensureConsumer(ctx, durableName)
+		cons, consCfg, err = bc.ensureConsumer(ctx, durableName)
 		if err == nil {
 			bc.consumerMu.Lock()
 			bc.consumer = cons
+			bc.consumerConfig = consCfg
 			bc.consumerMu.Unlock()
 
 			bc.logger.Info("broadcast consumer ready",
@@ -248,7 +265,9 @@ func (bc *BroadcastConsumer) durableName() string {
 }
 
 // ensureConsumer creates or updates the durable consumer with wildcard filter.
-func (bc *BroadcastConsumer) ensureConsumer(ctx context.Context, durable string) (jetstream.Consumer, error) {
+// It returns the consumer config that was used so the caller can snapshot it
+// for recovery after a successful creation.
+func (bc *BroadcastConsumer) ensureConsumer(ctx context.Context, durable string) (jetstream.Consumer, jetstream.ConsumerConfig, error) {
 	cfg := jetstream.ConsumerConfig{
 		Name:              durable,
 		Durable:           durable,
@@ -261,7 +280,9 @@ func (bc *BroadcastConsumer) ensureConsumer(ctx context.Context, durable string)
 		MaxAckPending:     bc.config.MaxAckPending,
 	}
 
-	return jsutil.EnsureConsumer(ctx, bc.js, bc.config.StreamName, cfg)
+	cons, err := jsutil.EnsureConsumer(ctx, bc.js, bc.config.StreamName, cfg)
+
+	return cons, cfg, err
 }
 
 // runLoop is the main message processing loop.
@@ -270,6 +291,9 @@ func (bc *BroadcastConsumer) runLoop(ctx context.Context) {
 
 	bc.logger.Debug("broadcast consumer loop starting", "filter", bc.config.WildcardFilter)
 	defer bc.logger.Debug("broadcast consumer loop stopped", "filter", bc.config.WildcardFilter)
+
+	// Seed the recovery checkpoint from the server-side ack floor.
+	bc.recovery.SeedCheckpoint(ctx, bc.consumerInfoFn())
 
 	batch := bc.config.BatchSize
 	expiry := bc.config.FetchTimeout
@@ -297,14 +321,42 @@ func (bc *BroadcastConsumer) runLoop(ctx context.Context) {
 			continue
 		}
 
-		if exit := bc.processIterator(ctx, iter); exit {
+		iterErr := bc.processIterator(ctx, iter)
+		if iterErr == nil {
+			continue
+		}
+
+		bc.consumerMu.RLock()
+		consumerConfig := bc.consumerConfig
+		bc.consumerMu.RUnlock()
+
+		action, newCons := bc.recovery.Classify(ctx, iterErr, bc.consumerInfoFn(), consumerConfig, bc.recreateFn())
+		switch action {
+		case recovery.ActionExit:
 			return
+		case recovery.ActionContinue:
+			bc.consumerMu.Lock()
+			bc.consumer = newCons
+			bc.consumerMu.Unlock()
+			// SeedCheckpoint on a freshly created consumer is typically a no-op:
+			// the new consumer's ack floor is 0 and the checkpoint monotonically
+			// advances, so it will not regress. Called here as a best-effort update
+			// in case the consumer was recreated over an existing durable.
+			bc.recovery.SeedCheckpoint(ctx, bc.consumerInfoFn())
+
+			continue
+		case recovery.ActionBackoff:
+			if bc.delayOrExit(ctx) {
+				return
+			}
 		}
 	}
 }
 
 // processIterator processes messages from the iterator until error or context cancellation.
-func (bc *BroadcastConsumer) processIterator(ctx context.Context, iter jetstream.MessagesContext) (exit bool) {
+// Returns nil on graceful exit (context canceled or ErrMsgIteratorClosed).
+// Returns the iterator error so the caller can classify and handle recovery.
+func (bc *BroadcastConsumer) processIterator(ctx context.Context, iter jetstream.MessagesContext) error {
 	// Start stopper goroutine
 	stopperCh := make(chan struct{})
 	go func() {
@@ -312,7 +364,6 @@ func (bc *BroadcastConsumer) processIterator(ctx context.Context, iter jetstream
 		case <-ctx.Done():
 			iter.Stop()
 		case <-stopperCh:
-			return
 		}
 	}()
 
@@ -327,40 +378,34 @@ func (bc *BroadcastConsumer) processIterator(ctx context.Context, iter jetstream
 	for {
 		if ctx.Err() != nil {
 			iter.Stop()
-			return true
+			return nil
 		}
 
 		msg, err := iter.Next()
 		if err != nil {
-			iter.Stop()
 			bc.logger.Debug("iterator next error", "error", err)
-			if bc.config.Metrics != nil {
-				bc.config.Metrics.IncrementWorkerConsumerIteratorRestart("transient")
+			iter.Stop()
+			if errors.Is(err, jetstream.ErrMsgIteratorClosed) || errors.Is(err, context.Canceled) {
+				return nil // graceful shutdown
 			}
-
-			if bc.delayOrExit(ctx) {
-				return true
-			}
-
-			return false
+			return err // caller classifies for recovery or backoff
 		}
 
 		// Process message via handler
-		// No local filtering - receive everything
 		if bc.handler == nil {
 			_ = msg.Nak()
 			continue
 		}
 
 		if bc.config.ManualAck {
-			_ = bc.handler.Handle(ctx, msg)
+			_ = bc.handler.Handle(ctx, bc.recovery.WrapForTracking(msg))
 			continue
 		}
 
 		if err := bc.handler.Handle(ctx, msg); err != nil {
 			_ = msg.Nak()
-		} else {
-			_ = msg.Ack()
+		} else if err := msg.Ack(); err == nil {
+			bc.recovery.AdvanceCheckpoint(msg)
 		}
 	}
 }
@@ -375,6 +420,26 @@ func (bc *BroadcastConsumer) delayOrExit(ctx context.Context) bool {
 		return true
 	case <-time.After(delay):
 		return false
+	}
+}
+
+// consumerInfoFn returns a function that calls consumer.Info() on the current consumer.
+func (bc *BroadcastConsumer) consumerInfoFn() recovery.InfoFunc {
+	return func(ctx context.Context) (*jetstream.ConsumerInfo, error) {
+		bc.consumerMu.RLock()
+		cons := bc.consumer
+		bc.consumerMu.RUnlock()
+		if cons == nil {
+			return nil, errors.New("no consumer")
+		}
+		return cons.Info(ctx)
+	}
+}
+
+// recreateFn returns a function that recreates the consumer via EnsureConsumer.
+func (bc *BroadcastConsumer) recreateFn() recovery.RecreateFunc {
+	return func(ctx context.Context, cfg jetstream.ConsumerConfig) (jetstream.Consumer, error) {
+		return jsutil.EnsureConsumer(ctx, bc.js, bc.config.StreamName, cfg)
 	}
 }
 
@@ -441,5 +506,8 @@ func isConsumerNameConflict(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "consumer name already in use") ||
 		strings.Contains(msg, "name already in use") ||
-		strings.Contains(msg, "consumer already exists")
+		strings.Contains(msg, "consumer already exists") ||
+		// NATS returns this when a pull consumer is created with a name that
+		// is already in use by an existing push consumer on the same stream.
+		strings.Contains(msg, "can not update push consumer to pull based")
 }

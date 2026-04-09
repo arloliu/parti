@@ -130,3 +130,73 @@ func (m *mockMsg) Metadata() (*jetstream.MsgMetadata, error) {
 func (m *mockMsg) Subject() string      { return "" }
 func (m *mockMsg) Reply() string        { return "" }
 func (m *mockMsg) Headers() nats.Header { return nil }
+
+// --- processIterator ErrMsgIteratorClosed filter test ---
+
+func TestPartitionConsumer_ProcessIterator_FiltersGracefulErrors(t *testing.T) {
+	logger := logging.NewNop()
+	cfg := partitionConsumerConfig{
+		BatchSize:    1,
+		FetchTimeout: 100 * time.Millisecond,
+	}
+
+	tests := []struct {
+		name    string
+		err     error
+		wantErr bool
+	}{
+		{"ErrMsgIteratorClosed is filtered", jetstream.ErrMsgIteratorClosed, false},
+		{"context.Canceled is filtered", context.Canceled, false},
+		{"ErrConsumerDeleted is returned", jetstream.ErrConsumerDeleted, true},
+		{"ErrNoHeartbeat is returned", jetstream.ErrNoHeartbeat, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create an iterator that returns the test error on first Next().
+			mockIter := &errorOnNextIter{err: tt.err}
+
+			pc := newPartitionConsumer(
+				logger,
+				nil,
+				cfg,
+				partitionConsumerOpts{
+					streamName:  "stream",
+					durableName: "durable",
+					subject:     "subject",
+					partitionID: "pid",
+				},
+			)
+
+			handler := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+				return nil
+			})
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			exit, iterErr := pc.processIterator(ctx, mockIter, handler)
+			require.False(t, exit, "should not signal exit for iterator error")
+			if tt.wantErr {
+				require.ErrorIs(t, iterErr, tt.err)
+			} else {
+				require.NoError(t, iterErr, "graceful error should be filtered to nil")
+			}
+		})
+	}
+}
+
+// --- mock helpers ---
+
+// errorOnNextIter returns an error immediately on Next().
+type errorOnNextIter struct {
+	err error
+}
+
+func (e *errorOnNextIter) Next(opts ...jetstream.NextOpt) (jetstream.Msg, error) {
+	return nil, e.err
+}
+
+func (e *errorOnNextIter) Stop() {}
+
+func (e *errorOnNextIter) Drain() {}

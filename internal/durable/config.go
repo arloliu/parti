@@ -7,9 +7,22 @@ import (
 	"github.com/arloliu/fuda"
 	"github.com/arloliu/parti/v2/internal/logging"
 	"github.com/arloliu/parti/v2/internal/metrics"
+	"github.com/arloliu/parti/v2/internal/recovery"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/go-playground/validator/v10"
 	"github.com/nats-io/nats.go/jetstream"
+)
+
+// RecoveryStrategy is an alias for [recovery.Strategy].
+// It is kept here for backward compatibility with existing config structs.
+type RecoveryStrategy = recovery.Strategy
+
+// Recovery strategy constants re-exported from the recovery package.
+const (
+	RecoveryDisabled         = recovery.Disabled
+	RecoverFromNew           = recovery.FromNew
+	RecoverFromLastProcessed = recovery.FromLastProcessed
+	RecoverFromBeginning     = recovery.FromBeginning
 )
 
 // RetryConfig groups retry backoff settings.
@@ -201,6 +214,10 @@ type WorkerConsumerConfig struct {
 	// AllowWorkerIDChange controls whether workerID changes are allowed after initialization.
 	// Default: false (immutable once set). Intended for controlled migrations only.
 	AllowWorkerIDChange bool
+
+	// RecoveryStrategy defines how a recreated consumer resumes after an unexpected deletion.
+	// Default: RecoveryDisabled (no auto-recovery).
+	RecoveryStrategy RecoveryStrategy
 
 	// IteratorFactory optionally overrides the iterator creation logic for testing or
 	// advanced customization. When nil, a default factory is used that configures

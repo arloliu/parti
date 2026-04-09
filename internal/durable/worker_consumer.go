@@ -393,6 +393,7 @@ func (wc *WorkerConsumer) addSubjectLoop(ctx context.Context, workerID string, s
 		BatchSize:                   wc.config.BatchSize,
 		FetchTimeout:                wc.config.FetchTimeout,
 		ManualAck:                   wc.config.ManualAck,
+		RecoveryStrategy:            wc.config.RecoveryStrategy,
 		Retry:                       wc.config.Retry,
 		IteratorEscalationWindow:    wc.config.IteratorEscalationWindow,
 		IteratorEscalationThreshold: wc.config.IteratorEscalationThreshold,
@@ -720,6 +721,16 @@ func (wc *WorkerConsumer) shouldSuppressPull(partitionID string) (bool, string) 
 }
 
 // defaultIterFactory provides the default messages iterator factory.
+// PullHeartbeat is set to expiry/2 (min 100ms) so that ErrNoHeartbeat
+// fires reliably when the consumer is deleted — enabling Path B detection.
 func defaultIterFactory(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error) {
-	return cons.Messages(jetstream.PullMaxMessages(batch), jetstream.PullExpiry(expiry))
+	heartbeat := expiry / 2
+	if heartbeat < 100*time.Millisecond {
+		heartbeat = 100 * time.Millisecond
+	}
+	return cons.Messages(
+		jetstream.PullMaxMessages(batch),
+		jetstream.PullExpiry(expiry),
+		jetstream.PullHeartbeat(heartbeat),
+	)
 }

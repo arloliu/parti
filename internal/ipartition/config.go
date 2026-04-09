@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/arloliu/fuda"
+	"github.com/arloliu/parti/v2/internal/durable"
 	"github.com/arloliu/parti/v2/internal/logging"
 	"github.com/arloliu/parti/v2/internal/metrics"
 	"github.com/arloliu/parti/v2/internal/partutil"
@@ -72,6 +73,9 @@ type ConsumerConfig struct {
 
 	// AckPolicy controls the JetStream acknowledgement policy.
 	AckPolicy jetstream.AckPolicy
+
+	// RecoveryStrategy defines how a recreated consumer resumes after an unexpected deletion.
+	RecoveryStrategy durable.RecoveryStrategy
 
 	// DispatchByKey enables per-key concurrent message processing.
 	//

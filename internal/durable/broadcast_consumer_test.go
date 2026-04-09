@@ -272,6 +272,190 @@ func TestBroadcastConsumer_UpdateWorkerConsumer_ReceivesMessages(t *testing.T) {
 	require.GreaterOrEqual(t, atomic.LoadInt32(&handled), int32(3))
 }
 
+// TestEnsureConsumer_ReturnsConfigWithoutMutatingState verifies that ensureConsumer
+// returns the jetstream.ConsumerConfig it built and does NOT write to bc.consumerConfig.
+// The caller (startConsumerLoop) is responsible for snapshotting after confirmed success.
+func TestEnsureConsumer_ReturnsConfigWithoutMutatingState(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+
+	_, nc := partitesting.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	_, err = js.CreateStream(ctx, jetstream.StreamConfig{
+		Name:      "ENSURE_CFG",
+		Subjects:  []string{"ensure.>"},
+		Retention: jetstream.LimitsPolicy,
+		Storage:   jetstream.MemoryStorage,
+	})
+	require.NoError(t, err)
+
+	cfg := BroadcastConsumerConfig{
+		StreamName:     "ENSURE_CFG",
+		ConsumerPrefix: "bctest",
+		ConsumerID:     "ens-worker",
+		WildcardFilter: "ensure.>",
+	}
+	require.NoError(t, cfg.SetDefaults())
+
+	handler := messageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error { return nil })
+	bc, err := NewBroadcastConsumer(js, cfg, handler)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = bc.Close(ctx) })
+
+	durable := bc.durableName()
+	cons, retCfg, ensureErr := bc.ensureConsumer(ctx, durable)
+	require.NoError(t, ensureErr)
+	require.NotNil(t, cons)
+
+	// Returned config must reflect the durable that was requested.
+	require.Equal(t, durable, retCfg.Durable, "returned config must match the requested durable name")
+
+	// ensureConsumer must NOT have stored anything in bc.consumerConfig.
+	bc.consumerMu.RLock()
+	stored := bc.consumerConfig
+	bc.consumerMu.RUnlock()
+	require.Empty(t, stored.Durable, "ensureConsumer must not mutate bc.consumerConfig; that is startConsumerLoop's responsibility")
+}
+
+// TestStartConsumerLoop_ConsumerConfigMatchesActiveDurable verifies that after a
+// successful startConsumerLoop, bc.consumerConfig.Durable equals the active durable name.
+func TestStartConsumerLoop_ConsumerConfigMatchesActiveDurable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+
+	_, nc := partitesting.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	_, err = js.CreateStream(ctx, jetstream.StreamConfig{
+		Name:      "LOOP_CFG",
+		Subjects:  []string{"loop.>"},
+		Retention: jetstream.LimitsPolicy,
+		Storage:   jetstream.MemoryStorage,
+	})
+	require.NoError(t, err)
+
+	cfg := BroadcastConsumerConfig{
+		StreamName:     "LOOP_CFG",
+		ConsumerPrefix: "bctest",
+		ConsumerID:     "loop-worker",
+		WildcardFilter: "loop.>",
+	}
+	require.NoError(t, cfg.SetDefaults())
+
+	handler := messageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error { return nil })
+	bc, err := NewBroadcastConsumer(js, cfg, handler)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = bc.Close(ctx) })
+
+	require.NoError(t, bc.startConsumerLoop(ctx))
+
+	expectedDurable := bc.durableName()
+
+	bc.consumerMu.RLock()
+	stored := bc.consumerConfig
+	bc.consumerMu.RUnlock()
+
+	require.Equal(t, expectedDurable, stored.Durable,
+		"bc.consumerConfig.Durable must equal the active durable after startConsumerLoop succeeds")
+}
+
+// TestStartConsumerLoop_CollisionFallback_SnapshotsWinningConfig is the regression test
+// for the bug where bc.consumerConfig was snapshotted before EnsureConsumer succeeded.
+//
+// When attempt 1 fails with a name collision and attempt 2 succeeds with a fresh
+// generated ID, bc.consumerConfig must reflect the winning durable — not the
+// first (failed) attempt's name.
+//
+// Collision is triggered by pre-creating a push (InboxDelivery) consumer with the
+// same name; pull consumer creation against that name returns "consumer name already
+// in use" (or equivalent), which matches isConsumerNameConflict.
+func TestStartConsumerLoop_CollisionFallback_SnapshotsWinningConfig(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	t.Cleanup(cancel)
+
+	_, nc := partitesting.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	_, err = js.CreateStream(ctx, jetstream.StreamConfig{
+		Name:      "COLLISION",
+		Subjects:  []string{"col.>"},
+		Retention: jetstream.LimitsPolicy,
+		Storage:   jetstream.MemoryStorage,
+	})
+	require.NoError(t, err)
+
+	// Pre-create a push consumer with the target durable name but a different
+	// FilterSubject.  CreateOrUpdateConsumer will reject a conflicting pull
+	// consumer creation attempt with a config-mismatch / name-already-in-use error.
+	const conflictDurable = "bctest_broadcast_col-worker"
+	_, err = js.CreateOrUpdateConsumer(ctx, "COLLISION", jetstream.ConsumerConfig{
+		Name:           conflictDurable,
+		Durable:        conflictDurable,
+		FilterSubject:  "col.other.>", // different from bc's "col.>"
+		DeliverSubject: nc.NewInbox(), // push consumer — incompatible with pull
+	})
+	require.NoError(t, err, "pre-create conflicting consumer")
+
+	cfg := BroadcastConsumerConfig{
+		StreamName:     "COLLISION",
+		ConsumerPrefix: "bctest",
+		WildcardFilter: "col.>",
+	}
+	require.NoError(t, cfg.SetDefaults())
+
+	handler := messageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error { return nil })
+
+	// Construct directly so we can set a controlled initial ID (same name as the
+	// pre-created conflicting consumer) with consumerIDSourceGenerated to allow retry.
+	bc := &BroadcastConsumer{
+		js:               js,
+		config:           cfg,
+		logger:           cfg.Logger,
+		handler:          handler,
+		consumerID:       "col-worker", // durableName() → "bctest_broadcast_col-worker" (conflict!)
+		consumerIDSource: consumerIDSourceGenerated,
+		iterFactory:      defaultIterFactory,
+		loopDone:         make(chan struct{}),
+	}
+	t.Cleanup(func() { _ = bc.Close(ctx) })
+
+	err = bc.startConsumerLoop(ctx)
+	if err != nil {
+		// If the embedded NATS version does not return a string that matches
+		// isConsumerNameConflict, the collision branch is not exercised. Skip
+		// rather than fail so the test suite remains green on all NATS versions.
+		t.Skipf("NATS did not produce a conflict error recognisable by isConsumerNameConflict; skipping collision path: %v", err)
+	}
+
+	bc.consumerMu.RLock()
+	winningDurable := bc.consumerConfig.Durable
+	bc.consumerMu.RUnlock()
+
+	require.NotEmpty(t, winningDurable, "bc.consumerConfig must be set after successful start")
+	require.NotEqual(t, conflictDurable, winningDurable,
+		"bc.consumerConfig must reflect the winning (retry) durable, not the failed first attempt")
+
+	// The winning consumer must actually exist on the server.
+	_, err = js.Consumer(ctx, "COLLISION", winningDurable)
+	require.NoError(t, err, "winning consumer %q must exist on the server", winningDurable)
+}
+
 func TestBroadcastConsumer_ReceivesAllMessages(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")

@@ -108,6 +108,10 @@ type BroadcastConsumerConfig struct {
 	// AckPolicy controls JetStream ack policy. Defaults to AckExplicitPolicy.
 	AckPolicy jetstream.AckPolicy
 
+	// RecoveryStrategy defines how a recreated consumer resumes after an unexpected deletion.
+	// Default: RecoveryDisabled (no auto-recovery).
+	RecoveryStrategy RecoveryStrategy
+
 	// Retry configures backoff behavior for control-plane operations.
 	Retry RetryConfig
 

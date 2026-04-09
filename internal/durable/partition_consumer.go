@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/arloliu/parti/v2/internal/natsutil"
+	"github.com/arloliu/parti/v2/internal/recovery"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -18,6 +20,9 @@ type partitionConsumerConfig struct {
 	BatchSize    int
 	FetchTimeout time.Duration
 	ManualAck    bool
+
+	// Recovery
+	RecoveryStrategy RecoveryStrategy
 
 	// Retry/Escalation
 	Retry                       RetryConfig
@@ -65,6 +70,9 @@ type partitionConsumer struct {
 
 	// Info lock
 	consInfoMu sync.Mutex
+
+	// Recovery
+	recovery *recovery.Controller
 }
 
 // partitionConsumerOpts contains the identity and dependency options for a partition consumer.
@@ -86,6 +94,9 @@ func newPartitionConsumer(
 	config partitionConsumerConfig,
 	opts partitionConsumerOpts,
 ) *partitionConsumer {
+	burstThreshold := 3
+	burstWindow := config.FetchTimeout*time.Duration(burstThreshold+1) + 3*time.Second
+
 	return &partitionConsumer{
 		logger:               logger,
 		js:                   js,
@@ -99,6 +110,13 @@ func newPartitionConsumer(
 		iterFactory:          opts.iterFactory,
 		checkPullSuppression: opts.checkPullSuppression,
 		done:                 make(chan struct{}),
+		recovery: recovery.NewController(recovery.ControllerConfig{
+			Strategy:       config.RecoveryStrategy,
+			BurstThreshold: burstThreshold,
+			BurstWindow:    burstWindow,
+			Logger:         logger,
+			Metrics:        config.Metrics,
+		}),
 	}
 }
 
@@ -121,6 +139,10 @@ func (pc *partitionConsumer) Run(ctx context.Context, handler messageHandler) {
 		pc.logger.Debug("partition consumer loop stopped", "subject", pc.subject)
 		close(pc.done)
 	}()
+
+	// Seed the recovery checkpoint from the current server-side ack floor so that
+	// a fresh process binding to an existing durable doesn't replay from zero.
+	pc.recovery.SeedCheckpoint(ctx, pc.consumerInfoFn())
 
 	batch := pc.config.BatchSize
 	expiry := pc.config.FetchTimeout
@@ -157,6 +179,11 @@ func (pc *partitionConsumer) Run(ctx context.Context, handler messageHandler) {
 				pc.config.Metrics.IncrementWorkerConsumerIteratorRestart("transient")
 			}
 
+			// Iterator creation failures (from cons.Messages()) are distinct from
+			// iterator consumption failures (from iter.Next()). Consumer deletion
+			// is detected via iter.Next() errors, not creation errors. The legacy
+			// escalation mechanism handles creation failures (rebind the durable)
+			// regardless of recovery strategy.
 			pc.maybeEscalateIteratorFailures(ctx)
 
 			if pc.delayWithBackoffOrExit(ctx, "iterate") {
@@ -170,23 +197,55 @@ func (pc *partitionConsumer) Run(ctx context.Context, handler messageHandler) {
 		if exit {
 			return
 		}
-		if iterErr != nil {
-			pc.logger.Warn("iterator error", "subject", pc.subject, "error", iterErr)
-			// Classify restart reason for metrics parity
-			if pc.config.Metrics != nil {
-				if errors.Is(iterErr, jetstream.ErrNoHeartbeat) {
-					pc.config.Metrics.IncrementWorkerConsumerIteratorRestart("heartbeat")
-				} else {
-					pc.config.Metrics.IncrementWorkerConsumerIteratorRestart("transient")
-				}
-			}
-			pc.maybeEscalateIteratorFailures(ctx)
-			if pc.delayWithBackoffOrExit(ctx, "iterate") {
-				return
-			}
+		if iterErr != nil && pc.handleIteratorFailure(ctx, iterErr) {
+			return
 		}
 		// loop continues to recreate iterator on next iteration
 	}
+}
+
+func (pc *partitionConsumer) handleIteratorFailure(ctx context.Context, iterErr error) bool {
+	pc.logger.Warn("iterator error", "subject", pc.subject, "error", iterErr)
+
+	// When recovery is disabled, use the pre-existing escalation mechanism.
+	if pc.recovery == nil {
+		if pc.config.Metrics != nil {
+			if errors.Is(iterErr, jetstream.ErrNoHeartbeat) {
+				pc.config.Metrics.IncrementWorkerConsumerIteratorRestart("heartbeat")
+			} else {
+				pc.config.Metrics.IncrementWorkerConsumerIteratorRestart("transient")
+			}
+		}
+		pc.maybeEscalateIteratorFailures(ctx)
+
+		return pc.delayWithBackoffOrExit(ctx, "iterate")
+	}
+
+	action, newCons := pc.recovery.Classify(ctx, iterErr, pc.consumerInfoFn(), pc.consumerConfig, pc.recreateFn())
+	switch action {
+	case recovery.ActionExit:
+		return true
+	case recovery.ActionContinue:
+		pc.consumerMu.Lock()
+		pc.consumer = newCons
+		pc.consumerMu.Unlock()
+		// Reset escalation counters so prior burst failures don't bleed into the new consumer.
+		pc.iterEscMu.Lock()
+		pc.iterFailureTimes = pc.iterFailureTimes[:0]
+		pc.lastEscalation = time.Time{}
+		pc.iterEscMu.Unlock()
+		// SeedCheckpoint on a freshly created consumer is typically a no-op:
+		// the new consumer's ack floor is 0 and the checkpoint monotonically
+		// advances, so it will not regress. Called here as a best-effort update
+		// in case the consumer was recreated over an existing durable.
+		pc.recovery.SeedCheckpoint(ctx, pc.consumerInfoFn())
+
+		return false
+	case recovery.ActionBackoff:
+		return pc.delayWithBackoffOrExit(ctx, "iterate")
+	}
+
+	return pc.delayWithBackoffOrExit(ctx, "iterate")
 }
 
 // Stop cancels the consumption loop.
@@ -282,8 +341,11 @@ func (pc *partitionConsumer) processIterator(
 
 		msg, err := iter.Next()
 		if err != nil {
-			iter.Stop()
 			pc.logger.Debug("iterator next error", "subject", pc.subject, "error", err)
+			iter.Stop()
+			if errors.Is(err, jetstream.ErrMsgIteratorClosed) || errors.Is(err, context.Canceled) {
+				return false, nil // graceful shutdown, not an iterator error
+			}
 			return false, err
 		}
 
@@ -293,14 +355,16 @@ func (pc *partitionConsumer) processIterator(
 		}
 
 		if pc.config.ManualAck {
-			_ = handler.Handle(ctx, msg)
+			_ = handler.Handle(ctx, pc.recovery.WrapForTracking(msg))
 			continue
 		}
 
 		if err := handler.Handle(ctx, msg); err != nil {
 			_ = msg.Nak()
 		} else {
-			_ = msg.Ack()
+			if err := msg.Ack(); err == nil {
+				pc.recovery.AdvanceCheckpoint(msg)
+			}
 		}
 	}
 }
@@ -336,16 +400,7 @@ func (pc *partitionConsumer) maybeEscalateIteratorFailures(ctx context.Context) 
 
 	now := time.Now()
 	pc.iterFailureTimes = append(pc.iterFailureTimes, now)
-	cutoff := now.Add(-window)
-	i := 0
-	for ; i < len(pc.iterFailureTimes); i++ {
-		if pc.iterFailureTimes[i].After(cutoff) {
-			break
-		}
-	}
-	if i > 0 && i <= len(pc.iterFailureTimes) {
-		pc.iterFailureTimes = append([]time.Time(nil), pc.iterFailureTimes[i:]...)
-	}
+	pc.iterFailureTimes = trimFailureTimes(pc.iterFailureTimes, now.Add(-window))
 	count := len(pc.iterFailureTimes)
 	lastEsc := pc.lastEscalation
 	canEscalate := count >= threshold && (lastEsc.IsZero() || now.Sub(lastEsc) >= window)
@@ -387,6 +442,7 @@ func (pc *partitionConsumer) maybeEscalateIteratorFailures(ctx context.Context) 
 			"durable", pc.durableName,
 			"error", err,
 		)
+
 		return
 	}
 
@@ -434,7 +490,7 @@ func (pc *partitionConsumer) ensureConsumer(ctx context.Context) (jetstream.Cons
 }
 
 // delayWithBackoffOrExit applies jittered exponential backoff according to config.
-func (pc *partitionConsumer) delayWithBackoffOrExit(ctx context.Context, purpose string) bool {
+func (pc *partitionConsumer) delayWithBackoffOrExit(ctx context.Context, purpose string) bool { //nolint:unparam // purpose is used for logging/metrics; all sites currently pass "iterate" but may diverge.
 	delay := jitterBackoff(0, pc.config.Retry.Base, pc.config.Retry.Multiplier, pc.config.Retry.Max, nil)
 	pc.logger.Debug("backoff", "purpose", purpose, "delay_ms", delay.Milliseconds())
 	emitControlRetry(pc.config.Metrics, purpose)
@@ -446,4 +502,35 @@ func (pc *partitionConsumer) delayWithBackoffOrExit(ctx context.Context, purpose
 	case <-time.After(delay):
 		return false
 	}
+}
+
+// consumerInfoFn returns an InfoFunc that reads consumer info under appropriate locks.
+func (pc *partitionConsumer) consumerInfoFn() recovery.InfoFunc {
+	return func(ctx context.Context) (*jetstream.ConsumerInfo, error) {
+		pc.consumerMu.RLock()
+		cons := pc.consumer
+		pc.consumerMu.RUnlock()
+		if cons == nil {
+			return nil, errors.New("no consumer")
+		}
+		pc.consInfoMu.Lock()
+		defer pc.consInfoMu.Unlock()
+
+		return cons.Info(ctx)
+	}
+}
+
+// recreateFn returns a RecreateFunc that creates or updates the consumer on the stream.
+func (pc *partitionConsumer) recreateFn() recovery.RecreateFunc {
+	return func(ctx context.Context, cfg jetstream.ConsumerConfig) (jetstream.Consumer, error) {
+		return pc.js.CreateOrUpdateConsumer(ctx, pc.streamName, cfg)
+	}
+}
+
+func trimFailureTimes(times []time.Time, cutoff time.Time) []time.Time {
+	idx := sort.Search(len(times), func(i int) bool {
+		return !times[i].Before(cutoff)
+	})
+
+	return append([]time.Time(nil), times[idx:]...)
 }

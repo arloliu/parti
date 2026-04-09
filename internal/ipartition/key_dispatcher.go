@@ -49,6 +49,8 @@ type keyDispatcher struct {
 	channelBuf   int
 	idleTimeout  time.Duration
 	manualAck    bool
+	onAck        func(jetstream.Msg)
+	wrapMsg      func(jetstream.Msg) jetstream.Msg
 
 	mu      sync.RWMutex
 	workers map[string]*keyWorker
@@ -84,6 +86,8 @@ func newKeyDispatcher(
 	channelBuf int,
 	idleTimeout time.Duration,
 	manualAck bool,
+	onAck func(jetstream.Msg),
+	wrapMsg func(jetstream.Msg) jetstream.Msg,
 ) *keyDispatcher {
 	if keyExtractor == nil {
 		panic("keyExtractor must not be nil")
@@ -104,6 +108,8 @@ func newKeyDispatcher(
 		channelBuf:   channelBuf,
 		idleTimeout:  idleTimeout,
 		manualAck:    manualAck,
+		onAck:        onAck,
+		wrapMsg:      wrapMsg,
 		workers:      make(map[string]*keyWorker),
 		ctx:          ctx,
 		cancel:       cancel,
@@ -236,6 +242,9 @@ func (kd *keyDispatcher) runWorker(worker *keyWorker) {
 // processMessage handles a single message with ack/nak logic.
 func (kd *keyDispatcher) processMessage(ctx context.Context, msg jetstream.Msg) {
 	if kd.manualAck {
+		if kd.wrapMsg != nil {
+			msg = kd.wrapMsg(msg)
+		}
 		_ = kd.handler.Handle(ctx, msg)
 		return
 	}
@@ -243,7 +252,9 @@ func (kd *keyDispatcher) processMessage(ctx context.Context, msg jetstream.Msg) 
 	if err := kd.handler.Handle(ctx, msg); err != nil {
 		_ = msg.Nak()
 	} else {
-		_ = msg.Ack()
+		if err := msg.Ack(); err == nil && kd.onAck != nil {
+			kd.onAck(msg)
+		}
 	}
 }
 

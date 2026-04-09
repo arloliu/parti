@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/arloliu/parti/v2/internal/partutil"
+	"github.com/arloliu/parti/v2/internal/recovery"
 	"github.com/arloliu/parti/v2/jsutil"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -41,10 +42,15 @@ type JSConsumer struct {
 	partition int
 	subject   string
 
-	consumer jetstream.Consumer
+	consumer       jetstream.Consumer
+	consumerConfig jetstream.ConsumerConfig
+	consumerMu     sync.RWMutex
 
 	// keyDispatcher handles per-key concurrent processing (nil if disabled)
 	keyDispatcher *keyDispatcher
+
+	// Recovery controller (nil when recovery is disabled)
+	rc *recovery.Controller
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -96,12 +102,32 @@ func NewJSConsumer(
 		done:      make(chan struct{}),
 	}
 
+	burstThreshold := 3
+	burstWindow := config.FetchTimeout*time.Duration(burstThreshold+1) + 3*time.Second
+	c.rc = recovery.NewController(recovery.ControllerConfig{
+		Strategy:       config.RecoveryStrategy,
+		BurstThreshold: burstThreshold,
+		BurstWindow:    burstWindow,
+		Logger:         config.Logger,
+		Metrics:        config.Metrics,
+	})
+
 	// Initialize key dispatcher if DispatchByKey is enabled
 	if config.DispatchByKey != nil && *config.DispatchByKey {
 		// Use pattern-aware key extractor if no custom one provided
 		keyExtractor := config.KeyExtractor
 		if keyExtractor == nil {
 			keyExtractor = KeyExtractorFunc(parts.KeyExtractorFunc())
+		}
+
+		var onAck func(jetstream.Msg)
+		if c.rc != nil && c.rc.Strategy() == recovery.FromLastProcessed && !config.ManualAck {
+			onAck = c.rc.AdvanceCheckpoint
+		}
+
+		var wrapMsg func(jetstream.Msg) jetstream.Msg
+		if c.rc != nil && c.rc.Strategy() == recovery.FromLastProcessed && config.ManualAck {
+			wrapMsg = c.rc.WrapForTracking
 		}
 
 		c.keyDispatcher = newKeyDispatcher(
@@ -111,6 +137,8 @@ func NewJSConsumer(
 			config.KeyChannelBuffer,
 			config.KeyIdleTimeout,
 			config.ManualAck,
+			onAck,
+			wrapMsg,
 		)
 	}
 
@@ -135,7 +163,9 @@ func (c *JSConsumer) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	c.consumerMu.Lock()
 	c.consumer = cons
+	c.consumerMu.Unlock()
 
 	loopCtx, cancel := context.WithCancel(context.Background())
 	c.cancel = cancel
@@ -210,40 +240,79 @@ func (c *JSConsumer) ensureConsumer(ctx context.Context) (jetstream.Consumer, er
 		MaxWaiting:        c.config.MaxWaiting,
 	}
 
+	c.consumerMu.Lock()
+	c.consumerConfig = cfg
+	c.consumerMu.Unlock()
+
 	return jsutil.EnsureConsumer(ctx, c.js, c.config.StreamName, cfg)
 }
 
 func (c *JSConsumer) run(ctx context.Context) {
 	defer close(c.done)
 
+	c.rc.SeedCheckpoint(ctx, c.consumerInfoFn())
+
 	for {
 		if ctx.Err() != nil {
 			return
 		}
 
+		c.consumerMu.RLock()
+		cons := c.consumer
+		c.consumerMu.RUnlock()
+		if cons == nil {
+			return
+		}
+
 		heartbeat := max(c.config.FetchTimeout/2, 100*time.Millisecond)
 
-		iter, err := c.consumer.Messages(
+		iter, err := cons.Messages(
 			jetstream.PullMaxMessages(c.config.BatchSize),
 			jetstream.PullExpiry(c.config.FetchTimeout),
 			jetstream.PullHeartbeat(heartbeat),
 		)
 		if err != nil {
-			c.config.Metrics.IncrementWorkerConsumerIteratorRestart("error")
+			c.config.Metrics.IncrementWorkerConsumerIteratorRestart("transient")
 			c.config.Logger.Warn("partition consumer messages iterator error", "error", err, "subject", c.subject)
-			if !sleepWithContext(ctx, 200*time.Millisecond) {
+			if !sleepWithContext(ctx) {
 				return
 			}
 			continue
 		}
 
-		if !c.processIterator(ctx, iter) {
+		iterErr := c.processIterator(ctx, iter)
+		if iterErr == nil {
+			continue
+		}
+
+		c.consumerMu.RLock()
+		consumerConfig := c.consumerConfig
+		c.consumerMu.RUnlock()
+
+		action, newCons := c.rc.Classify(ctx, iterErr, c.consumerInfoFn(), consumerConfig, c.recreateFn())
+		switch action {
+		case recovery.ActionExit:
 			return
+		case recovery.ActionContinue:
+			c.consumerMu.Lock()
+			c.consumer = newCons
+			c.consumerMu.Unlock()
+			// SeedCheckpoint on a freshly created consumer is typically a no-op:
+			// the new consumer's ack floor is 0 and the checkpoint monotonically
+			// advances, so it will not regress. Called here as a best-effort update
+			// in case the consumer was recreated over an existing durable.
+			c.rc.SeedCheckpoint(ctx, c.consumerInfoFn())
+
+			continue
+		case recovery.ActionBackoff:
+			if !sleepWithContext(ctx) {
+				return
+			}
 		}
 	}
 }
 
-func (c *JSConsumer) processIterator(ctx context.Context, iter jetstream.MessagesContext) bool {
+func (c *JSConsumer) processIterator(ctx context.Context, iter jetstream.MessagesContext) error {
 	stop := context.AfterFunc(ctx, iter.Stop)
 	defer func() {
 		_ = stop()
@@ -252,53 +321,70 @@ func (c *JSConsumer) processIterator(ctx context.Context, iter jetstream.Message
 
 	for {
 		if ctx.Err() != nil {
-			return false
+			return nil
 		}
 
 		msg, err := iter.Next()
 		if err != nil {
-			// If the iterator was explicitly closed, don't retry - context is likely cancelled
-			if errors.Is(err, jetstream.ErrMsgIteratorClosed) {
+			if errors.Is(err, jetstream.ErrMsgIteratorClosed) || errors.Is(err, context.Canceled) {
 				c.config.Logger.Debug("partition consumer iterator closed", "subject", c.subject)
-				return false
+				return nil
 			}
 
-			// For other errors (timeout, connection issues), log and retry with new iterator
 			c.config.Logger.Debug("partition consumer iterator error, will retry", "error", err, "subject", c.subject)
 
-			return sleepWithContext(ctx, 200*time.Millisecond)
+			return err
 		}
 
 		// Dispatch to key dispatcher if enabled
 		if c.keyDispatcher != nil {
 			if !c.keyDispatcher.Dispatch(ctx, msg) {
-				return false
+				return nil
 			}
 			continue
 		}
 
 		// Sequential processing (DispatchByKey disabled)
 		if c.config.ManualAck {
-			_ = c.handler.Handle(ctx, msg)
+			_ = c.handler.Handle(ctx, c.rc.WrapForTracking(msg))
 			continue
 		}
 
 		if err := c.handler.Handle(ctx, msg); err != nil {
 			_ = msg.Nak()
 		} else {
-			_ = msg.Ack()
+			if err := msg.Ack(); err == nil {
+				c.rc.AdvanceCheckpoint(msg)
+			}
 		}
 	}
 }
 
-func sleepWithContext(ctx context.Context, d time.Duration) bool {
-	if d <= 0 {
-		return true
+func (c *JSConsumer) consumerInfoFn() recovery.InfoFunc {
+	return func(ctx context.Context) (*jetstream.ConsumerInfo, error) {
+		c.consumerMu.RLock()
+		cons := c.consumer
+		c.consumerMu.RUnlock()
+		if cons == nil {
+			return nil, errors.New("no consumer")
+		}
+		return cons.Info(ctx)
 	}
+}
+
+func (c *JSConsumer) recreateFn() recovery.RecreateFunc {
+	return func(ctx context.Context, cfg jetstream.ConsumerConfig) (jetstream.Consumer, error) {
+		return jsutil.EnsureConsumer(ctx, c.js, c.config.StreamName, cfg)
+	}
+}
+
+const iteratorRetryDelay = 200 * time.Millisecond
+
+func sleepWithContext(ctx context.Context) bool {
 	select {
 	case <-ctx.Done():
 		return false
-	case <-time.After(d):
+	case <-time.After(iteratorRetryDelay):
 		return true
 	}
 }

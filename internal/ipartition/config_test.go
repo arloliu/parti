@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arloliu/parti/v2/internal/durable"
 	"github.com/arloliu/parti/v2/internal/partutil"
 	"github.com/arloliu/parti/v2/partition"
 	"github.com/stretchr/testify/require"
@@ -126,4 +127,21 @@ func TestConsumerConfig_DispatchByKeyWithKeyPlaceholder(t *testing.T) {
 
 	err := cfg.Validate()
 	require.NoError(t, err)
+}
+
+func TestConsumerConfig_AcceptsLastProcessedWithManualAck(t *testing.T) {
+	cfg := ConsumerConfig{
+		PartitionConfig: partition.PartitionConfig{
+			NumPartitions:  2,
+			SubjectPattern: "events.{{partition}}",
+		},
+		StreamName:       "EVENTS",
+		ConsumerName:     "consumer-0",
+		Partition:        0,
+		ManualAck:        true,
+		RecoveryStrategy: durable.RecoverFromLastProcessed,
+	}
+
+	err := cfg.Validate()
+	require.NoError(t, err, "ManualAck=true + RecoverFromLastProcessed must be accepted")
 }

@@ -60,7 +60,7 @@ func TestKeyDispatcher_DispatchByKey(t *testing.T) {
 		return nil
 	})
 
-	kd := newKeyDispatcher(logger, handler, testKeyExtractor, 16, 100*time.Millisecond, false)
+	kd := newKeyDispatcher(logger, handler, testKeyExtractor, 16, 100*time.Millisecond, false, nil, nil)
 	defer func() {
 		_ = kd.Close(t.Context())
 	}()
@@ -117,7 +117,7 @@ func TestKeyDispatcher_PerKeyOrdering(t *testing.T) {
 		return nil
 	})
 
-	kd := newKeyDispatcher(logger, handler, testKeyExtractor, 64, 100*time.Millisecond, false)
+	kd := newKeyDispatcher(logger, handler, testKeyExtractor, 64, 100*time.Millisecond, false, nil, nil)
 	defer func() {
 		_ = kd.Close(t.Context())
 	}()
@@ -159,7 +159,7 @@ func TestKeyDispatcher_IdleTimeout(t *testing.T) {
 	})
 
 	// Short idle timeout for testing
-	kd := newKeyDispatcher(logger, handler, testKeyExtractor, 16, 50*time.Millisecond, false)
+	kd := newKeyDispatcher(logger, handler, testKeyExtractor, 16, 50*time.Millisecond, false, nil, nil)
 	defer func() {
 		_ = kd.Close(t.Context())
 	}()
@@ -190,7 +190,7 @@ func TestKeyDispatcher_Close(t *testing.T) {
 		return nil
 	})
 
-	kd := newKeyDispatcher(logger, handler, testKeyExtractor, 16, 1*time.Second, false)
+	kd := newKeyDispatcher(logger, handler, testKeyExtractor, 16, 1*time.Second, false, nil, nil)
 
 	ctx := t.Context()
 
@@ -222,7 +222,7 @@ func TestKeyDispatcher_Backpressure(t *testing.T) {
 	})
 
 	// Small buffer of 2
-	kd := newKeyDispatcher(logger, handler, testKeyExtractor, 2, 1*time.Second, false)
+	kd := newKeyDispatcher(logger, handler, testKeyExtractor, 2, 1*time.Second, false, nil, nil)
 	defer func() {
 		close(blockCh)
 		_ = kd.Close(t.Context())
@@ -277,7 +277,7 @@ func TestKeyDispatcher_CustomKeyExtractor(t *testing.T) {
 		return subj
 	}
 
-	kd := newKeyDispatcher(logger, handler, customExtractor, 16, 100*time.Millisecond, false)
+	kd := newKeyDispatcher(logger, handler, customExtractor, 16, 100*time.Millisecond, false, nil, nil)
 	defer func() {
 		_ = kd.Close(t.Context())
 	}()
@@ -311,7 +311,7 @@ func TestKeyDispatcher_ManualAck(t *testing.T) {
 		return nil
 	})
 
-	kd := newKeyDispatcher(logger, handler, testKeyExtractor, 16, 100*time.Millisecond, true)
+	kd := newKeyDispatcher(logger, handler, testKeyExtractor, 16, 100*time.Millisecond, true, nil, nil)
 	defer func() {
 		_ = kd.Close(t.Context())
 	}()
@@ -333,7 +333,7 @@ func TestKeyDispatcher_AutoAck(t *testing.T) {
 		return nil // success
 	})
 
-	kd := newKeyDispatcher(logger, handler, testKeyExtractor, 16, 100*time.Millisecond, false)
+	kd := newKeyDispatcher(logger, handler, testKeyExtractor, 16, 100*time.Millisecond, false, nil, nil)
 	defer func() {
 		_ = kd.Close(t.Context())
 	}()
@@ -355,7 +355,7 @@ func TestKeyDispatcher_AutoNak(t *testing.T) {
 		return assert.AnError // failure
 	})
 
-	kd := newKeyDispatcher(logger, handler, testKeyExtractor, 16, 100*time.Millisecond, false)
+	kd := newKeyDispatcher(logger, handler, testKeyExtractor, 16, 100*time.Millisecond, false, nil, nil)
 	defer func() {
 		_ = kd.Close(t.Context())
 	}()
