@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"sync"
 	"time"
 
@@ -94,9 +93,6 @@ func newPartitionConsumer(
 	config partitionConsumerConfig,
 	opts partitionConsumerOpts,
 ) *partitionConsumer {
-	burstThreshold := 3
-	burstWindow := config.FetchTimeout*time.Duration(burstThreshold+1) + 3*time.Second
-
 	return &partitionConsumer{
 		logger:               logger,
 		js:                   js,
@@ -112,8 +108,8 @@ func newPartitionConsumer(
 		done:                 make(chan struct{}),
 		recovery: recovery.NewController(recovery.ControllerConfig{
 			Strategy:       config.RecoveryStrategy,
-			BurstThreshold: burstThreshold,
-			BurstWindow:    burstWindow,
+			BurstThreshold: recovery.DefaultBurstThreshold,
+			BurstWindow:    recovery.DefaultBurstWindow(config.FetchTimeout),
 			Logger:         logger,
 			Metrics:        config.Metrics,
 		}),
@@ -400,7 +396,7 @@ func (pc *partitionConsumer) maybeEscalateIteratorFailures(ctx context.Context) 
 
 	now := time.Now()
 	pc.iterFailureTimes = append(pc.iterFailureTimes, now)
-	pc.iterFailureTimes = trimFailureTimes(pc.iterFailureTimes, now.Add(-window))
+	pc.iterFailureTimes = recovery.TrimTimes(pc.iterFailureTimes, now.Add(-window))
 	count := len(pc.iterFailureTimes)
 	lastEsc := pc.lastEscalation
 	canEscalate := count >= threshold && (lastEsc.IsZero() || now.Sub(lastEsc) >= window)
@@ -525,12 +521,4 @@ func (pc *partitionConsumer) recreateFn() recovery.RecreateFunc {
 	return func(ctx context.Context, cfg jetstream.ConsumerConfig) (jetstream.Consumer, error) {
 		return pc.js.CreateOrUpdateConsumer(ctx, pc.streamName, cfg)
 	}
-}
-
-func trimFailureTimes(times []time.Time, cutoff time.Time) []time.Time {
-	idx := sort.Search(len(times), func(i int) bool {
-		return !times[i].Before(cutoff)
-	})
-
-	return append([]time.Time(nil), times[idx:]...)
 }

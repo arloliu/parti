@@ -3,19 +3,19 @@ package consumer
 import (
 	"time"
 
-	"github.com/arloliu/parti/v2/internal/durable"
 	"github.com/arloliu/parti/v2/internal/logging"
 	"github.com/arloliu/parti/v2/internal/metrics"
+	"github.com/arloliu/parti/v2/internal/recovery"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
 // RecoveryStrategy defines how a recreated consumer decides where to resume
-// after an unexpected deletion. It is a type alias for the internal durable type.
+// after an unexpected deletion.
 //
 // Use [WithRecoveryStrategy] to enable auto-recovery on consumer types that
 // support durable recreation semantics.
-type RecoveryStrategy = durable.RecoveryStrategy
+type RecoveryStrategy = recovery.Strategy
 
 // Recovery strategy constants control how a consumer resumes after its underlying
 // durable is unexpectedly deleted. The zero value [RecoveryDisabled] is safe and
@@ -28,7 +28,7 @@ const (
 	// RecoveryDisabled is the zero value. No strategy-aware consumer recreation is
 	// performed on deletion. The consumer retries transient errors with backoff but
 	// does not recreate the durable with an adjusted DeliverPolicy.
-	RecoveryDisabled = durable.RecoveryDisabled
+	RecoveryDisabled = recovery.Disabled
 
 	// RecoverFromNew recreates the consumer to deliver only newly published messages.
 	// Messages that arrived while the consumer was absent are skipped entirely.
@@ -36,7 +36,7 @@ const (
 	// Pros: zero replay risk; safe for Queue consumers and any consumer where
 	// missing a window of messages is acceptable.
 	// Cons: messages published between deletion and recreation are lost.
-	RecoverFromNew = durable.RecoverFromNew
+	RecoverFromNew = recovery.FromNew
 
 	// RecoverFromLastProcessed recreates the consumer starting at the sequence
 	// immediately after the last acknowledged message. This provides at-least-once
@@ -51,14 +51,14 @@ const (
 	//
 	// Not supported by [Queue] consumers (shared durable makes per-process
 	// checkpointing nondeterministic across replicas).
-	RecoverFromLastProcessed = durable.RecoverFromLastProcessed
+	RecoverFromLastProcessed = recovery.FromLastProcessed
 
 	// RecoverFromBeginning recreates the consumer to replay all messages from
 	// the beginning of the stream.
 	//
 	// WARNING: causes a full backlog replay. Use only for small or bounded streams
 	// where complete reprocessing is intentional and safe.
-	RecoverFromBeginning = durable.RecoverFromBeginning
+	RecoverFromBeginning = recovery.FromBeginning
 )
 
 // Option is a functional option that applies to all consumer types.

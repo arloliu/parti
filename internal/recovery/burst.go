@@ -17,6 +17,16 @@ type BurstDetector struct {
 	threshold int
 }
 
+// DefaultBurstThreshold is the default number of iterator failures within
+// DefaultBurstWindow that triggers burst detection.
+const DefaultBurstThreshold = 3
+
+// DefaultBurstWindow returns the default sliding window for burst detection
+// based on the consumer's fetch timeout.
+func DefaultBurstWindow(fetchTimeout time.Duration) time.Duration {
+	return fetchTimeout*time.Duration(DefaultBurstThreshold+1) + 3*time.Second
+}
+
 // NewBurstDetector creates a burst detector with the given window and threshold.
 // A burst is detected when at least threshold failures occur within window.
 func NewBurstDetector(window time.Duration, threshold int) BurstDetector {
@@ -34,7 +44,7 @@ func (bd *BurstDetector) Record() bool {
 
 	now := time.Now()
 	bd.failures = append(bd.failures, now)
-	bd.failures = trimTimes(bd.failures, now.Add(-bd.window))
+	bd.failures = TrimTimes(bd.failures, now.Add(-bd.window))
 
 	return len(bd.failures) >= bd.threshold
 }
@@ -46,10 +56,11 @@ func (bd *BurstDetector) Reset() {
 	bd.mu.Unlock()
 }
 
-// trimTimes removes all entries before cutoff. The slice must be sorted ascending.
-func trimTimes(times []time.Time, cutoff time.Time) []time.Time {
+// TrimTimes removes all entries before cutoff. The slice must be sorted ascending.
+func TrimTimes(times []time.Time, cutoff time.Time) []time.Time {
 	idx := sort.Search(len(times), func(i int) bool {
 		return !times[i].Before(cutoff)
 	})
+
 	return append([]time.Time(nil), times[idx:]...)
 }

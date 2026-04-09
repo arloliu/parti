@@ -36,6 +36,6 @@ func TestTrimTimes(t *testing.T) {
 		now,
 	}
 
-	result := trimTimes(times, now.Add(-2*time.Second))
+	result := TrimTimes(times, now.Add(-2*time.Second))
 	require.Len(t, result, 2) // only the last 2 entries within window
 }

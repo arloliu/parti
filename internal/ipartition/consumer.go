@@ -102,12 +102,10 @@ func NewJSConsumer(
 		done:      make(chan struct{}),
 	}
 
-	burstThreshold := 3
-	burstWindow := config.FetchTimeout*time.Duration(burstThreshold+1) + 3*time.Second
 	c.rc = recovery.NewController(recovery.ControllerConfig{
 		Strategy:       config.RecoveryStrategy,
-		BurstThreshold: burstThreshold,
-		BurstWindow:    burstWindow,
+		BurstThreshold: recovery.DefaultBurstThreshold,
+		BurstWindow:    recovery.DefaultBurstWindow(config.FetchTimeout),
 		Logger:         config.Logger,
 		Metrics:        config.Metrics,
 	})

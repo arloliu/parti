@@ -111,9 +111,6 @@ func NewBroadcastConsumer(js jetstream.JetStream, cfg BroadcastConsumerConfig, f
 		return nil, err
 	}
 
-	burstThreshold := 3
-	burstWindow := cfg.FetchTimeout*time.Duration(burstThreshold+1) + 3*time.Second
-
 	bc := &BroadcastConsumer{
 		js:               js,
 		config:           cfg,
@@ -125,8 +122,8 @@ func NewBroadcastConsumer(js jetstream.JetStream, cfg BroadcastConsumerConfig, f
 		loopDone:         make(chan struct{}),
 		recovery: recovery.NewController(recovery.ControllerConfig{
 			Strategy:       cfg.RecoveryStrategy,
-			BurstThreshold: burstThreshold,
-			BurstWindow:    burstWindow,
+			BurstThreshold: recovery.DefaultBurstThreshold,
+			BurstWindow:    recovery.DefaultBurstWindow(cfg.FetchTimeout),
 			Logger:         cfg.Logger,
 			Metrics:        cfg.Metrics,
 		}),

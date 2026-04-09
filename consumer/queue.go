@@ -223,9 +223,6 @@ func NewQueue(
 		iterFactory = defaultIterFactory
 	}
 
-	burstThreshold := 3
-	burstWindow := cfg.FetchTimeout*time.Duration(burstThreshold+1) + 3*time.Second
-
 	return &Queue{
 		js:          js,
 		config:      cfg,
@@ -237,8 +234,8 @@ func NewQueue(
 		iterFactory: iterFactory,
 		recovery: recovery.NewController(recovery.ControllerConfig{
 			Strategy:       cfg.RecoveryStrategy,
-			BurstThreshold: burstThreshold,
-			BurstWindow:    burstWindow,
+			BurstThreshold: recovery.DefaultBurstThreshold,
+			BurstWindow:    recovery.DefaultBurstWindow(cfg.FetchTimeout),
 			Logger:         cfg.Logger,
 			Metrics:        cfg.Metrics,
 		}),
