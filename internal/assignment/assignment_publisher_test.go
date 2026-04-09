@@ -424,9 +424,9 @@ func TestAssignmentPublisher_CleanupStaleAssignments_Selective(t *testing.T) {
 	t.Log("Verified: Selective cleanup removes only stale workers")
 }
 
-// TestAssignmentPublisher_Publish_LeaderEpoch verifies that the leaderEpoch
+// TestAssignmentPublisher_Publish_LeaderRevision verifies that the leaderRevision
 // parameter is embedded in every published Assignment.
-func TestAssignmentPublisher_Publish_LeaderEpoch(t *testing.T) {
+func TestAssignmentPublisher_Publish_LeaderRevision(t *testing.T) {
 	_, nc := partitest.StartEmbeddedNATS(t)
 	assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-publisher-epoch")
 
@@ -442,8 +442,8 @@ func TestAssignmentPublisher_Publish_LeaderEpoch(t *testing.T) {
 	assignments := map[string][]types.Partition{
 		"w1": {{Keys: []string{"p1"}}},
 	}
-	const wantEpoch uint64 = 42
-	err := publisher.Publish(ctx, []string{"w1"}, assignments, nil, "test", wantEpoch)
+	const wantRevision uint64 = 42
+	err := publisher.Publish(ctx, []string{"w1"}, assignments, nil, "test", wantRevision)
 	require.NoError(t, err)
 
 	entry, err := assignmentKV.Get(ctx, "assignment.w1")
@@ -451,5 +451,5 @@ func TestAssignmentPublisher_Publish_LeaderEpoch(t *testing.T) {
 
 	var asgn types.Assignment
 	require.NoError(t, json.Unmarshal(entry.Value(), &asgn))
-	require.Equal(t, wantEpoch, asgn.LeaderEpoch, "LeaderEpoch must be embedded in the published assignment")
+	require.Equal(t, wantRevision, asgn.LeaderRevision, "LeaderRevision must be embedded in the published assignment")
 }

@@ -352,3 +352,27 @@ func TestNATSElection_ConcurrentLeadership(t *testing.T) {
 		require.Equal(t, 1, leaderCount, "Expected exactly one leader")
 	})
 }
+
+// TestNATSElection_ClearLeadership_ResetsRevision verifies that involuntary
+// leadership loss (via clearLeadership) zeros the revision so that Revision()
+// does not return a stale value after the election key is gone.
+func TestNATSElection_ClearLeadership_ResetsRevision(t *testing.T) {
+	ctx := t.Context()
+
+	_, nc := partitest.StartEmbeddedNATS(t)
+	kv := partitest.CreateJetStreamKV(t, nc, "test-election-clear")
+
+	e := NewNATSElection(kv, "leader")
+
+	// Acquire leadership so revision is set to a non-zero value.
+	isLeader, err := e.RequestLeadership(ctx, "worker-1", 30)
+	require.NoError(t, err)
+	require.True(t, isLeader)
+	require.NotZero(t, e.Revision(), "revision must be non-zero after acquiring leadership")
+
+	// Simulate involuntary leadership loss.
+	e.clearLeadership()
+
+	require.Zero(t, e.Revision(), "Revision must be 0 after clearLeadership")
+	require.Empty(t, e.WorkerID(), "WorkerID must be empty after clearLeadership")
+}

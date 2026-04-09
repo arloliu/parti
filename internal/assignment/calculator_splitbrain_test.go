@@ -10,14 +10,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// ============================================================================
-// P9.1: LeaderEpoch wired through Calculator → AssignmentPublisher
-// ============================================================================
-
-// TestCalculator_LeaderEpoch_EmbeddedInAssignment verifies that the LeaderEpoch
+// TestCalculator_LeaderRevision_EmbeddedInAssignment verifies that the LeaderRevision
 // function from Config is called during rebalance and its value is embedded in
 // the published assignments read back from KV.
-func TestCalculator_LeaderEpoch_EmbeddedInAssignment(t *testing.T) {
+func TestCalculator_LeaderRevision_EmbeddedInAssignment(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 
@@ -28,7 +24,7 @@ func TestCalculator_LeaderEpoch_EmbeddedInAssignment(t *testing.T) {
 	_, err := heartbeatKV.Put(ctx, "heartbeat.worker-1", []byte(time.Now().Format(time.RFC3339Nano)))
 	require.NoError(t, err)
 
-	const wantEpoch uint64 = 99
+	const wantRevision uint64 = 99
 
 	calc, err := NewCalculator(&Config{
 		AssignmentKV:       assignmentKV,
@@ -42,8 +38,8 @@ func TestCalculator_LeaderEpoch_EmbeddedInAssignment(t *testing.T) {
 		Source: &mockSource{partitions: []types.Partition{
 			{Keys: []string{"p1"}},
 		}},
-		Strategy:    &mockStrategy{},
-		LeaderEpoch: func() uint64 { return wantEpoch },
+		Strategy:       &mockStrategy{},
+		LeaderRevision: func() uint64 { return wantRevision },
 	})
 	require.NoError(t, err)
 
@@ -55,14 +51,14 @@ func TestCalculator_LeaderEpoch_EmbeddedInAssignment(t *testing.T) {
 		return calc.CurrentVersion() > 0
 	}, 5*time.Second, 50*time.Millisecond, "initial rebalance must complete")
 
-	// Read the published assignment from KV and check LeaderEpoch.
+	// Read the published assignment from KV and check LeaderRevision.
 	entry, err := assignmentKV.Get(ctx, "assignment.worker-1")
 	require.NoError(t, err)
 
 	var asgn types.Assignment
 	require.NoError(t, json.Unmarshal(entry.Value(), &asgn))
-	require.Equal(t, wantEpoch, asgn.LeaderEpoch,
-		"LeaderEpoch must be embedded in the published assignment")
+	require.Equal(t, wantRevision, asgn.LeaderRevision,
+		"LeaderRevision must be embedded in the published assignment")
 }
 
 // ============================================================================
@@ -116,10 +112,9 @@ func TestCalculator_Rebalance_AbortsOnShutdown(t *testing.T) {
 	// Flip state to shutdown before triggering another rebalance.
 	stateProvider.SetState(types.StateShutdown)
 
-	// TriggerRebalance must fail with a shutdown error and must NOT increment the version.
+	// TriggerRebalance must fail with the sentinel shutdown error and must NOT increment the version.
 	err = calc.TriggerRebalance(ctx)
-	require.Error(t, err, "rebalance must fail when manager is shutting down")
-	require.Contains(t, err.Error(), "shutting down")
+	require.ErrorIs(t, err, errShuttingDown, "rebalance must return errShuttingDown when manager is shutting down")
 	require.Equal(t, versionAfterStart, calc.CurrentVersion(),
 		"version must not increment when rebalance is aborted due to shutdown")
 }

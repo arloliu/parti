@@ -12,6 +12,11 @@ import (
 	"github.com/arloliu/parti/v2/types"
 )
 
+// errShuttingDown is returned by rebalance() when the manager is shutting down.
+// handleRebalance catches this sentinel and logs at Info rather than Error so
+// that normal manager shutdown does not produce spurious error-level log entries.
+var errShuttingDown = errors.New("rebalance aborted: leader is shutting down")
+
 // Calculator manages partition assignment calculation and distribution.
 //
 // The calculator runs on the leader worker and orchestrates three focused components:
@@ -785,6 +790,12 @@ func (c *Calculator) getActiveWorkersFiltered(ctx context.Context, disappearedWo
 func (c *Calculator) handleRebalance(ctx context.Context, reason string) error {
 	// Perform the rebalance
 	if err := c.rebalance(ctx, reason); err != nil {
+		// Shutdown aborts are expected during clean manager stop; log at Info so
+		// the state machine does not escalate them to Error-level log entries.
+		if errors.Is(err, errShuttingDown) {
+			c.Logger.Info("rebalance skipped during shutdown", "reason", reason)
+			return nil
+		}
 		return fmt.Errorf("rebalance failed for %s: %w", reason, err)
 	}
 
@@ -914,23 +925,23 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 	}
 	c.Metrics.RecordActiveWorkers(len(workers))
 
-	// P9.2: Pre-publish leadership check — abort if manager is shutting down to
-	// avoid publishing stale assignments after leadership has been relinquished.
+	// Pre-publish leadership check — abort if manager is shutting down to avoid
+	// publishing stale assignments after leadership has been relinquished.
 	if c.stateProvider != nil && c.stateProvider.State() == types.StateShutdown {
 		c.Logger.Info("rebalance aborted: manager is shutting down")
 		c.Metrics.RecordRebalanceAttempt(lifecycle, false)
-		return errors.New("rebalance aborted: leader is shutting down")
+		return errShuttingDown
 	}
 
-	// P9.1: Embed the current leader epoch so workers can discard assignments
+	// Embed the current leader revision so workers can detect assignments
 	// from a former leader after a split-brain or leadership change.
-	var leaderEpoch uint64
-	if c.LeaderEpoch != nil {
-		leaderEpoch = c.LeaderEpoch()
+	var leaderRevision uint64
+	if c.LeaderRevision != nil {
+		leaderRevision = c.LeaderRevision()
 	}
 
 	// Publish assignments via publisher component
-	if err := c.publisher.Publish(ctx, workers, assignments, workersToRemove, lifecycle, leaderEpoch); err != nil {
+	if err := c.publisher.Publish(ctx, workers, assignments, workersToRemove, lifecycle, leaderRevision); err != nil {
 		c.Metrics.RecordRebalanceAttempt(lifecycle, false)
 		return fmt.Errorf("failed to publish assignments: %w", err)
 	}

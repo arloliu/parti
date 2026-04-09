@@ -6,6 +6,7 @@ import (
 	"fmt"
 	rand "math/rand/v2"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/arloliu/parti/v2/types"
@@ -21,15 +22,21 @@ type twoPhaseCoordinator struct {
 	cfg       Config
 	sweepMu   sync.Mutex
 	lastSweep time.Time
+	started   atomic.Bool
 }
 
 // Start launches a background goroutine that sweeps stale claims at SweepInterval.
 //
 // This ensures stale/expired claims are cleaned up even in idle systems where
 // Apply is rarely called. The goroutine exits when ctx is cancelled.
+//
+// Start is idempotent: calling it more than once has no effect.
 func (t *twoPhaseCoordinator) Start(ctx context.Context) {
 	if t.cfg.SweepInterval <= 0 {
 		return
+	}
+	if !t.started.CompareAndSwap(false, true) {
+		return // already started
 	}
 	go func() {
 		ticker := time.NewTicker(t.cfg.SweepInterval)

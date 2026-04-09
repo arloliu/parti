@@ -176,9 +176,9 @@ type leaderReviser interface {
 	Revision() uint64
 }
 
-// electionEpoch returns the current leader KV revision, or 0 if the election
-// implementation does not expose one. Used to populate Assignment.LeaderEpoch.
-func (m *Manager) electionEpoch() uint64 {
+// electionRevision returns the current leader KV revision, or 0 if the election
+// implementation does not expose one. Used to populate Assignment.LeaderRevision.
+func (m *Manager) electionRevision() uint64 {
 	if r, ok := m.election.(leaderReviser); ok {
 		return r.Revision()
 	}

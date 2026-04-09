@@ -309,9 +309,10 @@ func (e *NATSElection) setLeaderState(isLeader bool, workerID string, revision u
 	e.revision = revision
 }
 
-// clearLeadership clears the leadership flag (thread-safe).
+// clearLeadership resets all leadership state (thread-safe).
+//
+// Used on involuntary loss (renewal failure, key mismatch). Zeros revision and
+// workerID so that Revision() does not return a stale value after loss.
 func (e *NATSElection) clearLeadership() {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.isLeader = false
+	e.setLeaderState(false, "", 0)
 }

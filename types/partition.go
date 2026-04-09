@@ -191,16 +191,19 @@ type Assignment struct {
 	// Partitions is the list of partitions assigned to this worker.
 	Partitions []Partition `json:"partitions"`
 
-	// LeaderEpoch is the NATS KV revision of the leader key at publish time.
-	// Workers can use this to detect and discard assignments from a former leader
-	// after a split-brain or leadership change event.
-	// Zero when leader epoch tracking is not configured.
-	LeaderEpoch uint64 `json:"leader_epoch,omitempty"`
+	// LeaderRevision is the NATS KV revision of the leader key at publish time.
+	// This value increments on every leadership acquisition and renewal — it is
+	// not a per-term epoch counter. Workers can use it to detect assignments from
+	// a former leader: an assignment whose LeaderRevision is lower than the current
+	// leader's revision was published before the current leadership term began.
+	// Zero when leader revision tracking is not configured.
+	LeaderRevision uint64 `json:"leader_revision,omitempty"`
 
 	// TotalWorkers is the number of active workers in the assignment batch.
 	// Workers can use this as a consistency hint: if TotalWorkers > number of
 	// assignment keys observed in KV, some assignments may still be in flight
 	// (NATS KV does not support multi-key atomic writes).
+	// This field is informational only — the manager does not enforce it internally.
 	// Zero when not set by the publisher.
 	TotalWorkers int `json:"total_workers,omitempty"`
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	rand "math/rand/v2"
 	"time"
 
 	"github.com/arloliu/parti/v2/internal/assignment"
@@ -12,6 +13,12 @@ import (
 	"github.com/arloliu/parti/v2/kvutil"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
+)
+
+const (
+	watcherBaseBackoff = 2 * time.Second
+	watcherMaxBackoff  = 30 * time.Second
+	watcherJitter      = 0.3 // ±30% jitter
 )
 
 // RefreshPartitions triggers partition discovery refresh.
@@ -95,7 +102,7 @@ func (m *Manager) startCalculator(assignmentKV, heartbeatKV jetstream.KeyValue) 
 		Metrics:              m.metrics,
 		Logger:               m.logger,
 		StateProvider:        m, // Pass manager as state provider for degraded mode checks
-		LeaderEpoch:          m.electionEpoch,
+		LeaderRevision:       m.electionRevision,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create calculator: %w", err)
@@ -253,21 +260,32 @@ func (m *Manager) fetchAssignment(ctx context.Context, kv jetstream.KeyValue) (*
 
 // monitorAssignmentChanges monitors for assignment changes with automatic retry.
 //
-// If the watcher fails to start (e.g., transient NATS error), the monitor
-// waits 2 seconds and retries. A clean exit (context cancelled or watcher closed)
-// stops the retry loop immediately.
+// On watcher failure (e.g., transient NATS error), the monitor retries with
+// exponential backoff and jitter, capped at watcherMaxBackoff. A clean exit
+// (context cancelled or watcher channel closed) stops the loop immediately.
 func (m *Manager) monitorAssignmentChanges(ctx context.Context, kv jetstream.KeyValue) {
+	backoff := watcherBaseBackoff
 	for {
 		err := m.watchAssignment(ctx, kv)
 		if err == nil || ctx.Err() != nil {
 			return
 		}
-		m.logError("assignment watcher failed, retrying in 2s", "error", err)
+		m.logError("assignment watcher failed, retrying", "error", err, "backoff", backoff)
+
+		//nolint:gosec // jitter does not require crypto-secure random
+		f := rand.Float64()
+		low := 1 - watcherJitter
+		high := 1 + watcherJitter
+		delay := time.Duration(float64(backoff) * (low + f*(high-low)))
+
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(2 * time.Second):
+		case <-time.After(delay):
 		}
+
+		// Double for next attempt, capped at max.
+		backoff = min(backoff*2, watcherMaxBackoff)
 	}
 }
 
