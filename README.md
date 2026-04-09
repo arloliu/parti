@@ -25,7 +25,7 @@ It is designed for building distributed systems where work needs to be sharded a
 
 - **Automatic Durable Recreation**: When a JetStream durable consumer is unexpectedly deleted (server restart, `InactiveThreshold` expiry, administrative action), the consumer detects the deletion and recreates itself automatically — no worker restart required.
 - **Four Recovery Strategies**: Choose how the recreated consumer resumes — skip missed messages ([`RecoverFromNew`](https://pkg.go.dev/github.com/arloliu/parti/v2/consumer#RecoveryStrategy)), replay from the last auto-acknowledged message ([`RecoverFromLastProcessed`](https://pkg.go.dev/github.com/arloliu/parti/v2/consumer#RecoveryStrategy)), or replay from the beginning ([`RecoverFromBeginning`](https://pkg.go.dev/github.com/arloliu/parti/v2/consumer#RecoveryStrategy)).
-- **Eager Validation**: Incompatible combinations (e.g., `RecoverFromLastProcessed` with `ManualAck=true`) are rejected at construction time with [`ErrInvalidConfig`](https://pkg.go.dev/github.com/arloliu/parti/v2/consumer#ErrInvalidConfig), not at runtime.
+- **Eager Validation**: Incompatible combinations (e.g., `RecoverFromLastProcessed` on a `Queue` consumer) are rejected at construction time with [`ErrInvalidConfig`](https://pkg.go.dev/github.com/arloliu/parti/v2/consumer#ErrInvalidConfig), not at runtime.
 - **Opt-In, Zero-Cost Default**: Recovery is disabled (`RecoveryDisabled`) by default — enabling it requires a single option.
 
 See [Consumer Helpers](docs/CONSUMERS.md#auto-recovery) for the full strategy matrix and per-consumer support table.

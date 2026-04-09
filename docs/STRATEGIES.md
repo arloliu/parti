@@ -109,7 +109,7 @@ mgr, _ := parti.NewManager(cfg, js, src, s)
 
 | Option               | Default | Description                          |
 |----------------------|---------|--------------------------------------|
-| `WithVirtualNodes(n)`| 100     | Virtual nodes per worker (10-1000)   |
+| `WithVirtualNodes(n)`| 150     | Virtual nodes per worker (min: 1)    |
 
 **When to Use:**
 - Default choice for most workloads
@@ -177,10 +177,14 @@ mgr, _ := parti.NewManager(cfg, js, src, s)
 
 **Options:**
 
-| Option               | Default | Description                        |
-|----------------------|---------|------------------------------------|
-| `WithVirtualNodes(n)`| 100     | Virtual nodes per worker           |
-| `WithWeightPrecision(p)` | 2   | Decimal precision for weights      |
+| Option                       | Default | Description                                                  |
+|------------------------------|---------|--------------------------------------------------------------|
+| `WithWeightedVirtualNodes(n)`| 150     | Virtual nodes per worker                                     |
+| `WithWeightedHashSeed(seed)` | 0       | Hash seed for deterministic ring placement                   |
+| `WithOverloadThreshold(t)`   | 1.2     | Max allowed load ratio before soft-capping a worker (120%)   |
+| `WithExtremeThreshold(t)`    | 20.0    | Weight ratio above which a partition is routed via round-robin|
+| `WithMinPartitionCount(f)`   | 0.3     | Minimum fraction of average partitions guaranteed per worker |
+| `WithDefaultWeight(w)`       | 1       | Weight used when a partition reports zero or negative weight  |
 
 **When to Use:**
 - Partitions have known, varying loads
@@ -270,7 +274,7 @@ func (s *AffinityStrategy) Assign(
 
     for _, p := range partitions {
         // Check for preferred worker
-        if preferred, ok := s.affinityMap[p.ID]; ok {
+        if preferred, ok := s.affinityMap[p.ID()]; ok {
             if contains(workers, preferred) {
                 result[preferred] = append(result[preferred], p)
                 continue
@@ -365,14 +369,20 @@ mgr, _ := parti.NewManager(cfg, js, src, strategy.NewConsistentHash())
 Dynamic partition definitions stored in NATS KV.
 
 ```go
-import "github.com/arloliu/parti/v2/source"
+import (
+    "github.com/arloliu/parti/v2/source"
+    "github.com/nats-io/nats.go/jetstream"
+)
 
-// Create source from KV bucket
-src := source.NewNatsKV(js, "partitions-bucket")
+// Create the KV bucket first
+kv, _ := js.KeyValue(ctx, "partitions-bucket")
+
+// Create source from KV bucket; key is the KV entry name, logger is optional
+src := source.NewNatsKV(kv, "partitions", nil)
 
 // Partitions are stored as JSON in KV:
 // Key: "partitions"
-// Value: [{"id":"0","weight":1},{"id":"1","weight":2}]
+// Value: [{"keys":["0"],"weight":1},{"keys":["1"],"weight":2}]
 
 mgr, _ := parti.NewManager(cfg, js, src, strategy.NewConsistentHash())
 ```
@@ -404,15 +414,14 @@ Sources implementing `WatchablePartitionSource` enable automatic rebalancing:
 ```go
 // Check if source is watchable
 if watchable, ok := src.(source.WatchablePartitionSource); ok {
-    changes, err := watchable.Watch(ctx)
-    if err != nil {
-        return err
-    }
+    // Watch returns a signal channel; receive on it to detect changes.
+    // The Manager uses this automatically when present.
+    changes := watchable.Watch(ctx)
 
     go func() {
-        for partitions := range changes {
-            log.Printf("Partitions changed: %d partitions", len(partitions))
-            // Manager handles this automatically
+        for range changes {
+            log.Printf("Partitions changed")
+            // Manager handles rebalancing automatically
         }
     }()
 }
@@ -441,14 +450,15 @@ if watchable, ok := src.(source.WatchablePartitionSource); ok {
 
 ### Custom Sources
 
-Implement `PartitionSource` for custom partition providers:
+Implement the `PartitionSource` interface for custom partition providers.
+The required methods are `Start`, `List`, and `Stop`:
 
 ```go
 package custom
 
 import (
     "context"
-    "github.com/arloliu/parti/v2"
+    "github.com/arloliu/parti/v2/types"
 )
 
 type DatabaseSource struct {
@@ -459,7 +469,10 @@ func NewDatabaseSource(db *sql.DB) *DatabaseSource {
     return &DatabaseSource{db: db}
 }
 
-func (s *DatabaseSource) GetPartitions(ctx context.Context) ([]parti.Partition, error) {
+func (s *DatabaseSource) Start(_ context.Context) error { return nil }
+func (s *DatabaseSource) Stop(_ context.Context) error  { return nil }
+
+func (s *DatabaseSource) List(ctx context.Context) ([]types.Partition, error) {
     rows, err := s.db.QueryContext(ctx,
         "SELECT id, weight FROM partitions WHERE active = true")
     if err != nil {
@@ -467,47 +480,20 @@ func (s *DatabaseSource) GetPartitions(ctx context.Context) ([]parti.Partition, 
     }
     defer rows.Close()
 
-    var partitions []parti.Partition
+    var partitions []types.Partition
     for rows.Next() {
-        var p parti.Partition
-        if err := rows.Scan(&p.ID, &p.Weight); err != nil {
+        var id string
+        var weight int64
+        if err := rows.Scan(&id, &weight); err != nil {
             return nil, err
         }
-        partitions = append(partitions, p)
+        partitions = append(partitions, types.Partition{
+            Keys:   []string{id},
+            Weight: weight,
+        })
     }
 
     return partitions, rows.Err()
-}
-
-// Optional: implement WatchablePartitionSource for auto-rebalancing
-func (s *DatabaseSource) Watch(ctx context.Context) (<-chan []parti.Partition, error) {
-    ch := make(chan []parti.Partition)
-
-    go func() {
-        defer close(ch)
-        ticker := time.NewTicker(30 * time.Second)
-        defer ticker.Stop()
-
-        var lastHash string
-        for {
-            select {
-            case <-ctx.Done():
-                return
-            case <-ticker.C:
-                partitions, err := s.GetPartitions(ctx)
-                if err != nil {
-                    continue
-                }
-                hash := hashPartitions(partitions)
-                if hash != lastHash {
-                    lastHash = hash
-                    ch <- partitions
-                }
-            }
-        }
-    }()
-
-    return ch, nil
 }
 ```
 

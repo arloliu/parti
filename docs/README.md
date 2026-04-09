@@ -1,7 +1,7 @@
 # Parti Documentation
 
 **Version**: 2.0.0
-**Last Updated**: March 30, 2026
+**Last Updated**: 2026-04-09
 
 ---
 
@@ -16,7 +16,6 @@ nc, _ := nats.Connect(nats.DefaultURL)
 js, _ := jetstream.New(nc)
 
 cfg := &parti.Config{
-    ClusterName:    "my-cluster",
     WorkerIDPrefix: "worker",
     WorkerIDMax:    99,
 }

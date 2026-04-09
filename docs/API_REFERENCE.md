@@ -1,7 +1,7 @@
 # Parti API Reference
 
 **Version**: 2.0.0
-**Last Updated**: December 6, 2025
+**Last Updated**: 2026-04-09
 **Library**: `github.com/arloliu/parti/v2`
 
 ---
@@ -92,10 +92,13 @@ Blocks until worker ID is claimed and initial assignment is received. Returns er
 
 **Startup Sequence**:
 1. Claims stable worker ID from NATS KV
-2. Starts heartbeat publisher
-3. Participates in leader election
-4. Waits for initial partition assignment
-5. Transitions to stable state
+2. Starts partition source
+3. Ensures KV buckets (election, heartbeat, assignment)
+4. Participates in leader election
+5. Starts heartbeat publisher
+6. If leader: starts assignment calculator
+7. Waits for initial partition assignment
+8. Transitions to stable state
 
 **Example**:
 ```go
@@ -332,13 +335,15 @@ Discovers available partitions.
 
 ```go
 type PartitionSource interface {
-    ListPartitions(ctx context.Context) ([]Partition, error)
+    Start(ctx context.Context) error
+    List(ctx context.Context) ([]Partition, error)
+    Stop(ctx context.Context) error
 }
 ```
 
 **Methods**:
 
-#### ListPartitions
+#### List
 
 Returns all available partitions.
 
@@ -346,7 +351,7 @@ Returns all available partitions.
 - `ctx`: Context for cancellation and timeout
 
 **Returns**:
-- `[]Partition`: List of available partitions
+- `[]Partition`: List of discovered partitions
 - `error`: Discovery error or nil on success
 
 **When Called**:
@@ -360,7 +365,10 @@ type DBPartitionSource struct {
     db *sql.DB
 }
 
-func (s *DBPartitionSource) ListPartitions(ctx context.Context) ([]Partition, error) {
+func (s *DBPartitionSource) Start(_ context.Context) error { return nil }
+func (s *DBPartitionSource) Stop(_ context.Context) error  { return nil }
+
+func (s *DBPartitionSource) List(ctx context.Context) ([]Partition, error) {
     rows, err := s.db.QueryContext(ctx, "SELECT id, weight FROM partitions")
     if err != nil {
         return nil, err
@@ -926,56 +934,9 @@ type KVBucketConfig struct {
 
 ---
 
-### DegradedAlertConfig
-
-**NEW**: Controls alert emission during degraded mode.
-
-```go
-type DegradedAlertConfig struct {
-    InfoThreshold     time.Duration // Duration to trigger Info alert
-    WarnThreshold     time.Duration // Duration to trigger Warn alert
-    ErrorThreshold    time.Duration // Duration to trigger Error alert
-    CriticalThreshold time.Duration // Duration to trigger Critical alert
-    AlertInterval     time.Duration // Minimum time between alerts
-}
-```
-
-**Fields**:
-- `InfoThreshold`: Duration in degraded mode before Info alert (default: 30s)
-- `WarnThreshold`: Duration before Warn alert (default: 2m)
-- `ErrorThreshold`: Duration before Error alert (default: 5m)
-- `CriticalThreshold`: Duration before Critical alert (default: 10m)
-- `AlertInterval`: Minimum time between repeated alerts (default: 1m)
-
-**Alert Escalation**:
-Alerts escalate as degraded mode persists:
-```
-30s: [INFO] Degraded mode active
- 2m: [WARN] Degraded mode persisting
- 5m: [ERROR] Prolonged degraded mode
-10m: [CRITICAL] Extended degraded mode
-```
-
-**Validation Rules**:
-- Thresholds must be in ascending order: Info ≤ Warn ≤ Error ≤ Critical
-- All threshold values and AlertInterval must be positive (> 0)
-
-**Example**:
-```go
-cfg.DegradedAlert = parti.DegradedAlertConfig{
-    InfoThreshold:     30 * time.Second,
-    WarnThreshold:     2 * time.Minute,
-    ErrorThreshold:    5 * time.Minute,
-    CriticalThreshold: 10 * time.Minute,
-    AlertInterval:     1 * time.Minute,
-}
-```
-
----
-
 ### DegradedBehaviorConfig
 
-**NEW**: Controls when the manager enters and exits degraded mode.
+Controls when the manager enters and exits degraded mode.
 
 ```go
 type DegradedBehaviorConfig struct {
@@ -1587,9 +1548,9 @@ c, _ := consumer.NewQueue(js, "stream", "consumer", "subject.>", handler,
 
 | Option                           | Consumer Types | Description                          |
 |----------------------------------|----------------|--------------------------------------|
-| `WithInstanceID(id)`             | Broadcast      | Set unique instance identifier       |
-| `WithProcessingGate(cfg)`        | Dynamic        | Enable processing gate               |
-| `WithDrainOnRemove(bool)`        | Dynamic        | Drain messages on partition removal  |
+| `WithInstanceID(id)`                        | Broadcast      | Set unique instance identifier       |
+| `WithProcessingGate(cfg)`                   | Dynamic        | Enable processing gate               |
+| `WithDrainOnRemove(enabled, timeout)`       | Dynamic        | Drain messages on partition removal  |
 
 ---
 

@@ -88,7 +88,7 @@ hooks := &parti.Hooks{
     OnAssignmentChanged: func(ctx context.Context, _oldPartitions, newPartitions []parti.Partition) error {
         ids := make([]string, len(newPartitions))
         for i, p := range newPartitions {
-            ids[i] = p.ID
+            ids[i] = p.ID()
         }
         log.Info("received assignment", "partitions", ids)
         return updateConsumerFilters(ctx, ids)
@@ -176,7 +176,6 @@ _ = assignment
 
 ```go
 cfg := &parti.Config{
-    ClusterName:     "production",
     WorkerIDPrefix:  "worker",
     WorkerIDMin:     0,
     WorkerIDMax:     99,               // Allow 100 workers
@@ -196,7 +195,6 @@ cfg := &parti.Config{
 
 ```go
 cfg := &parti.Config{
-    ClusterName:     "dev",
     WorkerIDPrefix:  "dev-worker",
     WorkerIDMin:     0,
     WorkerIDMax:     9,
@@ -297,10 +295,9 @@ func TestPartitionProcessing(t *testing.T) {
 
     // Create test config with fast timeouts
     cfg := &parti.Config{
-        ClusterName:       "test",
-        WorkerIDPrefix:    "test-worker",
-        WorkerIDMax:       9,
-        WorkerIDTTL:       2 * time.Second,
+        WorkerIDPrefix:     "test-worker",
+        WorkerIDMax:        9,
+        WorkerIDTTL:        2 * time.Second,
         HeartbeatInterval:  500 * time.Millisecond,
         HeartbeatTTL:       1500 * time.Millisecond,
         ColdStartWindow:    1 * time.Second,
@@ -408,7 +405,7 @@ for mgr.State() != parti.StateStable {
 // Check ownership before processing
 owns := false
 for _, p := range mgr.CurrentAssignment().Partitions {
-    if p.ID == partitionID {
+    if p.ID() == partitionID {
         owns = true
         break
     }

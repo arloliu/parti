@@ -3,8 +3,8 @@
 > The `partition` package for application-level partitioning.
 
 > **Note:** For JetStream consumers, use the `consumer` package instead.
-> `partition.JSConsumer` is no longer part of the public API in v2; use
-> `consumer.Static` for static JetStream consumption. See [Consumer Package](CONSUMERS.md).
+> Use `consumer.Static` or `consumer.Dynamic` for JetStream consumption.
+> See [Consumer Package](CONSUMERS.md).
 
 **Related Documentation:**
 - [Docs README](README.md) - Documentation map
@@ -16,18 +16,26 @@
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [Partitioner Interface](#partitioner-interface)
-3. [HashPartitioner](#hashpartitioner)
-4. [Partition Helpers](#partition-helpers)
-5. [Use Cases](#use-cases)
+2. [PartitionConfig](#partitionconfig)
+3. [Publisher (Core NATS)](#publisher-core-nats)
+4. [JSPublisher (JetStream)](#jspublisher-jetstream)
+5. [Subscriber (Core NATS)](#subscriber-core-nats)
+6. [Functional Options](#functional-options)
+7. [StatefulSet Helpers](#statefulset-helpers)
+8. [Use Cases](#use-cases)
 
 ---
 
 ## Overview
 
-The `partition` package provides **application-level partitioning**—determining which partition a piece of data belongs to based on a partition key.
+The `partition` package provides **static partition-based publishing and subscribing**. It
+deterministically maps a partition key to a fixed partition index (0 to N-1) using xxh3
+hashing, and constructs NATS subjects from a template pattern containing `{{partition}}`
+and optionally `{{key}}` placeholders.
 
-This is different from Parti's core functionality (which assigns partitions to workers). The `partition` package answers: *"Given a user ID or order ID, which partition should handle it?"*
+This is different from Parti's dynamic core (`parti.Manager`), which assigns partitions
+to workers at runtime. The `partition` package answers: *"Given a user ID or order ID,
+which NATS subject should this message be published to?"*
 
 ### Import
 
@@ -44,22 +52,18 @@ import "github.com/arloliu/parti/v2/partition"
     │   orderID := "order-12345"                                    │
     │                                                               │
     │   ┌─────────────────────────────────────────────────────────┐│
-    │   │ partition.HashPartitioner                               ││
+    │   │ partition.JSPublisher                                   ││
     │   │                                                         ││
-    │   │   partitionID := partitioner.Partition(orderID)         ││
-    │   │   // Returns: "7" (of 16 partitions)                    ││
+    │   │   pub.Publish(ctx, orderID, payload)                    ││
+    │   │   // Routes to: "orders.order-12345.7"                  ││
     │   └─────────────────────────────────────────────────────────┘│
     │                              │                                │
     │                              ▼                                │
     │   ┌─────────────────────────────────────────────────────────┐│
-    │   │ parti.Manager                                           ││
+    │   │ consumer.Dynamic (via parti.Manager)                    ││
     │   │                                                         ││
-    │   │   assignment := mgr.CurrentAssignment()                 ││
-    │   │   // Worker has partitions: ["5", "6", "7", "8"]        ││
-    │   │                                                         ││
-    │   │   if contains(assignment.Partitions, partitionID) {     ││
-    │   │       process(orderID)  // This worker handles it       ││
-    │   │   }                                                     ││
+    │   │   // Manager assigns partition "7" to this worker       ││
+    │   │   // Dynamic consumer subscribes to "orders.*.7"        ││
     │   └─────────────────────────────────────────────────────────┘│
     │                                                               │
     └───────────────────────────────────────────────────────────────┘
@@ -67,264 +71,247 @@ import "github.com/arloliu/parti/v2/partition"
 
 ---
 
-## Partitioner Interface
+## PartitionConfig
+
+All types in the `partition` package share a single `PartitionConfig`:
 
 ```go
-type Partitioner interface {
-    // Partition returns the partition ID for the given key
-    Partition(key string) string
-
-    // PartitionCount returns the total number of partitions
-    PartitionCount() int
+type PartitionConfig struct {
+    NumPartitions  int          // Total number of partitions (required, > 0)
+    SubjectPattern string       // Subject template with {{partition}} placeholder (required)
+    HashSeed       uint64       // Optional seed for consistent hash (0 = default)
+    Logger         types.Logger // Optional logger
 }
 ```
 
----
+**Subject Pattern Placeholders:**
+- `{{partition}}` — Replaced with partition index (0 to N-1). **Required.**
+- `{{key}}` — Replaced with the partition key. **Optional.**
 
-## HashPartitioner
+**Examples:**
 
-The built-in `HashPartitioner` uses consistent hashing to map keys to partitions.
+| Pattern                                | Key         | Result                       |
+|----------------------------------------|-------------|------------------------------|
+| `events.{{partition}}`                 | `user-123`  | `events.2`                   |
+| `events.{{key}}.{{partition}}`         | `user-123`  | `events.user-123.2`          |
+| `orders.{{partition}}.{{key}}.created` | `order-456` | `orders.1.order-456.created` |
 
-### Basic Usage
-
-```go
-import "github.com/arloliu/parti/v2/partition"
-
-// Create partitioner with 16 partitions
-p := partition.NewHashPartitioner(16)
-
-// Partition a key
-partitionID := p.Partition("user-12345")
-// Returns: "7" (deterministic for this key)
-
-// Same key always maps to same partition
-p.Partition("user-12345") // "7"
-p.Partition("user-12345") // "7"
-
-// Different keys distribute across partitions
-p.Partition("user-67890") // "3"
-p.Partition("order-abc")  // "12"
-```
-
-### Integration with Parti Manager
+Build a config using the functional-options constructor:
 
 ```go
-import (
-    "github.com/arloliu/parti/v2"
-    "github.com/arloliu/parti/v2/partition"
-    "github.com/arloliu/parti/v2/source"
-)
-
-// Create partitioner and source with same partition count
-const partitionCount = 16
-
-partitioner := partition.NewHashPartitioner(partitionCount)
-
-// Generate partition definitions for the manager
-partitions := make([]parti.Partition, partitionCount)
-for i := range partitions {
-    partitions[i] = parti.Partition{Keys: []string{strconv.Itoa(i)}}
-}
-src := source.NewStatic(partitions)
-
-// Create manager with positional args: (config, jetstream, source, strategy)
-mgr, err := parti.NewManager(cfg, js, src, strategy.NewConsistentHash())
-
-// In message handler: route by partition
-func handleMessage(msg *nats.Msg) {
-    userID := extractUserID(msg)
-    partitionID := partitioner.Partition(userID)
-
-    // Check if this worker owns the partition
-    assignment := mgr.CurrentAssignment()
-    ownsPartition := false
-    for _, p := range assignment.Partitions {
-        if p.ID == partitionID {
-            ownsPartition = true
-            break
-        }
-    }
-
-    if ownsPartition {
-        processMessage(msg)
-    } else {
-        // Route to correct worker or re-queue
-        forwardToPartition(msg, partitionID)
-    }
-}
-```
-
-### Options
-
-```go
-// Default hash function (xxHash)
-p := partition.NewHashPartitioner(16)
-
-// Custom hash function
-p := partition.NewHashPartitioner(16,
-    partition.WithHashFunc(fnv.New64a),
+cfg := partition.NewConfig(
+    partition.WithNumPartitions(16),
+    partition.WithSubjectPattern("events.{{key}}.{{partition}}"),
+    partition.WithHashSeed(42),
 )
 ```
 
 ---
 
-## Partition Helpers
+## Publisher (Core NATS)
 
-### GeneratePartitionIDs
-
-Create partition ID slices for initialization:
+`Publisher` routes messages to partitioned core-NATS subjects using a `*nats.Conn`.
 
 ```go
-import "github.com/arloliu/parti/v2/partition"
+func NewPublisher(nc *nats.Conn, config PartitionConfig) (*Publisher, error)
+func NewPublisherWithOptions(nc *nats.Conn, opts ...Option) (*Publisher, error)
+```
 
-// Generate ["0", "1", "2", ..., "15"]
-ids := partition.GeneratePartitionIDs(16)
+**Methods:**
 
-// Convert to Partition slice
-partitions := make([]parti.Partition, len(ids))
-for i, id := range ids {
-    partitions[i] = parti.Partition{Keys: []string{id}}
+| Method                                 | Description                                           |
+|----------------------------------------|-------------------------------------------------------|
+| `Publish(ctx, key, data)`              | Publish payload to partition for key                  |
+| `PublishMsg(ctx, key, msg)`            | Publish a `*nats.Msg` to partition for key            |
+| `GetPartition(key) int`                | Return partition index (0 to N-1) for a key           |
+| `GetSubject(key) string`               | Return fully expanded subject for a key               |
+| `GetSubjectForPartition(n) (string, error)` | Return subject for a specific partition index    |
+| `NumPartitions() int`                  | Return configured partition count                     |
+
+**Example:**
+
+```go
+nc, _ := nats.Connect(nats.DefaultURL)
+
+pub, err := partition.NewPublisher(nc, partition.PartitionConfig{
+    NumPartitions:  16,
+    SubjectPattern: "events.{{key}}.{{partition}}",
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+if err := pub.Publish(ctx, "user-12345", payload); err != nil {
+    log.Fatal(err)
 }
 ```
 
-### GetPartitionIndex
+---
 
-Convert partition ID back to index:
+## JSPublisher (JetStream)
+
+`JSPublisher` routes messages to partitioned JetStream subjects with publish acknowledgment.
 
 ```go
-idx := partition.GetPartitionIndex("7")  // Returns: 7
-idx := partition.GetPartitionIndex("15") // Returns: 15
+func NewJSPublisher(js jetstream.JetStream, config PartitionConfig) (*JSPublisher, error)
+func NewJSPublisherWithOptions(js jetstream.JetStream, opts ...Option) (*JSPublisher, error)
+```
+
+**Methods:**
+
+| Method                                  | Description                                        |
+|-----------------------------------------|----------------------------------------------------|
+| `Publish(ctx, key, data)`               | Publish with JetStream ack; returns `*PubAck`      |
+| `PublishAsync(key, data)`               | Publish asynchronously; returns `PubAckFuture`     |
+| `PublishMsg(ctx, key, msg)`             | Publish a `*nats.Msg` with JetStream ack           |
+| `PublishMsgAsync(key, msg)`             | Publish a `*nats.Msg` asynchronously               |
+| `GetPartition(key) int`                 | Return partition index (0 to N-1) for a key        |
+| `GetSubject(key) string`                | Return fully expanded subject for a key            |
+| `GetSubjectForPartition(n) (string, error)` | Return subject for a specific partition index  |
+| `NumPartitions() int`                   | Return configured partition count                  |
+
+**Example:**
+
+```go
+js, _ := jetstream.New(nc)
+
+pub, err := partition.NewJSPublisher(js, partition.PartitionConfig{
+    NumPartitions:  16,
+    SubjectPattern: "orders.{{partition}}",
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+ack, err := pub.Publish(ctx, "order-12345", payload)
+if err != nil {
+    log.Fatal(err)
+}
+log.Printf("Published to stream %s, seq %d", ack.Stream, ack.Sequence)
+```
+
+---
+
+## Subscriber (Core NATS)
+
+`Subscriber` consumes messages from a single static partition using core NATS.
+
+```go
+func NewSubscriber(nc *nats.Conn, config PartitionConfig, partition int, handler NATSMessageHandler) (*Subscriber, error)
+func NewSubscriberWithOptions(nc *nats.Conn, partition int, handler NATSMessageHandler, opts ...Option) (*Subscriber, error)
+```
+
+**Methods:**
+
+| Method          | Description                               |
+|-----------------|-------------------------------------------|
+| `Start(ctx)`    | Begin consuming messages                  |
+| `Stop(ctx)`     | Gracefully stop subscription              |
+| `Partition() int` | Return this subscriber's partition index |
+| `Subject() string` | Return the NATS subject subscribed to  |
+
+> **JetStream consumption:** Use `consumer.NewStatic` or `consumer.NewDynamic` from the
+> `consumer` package instead of `Subscriber`. See [Consumer Package](CONSUMERS.md).
+
+**Example:**
+
+```go
+sub, err := partition.NewSubscriber(
+    nc,
+    partition.PartitionConfig{
+        NumPartitions:  4,
+        SubjectPattern: "events.{{key}}.{{partition}}",
+    },
+    0,
+    partition.NATSMessageHandlerFunc(func(ctx context.Context, msg *nats.Msg) error {
+        log.Printf("Received: %s", string(msg.Data))
+        return nil
+    }),
+)
+if err != nil {
+    log.Fatal(err)
+}
+if err := sub.Start(ctx); err != nil {
+    log.Fatal(err)
+}
+```
+
+---
+
+## Functional Options
+
+`NewConfig`, `NewPublisherWithOptions`, `NewJSPublisherWithOptions`, and
+`NewSubscriberWithOptions` accept functional options:
+
+| Option                      | Description                            |
+|-----------------------------|----------------------------------------|
+| `WithNumPartitions(n)`      | Set total number of partitions         |
+| `WithSubjectPattern(p)`     | Set subject template                   |
+| `WithHashSeed(seed)`        | Set hash seed for deterministic routing|
+| `WithLogger(logger)`        | Set logger                             |
+
+---
+
+## StatefulSet Helpers
+
+The package provides helpers for Kubernetes StatefulSet deployments:
+
+```go
+// GetPartitionFromEnv derives partition index from environment:
+//   1. PARTITION_INDEX env var (explicit override)
+//   2. HOSTNAME env var (StatefulSet pod name, e.g. "worker-2" -> 2)
+//   3. os.Hostname() as fallback
+partitionIndex, err := partition.GetPartitionFromEnv()
+
+// ParseStatefulSetOrdinal extracts the integer ordinal from a hostname string.
+// Example: "worker-3" -> 3
+ordinal, err := partition.ParseStatefulSetOrdinal("worker-3")
 ```
 
 ---
 
 ## Use Cases
 
-### User-Based Partitioning
+### Ordered Processing
 
-Route all operations for a user to the same partition:
-
-```go
-partitioner := partition.NewHashPartitioner(32)
-
-func handleUserRequest(userID string, request Request) {
-    partitionID := partitioner.Partition(userID)
-
-    // All requests for this user go to same partition
-    // Enables user-level ordering and caching
-    subject := fmt.Sprintf("requests.%s", partitionID)
-    js.Publish(subject, encodeRequest(request))
-}
-```
-
-### Order Processing
-
-Ensure order events are processed in sequence:
+Route all messages for the same entity (user, order) to the same partition:
 
 ```go
-partitioner := partition.NewHashPartitioner(16)
+pub, _ := partition.NewJSPublisher(js, partition.PartitionConfig{
+    NumPartitions:  32,
+    SubjectPattern: "events.{{key}}.{{partition}}",
+})
 
-func publishOrderEvent(orderID string, event OrderEvent) {
-    partitionID := partitioner.Partition(orderID)
-
-    // All events for this order go to same partition
-    // Worker processes them in order
-    subject := fmt.Sprintf("orders.%s", partitionID)
-    js.Publish(subject, encodeEvent(event))
-}
+// All events for "user-123" consistently route to the same partition
+pub.Publish(ctx, "user-123", payload)
 ```
 
-### Tenant Isolation
+### StatefulSet Fixed Partition
 
-Route tenant data to dedicated partitions:
+Each pod handles exactly one partition based on its ordinal:
 
 ```go
-// Map tenants to dedicated partitions
-tenantPartitions := map[string]string{
-    "tenant-a": "0",
-    "tenant-b": "1",
-    "tenant-c": "2",
+partitionIndex, err := partition.GetPartitionFromEnv()
+if err != nil {
+    log.Fatal(err)
 }
 
-func getPartition(tenantID string) string {
-    if p, ok := tenantPartitions[tenantID]; ok {
-        return p
-    }
-    // Fallback: hash smaller tenants across remaining partitions
-    return partitioner.Partition(tenantID)
-}
+// Publisher (shared by all pods)
+pub, _ := partition.NewJSPublisher(js, partition.PartitionConfig{
+    NumPartitions:  4,
+    SubjectPattern: "orders.{{partition}}",
+})
+
+// Consumer (this pod only handles its own partition)
+handler := consumer.MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+    log.Printf("Processing: %s", msg.Subject())
+    return nil
+})
+sc, _ := consumer.NewStatic(js, "orders",
+    fmt.Sprintf("processor-%d", partitionIndex),
+    "orders.{{partition}}",
+    4, partitionIndex, handler)
+_ = sc.Start(ctx)
 ```
 
-### Multi-Key Partitioning
-
-Combine multiple keys for composite partitioning:
-
-```go
-partitioner := partition.NewHashPartitioner(64)
-
-func getPartitionKey(tenantID, userID string) string {
-    // Combine keys for partitioning
-    compositeKey := fmt.Sprintf("%s:%s", tenantID, userID)
-    return partitioner.Partition(compositeKey)
-}
-```
-
----
-
-## Best Practices
-
-### Partition Count Selection
-
-| Factor                   | Recommendation                    |
-|--------------------------|-----------------------------------|
-| Expected worker count    | 4-8x max workers                  |
-| Load distribution        | More partitions = better balance  |
-| Rebalancing overhead     | Fewer partitions = faster rebalance |
-| Typical range            | 16-256 partitions                 |
-
-**Rule of Thumb:** Start with `8 × max_workers` partitions.
-
-### Key Design
-
-Good partition keys:
-- Evenly distributed (avoid hot spots)
-- Stable (don't change for same entity)
-- Meaningful (related data same partition)
-
-```go
-// Good: User ID - stable, well-distributed
-partitioner.Partition(userID)
-
-// Good: Order ID with prefix stripped
-partitioner.Partition(strings.TrimPrefix(orderID, "ORD-"))
-
-// Bad: Timestamp - creates hot partitions
-partitioner.Partition(time.Now().Format("2006-01-02"))
-
-// Bad: Status - only a few values, poor distribution
-partitioner.Partition(orderStatus) // "pending", "shipped", "delivered"
-```
-
-### Consistency with Manager
-
-Ensure the partitioner and manager agree on partition count:
-
-```go
-const partitionCount = 32
-
-// Partitioner for routing
-partitioner := partition.NewHashPartitioner(partitionCount)
-
-// Source for manager - MUST match partitioner count
-partitions := make([]parti.Partition, partitionCount)
-for i := range partitions {
-    partitions[i] = parti.Partition{Keys: []string{strconv.Itoa(i)}}
-}
-src := source.NewStatic(partitions)
-
-mgr, _ := parti.NewManager(cfg, js, src, strategy.NewConsistentHash())
-
-// Now partitioner.Partition(key) returns IDs that manager understands
-```
-
-See [Strategies Guide](STRATEGIES.md) for how the manager assigns these partitions to workers.
+See the [partition package README](../partition/README.md) for more examples.

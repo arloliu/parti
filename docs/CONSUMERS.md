@@ -573,10 +573,10 @@ c, _ := consumer.NewQueue(js, "stream", "consumer", "subject.>", handler,
 
 **Dynamic-Specific Options:**
 
-| Option                    | Description                                  |
-|---------------------------|----------------------------------------------|
-| `WithProcessingGate(cfg)` | Enable processing gate for ownership control |
-| `WithDrainOnRemove(bool)` | Drain messages when partitions are removed   |
+| Option                               | Description                                  |
+|--------------------------------------|----------------------------------------------|
+| `WithProcessingGate(cfg)`            | Enable processing gate for ownership control |
+| `WithDrainOnRemove(enabled, timeout)`| Drain messages when partitions are removed   |
 
 ---
 
