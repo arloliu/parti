@@ -45,6 +45,43 @@ func TestQueue_AutoRecovery_RejectsRecoverFromLastProcessed(t *testing.T) {
 	require.Error(t, err, "NewQueue must reject RecoverFromLastProcessed")
 }
 
+// TestQueue_AutoRecovery_WorkQueuePolicy_RecoverFromNew_RejectsAtStart verifies
+// that Start returns ErrInvalidConfig when RecoverFromNew is combined with a
+// WorkQueuePolicy stream. NATS only allows DeliverAllPolicy on work-queue streams;
+// RecoverFromNew maps to DeliverNewPolicy, so every recovery attempt would silently
+// fail. The check at Start time surfaces this as a clear configuration error.
+func TestQueue_AutoRecovery_WorkQueuePolicy_RecoverFromNew_RejectsAtStart(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration: skipping in short mode")
+	}
+
+	ctx := t.Context()
+	_, nc := partitesting.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	_, err = js.CreateStream(ctx, jetstream.StreamConfig{
+		Name:      "QWQ_VAL",
+		Subjects:  []string{"qwq.val.>"},
+		Retention: jetstream.WorkQueuePolicy,
+		Storage:   jetstream.MemoryStorage,
+	})
+	require.NoError(t, err)
+
+	handler := consumer.MessageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error {
+		return nil
+	})
+
+	q, err := consumer.NewQueue(js, "QWQ_VAL", "qwq-val", "qwq.val.>", handler,
+		consumer.WithRecoveryStrategy(consumer.RecoverFromNew),
+	)
+	require.NoError(t, err, "NewQueue itself must not reject RecoverFromNew (stream type unknown at construction)")
+
+	err = q.Start(ctx)
+	require.Error(t, err, "Start must reject RecoverFromNew on a WorkQueuePolicy stream")
+	require.ErrorIs(t, err, consumer.ErrInvalidConfig)
+}
+
 // TestQueue_AutoRecovery_RecoverFromNew_ExplicitDelete verifies that when the
 // durable consumer is explicitly deleted, the Queue consumer recovers using
 // RecoverFromNew and does NOT replay already-processed messages.
@@ -88,7 +125,7 @@ func TestQueue_AutoRecovery_RecoverFromNew_ExplicitDelete(t *testing.T) {
 
 	// Publish and consume initial batch.
 	for i := range 3 {
-		_, err = js.Publish(ctx, "qar.new.events", []byte(fmt.Sprintf("pre-%d", i)))
+		_, err = js.Publish(ctx, "qar.new.events", fmt.Appendf(nil, "pre-%d", i))
 		require.NoError(t, err)
 	}
 	for range 3 {
@@ -115,7 +152,7 @@ func TestQueue_AutoRecovery_RecoverFromNew_ExplicitDelete(t *testing.T) {
 	// With RecoverFromNew, publish post-delete messages. These MUST be received
 	// (recovery works), but the pre-delete messages should NOT be replayed.
 	for i := range 3 {
-		_, err = js.Publish(ctx, "qar.new.events", []byte(fmt.Sprintf("post-%d", i)))
+		_, err = js.Publish(ctx, "qar.new.events", fmt.Appendf(nil, "post-%d", i))
 		require.NoError(t, err)
 	}
 
@@ -171,7 +208,7 @@ func TestQueue_AutoRecovery_RecoverFromBeginning_ExplicitDelete(t *testing.T) {
 
 	// Publish and consume initial batch.
 	for i := range 3 {
-		_, err = js.Publish(ctx, "qar.beg.events", []byte(fmt.Sprintf("before-%d", i)))
+		_, err = js.Publish(ctx, "qar.beg.events", fmt.Appendf(nil, "before-%d", i))
 		require.NoError(t, err)
 	}
 	require.Eventually(t, func() bool {
@@ -340,6 +377,78 @@ func TestQueue_AutoRecovery_ActivePullDelete(t *testing.T) {
 		return received.Load() >= 1
 	}, 30*time.Second, 100*time.Millisecond,
 		"post-recovery message should be received after active-pull delete")
+}
+
+// TestQueue_AutoRecovery_WorkQueuePolicy_RecoverFromBeginning_Succeeds verifies
+// that when a stream uses WorkQueuePolicy, RecoverFromBeginning successfully
+// recreates the consumer after deletion. DeliverAllPolicy is the only deliver
+// policy WorkQueue streams accept, and RecoverFromBeginning maps exactly to it.
+func TestQueue_AutoRecovery_WorkQueuePolicy_RecoverFromBeginning_Succeeds(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration: skipping in short mode")
+	}
+
+	ctx := t.Context()
+	_, nc := partitesting.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	streamName := "QWQ_BEG"
+	consumerName := "qwq-beg"
+	_, err = js.CreateStream(ctx, jetstream.StreamConfig{
+		Name:      streamName,
+		Subjects:  []string{"qwq.beg.>"},
+		Retention: jetstream.WorkQueuePolicy,
+		Storage:   jetstream.MemoryStorage,
+	})
+	require.NoError(t, err)
+
+	var received atomic.Int32
+	handler := consumer.MessageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error {
+		received.Add(1)
+		return nil
+	})
+
+	q, err := consumer.NewQueue(js, streamName, consumerName, "qwq.beg.>", handler,
+		consumer.WithBatchSize(1),
+		consumer.WithFetchTimeout(1*time.Second),
+		consumer.WithRecoveryStrategy(consumer.RecoverFromBeginning),
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, q.Start(ctx))
+	t.Cleanup(func() { _ = q.Stop(ctx) })
+
+	// Publish and consume initial messages. WorkQueuePolicy removes acked
+	// messages from the stream, so no backlog remains after consumption.
+	for i := range 3 {
+		_, err = js.Publish(ctx, "qwq.beg.events", fmt.Appendf(nil, "init-%d", i))
+		require.NoError(t, err)
+	}
+	require.Eventually(t, func() bool {
+		return received.Load() >= 3
+	}, 10*time.Second, 50*time.Millisecond, "initial messages should be received")
+
+	// Delete the consumer while the Queue is running.
+	require.NoError(t, js.DeleteConsumer(ctx, streamName, consumerName))
+
+	// RecoverFromBeginning maps to DeliverAllPolicy, which WorkQueue streams
+	// accept. Wait for the recovery controller to recreate the durable.
+	require.Eventually(t, func() bool {
+		_, err := js.Consumer(ctx, streamName, consumerName)
+		return err == nil
+	}, 10*time.Second, 50*time.Millisecond,
+		"recovery must recreate consumer: DeliverAllPolicy is valid on WorkQueue streams")
+
+	// Publish post-recovery messages. They must be delivered to the recreated consumer.
+	for i := range 3 {
+		_, err = js.Publish(ctx, "qwq.beg.events", fmt.Appendf(nil, "post-%d", i))
+		require.NoError(t, err)
+	}
+	require.Eventually(t, func() bool {
+		return received.Load() >= 6
+	}, 15*time.Second, 50*time.Millisecond,
+		"post-recovery messages should be received; got %d", received.Load())
 }
 
 // TestQueue_AutoRecovery_DisabledPreservesDefaultBehavior verifies that when

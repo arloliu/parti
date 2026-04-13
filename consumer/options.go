@@ -36,6 +36,14 @@ const (
 	// Pros: zero replay risk; safe for Queue consumers and any consumer where
 	// missing a window of messages is acceptable.
 	// Cons: messages published between deletion and recreation are lost.
+	//
+	// # WorkQueuePolicy streams
+	//
+	// Not compatible with WorkQueuePolicy streams. NATS only permits
+	// [jetstream.DeliverAllPolicy] on work-queue streams; this strategy maps to
+	// [jetstream.DeliverNewPolicy], which NATS rejects. [Queue.Start] returns
+	// [ErrInvalidConfig] when this combination is detected. Use
+	// [RecoverFromBeginning] or [RecoveryDisabled] on WorkQueuePolicy streams.
 	RecoverFromNew = recovery.FromNew
 
 	// RecoverFromLastProcessed recreates the consumer starting at the sequence
@@ -58,6 +66,12 @@ const (
 	//
 	// WARNING: causes a full backlog replay. Use only for small or bounded streams
 	// where complete reprocessing is intentional and safe.
+	//
+	// This is the correct recovery strategy for WorkQueuePolicy streams because
+	// it maps to [jetstream.DeliverAllPolicy] — the only DeliverPolicy NATS
+	// accepts on work-queue streams. On WorkQueuePolicy, acknowledged messages
+	// are deleted immediately, so in practice the "full replay" covers only the
+	// unacknowledged backlog at the time of consumer deletion.
 	RecoverFromBeginning = recovery.FromBeginning
 )
 
@@ -377,10 +391,17 @@ func WithAckPolicy(p jetstream.AckPolicy) Option {
 //
 // Per-consumer support:
 //   - [Queue]: [RecoverFromNew], [RecoverFromBeginning] only. [RecoverFromLastProcessed]
-//     is rejected because multiple replicas share one durable, making per-process
-//     checkpointing nondeterministic.
+//     is rejected at construction time. [RecoverFromNew] is additionally rejected at
+//     [Queue.Start] time for WorkQueuePolicy streams (see below).
 //   - [Broadcast], [Static], [Dynamic]: all strategies supported, including
 //     [RecoverFromLastProcessed] with ManualAck=true.
+//
+// # Queue consumers on WorkQueuePolicy streams
+//
+// NATS only allows [jetstream.DeliverAllPolicy] when creating consumers on
+// WorkQueuePolicy streams. [RecoverFromNew] maps to [jetstream.DeliverNewPolicy]
+// and is therefore incompatible: [Queue.Start] will return [ErrInvalidConfig] when
+// both are combined. Use [RecoverFromBeginning] or [RecoveryDisabled] instead.
 func WithRecoveryStrategy(strategy RecoveryStrategy) Option {
 	return universalOpt(func(o *options) {
 		o.recoveryStrategy = strategy

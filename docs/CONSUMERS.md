@@ -400,18 +400,22 @@ c, err := consumer.NewQueue(js, "JOBS", "job-workers", "jobs.>", handler,
 
 ### Per-Consumer Support
 
-| Consumer    | `RecoveryDisabled` | `RecoverFromNew` | `RecoverFromLastProcessed`       | `RecoverFromBeginning` |
-|-------------|--------------------|------------------|----------------------------------|------------------------|
-| `Queue`     | ✓                  | ✓                | ✗ (shared durable — unsafe)      | ✓                      |
-| `Static`    | ✓                  | ✓                | ✓ (any `ManualAck`)              | ✓                      |
-| `Dynamic`   | ✓                  | ✓                | ✓ (any `ManualAck`)              | ✓                      |
-| `Broadcast` | ✓                  | ✓                | ✓ (any `ManualAck`)              | ✓                      |
+| Consumer    | `RecoveryDisabled` | `RecoverFromNew`             | `RecoverFromLastProcessed`       | `RecoverFromBeginning` |
+|-------------|--------------------|-----------------------------|----------------------------------|------------------------|
+| `Queue`     | ✓                  | ✓ ¹                          | ✗ (shared durable — unsafe)      | ✓                      |
+| `Static`    | ✓                  | ✓                            | ✓ (any `ManualAck`)              | ✓                      |
+| `Dynamic`   | ✓                  | ✓                            | ✓ (any `ManualAck`)              | ✓                      |
+| `Broadcast` | ✓                  | ✓                            | ✓ (any `ManualAck`)              | ✓                      |
 
-### Queue Consumer Restriction
+¹ Not supported on WorkQueuePolicy streams — see below.
 
-`RecoverFromLastProcessed` is **not supported** for `Queue`. Queue shares one durable consumer across all replicas — each instance processes a different subset of messages, so each would advance the checkpoint independently. The resulting resume position is nondeterministic and could cause some messages to be silently skipped by every instance. Passing `RecoverFromLastProcessed` to `NewQueue` returns `ErrInvalidConfig` immediately.
+### Queue Consumer Restrictions
 
-Use `RecoverFromNew` (skip messages published during the outage) or `RecoverFromBeginning` (full replay) instead.
+**`RecoverFromLastProcessed` is not supported** for `Queue`. Queue shares one durable consumer across all replicas — each instance processes a different subset of messages, so each would advance the checkpoint independently. The resulting resume position is nondeterministic and could cause some messages to be silently skipped by every instance. Passing `RecoverFromLastProcessed` to `NewQueue` returns `ErrInvalidConfig` immediately.
+
+**`RecoverFromNew` is not supported on WorkQueuePolicy streams.** NATS only allows `DeliverAllPolicy` when creating consumers on a `WorkQueuePolicy` stream. `RecoverFromNew` maps to `DeliverNewPolicy`, which NATS rejects — every recovery attempt would silently fail and the consumer would never be recreated. `Queue.Start` detects this combination and returns `ErrInvalidConfig` immediately.
+
+For `Queue` consumers on WorkQueuePolicy streams use `RecoverFromBeginning` or `RecoveryDisabled`. On WorkQueuePolicy streams, acknowledged messages are deleted immediately, so `RecoverFromBeginning` replays only the unacknowledged backlog — not the full stream history.
 
 ### Dynamic Consumer — Two Recovery Mechanisms
 
@@ -508,19 +512,27 @@ c, err := consumer.NewBroadcast(js, "AUDIT", "audit-logger", "events.>", handler
 
 ### Validation
 
-Incompatible combinations are rejected at construction time with [`ErrInvalidConfig`](https://pkg.go.dev/github.com/arloliu/parti/v2/consumer#ErrInvalidConfig) — you can detect them with `errors.Is`:
+Incompatible combinations return [`ErrInvalidConfig`](https://pkg.go.dev/github.com/arloliu/parti/v2/consumer#ErrInvalidConfig) — detect them with `errors.Is`:
 
 ```go
-// RecoverFromLastProcessed on a Queue is rejected (shared durable, unsafe checkpointing).
+// RecoverFromLastProcessed on a Queue is rejected at NewQueue time.
 _, err := consumer.NewQueue(js, "JOBS", "job-workers", "jobs.>", handler,
     consumer.WithRecoveryStrategy(consumer.RecoverFromLastProcessed),
 )
 if errors.Is(err, consumer.ErrInvalidConfig) {
     log.Fatal("incompatible configuration:", err)
 }
+
+// RecoverFromNew on a WorkQueuePolicy stream is rejected at Start time.
+q, _ := consumer.NewQueue(js, "JOBS", "job-workers", "jobs.>", handler,
+    consumer.WithRecoveryStrategy(consumer.RecoverFromNew),
+)
+if err := q.Start(ctx); errors.Is(err, consumer.ErrInvalidConfig) {
+    log.Fatal("incompatible configuration:", err)
+}
 ```
 
-You can also validate a config struct directly without a NATS connection:
+You can also validate a config struct directly without a NATS connection (catches construction-time errors only):
 
 ```go
 cfg := consumer.QueueConfig{

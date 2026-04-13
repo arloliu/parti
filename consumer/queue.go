@@ -91,12 +91,19 @@ type QueueConfig struct {
 
 	// RecoveryStrategy defines how a recreated consumer resumes after an unexpected deletion.
 	//
-	// [RecoverFromLastProcessed] is not supported for Queue consumers because Queue shares
-	// one durable across all replicas. Per-process checkpointing is nondeterministic when
-	// multiple instances compete for the same messages — different replicas would advance
-	// the checkpoint independently, causing unpredictable resume positions.
+	// Supported values for Queue consumers:
+	//   - [RecoverFromNew]: skip messages published during the outage.
+	//   - [RecoverFromBeginning]: replay all messages from the start of the stream.
 	//
-	// Use [RecoverFromNew] (skip missed messages) or [RecoverFromBeginning] (full replay).
+	// [RecoverFromLastProcessed] is rejected at construction time because Queue shares
+	// one durable across all replicas — per-process checkpointing is nondeterministic.
+	//
+	// # WorkQueuePolicy streams
+	//
+	// NATS only permits [jetstream.DeliverAllPolicy] on WorkQueuePolicy streams.
+	// [RecoverFromNew] maps to [jetstream.DeliverNewPolicy] and is therefore incompatible:
+	// [Queue.Start] will return [ErrInvalidConfig] when both are combined.
+	// Use [RecoverFromBeginning] or [RecoveryDisabled] for WorkQueuePolicy streams.
 	RecoveryStrategy RecoveryStrategy
 }
 
@@ -254,6 +261,34 @@ func defaultIterFactory(cons jetstream.Consumer, batch int, expiry time.Duration
 	)
 }
 
+// checkWorkQueueCompatibility returns ErrInvalidConfig if the stream uses
+// WorkQueuePolicy, because NATS only permits DeliverAllPolicy on work-queue
+// streams and RecoverFromNew maps to DeliverNewPolicy. The check is best-effort:
+// failures to fetch stream info are silently ignored so Start is not blocked by
+// transient connectivity issues.
+func (q *Queue) checkWorkQueueCompatibility(ctx context.Context) error {
+	stream, err := q.js.Stream(ctx, q.config.StreamName)
+	if err != nil {
+		return nil
+	}
+
+	info, err := stream.Info(ctx)
+	if err != nil {
+		return nil
+	}
+
+	if info.Config.Retention != jetstream.WorkQueuePolicy {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"%w: RecoverFromNew is incompatible with WorkQueuePolicy stream %q"+
+			" — NATS only permits DeliverAllPolicy on work-queue streams;"+
+			" use RecoverFromBeginning or RecoveryDisabled instead",
+		ErrInvalidConfig, q.config.StreamName,
+	)
+}
+
 // Start begins consuming messages.
 func (q *Queue) Start(ctx context.Context) error {
 	q.mu.Lock()
@@ -269,6 +304,12 @@ func (q *Queue) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to create consumer: %w", err)
 	}
 	q.consumer = cons
+
+	if q.config.RecoveryStrategy == RecoverFromNew {
+		if err := q.checkWorkQueueCompatibility(ctx); err != nil {
+			return err
+		}
+	}
 
 	// Start the pull loop
 	loopCtx, cancel := context.WithCancel(context.Background())
