@@ -593,3 +593,75 @@ func TestDynamic_WithProcessingGate(t *testing.T) {
 	require.Equal(t, int32(0), w2Count.Load(), "non-owner w2 must not process any messages")
 	t.Logf("w1=%d, w2=%d", w1Count.Load(), w2Count.Load())
 }
+
+// TestDynamic_WorkQueuePolicy_RecoverFromNew_RejectsAtFirstUpdate verifies that
+// the first Update call returns ErrInvalidConfig when RecoverFromNew is combined
+// with a WorkQueuePolicy stream.
+func TestDynamic_WorkQueuePolicy_RecoverFromNew_RejectsAtFirstUpdate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration: skipping in short mode")
+	}
+
+	ctx := t.Context()
+	_, nc := partitesting.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	_, err = js.CreateStream(ctx, jetstream.StreamConfig{
+		Name:      "DWQ_NEW",
+		Subjects:  []string{"dwq.new.>"},
+		Retention: jetstream.WorkQueuePolicy,
+		Storage:   jetstream.MemoryStorage,
+	})
+	require.NoError(t, err)
+
+	handler := consumer.MessageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error {
+		return nil
+	})
+
+	d, err := consumer.NewDynamic(js, "DWQ_NEW", "dwq-new", "dwq.new.{{.PartitionID}}", handler,
+		consumer.WithRecoveryStrategy(consumer.RecoverFromNew),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = d.Stop(ctx) })
+
+	err = d.Update(ctx, "worker-0", []parti.Partition{{Keys: []string{"p0"}}})
+	require.Error(t, err, "first Update must reject RecoverFromNew on a WorkQueuePolicy stream")
+	require.ErrorIs(t, err, consumer.ErrInvalidConfig)
+}
+
+// TestDynamic_WorkQueuePolicy_RecoverFromLastProcessed_RejectsAtFirstUpdate verifies
+// that the first Update call returns ErrInvalidConfig when RecoverFromLastProcessed
+// is combined with a WorkQueuePolicy stream.
+func TestDynamic_WorkQueuePolicy_RecoverFromLastProcessed_RejectsAtFirstUpdate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration: skipping in short mode")
+	}
+
+	ctx := t.Context()
+	_, nc := partitesting.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	_, err = js.CreateStream(ctx, jetstream.StreamConfig{
+		Name:      "DWQ_LKP",
+		Subjects:  []string{"dwq.lkp.>"},
+		Retention: jetstream.WorkQueuePolicy,
+		Storage:   jetstream.MemoryStorage,
+	})
+	require.NoError(t, err)
+
+	handler := consumer.MessageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error {
+		return nil
+	})
+
+	d, err := consumer.NewDynamic(js, "DWQ_LKP", "dwq-lkp", "dwq.lkp.{{.PartitionID}}", handler,
+		consumer.WithRecoveryStrategy(consumer.RecoverFromLastProcessed),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = d.Stop(ctx) })
+
+	err = d.Update(ctx, "worker-0", []parti.Partition{{Keys: []string{"p0"}}})
+	require.Error(t, err, "first Update must reject RecoverFromLastProcessed on a WorkQueuePolicy stream")
+	require.ErrorIs(t, err, consumer.ErrInvalidConfig)
+}

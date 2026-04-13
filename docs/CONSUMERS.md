@@ -403,19 +403,28 @@ c, err := consumer.NewQueue(js, "JOBS", "job-workers", "jobs.>", handler,
 | Consumer    | `RecoveryDisabled` | `RecoverFromNew`             | `RecoverFromLastProcessed`       | `RecoverFromBeginning` |
 |-------------|--------------------|-----------------------------|----------------------------------|------------------------|
 | `Queue`     | ✓                  | ✓ ¹                          | ✗ (shared durable — unsafe)      | ✓                      |
-| `Static`    | ✓                  | ✓                            | ✓ (any `ManualAck`)              | ✓                      |
-| `Dynamic`   | ✓                  | ✓                            | ✓ (any `ManualAck`)              | ✓                      |
+| `Static`    | ✓                  | ✓ ¹                          | ✓ ¹ (any `ManualAck`)            | ✓                      |
+| `Dynamic`   | ✓                  | ✓ ¹                          | ✓ ¹ (any `ManualAck`)            | ✓                      |
 | `Broadcast` | ✓                  | ✓                            | ✓ (any `ManualAck`)              | ✓                      |
 
-¹ Not supported on WorkQueuePolicy streams — see below.
+¹ Not supported on WorkQueuePolicy streams — see [WorkQueuePolicy Restriction](#workqueuepolicy-restriction) below.
 
-### Queue Consumer Restrictions
+### Queue Consumer Restriction
 
 **`RecoverFromLastProcessed` is not supported** for `Queue`. Queue shares one durable consumer across all replicas — each instance processes a different subset of messages, so each would advance the checkpoint independently. The resulting resume position is nondeterministic and could cause some messages to be silently skipped by every instance. Passing `RecoverFromLastProcessed` to `NewQueue` returns `ErrInvalidConfig` immediately.
 
-**`RecoverFromNew` is not supported on WorkQueuePolicy streams.** NATS only allows `DeliverAllPolicy` when creating consumers on a `WorkQueuePolicy` stream. `RecoverFromNew` maps to `DeliverNewPolicy`, which NATS rejects — every recovery attempt would silently fail and the consumer would never be recreated. `Queue.Start` detects this combination and returns `ErrInvalidConfig` immediately.
+### WorkQueuePolicy Restriction
 
-For `Queue` consumers on WorkQueuePolicy streams use `RecoverFromBeginning` or `RecoveryDisabled`. On WorkQueuePolicy streams, acknowledged messages are deleted immediately, so `RecoverFromBeginning` replays only the unacknowledged backlog — not the full stream history.
+NATS only allows `DeliverAllPolicy` when creating consumers on a `WorkQueuePolicy` stream. Both `RecoverFromNew` (`DeliverNewPolicy`) and `RecoverFromLastProcessed` (`DeliverByStartSequencePolicy`) are incompatible — every recovery attempt would silently fail and the consumer would never be recreated.
+
+This affects `Queue`, `Static`, and `Dynamic` consumers. Each detects the combination at startup and returns `ErrInvalidConfig`:
+- `Queue.Start` rejects `RecoverFromNew` (only strategy affected — `RecoverFromLastProcessed` is already rejected at construction)
+- `Static.Start` rejects `RecoverFromNew` and `RecoverFromLastProcessed`
+- `Dynamic.Update` (first call) rejects `RecoverFromNew` and `RecoverFromLastProcessed`
+
+For WorkQueuePolicy streams use `RecoverFromBeginning` or `RecoveryDisabled`. On WorkQueuePolicy streams, acknowledged messages are deleted immediately, so `RecoverFromBeginning` replays only the unacknowledged backlog — not the full stream history.
+
+> **Broadcast** is not listed because `WorkQueuePolicy` is already [incompatible with Broadcast](#broadcast) for a different reason (single delivery defeats fan-out).
 
 ### Dynamic Consumer — Two Recovery Mechanisms
 

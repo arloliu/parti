@@ -30,7 +30,10 @@ import (
 // Static is safe for concurrent use. [Static.Start] and [Static.Stop] are
 // serialized internally.
 type Static struct {
-	inner *ipartition.JSConsumer
+	inner            *ipartition.JSConsumer
+	js               jetstream.JetStream
+	streamName       string
+	recoveryStrategy RecoveryStrategy
 }
 
 // StaticConfig configures a Static consumer.
@@ -93,6 +96,13 @@ type StaticConfig struct {
 	// All strategies are supported. [RecoverFromLastProcessed] works with both
 	// ManualAck=false (checkpoint advances automatically) and ManualAck=true
 	// (checkpoint advances when the handler calls msg.Ack() or msg.DoubleAck()).
+	//
+	// # WorkQueuePolicy streams
+	//
+	// NATS only permits [jetstream.DeliverAllPolicy] on WorkQueuePolicy streams.
+	// [RecoverFromNew] and [RecoverFromLastProcessed] are incompatible and will
+	// cause [Static.Start] to return [ErrInvalidConfig]. Use [RecoverFromBeginning]
+	// or [RecoveryDisabled] for WorkQueuePolicy streams.
 	RecoveryStrategy RecoveryStrategy
 }
 
@@ -194,7 +204,12 @@ func NewStatic(
 		return nil, err
 	}
 
-	return &Static{inner: inner}, nil
+	return &Static{
+		inner:            inner,
+		js:               js,
+		streamName:       streamName,
+		recoveryStrategy: o.recoveryStrategy,
+	}, nil
 }
 
 // Start begins consuming messages in a background goroutine.
@@ -212,6 +227,9 @@ func NewStatic(
 //   - error: Non-nil if the consumer is already started or if JetStream
 //     consumer creation fails.
 func (s *Static) Start(ctx context.Context) error {
+	if err := checkWorkQueueRecoveryCompat(ctx, s.js, s.streamName, s.recoveryStrategy); err != nil {
+		return err
+	}
 	return s.inner.Start(ctx)
 }
 

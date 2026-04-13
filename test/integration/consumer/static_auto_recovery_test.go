@@ -322,3 +322,73 @@ func TestStatic_AutoRecovery_PassiveExpiry(t *testing.T) {
 		return received.Load() > beforeRecovery
 	}, 30*time.Second, 100*time.Millisecond)
 }
+
+// TestStatic_AutoRecovery_WorkQueuePolicy_RecoverFromNew_RejectsAtStart verifies
+// that Start returns ErrInvalidConfig when RecoverFromNew is combined with a
+// WorkQueuePolicy stream.
+func TestStatic_AutoRecovery_WorkQueuePolicy_RecoverFromNew_RejectsAtStart(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration: skipping in short mode")
+	}
+
+	ctx := t.Context()
+	_, nc := partitesting.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	_, err = js.CreateStream(ctx, jetstream.StreamConfig{
+		Name:      "SWQ_NEW",
+		Subjects:  []string{"swq.new.*"},
+		Retention: jetstream.WorkQueuePolicy,
+		Storage:   jetstream.MemoryStorage,
+	})
+	require.NoError(t, err)
+
+	handler := consumer.MessageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error {
+		return nil
+	})
+
+	s, err := consumer.NewStatic(js, "SWQ_NEW", "swq-new-0", "swq.new.{{partition}}", 1, 0, handler,
+		consumer.WithRecoveryStrategy(consumer.RecoverFromNew),
+	)
+	require.NoError(t, err)
+
+	err = s.Start(ctx)
+	require.Error(t, err, "Start must reject RecoverFromNew on a WorkQueuePolicy stream")
+	require.ErrorIs(t, err, consumer.ErrInvalidConfig)
+}
+
+// TestStatic_AutoRecovery_WorkQueuePolicy_RecoverFromLastProcessed_RejectsAtStart
+// verifies that Start returns ErrInvalidConfig when RecoverFromLastProcessed is
+// combined with a WorkQueuePolicy stream.
+func TestStatic_AutoRecovery_WorkQueuePolicy_RecoverFromLastProcessed_RejectsAtStart(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration: skipping in short mode")
+	}
+
+	ctx := t.Context()
+	_, nc := partitesting.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	_, err = js.CreateStream(ctx, jetstream.StreamConfig{
+		Name:      "SWQ_LKP",
+		Subjects:  []string{"swq.lkp.*"},
+		Retention: jetstream.WorkQueuePolicy,
+		Storage:   jetstream.MemoryStorage,
+	})
+	require.NoError(t, err)
+
+	handler := consumer.MessageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error {
+		return nil
+	})
+
+	s, err := consumer.NewStatic(js, "SWQ_LKP", "swq-lkp-0", "swq.lkp.{{partition}}", 1, 0, handler,
+		consumer.WithRecoveryStrategy(consumer.RecoverFromLastProcessed),
+	)
+	require.NoError(t, err)
+
+	err = s.Start(ctx)
+	require.Error(t, err, "Start must reject RecoverFromLastProcessed on a WorkQueuePolicy stream")
+	require.ErrorIs(t, err, consumer.ErrInvalidConfig)
+}

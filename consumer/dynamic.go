@@ -3,6 +3,7 @@ package consumer
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/arloliu/fuda"
@@ -35,7 +36,12 @@ import (
 // Dynamic is safe for concurrent use. [Dynamic.Update] calls are serialized
 // internally to prevent race conditions during assignment changes.
 type Dynamic struct {
-	inner *durable.WorkerConsumer
+	inner            *durable.WorkerConsumer
+	js               jetstream.JetStream
+	streamName       string
+	recoveryStrategy RecoveryStrategy
+	workQueueOnce    sync.Once
+	workQueueErr     error
 }
 
 // DynamicConfig configures a Dynamic consumer.
@@ -145,6 +151,13 @@ type DynamicConfig struct {
 	// [DynamicConfig.IteratorEscalationWindow]) that rebinds to the existing durable
 	// on repeated failures. RecoveryStrategy controls a distinct, complementary mechanism
 	// that recreates the durable itself when it has been deleted.
+	//
+	// # WorkQueuePolicy streams
+	//
+	// NATS only permits [jetstream.DeliverAllPolicy] on WorkQueuePolicy streams.
+	// [RecoverFromNew] and [RecoverFromLastProcessed] are incompatible and will
+	// cause the first [Dynamic.Update] call to return [ErrInvalidConfig]. Use
+	// [RecoverFromBeginning] or [RecoveryDisabled] for WorkQueuePolicy streams.
 	RecoveryStrategy RecoveryStrategy
 }
 
@@ -256,7 +269,12 @@ func NewDynamic(
 		return nil, err
 	}
 
-	return &Dynamic{inner: inner}, nil
+	return &Dynamic{
+		inner:            inner,
+		js:               js,
+		streamName:       streamName,
+		recoveryStrategy: o.recoveryStrategy,
+	}, nil
 }
 
 // Update applies a new partition assignment set.
@@ -284,6 +302,12 @@ func NewDynamic(
 //   - [ErrMaxSubjectsExceeded]: Returned when partition count
 //     exceeds MaxConcurrentSubjects.
 func (d *Dynamic) Update(ctx context.Context, workerID string, partitions []types.Partition) error {
+	d.workQueueOnce.Do(func() {
+		d.workQueueErr = checkWorkQueueRecoveryCompat(ctx, d.js, d.streamName, d.recoveryStrategy)
+	})
+	if d.workQueueErr != nil {
+		return d.workQueueErr
+	}
 	return d.inner.UpdateWorkerConsumer(ctx, workerID, partitions)
 }
 

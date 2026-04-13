@@ -1,6 +1,8 @@
 package consumer
 
 import (
+	"context"
+	"fmt"
 	"time"
 
 	"github.com/arloliu/fuda"
@@ -120,6 +122,47 @@ func (c *CommonConfig) Validate() error {
 	}
 
 	return fuda.Validate(c)
+}
+
+// checkWorkQueueRecoveryCompat returns ErrInvalidConfig when the stream uses
+// WorkQueuePolicy and the recovery strategy requires a non-DeliverAllPolicy.
+// NATS only permits DeliverAllPolicy on work-queue streams; RecoverFromNew
+// (DeliverNewPolicy) and RecoverFromLastProcessed (DeliverByStartSequencePolicy)
+// would silently fail during every recovery attempt.
+//
+// The check is best-effort: failures to fetch stream info are silently ignored
+// so callers are not blocked by transient connectivity issues.
+func checkWorkQueueRecoveryCompat(ctx context.Context, js jetstream.JetStream, streamName string, strategy RecoveryStrategy) error {
+	var strategyName string
+	switch strategy {
+	case RecoverFromNew:
+		strategyName = "RecoverFromNew"
+	case RecoverFromLastProcessed:
+		strategyName = "RecoverFromLastProcessed"
+	default:
+		return nil // RecoveryDisabled and RecoverFromBeginning are always valid
+	}
+
+	stream, err := js.Stream(ctx, streamName)
+	if err != nil {
+		return nil
+	}
+
+	info, err := stream.Info(ctx)
+	if err != nil {
+		return nil
+	}
+
+	if info.Config.Retention != jetstream.WorkQueuePolicy {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"%w: %s is incompatible with WorkQueuePolicy stream %q"+
+			" — NATS only permits DeliverAllPolicy on work-queue streams;"+
+			" use RecoverFromBeginning or RecoveryDisabled instead",
+		ErrInvalidConfig, strategyName, streamName,
+	)
 }
 
 // RetryConfig groups retry backoff settings.
