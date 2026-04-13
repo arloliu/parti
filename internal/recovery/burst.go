@@ -21,9 +21,11 @@ type BurstDetector struct {
 // the burst window before a consumer.Info() confirmation is triggered.
 const defaultBurstThreshold = 3
 
-// defaultBurstWindow computes the burst detection window from FetchTimeout.
-func defaultBurstWindow(fetchTimeout time.Duration) time.Duration {
-	return fetchTimeout*time.Duration(defaultBurstThreshold+1) + 3*time.Second
+// defaultBurstWindow computes the burst detection window from FetchTimeout and
+// the resolved threshold. The window must be wide enough to accommodate
+// threshold+1 fetch cycles plus a fixed 3s buffer.
+func defaultBurstWindow(fetchTimeout time.Duration, threshold int) time.Duration {
+	return fetchTimeout*time.Duration(threshold+1) + 3*time.Second
 }
 
 // NewBurstDetector creates a burst detector with the given window and threshold.

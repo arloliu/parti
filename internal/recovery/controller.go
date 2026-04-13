@@ -83,7 +83,7 @@ func NewController(cfg ControllerConfig) *Controller {
 	}
 	window := cfg.BurstWindow
 	if window <= 0 {
-		window = defaultBurstWindow(cfg.FetchTimeout)
+		window = defaultBurstWindow(cfg.FetchTimeout, threshold)
 	}
 
 	return &Controller{
