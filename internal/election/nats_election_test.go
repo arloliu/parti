@@ -376,3 +376,44 @@ func TestNATSElection_ClearLeadership_ResetsRevision(t *testing.T) {
 	require.Zero(t, e.Revision(), "Revision must be 0 after clearLeadership")
 	require.Empty(t, e.WorkerID(), "WorkerID must be empty after clearLeadership")
 }
+
+// TestNATSElection_Revision_StableAcrossRenewals verifies that Revision() returns
+// the term-epoch revision (set at initial acquisition) and does not advance on
+// subsequent renewals. A stale-assignment check based on LeaderRevision would
+// incorrectly discard valid assignments if this value advanced on every renewal.
+func TestNATSElection_Revision_StableAcrossRenewals(t *testing.T) {
+	ctx := t.Context()
+
+	_, nc := partitest.StartEmbeddedNATS(t)
+	kv := partitest.CreateJetStreamKV(t, nc, "test-election-term-rev")
+
+	e := NewNATSElection(kv, "leader")
+
+	isLeader, err := e.RequestLeadership(ctx, "worker-1", 30)
+	require.NoError(t, err)
+	require.True(t, isLeader)
+
+	termRev := e.Revision()
+	require.NotZero(t, termRev, "term revision must be non-zero after acquisition")
+
+	// Renew several times; the term revision must remain unchanged.
+	for i := range 3 {
+		err = e.RenewLeadership(ctx)
+		require.NoError(t, err, "renewal %d failed", i+1)
+		require.Equal(t, termRev, e.Revision(),
+			"Revision() must not advance on renewal %d (was %d, got %d)", i+1, termRev, e.Revision())
+	}
+
+	// Simulate a leader change: first leader releases, second worker acquires.
+	err = e.ReleaseLeadership(ctx)
+	require.NoError(t, err)
+
+	e2 := NewNATSElection(kv, "leader")
+	isLeader, err = e2.RequestLeadership(ctx, "worker-2", 30)
+	require.NoError(t, err)
+	require.True(t, isLeader)
+
+	// The new leader's term revision must be strictly greater than the old one.
+	require.Greater(t, e2.Revision(), termRev,
+		"new leader's term revision must exceed previous leader's term revision")
+}

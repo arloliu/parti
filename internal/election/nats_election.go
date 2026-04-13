@@ -31,13 +31,14 @@ var (
 //
 // All fields are protected by mu for thread-safe concurrent access.
 type NATSElection struct {
-	kv       jetstream.KeyValue
-	key      string
-	mu       sync.RWMutex
-	workerID string
-	revision uint64
-	isLeader bool
-	logger   types.Logger
+	kv           jetstream.KeyValue
+	key          string
+	mu           sync.RWMutex
+	workerID     string
+	revision     uint64
+	termRevision uint64
+	isLeader     bool
+	logger       types.Logger
 }
 
 // Compile-time assertion that NATSElection implements ElectionAgent.
@@ -121,7 +122,7 @@ func (e *NATSElection) RequestLeadership(ctx context.Context, workerID string, l
 	}
 
 	// Try to acquire leadership atomically
-	value := []byte(fmt.Sprintf("%s:%d", workerID, time.Now().Unix()))
+	value := fmt.Appendf(nil, "%s:%d", workerID, time.Now().Unix())
 
 	start := time.Now()
 	if e.logger != nil {
@@ -145,7 +146,7 @@ func (e *NATSElection) RequestLeadership(ctx context.Context, workerID string, l
 	}
 
 	// Successfully acquired leadership
-	e.setLeaderState(true, workerID, revision)
+	e.setLeaderState(true, workerID, revision, revision)
 	if e.logger != nil {
 		e.logger.Info("election.lead_acquired", "worker_id", workerID, "key", e.key, "revision", revision, "elapsed", elapsed)
 	}
@@ -171,7 +172,7 @@ func (e *NATSElection) RenewLeadership(ctx context.Context) error {
 	}
 
 	// Update with our current revision to renew
-	value := []byte(fmt.Sprintf("%s:%d", workerID, time.Now().Unix()))
+	value := fmt.Appendf(nil, "%s:%d", workerID, time.Now().Unix())
 
 	start := time.Now()
 	if e.logger != nil {
@@ -219,7 +220,7 @@ func (e *NATSElection) ReleaseLeadership(ctx context.Context) error {
 		return fmt.Errorf("failed to delete leader key: %w", err)
 	}
 
-	e.setLeaderState(false, "", 0)
+	e.setLeaderState(false, "", 0, 0)
 
 	return nil
 }
@@ -280,17 +281,21 @@ func (e *NATSElection) WorkerID() string {
 	return workerID
 }
 
-// Revision returns the NATS KV revision of the current leader key.
+// Revision returns the NATS KV revision at the time the current leader first
+// acquired leadership. This value is stable for the entire leadership term —
+// it does not advance on renewals, only when a new leader takes over.
 //
-// This monotonically increasing value changes on each successful leadership
-// acquisition or renewal. It can be embedded in published assignments so
-// workers can detect and discard assignments from a former leader.
+// Embed this value in published assignments as LeaderRevision so workers can
+// detect and discard assignments from a former leader: an assignment whose
+// LeaderRevision is lower than the current term revision was published during
+// a previous leadership term.
 //
 // Returns:
-//   - uint64: Current leader key revision, or 0 if not the leader
+//   - uint64: Term-epoch revision, or 0 if not the leader
 func (e *NATSElection) Revision() uint64 {
-	_, _, revision := e.getLeaderState()
-	return revision
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.termRevision
 }
 
 // getLeaderState returns the current leadership state (thread-safe).
@@ -301,12 +306,15 @@ func (e *NATSElection) getLeaderState() (isLeader bool, workerID string, revisio
 }
 
 // setLeaderState updates the leadership state (thread-safe).
-func (e *NATSElection) setLeaderState(isLeader bool, workerID string, revision uint64) {
+// termRevision should be set to revision on acquisition and 0 on clear; it is
+// not updated on renewal so it remains stable for the lifetime of a leadership term.
+func (e *NATSElection) setLeaderState(isLeader bool, workerID string, revision, termRevision uint64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.isLeader = isLeader
 	e.workerID = workerID
 	e.revision = revision
+	e.termRevision = termRevision
 }
 
 // clearLeadership resets all leadership state (thread-safe).
@@ -314,5 +322,5 @@ func (e *NATSElection) setLeaderState(isLeader bool, workerID string, revision u
 // Used on involuntary loss (renewal failure, key mismatch). Zeros revision and
 // workerID so that Revision() does not return a stale value after loss.
 func (e *NATSElection) clearLeadership() {
-	e.setLeaderState(false, "", 0)
+	e.setLeaderState(false, "", 0, 0)
 }

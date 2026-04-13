@@ -191,11 +191,11 @@ type Assignment struct {
 	// Partitions is the list of partitions assigned to this worker.
 	Partitions []Partition `json:"partitions"`
 
-	// LeaderRevision is the NATS KV revision of the leader key at publish time.
-	// This value increments on every leadership acquisition and renewal — it is
-	// not a per-term epoch counter. Workers can use it to detect assignments from
-	// a former leader: an assignment whose LeaderRevision is lower than the current
-	// leader's revision was published before the current leadership term began.
+	// LeaderRevision is the NATS KV revision at the time the publishing leader
+	// first acquired leadership — a term-epoch identifier that is stable across
+	// renewals. Workers can use it to detect assignments from a former leader:
+	// an assignment whose LeaderRevision is lower than the current leader's term
+	// revision was published during a previous leadership term and can be discarded.
 	// Zero when leader revision tracking is not configured.
 	LeaderRevision uint64 `json:"leader_revision,omitempty"`
 
