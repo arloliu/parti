@@ -165,12 +165,12 @@ cfg := &parti.Config{
     WorkerIDPrefix: "worker",      // Prefix for IDs
     WorkerIDMin:    0,             // Minimum ID number
     WorkerIDMax:    999,           // Maximum ID number (1000 workers)
-    WorkerIDTTL:    30*time.Second, // TTL for ID claims
+    WorkerIDTTL:    75*time.Second, // TTL for ID claims
 }
 ```
 
 **Recommendations:**
-- `WorkerIDTTL`: 3-5x `HeartbeatInterval` (default 30s)
+- `WorkerIDTTL`: 3-5x `HeartbeatTTL` (default 75s is 5x the default HeartbeatTTL of 15s)
 - `WorkerIDMax`: Set to maximum expected workers + buffer
 
 ---

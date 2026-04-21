@@ -74,14 +74,14 @@ func TestValidateWithWarnings_StartupTimeout(t *testing.T) {
 			"did not expect startup-timeout warning, got %v", log.warns)
 	})
 
-	t.Run("warns at defaults (30s = ColdStartWindow)", func(t *testing.T) {
-		// Defaults have StartupTimeout==ColdStartWindow==30s — that's exactly
-		// the race scenario. Document it as a warn.
+	t.Run("no warning at defaults", func(t *testing.T) {
+		// Defaults provide StartupTimeout >= ColdStartWindow + ElectionTimeout + 5s
+		// headroom, so the warning must stay silent for an unmodified config.
 		cfg := DefaultConfig()
 		log := &warnCapture{}
 		cfg.ValidateWithWarnings(log)
-		require.True(t, log.contains(warnPrefix),
-			"defaults should emit the warning — ColdStartWindow==StartupTimeout is unsafe")
+		require.False(t, log.contains(warnPrefix),
+			"defaults should not emit the warning — StartupTimeout must cover cold-start stabilization")
 	})
 }
 
@@ -91,15 +91,15 @@ func TestDefaultConfig(t *testing.T) {
 	require.Equal(t, "worker", cfg.WorkerIDPrefix)
 	require.Equal(t, 0, cfg.WorkerIDMin)
 	require.Equal(t, 999, cfg.WorkerIDMax)
-	require.Equal(t, 30*time.Second, cfg.WorkerIDTTL)
-	require.Equal(t, 2*time.Second, cfg.HeartbeatInterval)
-	require.Equal(t, 6*time.Second, cfg.HeartbeatTTL)
+	require.Equal(t, 75*time.Second, cfg.WorkerIDTTL)
+	require.Equal(t, 5*time.Second, cfg.HeartbeatInterval)
+	require.Equal(t, 15*time.Second, cfg.HeartbeatTTL)
 	require.Equal(t, 30*time.Second, cfg.ColdStartWindow)
 	require.Equal(t, 10*time.Second, cfg.PlannedScaleWindow)
 	require.Equal(t, 0.5, cfg.RestartDetectionRatio)
 	require.Equal(t, 10*time.Second, cfg.OperationTimeout)
-	require.Equal(t, 5*time.Second, cfg.ElectionTimeout)
-	require.Equal(t, 30*time.Second, cfg.StartupTimeout)
+	require.Equal(t, 10*time.Second, cfg.ElectionTimeout)
+	require.Equal(t, 60*time.Second, cfg.StartupTimeout)
 	require.Equal(t, 10*time.Second, cfg.ShutdownTimeout)
 	require.Equal(t, 10*time.Second, cfg.RebalanceCooldown)
 }
@@ -111,7 +111,7 @@ func TestSetDefaults(t *testing.T) {
 
 		require.Equal(t, "worker", cfg.WorkerIDPrefix)
 		require.Equal(t, 999, cfg.WorkerIDMax)
-		require.Equal(t, 30*time.Second, cfg.WorkerIDTTL)
+		require.Equal(t, 75*time.Second, cfg.WorkerIDTTL)
 		require.Equal(t, 10*time.Second, cfg.RebalanceCooldown)
 	})
 
@@ -164,7 +164,7 @@ func TestSetDefaults(t *testing.T) {
 		require.Equal(t, 45*time.Second, cfg.WorkerIDTTL)
 		// Defaults applied
 		require.Equal(t, 999, cfg.WorkerIDMax)
-		require.Equal(t, 2*time.Second, cfg.HeartbeatInterval)
+		require.Equal(t, 5*time.Second, cfg.HeartbeatInterval)
 	})
 }
 
@@ -228,8 +228,8 @@ heartbeatInterval: 5s
 
 	// Defaults applied
 	require.Equal(t, 999, cfg.WorkerIDMax)
-	require.Equal(t, 6*time.Second, cfg.HeartbeatTTL)
-	require.Equal(t, 30*time.Second, cfg.WorkerIDTTL)
+	require.Equal(t, 15*time.Second, cfg.HeartbeatTTL)
+	require.Equal(t, 75*time.Second, cfg.WorkerIDTTL)
 	require.Equal(t, 10*time.Second, cfg.RebalanceCooldown)
 }
 

@@ -295,19 +295,22 @@ type Config struct {
 	WorkerIDMax int `yaml:"workerIdMax" default:"999" validate:"gtefield=WorkerIDMin"`
 
 	// WorkerIDTTL is how long a worker ID claim remains valid in the key-value store.
-	// Must be greater than HeartbeatInterval to prevent premature expiration.
-	// Recommended: 3-5x HeartbeatInterval.
-	WorkerIDTTL time.Duration `yaml:"workerIdTtl" default:"30s" validate:"gt=0,gtefield=HeartbeatTTL"`
+	// Must be greater than HeartbeatTTL. Renewal writes one KV op per worker every
+	// WorkerIDTTL/3, so longer values reduce steady-state IOPS at the cost of slower
+	// ID reclamation after a worker exits.
+	// Recommended: 3-5x HeartbeatTTL. Default 75s is 5x the default HeartbeatTTL (15s).
+	WorkerIDTTL time.Duration `yaml:"workerIdTtl" default:"75s" validate:"gt=0,gtefield=HeartbeatTTL"`
 
 	// HeartbeatInterval is how often workers publish heartbeat messages.
-	// Shorter intervals provide faster failure detection but increase network traffic.
-	// Recommended: 2-5 seconds.
-	HeartbeatInterval time.Duration `yaml:"heartbeatInterval" default:"2s" validate:"gt=0"`
+	// Shorter intervals provide faster failure detection but increase KV write load
+	// (one write per worker per interval, amplified by JetStream replication and fsync).
+	// Recommended: 3-10 seconds.
+	HeartbeatInterval time.Duration `yaml:"heartbeatInterval" default:"5s" validate:"gt=0"`
 
 	// HeartbeatTTL is how long heartbeat messages remain valid before a worker is considered failed.
 	// Must be greater than HeartbeatInterval.
 	// Recommended: 3x HeartbeatInterval.
-	HeartbeatTTL time.Duration `yaml:"heartbeatTtl" default:"6s" validate:"gt=0"`
+	HeartbeatTTL time.Duration `yaml:"heartbeatTtl" default:"15s" validate:"gt=0"`
 
 	// ColdStartWindow is the stabilization period when starting workers from zero.
 	// During this window, partition assignment is delayed to allow all initial workers to join.
@@ -339,13 +342,16 @@ type Config struct {
 	OperationTimeout time.Duration `yaml:"operationTimeout" default:"10s" validate:"gt=0"`
 
 	// ElectionTimeout is the maximum time to wait for leader election to complete.
-	// Recommended: 5 seconds.
-	ElectionTimeout time.Duration `yaml:"electionTimeout" default:"5s" validate:"gt=0"`
+	// Also drives leader lease renewal frequency (ElectionTimeout/3). Longer values
+	// reduce KV write load at the cost of slower failover detection.
+	// Recommended: 5-15 seconds.
+	ElectionTimeout time.Duration `yaml:"electionTimeout" default:"10s" validate:"gt=0"`
 
 	// StartupTimeout is the maximum time to wait for the manager to fully start.
 	// Includes worker ID claiming, leader election, and initial partition assignment.
-	// Recommended: 30 seconds.
-	StartupTimeout time.Duration `yaml:"startupTimeout" default:"30s" validate:"gt=0"`
+	// Must be at least ColdStartWindow + ElectionTimeout with some headroom.
+	// Recommended: 60 seconds.
+	StartupTimeout time.Duration `yaml:"startupTimeout" default:"60s" validate:"gt=0"`
 
 	// ShutdownTimeout is the maximum time to wait for graceful shutdown.
 	// Includes releasing worker ID, stopping heartbeats, and cleanup operations.
@@ -460,14 +466,14 @@ func SetDefaults(cfg *Config) error {
 //
 // Example Valid Configurations:
 //
-//   // Production (default)
+//   // Production (default) — tuned for low PVC IOPS on file-backed JetStream
+//   WorkerIDTTL: 75s, HeartbeatInterval: 5s, HeartbeatTTL: 15s
+//
+//   // Fast failover (higher write load)
 //   WorkerIDTTL: 30s, HeartbeatInterval: 2s, HeartbeatTTL: 6s
 //
 //   // Fast (testing)
 //   WorkerIDTTL: 5s, HeartbeatInterval: 500ms, HeartbeatTTL: 1.5s
-//
-//   // Conservative (unstable network)
-//   WorkerIDTTL: 60s, HeartbeatInterval: 5s, HeartbeatTTL: 15s
 
 // Validate checks configuration constraints and returns error for invalid values.
 //

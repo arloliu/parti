@@ -97,7 +97,6 @@ func main() {
     cfg := &parti.Config{
         WorkerIDPrefix: "worker",
         WorkerIDMax:    10,
-        WorkerIDTTL:    10 * time.Second,
     }
     if err := parti.SetDefaults(cfg); err != nil {
         log.Fatal(err)

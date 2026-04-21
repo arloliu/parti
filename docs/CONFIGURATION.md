@@ -33,11 +33,11 @@ type Config struct {
     WorkerIDPrefix string        // Prefix for worker IDs (default: "worker")
     WorkerIDMin    int           // Minimum ID number (default: 0)
     WorkerIDMax    int           // Maximum ID number (default: 999)
-    WorkerIDTTL    time.Duration // TTL for ID claims (default: 30s)
+    WorkerIDTTL    time.Duration // TTL for ID claims (default: 75s)
 
     // Heartbeat Configuration
-    HeartbeatInterval time.Duration // Heartbeat publish interval (default: 2s)
-    HeartbeatTTL      time.Duration // Heartbeat validity duration (default: 6s)
+    HeartbeatInterval time.Duration // Heartbeat publish interval (default: 5s)
+    HeartbeatTTL      time.Duration // Heartbeat validity duration (default: 15s)
 
     // Stabilization Windows
     ColdStartWindow      time.Duration // Window for cold start (default: 30s)
@@ -86,7 +86,7 @@ cfg := &parti.Config{
     WorkerIDPrefix: "worker",     // Prefix for IDs → "worker-0", "worker-1"
     WorkerIDMin:    0,            // Minimum ID number
     WorkerIDMax:    999,          // Maximum ID number (supports 1000 workers)
-    WorkerIDTTL:    30*time.Second, // TTL for ID claims
+    WorkerIDTTL:    75*time.Second, // TTL for ID claims
 }
 ```
 
@@ -97,12 +97,12 @@ cfg := &parti.Config{
 | `WorkerIDPrefix` | `"worker"` | Prefix for generated worker IDs          |
 | `WorkerIDMin`    | `0`        | First ID number in the pool              |
 | `WorkerIDMax`    | `999`      | Last ID number in the pool               |
-| `WorkerIDTTL`    | `30s`      | How long an ID claim remains valid       |
+| `WorkerIDTTL`    | `75s`      | How long an ID claim remains valid       |
 
 ### Recommendations
 
 - **WorkerIDMax**: Set to at least 2x expected peak worker count
-- **WorkerIDTTL**: 3-5x HeartbeatInterval (default 30s is good)
+- **WorkerIDTTL**: 3-5x HeartbeatTTL (default 75s is 5x the default HeartbeatTTL)
 - **WorkerIDPrefix**: Use application name for multi-app clusters
 
 ---
@@ -113,8 +113,8 @@ Controls health signal publishing and failure detection:
 
 ```go
 cfg := &parti.Config{
-    HeartbeatInterval: 2 * time.Second,  // Publish interval
-    HeartbeatTTL:      6 * time.Second,  // Validity duration
+    HeartbeatInterval: 5 * time.Second,   // Publish interval
+    HeartbeatTTL:      15 * time.Second,  // Validity duration
 }
 ```
 
@@ -122,14 +122,15 @@ cfg := &parti.Config{
 
 | Option              | Default | Description                               |
 |---------------------|---------|-------------------------------------------|
-| `HeartbeatInterval` | `2s`    | How often workers publish heartbeats      |
-| `HeartbeatTTL`      | `6s`    | How long a heartbeat is considered valid  |
+| `HeartbeatInterval` | `5s`    | How often workers publish heartbeats      |
+| `HeartbeatTTL`      | `15s`   | How long a heartbeat is considered valid  |
 
 ### Recommendations
 
 - **HeartbeatTTL**: Should be 2-3x HeartbeatInterval
-- Faster intervals = faster failure detection, more KV traffic
-- Slower intervals = reduced overhead, slower detection
+- Faster intervals = faster failure detection, higher KV write load (one write per worker per interval, amplified by JetStream replication and fsync)
+- Slower intervals = lower PVC IOPS, slower detection. Defaults are tuned for low IOPS on file-backed JetStream clusters (e.g., NetApp PVC with quota)
+- For fast failover, override to `HeartbeatInterval: 2s, HeartbeatTTL: 6s` (previous default)
 
 ---
 
@@ -181,15 +182,19 @@ cfg := &parti.Config{
 }
 ```
 
-### Bucket Purposes
+### Bucket Purposes and Storage Type
 
-| Bucket             | Purpose                   | Recommended TTL                |
-|--------------------|---------------------------|--------------------------------|
-| `StableIDBucket`   | Worker ID claims          | Auto (WorkerIDTTL)             |
-| `ElectionBucket`   | Leader lease              | Lease-based                    |
-| `HeartbeatBucket`  | Worker health signals     | Auto (HeartbeatTTL)            |
-| `AssignmentBucket` | Partition assignments     | 0 (no expiration) or very long |
-| `HandoffBucket`    | Two-phase handoff claims  | 2-5 minutes                    |
+| Bucket             | Purpose                   | Recommended TTL                | Default Storage |
+|--------------------|---------------------------|--------------------------------|-----------------|
+| `StableIDBucket`   | Worker ID claims          | Auto (WorkerIDTTL)             | File            |
+| `ElectionBucket`   | Leader lease              | Lease-based                    | Memory          |
+| `HeartbeatBucket`  | Worker health signals     | Auto (HeartbeatTTL)            | Memory          |
+| `AssignmentBucket` | Partition assignments     | 0 (no expiration) or very long | File            |
+| `HandoffBucket`    | Two-phase handoff claims  | 2-5 minutes                    | File            |
+
+Heartbeat and election buckets use `MemoryStorage` to minimize PVC IOPS on file-backed JetStream clusters. Their data is intrinsically ephemeral — workers re-publish heartbeats every `HeartbeatInterval`, and a lost leader key simply triggers re-election. Stable-ID, assignment, and handoff buckets use `FileStorage` for durability: stable IDs must survive NATS restart to preserve worker identity, assignments must remain visible to followers joining during an outage, and handoff claims protect two-phase ownership transfers.
+
+If a bucket with a different storage type already exists (e.g., from a prior parti version or pre-provisioned by ops), parti opens it as-is and logs a `Warn` pointing at the manual migration path: `nats kv del <bucket>` during a maintenance window, then restart pods.
 
 ### Multi-Application Clusters
 

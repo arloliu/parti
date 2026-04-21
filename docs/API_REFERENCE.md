@@ -763,11 +763,11 @@ type Config struct {
     WorkerIDPrefix string        // Prefix for worker IDs (default: "worker")
     WorkerIDMin    int           // Minimum ID number (default: 0)
     WorkerIDMax    int           // Maximum ID number (default: 999)
-    WorkerIDTTL    time.Duration // TTL for ID claims (default: 30s)
+    WorkerIDTTL    time.Duration // TTL for ID claims (default: 75s)
 
     // Heartbeat Configuration
-    HeartbeatInterval time.Duration // Heartbeat publish interval (default: 2s)
-    HeartbeatTTL      time.Duration // Heartbeat validity duration (default: 6s)
+    HeartbeatInterval time.Duration // Heartbeat publish interval (default: 5s)
+    HeartbeatTTL      time.Duration // Heartbeat validity duration (default: 15s)
 
     // Stabilization Windows
     ColdStartWindow       time.Duration // Window for cold start (default: 30s)
@@ -777,8 +777,8 @@ type Config struct {
 
     // Timeouts
     OperationTimeout time.Duration // Timeout for KV operations (default: 10s)
-    ElectionTimeout  time.Duration // Timeout for leader election (default: 5s)
-    StartupTimeout   time.Duration // Timeout for manager startup (default: 30s)
+    ElectionTimeout  time.Duration // Timeout for leader election (default: 10s)
+    StartupTimeout   time.Duration // Timeout for manager startup (default: 60s)
     ShutdownTimeout  time.Duration // Timeout for graceful shutdown (default: 10s)
 
     // Assignment Configuration

@@ -142,7 +142,7 @@ func ExampleSetDefaults() {
 	}
 
 	fmt.Printf("Prefix: %s, HeartbeatInterval: %v\n", cfg.WorkerIDPrefix, cfg.HeartbeatInterval)
-	// Output: Prefix: custom-worker, HeartbeatInterval: 2s
+	// Output: Prefix: custom-worker, HeartbeatInterval: 5s
 }
 
 // This example demonstrates composing multiple WorkerConsumerUpdater
