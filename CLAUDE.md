@@ -14,6 +14,13 @@ Key public packages:
 
 Internal packages under `internal/` are private implementation details — do not reference them in public API or docs.
 
+## Working Principles
+
+- **Surface uncertainty before coding.** If multiple interpretations exist, present them; if unclear, ask.
+- **Minimum change that solves the problem.** No speculative features or unasked-for flexibility.
+- **Don't guess — verify.** Write a small test or benchmark; don't refactor on intuition.
+- **Define verifiable success criteria.** Transform vague tasks into concrete checks.
+
 ## Git Conventions
 
 **Never add `Co-Authored-By` or any other attribution trailers to git commit messages.**
