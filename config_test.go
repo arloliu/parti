@@ -1,12 +1,89 @@
 package parti
 
 import (
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
+
+// warnCapture is a minimal Logger that records Warn-level messages only.
+// Other levels are dropped. Safe for concurrent use in case ValidateWithWarnings
+// ever calls the logger from a goroutine.
+type warnCapture struct {
+	mu    sync.Mutex
+	warns []string
+}
+
+func (w *warnCapture) Debug(string, ...any) {}
+func (w *warnCapture) Info(string, ...any)  {}
+func (w *warnCapture) Warn(msg string, _ ...any) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.warns = append(w.warns, msg)
+}
+func (w *warnCapture) Error(string, ...any) {}
+func (w *warnCapture) Fatal(string, ...any) {}
+
+func (w *warnCapture) contains(substr string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, m := range w.warns {
+		if len(m) >= len(substr) && containsSubstring(m, substr) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func containsSubstring(haystack, needle string) bool {
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if haystack[i:i+len(needle)] == needle {
+			return true
+		}
+	}
+	return false
+}
+
+// TestValidateWithWarnings_StartupTimeout asserts that ValidateWithWarnings
+// emits a warning when StartupTimeout is smaller than the safe minimum
+// (ColdStartWindow + ElectionTimeout + 5s headroom) and stays silent otherwise.
+// The guidance prevents the takeover-race hang fixed in an earlier commit from
+// regressing due to misconfiguration.
+func TestValidateWithWarnings_StartupTimeout(t *testing.T) {
+	const warnPrefix = "StartupTimeout is shorter than"
+
+	t.Run("warns when startup timeout is too small", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.StartupTimeout = cfg.ColdStartWindow // exactly equal — below safe minimum
+		log := &warnCapture{}
+		cfg.ValidateWithWarnings(log)
+		require.True(t, log.contains(warnPrefix),
+			"expected startup-timeout warning, got %v", log.warns)
+	})
+
+	t.Run("no warning at or above safe minimum", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.StartupTimeout = cfg.ColdStartWindow + cfg.ElectionTimeout + 5*time.Second
+		log := &warnCapture{}
+		cfg.ValidateWithWarnings(log)
+		require.False(t, log.contains(warnPrefix),
+			"did not expect startup-timeout warning, got %v", log.warns)
+	})
+
+	t.Run("warns at defaults (30s = ColdStartWindow)", func(t *testing.T) {
+		// Defaults have StartupTimeout==ColdStartWindow==30s — that's exactly
+		// the race scenario. Document it as a warn.
+		cfg := DefaultConfig()
+		log := &warnCapture{}
+		cfg.ValidateWithWarnings(log)
+		require.True(t, log.contains(warnPrefix),
+			"defaults should emit the warning — ColdStartWindow==StartupTimeout is unsafe")
+	})
+}
 
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
