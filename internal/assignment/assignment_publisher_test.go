@@ -27,12 +27,13 @@ func TestAssignmentPublisher_DiscoverHighestVersion(t *testing.T) {
 	ctx := context.Background()
 
 	// Initially should be 0 - DiscoverHighestVersion handles empty KV gracefully
-	err := publisher.DiscoverHighestVersion(ctx)
+	ids, err := publisher.DiscoverHighestVersion(ctx)
 	// Empty KV may return "no keys found" error - this is acceptable
 	if err != nil && !types.IsNoKeysFoundError(err) {
 		require.NoError(t, err)
 	}
 	require.Equal(t, int64(0), publisher.CurrentVersion())
+	require.Empty(t, ids)
 
 	// Add some assignments with different versions
 	asgn1 := types.Assignment{Version: 5, Partitions: []types.Partition{{Keys: []string{"p1"}}}}
@@ -45,10 +46,11 @@ func TestAssignmentPublisher_DiscoverHighestVersion(t *testing.T) {
 	_, err = assignmentKV.Put(ctx, "assignment.w2", data2)
 	require.NoError(t, err)
 
-	// Should discover version 10
-	err = publisher.DiscoverHighestVersion(ctx)
+	// Should discover version 10 and return both worker IDs
+	ids, err = publisher.DiscoverHighestVersion(ctx)
 	require.NoError(t, err)
 	require.Equal(t, int64(10), publisher.CurrentVersion())
+	require.ElementsMatch(t, []string{"w1", "w2"}, ids)
 }
 
 func TestAssignmentPublisher_DiscoverHighestVersion_IgnoresNonAssignmentKeys(t *testing.T) {
@@ -74,10 +76,11 @@ func TestAssignmentPublisher_DiscoverHighestVersion_IgnoresNonAssignmentKeys(t *
 	_, err = assignmentKV.Put(ctx, "assignment.w1", data)
 	require.NoError(t, err)
 
-	// Should only find version 3 (ignoring heartbeat)
-	err = publisher.DiscoverHighestVersion(ctx)
+	// Should only find version 3 (ignoring heartbeat) and only the assignment worker ID
+	ids, err := publisher.DiscoverHighestVersion(ctx)
 	require.NoError(t, err)
 	require.Equal(t, int64(3), publisher.CurrentVersion())
+	require.Equal(t, []string{"w1"}, ids)
 }
 
 func TestAssignmentPublisher_Publish(t *testing.T) {
@@ -298,7 +301,7 @@ func TestAssignmentPublisher_VersionMonotonicity(t *testing.T) {
 		metrics.NewNop(),
 	)
 
-	err = publisher.DiscoverHighestVersion(ctx)
+	_, err = publisher.DiscoverHighestVersion(ctx)
 	require.NoError(t, err)
 	require.Equal(t, int64(100), publisher.CurrentVersion())
 

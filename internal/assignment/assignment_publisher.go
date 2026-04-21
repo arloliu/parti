@@ -55,25 +55,35 @@ func NewAssignmentPublisher(
 	}
 }
 
-// DiscoverHighestVersion scans KV for the highest existing assignment version.
+// DiscoverHighestVersion scans KV for the highest existing assignment version
+// and returns the set of worker IDs that currently have assignment keys.
 //
-// This ensures version monotonicity across leader changes by finding the
-// maximum version number from existing assignments.
+// Two uses:
+//  1. Version monotonicity across leader changes — the highest version found
+//     seeds p.currentVersion so subsequent publishes increment from there.
+//  2. Takeover hygiene — callers can seed their internal "currently assigned
+//     workers" map from the returned IDs so the next rebalance's
+//     workersToRemove computation sweeps keys for workers that are no longer
+//     alive. Without this, a new leader's first rebalance leaves stale
+//     assignment.<id> keys in KV and a restarted pod reclaiming the same ID
+//     would read stale partition data.
 //
 // Parameters:
 //   - ctx: Context for cancellation
 //
 // Returns:
+//   - []string: Worker IDs that currently have assignment keys in KV.
 //   - error: Nil on success, error on KV access failure
-func (p *AssignmentPublisher) DiscoverHighestVersion(ctx context.Context) error {
+func (p *AssignmentPublisher) DiscoverHighestVersion(ctx context.Context) ([]string, error) {
 	keys, err := kvutil.ListKeys(ctx, p.assignmentKV, p.keyPrefix, false)
 	if err != nil {
-		return fmt.Errorf("failed to list KV keys: %w", err)
+		return nil, fmt.Errorf("failed to list KV keys: %w", err)
 	}
 
 	p.logger.Debug("discovering highest version", "total_keys", len(keys), "prefix", p.prefix)
 
 	highestVersion := int64(0)
+	workerIDs := make([]string, 0, len(keys))
 	checkedCount := 0
 	for _, key := range keys {
 		checkedCount++
@@ -90,6 +100,7 @@ func (p *AssignmentPublisher) DiscoverHighestVersion(ctx context.Context) error 
 		if asgn.Version > highestVersion {
 			highestVersion = asgn.Version
 		}
+		workerIDs = append(workerIDs, strings.TrimPrefix(key, p.keyPrefix))
 	}
 
 	p.mu.Lock()
@@ -97,12 +108,12 @@ func (p *AssignmentPublisher) DiscoverHighestVersion(ctx context.Context) error 
 	p.mu.Unlock()
 
 	if highestVersion > 0 {
-		p.logger.Info("discovered existing assignments", "highest_version", highestVersion, "checked_keys", checkedCount)
+		p.logger.Info("discovered existing assignments", "highest_version", highestVersion, "checked_keys", checkedCount, "worker_keys", len(workerIDs))
 	} else {
 		p.logger.Debug("no existing assignments found", "checked_keys", checkedCount)
 	}
 
-	return nil
+	return workerIDs, nil
 }
 
 // cleanupStaleAssignments removes assignment keys for specific workers.

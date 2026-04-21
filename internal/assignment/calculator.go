@@ -184,8 +184,23 @@ func (c *Calculator) Start(ctx context.Context) error {
 	}
 
 	// Discover highest version from existing assignments to ensure monotonicity across leader changes
-	if err := c.discoverHighestVersion(ctx); err != nil {
+	existingWorkers, err := c.discoverHighestVersion(ctx)
+	if err != nil {
 		c.Logger.Warn("failed to discover existing versions, starting from 0", "error", err)
+	}
+
+	// Seed currentWorkers with IDs that currently have assignment keys in KV.
+	// Without this seeding, a new leader's first rebalance has an empty
+	// currentWorkers map, so its workersToRemove computation is empty and
+	// stale assignment.<id> keys for already-dead workers are never swept.
+	// A pod later reclaiming such an ID would then read stale partition data
+	// from its own waitForAssignment poll.
+	if len(existingWorkers) > 0 {
+		c.mu.Lock()
+		for _, wid := range existingWorkers {
+			c.currentWorkers[wid] = true
+		}
+		c.mu.Unlock()
 	}
 
 	// A non-zero discovered version means prior leaders have already published
@@ -344,9 +359,12 @@ func (c *Calculator) TriggerRebalance(ctx context.Context) error {
 	return c.rebalance(ctx, "manual-refresh")
 }
 
-// discoverHighestVersion scans existing assignments in KV to find the highest version.
-// This ensures version monotonicity across leader changes.
-func (c *Calculator) discoverHighestVersion(ctx context.Context) error {
+// discoverHighestVersion scans existing assignments in KV to find the highest
+// version and the set of worker IDs that currently have assignment keys.
+// This ensures version monotonicity across leader changes and lets the
+// calculator seed its currentWorkers map so the first rebalance can sweep
+// assignment keys for workers that no longer have active heartbeats.
+func (c *Calculator) discoverHighestVersion(ctx context.Context) ([]string, error) {
 	return c.publisher.DiscoverHighestVersion(ctx)
 }
 
