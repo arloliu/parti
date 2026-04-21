@@ -118,9 +118,11 @@ func (m *Manager) startCalculator(assignmentKV, heartbeatKV jetstream.KeyValue) 
 	m.wg.Go(func() { m.monitorCalculatorState(calc, readyCh) })
 	<-readyCh
 
-	// Start calculator in background
+	// Start calculator in background. On failure, restore the Nop default
+	// (not nil) so any lifecycle method that reads m.calculator continues to
+	// work without a nil-check.
 	if err := calc.Start(m.ctx); err != nil {
-		m.calculator = nil
+		m.calculator = assignment.NewNopCalculator()
 		return fmt.Errorf("failed to start calculator: %w", err)
 	}
 

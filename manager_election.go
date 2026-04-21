@@ -160,13 +160,45 @@ func (m *Manager) monitorLeadership() {
 						})
 					}
 
-					// Start calculator
+					// Start calculator. If this fails we must NOT silently keep
+					// leadership — the pod would hold the election lease without
+					// a working calculator, so followers waiting on assignment
+					// keys would hang until the lease TTL expires (potentially
+					// forever if renewal keeps succeeding). Give up leadership
+					// so another pod can attempt; if every pod fails the same
+					// way (e.g. KV MaxValueSize too small for the assignment),
+					// the error is logged cluster-wide and operators can
+					// diagnose instead of seeing a silent hang.
 					if err := m.startCalculator(m.assignmentKV, m.heartbeatKV); err != nil {
-						m.logError("failed to start calculator", "error", err)
+						m.releaseLeadershipAfterCalculatorFailure(err)
 					}
 				}
 			}
 		}
+	}
+}
+
+// releaseLeadershipAfterCalculatorFailure gives up leadership when
+// startCalculator fails on takeover. Holding the election lease without a
+// working calculator would leave followers hanging on assignment keys, so we
+// release so another pod can attempt; if every pod fails the same way (e.g.
+// KV MaxValueSize too small for the assignment), the error is logged
+// cluster-wide and operators can diagnose instead of seeing a silent hang.
+func (m *Manager) releaseLeadershipAfterCalculatorFailure(cause error) {
+	m.logError("failed to start calculator after takeover, releasing leadership", "error", cause)
+	m.isLeader.Store(false)
+
+	releaseCtx, releaseCancel := context.WithTimeout(m.ctx, m.cfg.OperationTimeout)
+	relErr := m.election.ReleaseLeadership(releaseCtx)
+	releaseCancel()
+	if relErr != nil && !errors.Is(relErr, election.ErrNotLeader) {
+		m.logError("failed to release leadership after calculator failure", "error", relErr)
+	}
+
+	if m.hooks != nil && m.hooks.OnLeadershipChanged != nil {
+		m.invokeHook("leadership released after calculator failure", func() error {
+			return m.hooks.OnLeadershipChanged(m.ctx, false)
+		})
 	}
 }
 
