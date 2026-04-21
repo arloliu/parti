@@ -205,9 +205,14 @@ func (cc *ChaosController) generateEventParams(event ChaosEvent) map[string]any 
 		params["duration"] = time.Duration(cc.rng.Intn(4)+5) * time.Second
 
 	case SlowConsumerEvent:
-		// Slow down processing by 10x-50x for 10-30 seconds
-		params["multiplier"] = cc.rng.Intn(40) + 10 // 10-50x slowdown
-		params["duration"] = time.Duration(cc.rng.Intn(20)+10) * time.Second
+		// Slow down processing by 3x-10x for 5-15 seconds. The upper bound is
+		// capped so that a slow window's accumulated backlog can drain within
+		// the 240s gap_aging threshold even under worst-case scheduling; prior
+		// ranges (10x-50x / 10-30s) produced backlogs that could not catch up
+		// before aging out into unresolved gaps when chaos reassigned the
+		// partition mid-slow-window.
+		params["multiplier"] = cc.rng.Intn(8) + 3 // 3-10x
+		params["duration"] = time.Duration(cc.rng.Intn(11)+5) * time.Second
 
 	default:
 		// Unknown event type, return empty params

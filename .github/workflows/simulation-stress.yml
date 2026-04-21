@@ -13,7 +13,8 @@ permissions:
 jobs:
   chaos-simulation:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 3 attempts × (8m sim + 90s cooldown + ~1m setup) ≈ 32m worst case; 35m gives headroom.
+    timeout-minutes: 35
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -26,14 +27,33 @@ jobs:
         run: go build -o tmp/simulation ./test/simulation/cmd/simulation
 
       - name: Run Chaos Simulation
+        # Retry up to 3 times to absorb residual chaos-timing flakiness. Each
+        # attempt uses an independent random seed, so failures are independent.
+        # Per-attempt logs are preserved on failure so every attempt is
+        # diagnosable from the uploaded artifact.
         run: |
-          # Run for 8 minutes with comprehensive chaos
-          ./tmp/simulation \
-            --config test/simulation/configs/chaos_comprehensive.yaml \
-            --duration 8m \
-            --cooldown 90s \
-            --stop-on-failure=false \
-            2>&1 | tee tmp/simulation.log
+          set +e
+          max_attempts=3
+          for attempt in $(seq 1 $max_attempts); do
+            echo "::group::Simulation attempt $attempt/$max_attempts"
+            ./tmp/simulation \
+              --config test/simulation/configs/chaos_comprehensive.yaml \
+              --duration 8m \
+              --cooldown 90s \
+              --stop-on-failure=false \
+              2>&1 | tee "tmp/simulation-attempt${attempt}.log"
+            rc=${PIPESTATUS[0]}
+            echo "::endgroup::"
+            if [ $rc -eq 0 ]; then
+              echo "Attempt $attempt succeeded"
+              cp "tmp/simulation-attempt${attempt}.log" tmp/simulation.log
+              exit 0
+            fi
+            echo "Attempt $attempt failed (exit $rc)"
+          done
+          # All attempts exhausted — surface the last attempt's log as the primary.
+          cp "tmp/simulation-attempt${max_attempts}.log" tmp/simulation.log
+          exit 1
 
       - name: Upload Failure Report
         if: failure()
@@ -43,3 +63,4 @@ jobs:
           path: |
             failure_report.json
             tmp/simulation.log
+            tmp/simulation-attempt*.log

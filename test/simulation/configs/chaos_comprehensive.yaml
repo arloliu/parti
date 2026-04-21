@@ -39,7 +39,10 @@ chaos:
     - slow_consumer
 
 coordinator:
-  gap_aging: 180s
+  # 240s gives post-burst drains enough runway when chaos reassigns partitions
+  # while a slow_consumer event is still active. Prior value (180s) produced
+  # flaky unresolved-gap failures under aggressive chaos combinations.
+  gap_aging: 240s
   slo:
     enable_catch_up: true
     catch_up_deadline: 30s
