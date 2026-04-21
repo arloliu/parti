@@ -1462,6 +1462,13 @@ func handleWorkerGoroutineScaleDown(
 		log.Printf("[Chaos] Stopping worker goroutine: %s", target.ID)
 		target.Cancel()
 		registry.MarkInactive(target.ID)
+		// Notify coordinator so its audit does not keep attributing partitions
+		// to this permanently stopped worker. Skipped for crash/restart paths
+		// that re-spawn the same ID because a fresh OnAssignmentChanged will
+		// re-populate the snapshot on restart.
+		if aioCoord != nil {
+			aioCoord.NotifyWorkerStopped(target.ID)
+		}
 	}
 
 	// Update metrics

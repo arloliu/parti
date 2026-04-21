@@ -26,6 +26,7 @@ type Coordinator struct {
 
 	// assignment tracking
 	assignmentsCh       chan AssignmentReport
+	stoppedWorkersCh    chan string // signals a worker goroutine has permanently stopped
 	workerAssignments   map[string]map[int]struct{}
 	prevGlobalAssigned  map[int]struct{}
 	prevPartitionOwners map[int]string // partitionID -> workerID for previous snapshot
@@ -155,6 +156,7 @@ func NewCoordinator(totalPartitions int, metricsCollector *metrics.Collector, du
 		receivedCh:          make(chan ReceivedMessage, 10000),
 		stopCh:              make(chan struct{}),
 		assignmentsCh:       make(chan AssignmentReport, 1000),
+		stoppedWorkersCh:    make(chan string, 256),
 		workerAssignments:   make(map[string]map[int]struct{}),
 		prevGlobalAssigned:  make(map[int]struct{}),
 		activeOwners:        make(map[int]string),
@@ -208,6 +210,27 @@ func (c *Coordinator) GetReceivedChannel() chan<- ReceivedMessage {
 //   - chan<- AssignmentReport: Channel for assignment reports
 func (c *Coordinator) GetAssignmentsChannel() chan<- AssignmentReport {
 	return c.assignmentsCh
+}
+
+// NotifyWorkerStopped signals that a worker goroutine has permanently stopped
+// (e.g., scale-down). Its last reported assignment snapshot is pruned from the
+// coordinator's tracking so ownership-audit telemetry does not attribute
+// partitions to a dead worker whose entries would otherwise persist forever
+// because a dead worker cannot send a final OnAssignmentChanged hook with an
+// empty set.
+//
+// Best-effort: drops the notification if the internal buffer is full. A
+// restarted worker reclaiming the same ID will re-populate its snapshot via
+// its normal OnAssignmentChanged hook, so pruning here is always safe.
+func (c *Coordinator) NotifyWorkerStopped(workerID string) {
+	if workerID == "" {
+		return
+	}
+	select {
+	case c.stoppedWorkersCh <- workerID:
+	default:
+		log.Printf("[Coordinator] stoppedWorkersCh full, dropping stop notification for %s", workerID)
+	}
 }
 
 // Start begins coordinator tracking.
@@ -875,6 +898,26 @@ func (c *Coordinator) processAssignments(ctx context.Context) { //nolint:gocyclo
 		select {
 		case <-ctx.Done():
 			return
+		case wid := <-c.stoppedWorkersCh:
+			// A worker goroutine has permanently stopped. Drop its snapshot and
+			// rebuild prevPartitionOwners so the ownership audit no longer
+			// attributes partitions to a dead worker. Running in the same
+			// goroutine as assignment reports keeps these updates serialized.
+			if _, had := c.workerAssignments[wid]; !had {
+				continue
+			}
+			delete(c.workerAssignments, wid)
+			if c.baselineLocked && c.totalPartitions > 0 {
+				fresh := make(map[int]string, c.totalPartitions)
+				for id, wset := range c.workerAssignments {
+					for pid := range wset {
+						if _, exists := fresh[pid]; !exists {
+							fresh[pid] = id
+						}
+					}
+				}
+				c.prevPartitionOwners = fresh
+			}
 		case ar := <-c.assignmentsCh:
 			// Track reporter appearance and optionally log when all expected workers reported once
 			if c.expectedWorkers > 0 {
