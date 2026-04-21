@@ -434,6 +434,7 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 			ProcessingDelayMax:  cfg.Workers.ProcessingDelay.Max,
 			CoordinatorReportCh: coord.GetReceivedChannel(),
 			AssignmentReportCh:  coord.GetAssignmentsChannel(),
+			StartLatencyCh:      coord.GetStartLatencyChannel(),
 			MetricsCollector:    metricsCollector,
 			ConsumerBatchSize:   cfg.Workers.ConsumerBatchSize,
 			HandlerConcurrency:  cfg.Workers.HandlerConcurrency,
@@ -659,12 +660,15 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 				late := metricsCollector.GetLateMessagesTotal()
 				lost := metricsCollector.GetLostMessagesTotal()
 				failures := metricsCollector.GetAuditFailuresTotal()
-				if failures > 0 || late > 0 || lost > 0 {
+				initialExc, takeoverExc := coord.SlowStartExceedances()
+				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 {
 					// Record error but proceed to ordered shutdown
-					invariantsErr = fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d", failures, late, lost)
+					invariantsErr = fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d",
+						failures, late, lost, initialExc, takeoverExc)
 				}
 				if invariantsErr == nil {
-					log.Printf("Stability invariants passed: audit_failures=%d late=%d lost=%d", failures, late, lost)
+					log.Printf("Stability invariants passed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d",
+						failures, late, lost, initialExc, takeoverExc)
 				} else {
 					log.Printf("Stability invariants failed: %v", invariantsErr)
 				}
@@ -704,8 +708,10 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 				late := metricsCollector.GetLateMessagesTotal()
 				lost := metricsCollector.GetLostMessagesTotal()
 				failures := metricsCollector.GetAuditFailuresTotal()
-				if failures > 0 || late > 0 || lost > 0 {
-					return fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d", failures, late, lost)
+				initialExc, takeoverExc := coord.SlowStartExceedances()
+				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 {
+					return fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d",
+						failures, late, lost, initialExc, takeoverExc)
 				}
 			}
 
@@ -1346,6 +1352,7 @@ func spawnAllInOneWorker(parent context.Context, workerID string) bool {
 		ProcessingDelayMax:          aioCfg.Workers.ProcessingDelay.Max,
 		CoordinatorReportCh:         aioCoord.GetReceivedChannel(),
 		AssignmentReportCh:          aioCoord.GetAssignmentsChannel(),
+		StartLatencyCh:              aioCoord.GetStartLatencyChannel(),
 		MetricsCollector:            aioMetrics,
 		ConsumerBatchSize:           aioCfg.Workers.ConsumerBatchSize,
 		HandlerConcurrency:          aioCfg.Workers.HandlerConcurrency,

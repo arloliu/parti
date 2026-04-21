@@ -46,12 +46,21 @@ type Worker struct {
 	processingDelayMax  time.Duration
 	coordinatorReportCh chan<- coordinator.ReceivedMessage
 	assignmentReportCh  chan<- coordinator.AssignmentReport
+	startLatencyCh      chan<- coordinator.StartLatencyReport
 	metricsCollector    *metrics.Collector
 	logger              types.Logger
 	currentPartitions   int // Track current partition count for metrics
 	ctx                 context.Context
 	cancel              context.CancelFunc
 	started             atomic.Bool // Prevents multiple Start() calls
+
+	// first-assignment latency tracking: captures the delay between Start()
+	// being called and the first OnAssignmentChanged with a non-empty set.
+	// Surfaces regressions of leader-takeover hang fixes (commits 5345527 and
+	// 7781b9b) where a replacement worker would block in waitForAssignment
+	// past its caller's deadline.
+	startCalledAt     time.Time
+	firstAssignmentOK atomic.Bool
 	// throughput controls
 	handlerConcurrency int
 	consumerBatchSize  int
@@ -117,6 +126,7 @@ type Config struct {
 	ProcessingDelayMax  time.Duration
 	CoordinatorReportCh chan<- coordinator.ReceivedMessage
 	AssignmentReportCh  chan<- coordinator.AssignmentReport
+	StartLatencyCh      chan<- coordinator.StartLatencyReport
 	MetricsCollector    *metrics.Collector
 	// Throughput knobs
 	ConsumerBatchSize  int
@@ -214,6 +224,7 @@ func NewWorker(cfg Config) (*Worker, error) { //nolint:cyclop
 		processingDelayMax:  cfg.ProcessingDelayMax,
 		coordinatorReportCh: cfg.CoordinatorReportCh,
 		assignmentReportCh:  cfg.AssignmentReportCh,
+		startLatencyCh:      cfg.StartLatencyCh,
 		metricsCollector:    cfg.MetricsCollector,
 		logger:              logger,
 		currentPartitions:   0,
@@ -350,6 +361,11 @@ func (w *Worker) Start(ctx context.Context) error {
 		return nil
 	}
 
+	// Timestamp Start() entry so handleAssignmentChanged can measure the
+	// Start()-to-first-assignment latency that the coordinator audits.
+	w.startCalledAt = time.Now()
+	w.firstAssignmentOK.Store(false)
+
 	// Use the provided context directly (don't create child context)
 	// This ensures that when the parent context is cancelled (e.g., by chaos events),
 	// the manager and all its goroutines will properly shut down
@@ -406,6 +422,21 @@ func (w *Worker) handleAssignmentChanged(ctx context.Context, oldSet, newSet []t
 
 	// Debug: log change details
 	log.Printf("[%s] Assignment change: old=%d new=%d", w.id, len(oldSet), len(newSet))
+
+	// Report the first non-empty assignment back as a start-latency sample.
+	// Guarded with CAS so we emit exactly once per Worker instance even if
+	// the first rebalance arrives with 0 partitions and the second finally
+	// assigns some (the sample we care about is "time to first real work").
+	if len(newSet) > 0 && w.firstAssignmentOK.CompareAndSwap(false, true) {
+		if w.startLatencyCh != nil && !w.startCalledAt.IsZero() {
+			latency := time.Since(w.startCalledAt)
+			select {
+			case w.startLatencyCh <- coordinator.StartLatencyReport{WorkerID: w.id, Latency: latency}:
+			default:
+				log.Printf("[%s] startLatencyCh full, dropping first-assignment latency=%s", w.id, latency)
+			}
+		}
+	}
 
 	// Report new assignment snapshot to coordinator for completeness/locality metrics.
 	if w.assignmentReportCh != nil {

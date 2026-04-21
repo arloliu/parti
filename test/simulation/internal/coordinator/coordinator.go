@@ -27,16 +27,27 @@ type Coordinator struct {
 	// assignment tracking
 	assignmentsCh       chan AssignmentReport
 	stoppedWorkersCh    chan string // signals a worker goroutine has permanently stopped
+	startLatenciesCh    chan StartLatencyReport
 	workerAssignments   map[string]map[int]struct{}
 	prevGlobalAssigned  map[int]struct{}
 	prevPartitionOwners map[int]string // partitionID -> workerID for previous snapshot
 	activeOwners        map[int]string // partitionID -> workerID based on actual processing reports
 	ownersMu            sync.RWMutex   // guards activeOwners
-	totalPartitions     int
-	expectedWorkers     int // optional hint for expected worker count
-	initialReporters    map[string]struct{}
-	baselineLockTimeout time.Duration
-	baselineLocked      bool
+
+	// start-latency tracking: time from Worker.Start() to first OnAssignmentChanged with
+	// a non-empty partition set. Surfaces regressions of the leader-takeover hang fix
+	// (commit 5345527) and stale-assignment-sweep fix (commit 7781b9b) — both cause
+	// replacement workers to block in waitForAssignment longer than expected.
+	startLatencyMu          sync.Mutex
+	initialStartLatencies   map[string]time.Duration // first assignment arrived before coldStartComplete
+	takeoverStartLatencies  map[string]time.Duration // first assignment arrived after coldStartComplete
+	slowStartBudgetInitial  time.Duration            // threshold before cold-start completes
+	slowStartBudgetTakeover time.Duration            // threshold after cold-start completes
+	totalPartitions         int
+	expectedWorkers         int // optional hint for expected worker count
+	initialReporters        map[string]struct{}
+	baselineLockTimeout     time.Duration
+	baselineLocked          bool
 	// finalCoverageAchieved is set once we've observed a union of assigned
 	// partitions covering the full expected partition space. Before this point
 	// (during cold start convergence) we suppress reporting partially assigned
@@ -137,6 +148,14 @@ type AssignmentReport struct {
 	Partitions []int
 }
 
+// StartLatencyReport reports the latency from Worker.Start() to the first
+// OnAssignmentChanged hook firing with a non-empty partition set. It is
+// emitted exactly once per worker instance.
+type StartLatencyReport struct {
+	WorkerID string
+	Latency  time.Duration
+}
+
 // NewCoordinator creates a new coordinator.
 //
 // Parameters:
@@ -150,25 +169,30 @@ type AssignmentReport struct {
 //   - *Coordinator: Initialized coordinator
 func NewCoordinator(totalPartitions int, metricsCollector *metrics.Collector, dupCfg DupTraceSettings, stopOnFailure bool, failureReportPath string) *Coordinator {
 	c := &Coordinator{
-		tracker:             NewMessageTracker(),
-		metricsCollector:    metricsCollector,
-		sentCh:              make(chan producer.ReportMessage, 10000),
-		receivedCh:          make(chan ReceivedMessage, 10000),
-		stopCh:              make(chan struct{}),
-		assignmentsCh:       make(chan AssignmentReport, 1000),
-		stoppedWorkersCh:    make(chan string, 256),
-		workerAssignments:   make(map[string]map[int]struct{}),
-		prevGlobalAssigned:  make(map[int]struct{}),
-		activeOwners:        make(map[int]string),
-		totalPartitions:     totalPartitions,
-		initialReporters:    make(map[string]struct{}),
-		baselineLockTimeout: 5 * time.Second,
-		recoveryActive:      false,
-		stableQuietWindow:   10 * time.Second,
-		workerLastSeen:      make(map[string]time.Time),
-		workerRecovery:      make(map[string]*workerRecoveryContext),
-		stopOnFailure:       stopOnFailure,
-		failureReportPath:   failureReportPath,
+		tracker:                 NewMessageTracker(),
+		metricsCollector:        metricsCollector,
+		sentCh:                  make(chan producer.ReportMessage, 10000),
+		receivedCh:              make(chan ReceivedMessage, 10000),
+		stopCh:                  make(chan struct{}),
+		assignmentsCh:           make(chan AssignmentReport, 1000),
+		stoppedWorkersCh:        make(chan string, 256),
+		startLatenciesCh:        make(chan StartLatencyReport, 256),
+		initialStartLatencies:   make(map[string]time.Duration),
+		takeoverStartLatencies:  make(map[string]time.Duration),
+		slowStartBudgetInitial:  25 * time.Second, // sim ColdStartWindow(10s) + election + chaos-burst headroom
+		slowStartBudgetTakeover: 20 * time.Second, // PlannedScaleWindow(10s) + election + chaos-burst headroom; still well below pre-fix ColdStartWindow(30s)
+		workerAssignments:       make(map[string]map[int]struct{}),
+		prevGlobalAssigned:      make(map[int]struct{}),
+		activeOwners:            make(map[int]string),
+		totalPartitions:         totalPartitions,
+		initialReporters:        make(map[string]struct{}),
+		baselineLockTimeout:     5 * time.Second,
+		recoveryActive:          false,
+		stableQuietWindow:       10 * time.Second,
+		workerLastSeen:          make(map[string]time.Time),
+		workerRecovery:          make(map[string]*workerRecoveryContext),
+		stopOnFailure:           stopOnFailure,
+		failureReportPath:       failureReportPath,
 	}
 	c.dup = NewDupTracer(dupCfg)
 	// Suppress verbose out-of-order logs by default; metrics capture disorder depth.
@@ -212,6 +236,38 @@ func (c *Coordinator) GetAssignmentsChannel() chan<- AssignmentReport {
 	return c.assignmentsCh
 }
 
+// GetStartLatencyChannel returns the channel workers use to report their
+// first-assignment latency. Workers send a single report per instance when
+// their OnAssignmentChanged hook fires for the first time with a non-empty
+// partition set.
+//
+// Returns:
+//   - chan<- StartLatencyReport: Channel for per-worker start-latency reports
+func (c *Coordinator) GetStartLatencyChannel() chan<- StartLatencyReport {
+	return c.startLatenciesCh
+}
+
+// ConfigureSlowStartBudgets sets thresholds used to flag workers whose first
+// assignment arrived too late. Separate budgets apply before vs. after cold
+// start completes:
+//   - initial: applied while the cluster is still converging for the first time
+//     (expected to absorb ColdStartWindow + election + startup jitter).
+//   - takeover: applied after cold-start convergence, when a new worker joining
+//     an already-warm cluster should be picked up within PlannedScaleWindow
+//     (this is the budget that regresses if fix 5345527 is reverted).
+//
+// Values <= 0 leave the existing default in place.
+func (c *Coordinator) ConfigureSlowStartBudgets(initial, takeover time.Duration) {
+	c.startLatencyMu.Lock()
+	defer c.startLatencyMu.Unlock()
+	if initial > 0 {
+		c.slowStartBudgetInitial = initial
+	}
+	if takeover > 0 {
+		c.slowStartBudgetTakeover = takeover
+	}
+}
+
 // NotifyWorkerStopped signals that a worker goroutine has permanently stopped
 // (e.g., scale-down). Its last reported assignment snapshot is pruned from the
 // coordinator's tracking so ownership-audit telemetry does not attribute
@@ -251,6 +307,8 @@ func (c *Coordinator) Start(ctx context.Context) {
 	}
 
 	// Process assignment reports to derive completeness & locality metrics.
+	// This goroutine also drains start-latency reports to classify them with
+	// the same goroutine's view of baselineLocked (no cross-goroutine races).
 	if c.metricsCollector != nil && c.totalPartitions > 0 {
 		go c.processAssignments(ctx)
 	}
@@ -536,6 +594,109 @@ func (c *Coordinator) printDuplicateTrace(now time.Time) {
 	}
 }
 
+// printStartLatencyAudit summarizes how long workers took from Worker.Start()
+// to their first non-empty OnAssignmentChanged hook. Separates the initial
+// cold-start cohort from later joiners (chaos-spawned workers, post-takeover
+// replacements) and flags any worker that breached the configured budget.
+//
+// Exists specifically to surface regressions of:
+//   - commit 5345527 (takeover uses PlannedScaleWindow, not ColdStartWindow)
+//   - commit 7781b9b (stale assignment.<id> keys are swept on takeover)
+//
+// Either regression would manifest as takeover-cohort latencies climbing toward
+// the pre-fix ColdStartWindow default (30s).
+func (c *Coordinator) printStartLatencyAudit() {
+	c.startLatencyMu.Lock()
+	initial := make(map[string]time.Duration, len(c.initialStartLatencies))
+	for w, d := range c.initialStartLatencies {
+		initial[w] = d
+	}
+	takeover := make(map[string]time.Duration, len(c.takeoverStartLatencies))
+	for w, d := range c.takeoverStartLatencies {
+		takeover[w] = d
+	}
+	initialBudget := c.slowStartBudgetInitial
+	takeoverBudget := c.slowStartBudgetTakeover
+	c.startLatencyMu.Unlock()
+
+	if len(initial) == 0 && len(takeover) == 0 {
+		return
+	}
+
+	fmt.Println("-- Start Latency (Start() -> first assignment) --")
+	c.printStartLatencyCohort("Initial cohort", initial, initialBudget)
+	c.printStartLatencyCohort("Takeover / late joiners", takeover, takeoverBudget)
+}
+
+func (c *Coordinator) printStartLatencyCohort(label string, samples map[string]time.Duration, budget time.Duration) {
+	if len(samples) == 0 {
+		fmt.Printf("%s: n=0\n", label)
+		return
+	}
+
+	var sum, maxLat time.Duration
+	minLat := time.Duration(1<<63 - 1)
+	var maxWorker, minWorker string
+	type exceed struct {
+		id  string
+		lat time.Duration
+	}
+	var exceeds []exceed
+	for id, d := range samples {
+		sum += d
+		if d > maxLat {
+			maxLat = d
+			maxWorker = id
+		}
+		if d < minLat {
+			minLat = d
+			minWorker = id
+		}
+		if budget > 0 && d > budget {
+			exceeds = append(exceeds, exceed{id: id, lat: d})
+		}
+	}
+	avg := sum / time.Duration(len(samples))
+
+	fmt.Printf("%s: n=%d avg=%s min=%s(%s) max=%s(%s) budget=%s exceeded=%d\n",
+		label, len(samples), avg.Round(time.Millisecond),
+		minLat.Round(time.Millisecond), minWorker,
+		maxLat.Round(time.Millisecond), maxWorker,
+		budget, len(exceeds))
+
+	if len(exceeds) > 0 {
+		const maxShown = 5
+		fmt.Println("  Exceeded budget:")
+		for i, e := range exceeds {
+			if i >= maxShown {
+				fmt.Printf("  ... and %d more\n", len(exceeds)-maxShown)
+				break
+			}
+			fmt.Printf("  %s=%s\n", e.id, e.lat.Round(time.Millisecond))
+		}
+	}
+}
+
+// SlowStartExceedances returns the counts of workers that breached the
+// start-latency budget, per cohort. Used by the stability invariant check
+// at simulation shutdown.
+func (c *Coordinator) SlowStartExceedances() (initial, takeover int) {
+	c.startLatencyMu.Lock()
+	defer c.startLatencyMu.Unlock()
+	for _, d := range c.initialStartLatencies {
+		if c.slowStartBudgetInitial > 0 && d > c.slowStartBudgetInitial {
+			initial++
+		}
+	}
+	for _, d := range c.takeoverStartLatencies {
+		if c.slowStartBudgetTakeover > 0 && d > c.slowStartBudgetTakeover {
+			takeover++
+		}
+	}
+
+	return initial, takeover
+}
+
 // printOwnershipAudit compares active owners vs assigned owners and prints mismatch stats.
 func (c *Coordinator) printOwnershipAudit(activeSnapshot map[int]string) {
 	if len(c.prevPartitionOwners) == 0 || len(activeSnapshot) == 0 {
@@ -669,6 +830,9 @@ func (c *Coordinator) PrintReport() {
 		fmt.Println("-- Recovery --")
 		fmt.Printf("Recovery Samples: %d (sum=%.3fs) Active=%v\n", recoveryCount, recoverySum, c.recoveryActive)
 	}
+
+	// Start-latency audit: flags regressions of leader-takeover hang fixes.
+	c.printStartLatencyAudit()
 
 	// Legacy hole-age SLO and Catch-Up SLO blocks
 	c.printLegacySLO(currentOldest)
@@ -918,6 +1082,18 @@ func (c *Coordinator) processAssignments(ctx context.Context) { //nolint:gocyclo
 				}
 				c.prevPartitionOwners = fresh
 			}
+		case sl := <-c.startLatenciesCh:
+			// Classify using this goroutine's live view of baselineLocked so the
+			// distinction between "initial fleet coming up" and "late joiner /
+			// takeover replacement" is decided at the moment the worker's first
+			// assignment landed, without cross-goroutine locking.
+			c.startLatencyMu.Lock()
+			if c.baselineLocked {
+				c.takeoverStartLatencies[sl.WorkerID] = sl.Latency
+			} else {
+				c.initialStartLatencies[sl.WorkerID] = sl.Latency
+			}
+			c.startLatencyMu.Unlock()
 		case ar := <-c.assignmentsCh:
 			// Track reporter appearance and optionally log when all expected workers reported once
 			if c.expectedWorkers > 0 {
