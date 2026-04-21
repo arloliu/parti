@@ -563,6 +563,25 @@ func (cfg *Config) ValidateWithWarnings(logger Logger) {
 			"recommended", "15s or higher",
 		)
 	}
+
+	// Warn if StartupTimeout is not long enough to accommodate the cold-start
+	// stabilization window plus leader election. A pod starting during a true
+	// cold start must wait for the leader's ColdStartWindow to fire the final
+	// rebalance; if its Start(ctx) or StartupTimeout expires sooner, it will
+	// appear to hang with "context deadline exceeded". On leader takeover the
+	// post-takeover window is now PlannedScaleWindow, so the takeover path
+	// doesn't require this headroom — but a true cold-start fleet still does.
+	minStartup := cfg.ColdStartWindow + cfg.ElectionTimeout + 5*time.Second
+	if cfg.StartupTimeout < minStartup {
+		logger.Warn(
+			"StartupTimeout is shorter than ColdStartWindow + ElectionTimeout + 5s headroom",
+			"startup_timeout", cfg.StartupTimeout,
+			"cold_start_window", cfg.ColdStartWindow,
+			"election_timeout", cfg.ElectionTimeout,
+			"recommended_minimum", minStartup,
+			"note", "workers starting during the leader's cold-start stabilization window may time out before they receive their first assignment",
+		)
+	}
 }
 
 // TestConfig returns a configuration optimized for fast test execution.

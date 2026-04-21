@@ -188,12 +188,25 @@ func (c *Calculator) Start(ctx context.Context) error {
 		c.Logger.Warn("failed to discover existing versions, starting from 0", "error", err)
 	}
 
+	// A non-zero discovered version means prior leaders have already published
+	// assignments in this cluster, so this Start() is a leadership takeover of
+	// an already-warm cluster — not a true cold start from empty. On takeover
+	// the full ColdStartWindow wait for "fleet to come online" is wasted: the
+	// fleet is already online, and any worker joining during that wait gets
+	// its assignment delayed by up to ColdStartWindow, which can exceed caller
+	// startup deadlines (the user-reported restart hang).
+	isTakeover := c.publisher.CurrentVersion() > 0
+
 	// Step 1: Immediate assignment to whoever is available NOW
 	// This ensures zero-downtime - partitions are covered from T=0
 	// We do this synchronously to ensure Start() returns error if initial assignment fails.
 	c.Logger.Info("performing immediate initial assignment to current workers")
 
-	if err := c.rebalance(ctx, "cold_start_immediate"); err != nil {
+	initialReason := "cold_start_immediate"
+	if isTakeover {
+		initialReason = "takeover_immediate"
+	}
+	if err := c.rebalance(ctx, initialReason); err != nil {
 		c.started.Store(false)
 		return fmt.Errorf("immediate initial assignment failed: %w", err)
 	}
@@ -205,7 +218,7 @@ func (c *Calculator) Start(ctx context.Context) error {
 	c.mu.Unlock()
 
 	c.Logger.Info("immediate initial assignment complete - partitions now covered",
-		"workers", immediateWorkerCount)
+		"workers", immediateWorkerCount, "takeover", isTakeover)
 
 	// Start worker monitoring component AFTER establishing baseline
 	// This ensures the monitor doesn't see the initial workers as "new" additions
@@ -224,10 +237,21 @@ func (c *Calculator) Start(ctx context.Context) error {
 		}()
 	}
 
-	// Step 2: Enter scaling state for stabilization
-	// The StateMachine will handle the wait window and trigger the final rebalance
-	c.Logger.Info("entering stabilization phase", "window", c.ColdStartWindow)
-	c.enterScalingState(ctx, "cold_start", c.ColdStartWindow)
+	// Step 2: Enter stabilization window.
+	//   - Cold start: use the long ColdStartWindow so the initial fleet has
+	//     time to fully come online before the final rebalance fires.
+	//   - Takeover: use the much shorter PlannedScaleWindow. The fleet is
+	//     already warm; this window only needs to absorb any worker that was
+	//     briefly invisible when the new leader ran its immediate rebalance
+	//     (e.g. a pod restarting concurrently with leader takeover).
+	window := c.ColdStartWindow
+	reason := "cold_start"
+	if isTakeover {
+		window = c.PlannedScaleWindow
+		reason = "takeover"
+	}
+	c.Logger.Info("entering stabilization phase", "window", window, "reason", reason)
+	c.enterScalingState(ctx, reason, window)
 
 	return nil
 }
