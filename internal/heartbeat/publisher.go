@@ -147,8 +147,10 @@ func (p *Publisher) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to publish initial heartbeat: %w", err)
 	}
 
-	// Start background publisher
-	go p.publishLoop()
+	// Start background publisher. Lifecycle is managed by stopCh (via Stop),
+	// not by the context passed to Start — the publisher outlives any
+	// startup/request context and runs until Stop is called.
+	go p.publishLoop() //nolint:gosec // G118: goroutine lifecycle is stopCh-driven, not context-driven
 
 	return nil
 }

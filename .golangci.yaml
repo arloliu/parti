@@ -78,6 +78,13 @@ linters:
           skipRecvDeref: false
     gocyclo:
       min-complexity: 30
+    gosec:
+      # G706 (log injection via taint analysis) has high false-positive rate
+      # in test simulation code where inputs are internally generated and
+      # there is no untrusted user input. G118 (context discipline) IS
+      # enabled — it catches real cancel-fn leaks and misplaced contexts.
+      excludes:
+        - G706
     gomodguard:
       blocked:
         modules:
@@ -178,6 +185,11 @@ linters:
             - fmt.Errorf
             - fmt.Printf
             - fmt.Println
+            # fmt.Fprintf/Fprintln to in-memory writers (Builder, Buffer)
+            # cannot fail; staticcheck QF1012 actively recommends this
+            # pattern over WriteString(fmt.Sprintf).
+            - fmt.Fprintf
+            - fmt.Fprintln
             - strings.Builder.*
             - bytes.Buffer.*
           severity: warning
@@ -199,6 +211,12 @@ linters:
             - - skipPackageNameChecks: true
           severity: warning
           disabled: false
+        # types/ is this module's public leaf package (github.com/arloliu/parti/v2/types).
+        # Renaming it is a breaking change for every downstream user, so this
+        # stylistic guidance from the Go blog is not actionable here. Keep
+        # revive enabled in general; only package-naming is disabled.
+        - name: package-naming
+          disabled: true
     rowserrcheck:
       packages:
         - github.com/jmoiron/sqlx

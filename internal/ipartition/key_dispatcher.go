@@ -99,7 +99,7 @@ func newKeyDispatcher(
 		idleTimeout = 30 * time.Second
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background()) //nolint:gosec // G118: cancel stored in keyDispatcher.cancel; called by Close
 
 	return &keyDispatcher{
 		logger:       logger,

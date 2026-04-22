@@ -313,8 +313,9 @@ func collectPartitionKeys(managers []*parti.Manager) map[string][]string {
 	result := make(map[string][]string)
 	for _, mgr := range managers {
 		wID := mgr.WorkerID()
-		var keys []string
-		for _, p := range mgr.CurrentAssignment().Partitions {
+		partitions := mgr.CurrentAssignment().Partitions
+		keys := make([]string, 0, len(partitions))
+		for _, p := range partitions {
 			keys = append(keys, partitionKey(p))
 		}
 

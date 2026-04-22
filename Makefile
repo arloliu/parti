@@ -21,7 +21,7 @@ TRIALS ?= 500
 
 # Linter configuration
 LINTER_GOMOD          := -modfile=linter.go.mod
-GOLANGCI_LINT_VERSION := 2.5.0
+GOLANGCI_LINT_VERSION := 2.11.4
 
 # Default target
 .DEFAULT_GOAL := help

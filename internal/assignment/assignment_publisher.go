@@ -3,7 +3,7 @@ package assignment
 import (
 	"context"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -238,7 +238,7 @@ func (p *AssignmentPublisher) Publish(
 	for wid := range assignments {
 		sortedWorkers = append(sortedWorkers, wid)
 	}
-	sort.Strings(sortedWorkers)
+	slices.Sort(sortedWorkers)
 
 	for _, workerID := range sortedWorkers {
 		parts := assignments[workerID]

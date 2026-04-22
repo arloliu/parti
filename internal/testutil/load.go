@@ -387,20 +387,20 @@ func (lm *LoadMetrics) Report() string {
 
 	var report strings.Builder
 	report.WriteString("\n=== Load Test Report ===\n")
-	report.WriteString(fmt.Sprintf("Description: %s\n", lm.Config.Description))
-	report.WriteString(fmt.Sprintf("Duration: %v\n", lm.Duration()))
+	fmt.Fprintf(&report, "Description: %s\n", lm.Config.Description)
+	fmt.Fprintf(&report, "Duration: %v\n", lm.Duration())
 	report.WriteString("\nConfiguration:\n")
-	report.WriteString(fmt.Sprintf("  Workers: %d\n", lm.Config.WorkerCount))
-	report.WriteString(fmt.Sprintf("  Partitions: %d\n", lm.Config.PartitionCount))
-	report.WriteString(fmt.Sprintf("  Churn Rate: %v\n", lm.Config.ChurnRate))
+	fmt.Fprintf(&report, "  Workers: %d\n", lm.Config.WorkerCount)
+	fmt.Fprintf(&report, "  Partitions: %d\n", lm.Config.PartitionCount)
+	fmt.Fprintf(&report, "  Churn Rate: %v\n", lm.Config.ChurnRate)
 
 	report.WriteString("\nRebalance Metrics:\n")
-	report.WriteString(fmt.Sprintf("  Count: %d\n", lm.RebalanceCount))
+	fmt.Fprintf(&report, "  Count: %d\n", lm.RebalanceCount)
 	if len(lm.RebalanceLatency) > 0 {
-		report.WriteString(fmt.Sprintf("  Avg Latency: %v\n", lm.AvgRebalanceLatency()))
-		report.WriteString(fmt.Sprintf("  P50 Latency: %v\n", lm.LatencyPercentile(0.50)))
-		report.WriteString(fmt.Sprintf("  P95 Latency: %v\n", lm.LatencyPercentile(0.95)))
-		report.WriteString(fmt.Sprintf("  P99 Latency: %v\n", lm.LatencyPercentile(0.99)))
+		fmt.Fprintf(&report, "  Avg Latency: %v\n", lm.AvgRebalanceLatency())
+		fmt.Fprintf(&report, "  P50 Latency: %v\n", lm.LatencyPercentile(0.50))
+		fmt.Fprintf(&report, "  P95 Latency: %v\n", lm.LatencyPercentile(0.95))
+		fmt.Fprintf(&report, "  P99 Latency: %v\n", lm.LatencyPercentile(0.99))
 	}
 
 	// Calculate peak memory inline (can't call PeakMemoryMB() while holding lock)
@@ -420,19 +420,19 @@ func (lm *LoadMetrics) Report() string {
 	}
 
 	report.WriteString("\nResource Usage:\n")
-	report.WriteString(fmt.Sprintf("  Peak Memory: %.2f MB\n", peakMemory))
-	report.WriteString(fmt.Sprintf("  Peak Goroutines: %d\n", peakGoroutines))
-	report.WriteString(fmt.Sprintf("  Samples: %d\n", len(lm.MemoryUsageMB)))
+	fmt.Fprintf(&report, "  Peak Memory: %.2f MB\n", peakMemory)
+	fmt.Fprintf(&report, "  Peak Goroutines: %d\n", peakGoroutines)
+	fmt.Fprintf(&report, "  Samples: %d\n", len(lm.MemoryUsageMB))
 
 	if len(lm.Errors) > 0 {
-		report.WriteString(fmt.Sprintf("\nErrors: %d\n", len(lm.Errors)))
+		fmt.Fprintf(&report, "\nErrors: %d\n", len(lm.Errors))
 		for i, err := range lm.Errors {
 			if i < 5 { // Show first 5 errors
-				report.WriteString(fmt.Sprintf("  %d: %v\n", i+1, err))
+				fmt.Fprintf(&report, "  %d: %v\n", i+1, err)
 			}
 		}
 		if len(lm.Errors) > 5 {
-			report.WriteString(fmt.Sprintf("  ... and %d more\n", len(lm.Errors)-5))
+			fmt.Fprintf(&report, "  ... and %d more\n", len(lm.Errors)-5)
 		}
 	}
 

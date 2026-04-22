@@ -434,7 +434,10 @@ func (wc *WorkerConsumer) addSubjectLoop(ctx context.Context, workerID string, s
 	wc.subjects[subject] = pc
 	wc.mu.Unlock()
 
-	go pc.Run(context.Background(), effectiveHandler)
+	// partitionConsumer has its own Stop() method that cancels an internal
+	// context; using a request-scoped ctx here would kill the subscription
+	// as soon as the caller's request returns.
+	go pc.Run(context.Background(), effectiveHandler) //nolint:gosec // G118: lifecycle managed by partitionConsumer.Stop
 
 	return nil
 }

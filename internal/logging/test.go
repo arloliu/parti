@@ -69,9 +69,9 @@ func formatKeyValues(keysAndValues []any) string {
 	var result strings.Builder
 	for i := 0; i < len(keysAndValues); i += 2 {
 		if i+1 < len(keysAndValues) {
-			result.WriteString(fmt.Sprintf("%v=%v ", keysAndValues[i], keysAndValues[i+1]))
+			fmt.Fprintf(&result, "%v=%v ", keysAndValues[i], keysAndValues[i+1])
 		} else {
-			result.WriteString(fmt.Sprintf("%v=<missing> ", keysAndValues[i]))
+			fmt.Fprintf(&result, "%v=<missing> ", keysAndValues[i])
 		}
 	}
 

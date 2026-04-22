@@ -1,7 +1,7 @@
 package coordinator
 
 import (
-	"sort"
+	"slices"
 	"time"
 )
 
@@ -104,7 +104,7 @@ func (d *DupTracer) MaybeSnapshot(now time.Time) (DupSnapshot, bool) {
 	for pid, cnt := range byPartition {
 		parts = append(parts, PartitionDup{PartitionID: pid, Count: cnt})
 	}
-	sort.Slice(parts, func(i, j int) bool { return parts[i].Count > parts[j].Count })
+	slices.SortFunc(parts, func(a, b PartitionDup) int { return b.Count - a.Count })
 	if d.topN > 0 && len(parts) > d.topN {
 		parts = parts[:d.topN]
 	}

@@ -19,7 +19,7 @@ func (m *Manager) prepareStart(ctx context.Context) (context.Context, context.Ca
 		m.mu.Unlock()
 		return nil, func() {}, types.ErrAlreadyStarted
 	}
-	m.ctx, m.cancel = context.WithCancel(context.Background())
+	m.ctx, m.cancel = context.WithCancel(context.Background()) //nolint:gosec // G118: cancel stored in m.cancel; called by Manager.Stop
 	m.mu.Unlock()
 
 	if m.cfg.StartupTimeout > 0 {
