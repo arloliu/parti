@@ -70,8 +70,27 @@ func (m *Manager) checkConnectionHealth() {
 }
 
 // recordKVError records a KV operation error and may trigger degraded mode.
+//
+// Errors that drive the circuit are either connectivity failures (the NATS
+// connection itself is down) or degrading JetStream errors (bucket/stream/
+// consumer missing while the connection remains up — e.g. operator wipe,
+// non-replicated JetStream data loss). Sustained NotFound without connection
+// loss would otherwise produce a silent-drift failure mode where publishes
+// fail silently and no state transition occurs.
 func (m *Manager) recordKVError(err error) {
-	if err == nil || !natsutil.IsConnectivityError(err) {
+	if err == nil {
+		return
+	}
+	if !natsutil.IsConnectivityError(err) && !natsutil.IsDegradingJetStreamError(err) {
+		return
+	}
+	// Short-circuit once already Degraded. Every subsystem (heartbeat 500ms,
+	// election ticks, stableID renew, assignment watcher, attemptRecoveryFromDegraded
+	// at 1s) retries against the same failure indefinitely; without this we would
+	// re-enter the locked window-append + threshold-warn on every call and grow
+	// kvErrorWindow unboundedly until the pod restarts. degradedSince is cleared
+	// atomically by exitDegraded, so recovery is unaffected.
+	if m.degradedSince.Load() != 0 {
 		return
 	}
 
@@ -128,6 +147,9 @@ func (m *Manager) recordKVSuccess() {
 // After a successful exitDegraded, degradedSince is reset to 0, so future
 // enterDegraded calls succeed without the re-entry bug that typed-nil atomic.Value
 // storage caused previously.
+//
+// Lock contract: must not acquire m.mu. Callers (notably recordKVError) may
+// already hold m.mu; taking it here would self-deadlock.
 func (m *Manager) enterDegraded(reason string) {
 	// Reject degraded entry from terminal Shutdown state.
 	if m.State() == StateShutdown {

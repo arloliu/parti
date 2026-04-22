@@ -40,6 +40,32 @@ func IsStreamNotFound(err error) bool {
 		errors.Is(err, jetstream.ErrStreamNotFound)
 }
 
+// IsDegradingJetStreamError reports whether err indicates that Parti's backing
+// JetStream state is missing for reasons that should drive the manager into
+// degraded mode if the condition is sustained.
+//
+// Distinct from [IsConnectivityError]: the NATS connection is up, but a bucket,
+// stream, or consumer that Parti depends on has disappeared (operator wipe,
+// non-replicated JetStream restart with lost data, peer promotion before Raft
+// replication catches up). A single occurrence may be a transient cluster
+// event; only the repeat-within-window semantics of the degraded-mode circuit
+// should convert it into a state transition.
+//
+// Parameters:
+//   - err: Error to check
+//
+// Returns:
+//   - bool: true if err indicates missing JetStream state
+func IsDegradingJetStreamError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	return errors.Is(err, jetstream.ErrBucketNotFound) ||
+		IsStreamNotFound(err) ||
+		IsConsumerNotFound(err)
+}
+
 // IsConnectivityError checks if an error is caused by connectivity issues.
 //
 // This includes NATS timeouts, connection refused, disconnections, etc.

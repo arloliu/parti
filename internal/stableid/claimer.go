@@ -59,7 +59,8 @@ type Claimer struct {
 	renewStarted atomic.Int32 // 0 = not started, 1 = started
 	closed       atomic.Int32 // 0 = open, 1 = closed (Release/Close called)
 
-	logger types.Logger
+	logger  types.Logger
+	onError atomic.Pointer[func(error)]
 }
 
 // NewClaimer creates a new stable ID claimer.
@@ -94,6 +95,23 @@ func NewClaimer(kv jetstream.KeyValue, prefix string, minID, maxID int, ttl time
 		doneCh: make(chan struct{}),
 		logger: logger,
 	}
+}
+
+// SetOnError registers a callback invoked on each background renewal failure.
+//
+// Safe to call concurrently with the running renewal goroutine; the update is
+// atomic and the hot path reads without locking. Passing nil clears the
+// callback. The callback must not block on the Claimer's own lifecycle
+// (do not call Release from inside it).
+//
+// Parameters:
+//   - fn: Callback invoked with the raw error; ignored if nil
+func (c *Claimer) SetOnError(fn func(error)) {
+	if fn == nil {
+		c.onError.Store(nil)
+		return
+	}
+	c.onError.Store(&fn)
 }
 
 // Claim attempts to claim a stable worker ID from the pool.
@@ -259,6 +277,9 @@ func (c *Claimer) renewalLoop() {
 				wid := c.workerID
 				c.mu.RUnlock()
 				c.logger.Error("stable ID renewal failed", "worker_id", wid, "error", err)
+				if onError := c.onError.Load(); onError != nil {
+					(*onError)(err)
+				}
 			}
 			cancel()
 		}

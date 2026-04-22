@@ -28,6 +28,17 @@ Parti's `source.NatsKV` builds upon.
 go run ./examples/kv-watcher
 ```
 
+### [degraded-readiness/](degraded-readiness/)
+
+Wires Parti's `OnDegraded` hook to an HTTP `/readyz` endpoint so Kubernetes
+rotates pods that enter Degraded (e.g. after live NATS data loss).
+
+**Demonstrates:** `OnDegraded` hook, readiness-probe integration, restart-based recovery.
+
+```bash
+NATS_URL=nats://localhost:4222 go run ./examples/degraded-readiness
+```
+
 ## See Also
 
 - [Example tests in the root package](../example_test.go) — Godoc-visible examples for

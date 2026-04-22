@@ -610,6 +610,39 @@ nats server report jetstream
 nats kv info parti-<cluster>-stableid
 ```
 
+#### Live NATS Data Loss (Bucket Wipe While Workers Run)
+
+**Symptoms:** All running workers transition to `Degraded`; `OnDegraded` fires with reason "KV error threshold exceeded"; assignment versions stay frozen at their pre-incident values; no leader is publishing fresh updates.
+
+**Causes (what actually wiped the KV buckets):**
+- Single-node JetStream with ephemeral storage (container local disk, `emptyDir` PVC) restarted without app-side restart
+- Operator ran `nats kv rm` against a Parti-managed bucket
+- JetStream cluster peer promoted with empty state before Raft replication caught up
+- Disk corruption on the leading replica of a non-replicated (R=1) stream
+
+**Why the process does not self-heal:** Parti deliberately does not auto-recreate buckets from the live publish path. Recreating on a transient `ErrStreamNotFound` during a JetStream leader reshuffle would cause the data loss it was trying to prevent (the bucket would have come back naturally). Parti cannot distinguish "data permanently gone" from "data coming back", so it surfaces the problem via `Degraded` and leaves the recovery decision to the operator (or k8s).
+
+**Resolution:**
+```bash
+# Confirm the wipe actually happened (buckets missing).
+nats kv ls | grep parti-<cluster>
+
+# Inspect JetStream for the underlying cause (node restart, peer promotion).
+nats server report jetstream --json
+
+# Restart the workers. The restart path recreates buckets via
+# ensureKVBucket and is covered by TestManager_Restart_AfterNATSBucketLoss.
+kubectl rollout restart deployment/parti
+```
+
+**Prevention:**
+- Use replicated JetStream (R ≥ 3) for Parti's KV buckets so a single node's data loss does not wipe state
+- Use persistent storage (not `emptyDir`) for JetStream file storage
+- Gate `nats kv rm` behind an operator runbook; the command is not distinguishable from accidental wipe at the Parti level
+- Wire `OnDegraded` to fail a k8s readiness probe (see `examples/degraded-readiness`) so pods are rotated automatically instead of drifting
+
+**Expected log noise during the incident:** while the buckets are missing the recovery loop retries `refreshAssignmentFromNATS` each second and surfaces `failed to refresh assignment during recovery` warnings plus periodic `KV error threshold exceeded` entries. This is expected — it stops as soon as the buckets are restored (by a process restart) and the manager exits Degraded.
+
 #### Stable ID Pool Exhaustion
 
 **Symptoms:** New workers fail to start with an error indicating no available worker IDs

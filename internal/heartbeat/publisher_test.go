@@ -24,6 +24,42 @@ func requireHeartbeatEntry(t *testing.T, kv jetstream.KeyValue, key string, wait
 	return entry
 }
 
+// TestPublisher_SetOnError_Concurrent exercises the atomic.Pointer hot path:
+// the publish goroutine reads onError while SetOnError swaps it from another
+// goroutine. Run with -race; no assertion failure here is the pass condition.
+func TestPublisher_SetOnError_Concurrent(t *testing.T) {
+	ctx := t.Context()
+
+	_, nc := partitest.StartEmbeddedNATS(t)
+	kv := partitest.CreateJetStreamKV(t, nc, "test-hb-onerror-race")
+
+	publisher := New(kv, "worker-hb", "worker-1", 20*time.Millisecond, nil, nil)
+	// Install, swap, and clear the callback while the publish loop is
+	// running against a valid bucket (so publishes succeed, onError is
+	// not invoked, but the hot path still Loads on each tick).
+	publisher.SetOnError(func(error) {})
+	require.NoError(t, publisher.Start(ctx))
+	t.Cleanup(func() { _ = publisher.Stop() })
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := range 200 {
+			if i%3 == 0 {
+				publisher.SetOnError(nil)
+			} else {
+				publisher.SetOnError(func(error) {})
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("SetOnError swap loop did not complete in 5s")
+	}
+}
+
 func TestPublisher_SetWorkerID(t *testing.T) {
 	t.Run("sets worker ID successfully", func(t *testing.T) {
 		_, nc := partitest.StartEmbeddedNATS(t)

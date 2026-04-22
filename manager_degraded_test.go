@@ -8,6 +8,7 @@ import (
 	"github.com/arloliu/parti/v2/internal/logging"
 	"github.com/arloliu/parti/v2/internal/metrics"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 )
 
@@ -48,6 +49,14 @@ func TestManager_recordKVError(t *testing.T) {
 		require.Equal(t, int32(1), m.kvErrorCount.Load())
 	})
 
+	t.Run("records degrading jetstream error", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		m := &Manager{logger: logger, cfg: cfg, hooks: &Hooks{}, metrics: nopMetrics, ctx: ctx, cancel: cancel}
+		m.recordKVError(jetstream.ErrBucketNotFound)
+		require.Equal(t, int32(1), m.kvErrorCount.Load())
+	})
+
 	t.Run("triggers degraded mode", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -55,7 +64,7 @@ func TestManager_recordKVError(t *testing.T) {
 		m.state.Store(int32(StateStable)) // must be a state that allows Degraded entry
 
 		// Trigger threshold
-		for i := 0; i < 3; i++ {
+		for range 3 {
 			m.recordKVError(nats.ErrTimeout)
 		}
 		// Cancel to stop the monitorDegradedAlerts goroutine started by enterDegraded

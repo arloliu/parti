@@ -15,19 +15,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestManager_LiveNATSBucketLoss is an exploratory / diagnostic test for
-// the scenario where NATS loses all Parti-managed KV bucket data WHILE the
-// application workers remain running (no restart). The failing node of a
-// non-replicated JetStream cluster may come back with empty storage, or an
-// operator may wipe a bucket out of band. The open question is whether the
-// running workers observe the loss and recover, or whether they silently
-// drift into an inconsistent state until someone restarts them.
+// TestManager_LiveNATSBucketLoss exercises the live-wipe scenario: NATS loses
+// all Parti-managed KV bucket data WHILE the application workers remain
+// running (no restart). The failing node of a non-replicated JetStream
+// cluster may come back with empty storage, or an operator may wipe a bucket
+// out of band.
 //
-// This is not a contract test — we do not yet claim Parti handles this path
-// gracefully. The test exists to document observed behavior so we can decide
-// whether code changes are warranted. The assertions it makes are the
-// minimum we want to be true regardless of the recovery story: workers must
-// not panic, and a subsequent restart must still succeed.
+// Contract (v2.3+): every running worker must enter Degraded state within a
+// bounded window of the wipe. Parti does not attempt in-process self-healing
+// of lost bucket metadata — recovery is a process restart, but Degraded
+// entry is the observable trigger that lets operators (and k8s readiness
+// probes wired through OnDegraded) know a restart is needed. See
+// docs/OPERATIONS.md "Live NATS data loss" for the runbook.
 func TestManager_LiveNATSBucketLoss(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -100,92 +99,138 @@ func TestManager_LiveNATSBucketLoss(t *testing.T) {
 	_, err = js.KeyValue(ctx, cfg.KVBuckets.AssignmentBucket)
 	require.ErrorIs(t, err, jetstream.ErrBucketNotFound)
 
-	// Observe for 20 seconds. This is long enough for multiple heartbeat
-	// intervals (500ms), multiple TTLs (5s), and a complete stabilization
-	// window (3s ColdStartWindow + 2s PlannedScaleWindow).
-	const observeFor = 20 * time.Second
-	deadline := wipedAt.Add(observeFor)
-
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-	for time.Now().Before(deadline) {
-		select {
-		case <-ctx.Done():
-			t.Fatal("context cancelled during observation")
-		case now := <-ticker.C:
-			var states, roles []string
-			var parts []int
-			var versions []int64
-			for _, mgr := range cluster.GetActiveWorkers() {
-				states = append(states, mgr.State().String())
-				role := "follower"
-				if mgr.IsLeader() {
-					role = "LEADER"
-				}
-				roles = append(roles, role)
-				a := mgr.CurrentAssignment()
-				parts = append(parts, len(a.Partitions))
-				versions = append(versions, a.Version)
+	// Every worker must enter Degraded within this window. Defaults at
+	// IntegrationTestConfig: HeartbeatInterval=500ms, KVErrorThreshold=5,
+	// KVErrorWindow=30s → 5 failed publishes accrue in ~2.5s; budget 20s for
+	// scheduling jitter, the election timer (3s), and hook invocation.
+	const degradedWithin = 20 * time.Second
+	require.Eventually(t, func() bool {
+		active := cluster.GetActiveWorkers()
+		if len(active) != 3 {
+			return false
+		}
+		degraded := 0
+		for _, mgr := range active {
+			if mgr.State() == types.StateDegraded {
+				degraded++
 			}
-			t.Logf("t+%s  states=%v  roles=%v  parts=%v  versions=%v",
-				now.Sub(wipedAt).Round(100*time.Millisecond),
-				states, roles, parts, versions)
 		}
-	}
 
-	// Observation: did any bucket come back? Parti does not try to
-	// re-provision buckets from the publish path, so the expected answer
-	// depends on whether any subsystem calls ensureKVBucket after startup.
-	// Record per-bucket presence for the test log.
-	bucketsRecreated := 0
+		return degraded == 3
+	}, degradedWithin, 500*time.Millisecond,
+		"all 3 workers should enter Degraded within %s of bucket wipe", degradedWithin)
+
+	t.Logf("phase 3: all workers reported Degraded within %s", time.Since(wipedAt).Round(100*time.Millisecond))
+
+	// Parti explicitly declines in-process auto re-provisioning — recovery
+	// is a process restart. Guard against a future change silently
+	// reintroducing it by asserting the wiped buckets stay gone.
 	for _, b := range buckets {
-		if _, err := js.KeyValue(ctx, b); err == nil {
-			bucketsRecreated++
-			t.Logf("observation: bucket %s was recreated during observation window", b)
-		}
+		_, err := js.KeyValue(ctx, b)
+		require.ErrorIsf(t, err, jetstream.ErrBucketNotFound,
+			"bucket %s must not be auto-recreated by live workers", b)
 	}
-	t.Logf("observation: %d/%d buckets recreated during live window", bucketsRecreated, len(buckets))
 
-	// Observation: is there a functional leader? Before the wipe there was
-	// exactly one. After the wipe, the election key is gone and the
-	// heartbeat TTLs will expire; a healthy system should either hold
-	// leadership via the existing watcher+refresh path or trigger a fresh
-	// election and settle on a new one.
-	leaderCount := 0
-	for _, mgr := range cluster.GetActiveWorkers() {
-		if mgr.IsLeader() {
-			leaderCount++
-		}
-	}
-	t.Logf("observation: leaderCount=%d (expected=1 for healthy cluster)", leaderCount)
-
-	// Observation: assignment versions. If the leader detected the loss and
-	// republished, versions advance; if leadership was lost silently, they
-	// stay frozen at the pre-wipe value.
+	// Log the post-wipe state for diagnostic context. Assignment versions
+	// should be frozen at their pre-wipe values because the leader's
+	// publishes all fail against a missing bucket.
 	postWipeVersions := make(map[string]int64)
-	for _, mgr := range cluster.GetActiveWorkers() {
-		postWipeVersions[mgr.WorkerID()] = mgr.CurrentAssignment().Version
-	}
-	t.Logf("observation: post-wipe assignment versions: %v", postWipeVersions)
-
-	// Observation: worker states. Degraded would indicate Parti saw the
-	// problem; Stable means it hasn't noticed; Shutdown means something
-	// crashed / gave up.
 	stateSummary := make(map[string]int)
 	for _, mgr := range cluster.GetActiveWorkers() {
+		postWipeVersions[mgr.WorkerID()] = mgr.CurrentAssignment().Version
 		stateSummary[mgr.State().String()]++
 	}
-	t.Logf("observation: final state summary: %v", stateSummary)
+	t.Logf("phase 3: pre-wipe versions=%v post-wipe versions=%v states=%v",
+		preWipeVersions, postWipeVersions, stateSummary)
+}
 
-	// Minimum hard invariant: nobody panicked, at least one worker is still
-	// alive (not Shutdown). Anything looser would not be a useful test; we
-	// are fine with the test passing even if Parti silently does nothing —
-	// the diagnostic log output is what we care about for now.
-	alive := 0
-	for _, mgr := range cluster.GetActiveWorkers() {
-		if mgr.State() != types.StateShutdown {
-			alive++
+// TestManager_LiveNATSBucketLoss_OnDegradedHook asserts that the OnDegraded
+// hook fires for every worker when buckets are wiped live. This is the
+// integration point k8s readiness probes hang off of.
+func TestManager_LiveNATSBucketLoss_OnDegradedHook(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	t.Parallel()
+
+	nc, cleanup := testutil.StartEmbeddedNATS(t)
+	defer cleanup()
+
+	cfg := testutil.IntegrationTestConfig()
+	partitions := testutil.CreateTestPartitions(6)
+	src := source.NewStatic(partitions)
+	assignStrat := strategy.NewConsistentHash()
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+
+	const clusterSize = 3
+	degradedReasons := make(chan string, clusterSize*4)
+	managers := make([]*parti.Manager, 0, clusterSize)
+	for range clusterSize {
+		hooks := &parti.Hooks{
+			OnDegraded: func(_ context.Context, reason string) error {
+				select {
+				case degradedReasons <- reason:
+				default:
+				}
+				return nil
+			},
+		}
+		mgr, err := parti.NewManager(&cfg, js, src, assignStrat, parti.WithHooks(hooks))
+		require.NoError(t, err)
+		managers = append(managers, mgr)
+	}
+
+	defer func() {
+		for _, mgr := range managers {
+			_ = mgr.Stop(context.Background())
+		}
+	}()
+
+	for _, mgr := range managers {
+		require.NoError(t, mgr.Start(ctx))
+	}
+
+	// Wait for cluster to stabilize before the wipe.
+	require.Eventually(t, func() bool {
+		for _, mgr := range managers {
+			if mgr.State() != types.StateStable {
+				return false
+			}
+		}
+		return true
+	}, 15*time.Second, 200*time.Millisecond, "cluster should stabilize before wipe")
+
+	for _, b := range []string{
+		cfg.KVBuckets.StableIDBucket,
+		cfg.KVBuckets.ElectionBucket,
+		cfg.KVBuckets.HeartbeatBucket,
+		cfg.KVBuckets.AssignmentBucket,
+	} {
+		if err := js.DeleteKeyValue(ctx, b); err != nil && !errors.Is(err, jetstream.ErrBucketNotFound) {
+			t.Fatalf("failed to wipe bucket %s: %v", b, err)
 		}
 	}
-	require.Greater(t, alive, 0, "at least one worker should still be running after bucket wipe")
+
+	// Each manager fires OnDegraded at most once per degraded entry. Expect
+	// one reason per worker.
+	collected := make([]string, 0, clusterSize)
+	timeout := time.After(20 * time.Second)
+	for len(collected) < clusterSize {
+		select {
+		case reason := <-degradedReasons:
+			collected = append(collected, reason)
+		case <-timeout:
+			t.Fatalf("OnDegraded fired %d/%d times within 20s; reasons so far: %v",
+				len(collected), clusterSize, collected)
+		}
+	}
+	for _, reason := range collected {
+		require.NotEmpty(t, reason, "OnDegraded reason must be non-empty")
+	}
+	t.Logf("OnDegraded hook fired %d/%d times; reasons=%v", len(collected), clusterSize, collected)
 }

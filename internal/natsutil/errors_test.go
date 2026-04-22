@@ -73,6 +73,37 @@ func TestIsStreamNotFound(t *testing.T) {
 	}
 }
 
+func TestIsDegradingJetStreamError(t *testing.T) {
+	// Simulates the double-%w wrapping used by election.RenewLeadership
+	// (fmt.Errorf("%w: %w", ErrLeadershipLost, err)) to confirm errors.Is
+	// traversal still succeeds after that wrapping.
+	sentinelLeadershipLost := errors.New("leadership was lost")
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil error", nil, false},
+		{"bucket not found", jetstream.ErrBucketNotFound, true},
+		{"nats stream not found", nats.ErrStreamNotFound, true},
+		{"jetstream stream not found", jetstream.ErrStreamNotFound, true},
+		{"nats consumer not found", nats.ErrConsumerNotFound, true},
+		{"jetstream consumer not found", jetstream.ErrConsumerNotFound, true},
+		{"wrapped bucket not found", fmt.Errorf("wrap: %w", jetstream.ErrBucketNotFound), true},
+		{"double-wrapped stream not found", fmt.Errorf("%w: %w", sentinelLeadershipLost, jetstream.ErrStreamNotFound), true},
+		{"timeout is not degrading", nats.ErrTimeout, false},
+		{"no servers is not degrading", nats.ErrNoServers, false},
+		{"random error", errors.New("something"), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, IsDegradingJetStreamError(tt.err))
+		})
+	}
+}
+
 func TestIsConnectivityError(t *testing.T) {
 	tests := []struct {
 		name string

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -39,6 +40,7 @@ type Publisher struct {
 	ticker  *time.Ticker
 	logger  types.Logger
 	metrics types.WorkerMetrics
+	onError atomic.Pointer[func(error)]
 }
 
 // New creates a new heartbeat publisher with dependency injection.
@@ -91,6 +93,23 @@ func New(
 		stopCh:   make(chan struct{}),
 		doneCh:   make(chan struct{}),
 	}
+}
+
+// SetOnError registers a callback invoked on each heartbeat publish failure.
+//
+// Safe to call concurrently with the running publish goroutine; the update is
+// atomic and the hot path reads without locking. Passing nil clears the
+// callback. The callback must not block on the Publisher's own lifecycle
+// (do not call Stop from inside it).
+//
+// Parameters:
+//   - fn: Callback invoked with the raw error; ignored if nil
+func (p *Publisher) SetOnError(fn func(error)) {
+	if fn == nil {
+		p.onError.Store(nil)
+		return
+	}
+	p.onError.Store(&fn)
 }
 
 // Start begins publishing heartbeats in the background.
@@ -190,9 +209,10 @@ func (p *Publisher) publishLoop() {
 
 			if err != nil {
 				p.recordMetric(false)
-				// Log error but continue trying
-				// In production, this should use the configured logger
-				_ = err
+				p.logger.Warn("heartbeat publish failed", "worker_id", p.workerID, "error", err)
+				if onError := p.onError.Load(); onError != nil {
+					(*onError)(err)
+				}
 			} else {
 				p.recordMetric(true)
 			}

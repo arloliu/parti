@@ -22,6 +22,9 @@ func (m *Manager) claimWorkerID(ctx context.Context, kv jetstream.KeyValue) erro
 		m.cfg.WorkerIDTTL,
 		m.logger,
 	)
+	// Feed renewal failures into the degraded-mode circuit so sustained KV
+	// errors on the stableID bucket drive the manager into Degraded.
+	claimer.SetOnError(m.recordKVError)
 	m.idClaimer = claimer
 
 	workerID, err := claimer.Claim(ctx)
@@ -121,6 +124,10 @@ func (m *Manager) monitorLeadership() {
 				renewCancel()
 				if err != nil {
 					m.logError("failed to renew leadership", "error", err)
+					// Feed into degraded circuit: ErrBucketNotFound or
+					// ErrStreamNotFound from the election bucket is the
+					// canonical live-wipe signal on the leader side.
+					m.recordKVError(err)
 					// Leadership lost
 					m.isLeader.Store(false)
 					m.logger.Info("lost leadership", "worker_id", m.WorkerID())
@@ -144,6 +151,10 @@ func (m *Manager) monitorLeadership() {
 				reqCancel()
 				if err != nil {
 					m.logError("failed to request leadership", "error", err)
+					// Feed into degraded circuit for the follower path:
+					// if the election bucket is gone, every follower will
+					// surface NotFound here each tick.
+					m.recordKVError(err)
 
 					continue
 				}
@@ -221,6 +232,9 @@ func (m *Manager) electionRevision() uint64 {
 func (m *Manager) startHeartbeat(kv jetstream.KeyValue) error {
 	workerID := m.WorkerID()
 	publisher := heartbeat.New(kv, "heartbeat", workerID, m.cfg.HeartbeatInterval, m.metrics, m.logger)
+	// Feed publish failures into the degraded-mode circuit so sustained KV
+	// errors (connection loss or bucket wipe) drive the manager into Degraded.
+	publisher.SetOnError(m.recordKVError)
 	m.heartbeat = publisher
 
 	// Start heartbeat in background

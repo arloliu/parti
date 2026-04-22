@@ -90,6 +90,49 @@ func TestClaimer_DoubleRelease(t *testing.T) {
 	require.ErrorIs(t, err, ErrNotClaimed)
 }
 
+// TestClaimer_SetOnError_Concurrent exercises the atomic.Pointer hot path:
+// the renewal goroutine reads onError while SetOnError swaps it from another
+// goroutine. Run with -race; no assertion failure here is the pass condition.
+func TestClaimer_SetOnError_Concurrent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	_, nc := partitest.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{
+		Bucket:  "unit-stableid-onerror-race",
+		TTL:     500 * time.Millisecond,
+		Storage: jetstream.MemoryStorage,
+	})
+	require.NoError(t, err)
+
+	c := NewClaimer(kv, "worker", 0, 0, 300*time.Millisecond, nil)
+	_, err = c.Claim(ctx)
+	require.NoError(t, err)
+	c.SetOnError(func(error) {})
+	require.NoError(t, c.StartRenewal())
+	t.Cleanup(func() { _ = c.Release(ctx) })
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := range 200 {
+			if i%3 == 0 {
+				c.SetOnError(nil)
+			} else {
+				c.SetOnError(func(error) {})
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("SetOnError swap loop did not complete in 5s")
+	}
+}
+
 func TestClaimer_StartRenewal_AfterClose(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

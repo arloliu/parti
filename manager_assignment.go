@@ -273,6 +273,9 @@ func (m *Manager) monitorAssignmentChanges(ctx context.Context, kv jetstream.Key
 			return
 		}
 		m.logError("assignment watcher failed, retrying", "error", err, "backoff", backoff)
+		// Feed into degraded circuit: a wiped assignment bucket repeatedly
+		// fails here; connection-loss errors also land here.
+		m.recordKVError(err)
 
 		//nolint:gosec // jitter does not require crypto-secure random
 		f := rand.Float64()
