@@ -345,7 +345,7 @@ func TestCalculator_StabilizationWindow(t *testing.T) {
 
 		// Create many partitions so expected workers is high
 		var partitions []types.Partition
-		for i := 0; i < 50; i++ {
+		for i := range 50 {
 			partitions = append(partitions, types.Partition{Keys: []string{fmt.Sprintf("p%d", i)}})
 		}
 

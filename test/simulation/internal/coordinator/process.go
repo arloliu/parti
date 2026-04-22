@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"os/exec"
 	"sync"
@@ -326,9 +327,7 @@ func (pm *ProcessManager) ListProcesses() map[string]*ProcessInfo {
 
 	// Create a copy to avoid race conditions
 	result := make(map[string]*ProcessInfo, len(pm.processes))
-	for k, v := range pm.processes {
-		result[k] = v
-	}
+	maps.Copy(result, pm.processes)
 
 	return result
 }

@@ -256,7 +256,7 @@ func TestBroadcastConsumer_UpdateWorkerConsumer_ReceivesMessages(t *testing.T) {
 	}
 
 	// Publish messages
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		require.NoError(t, nc.Publish("bc.region.us-east.events", []byte("msg")))
 	}
 	_ = nc.Flush()

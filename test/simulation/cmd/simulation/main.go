@@ -528,7 +528,7 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 	// Optional: immediate scale-up via CLI flag
 	if aioScaleUpOnce > 0 {
 		spawnN := aioScaleUpOnce
-		for i := 0; i < spawnN; i++ {
+		for range spawnN {
 			id := fmt.Sprintf("worker-%d", nextWorkerIndex(goroutineRegistry))
 			if spawnAllInOneWorker(ctx, id) {
 				if metricsCollector != nil {
@@ -546,10 +546,7 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 	for i := 0; i < cfg.Producers.Count; i++ {
 		// Calculate partition range for this producer
 		startPartition := i * partitionsPerProducer
-		endPartition := (i + 1) * partitionsPerProducer
-		if endPartition > cfg.Partitions.Count {
-			endPartition = cfg.Partitions.Count
-		}
+		endPartition := min((i+1)*partitionsPerProducer, cfg.Partitions.Count)
 
 		partitionIDs := make([]int, 0, endPartition-startPartition)
 		partitionWeights := make([]int64, 0, endPartition-startPartition)
@@ -593,10 +590,7 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 
 	// If a cooldown is configured and we have a deadline, stop chaos & producers early to allow healing
 	if dl, ok := ctx.Deadline(); ok && cooldown > 0 {
-		delay := time.Until(dl) - cooldown
-		if delay < 0 {
-			delay = 0
-		}
+		delay := max(time.Until(dl)-cooldown, 0)
 		time.AfterFunc(delay, func() {
 			log.Printf("Entering cooldown window (%v before end): stopping chaos and producers to allow healing", cooldown)
 			// Mark cooldown active to enable quiesced drain behavior
@@ -792,10 +786,7 @@ func runProducer(ctx context.Context, cfg *config.Config) error {
 		partitionsPerProducer++ // Round up to handle remainder
 	}
 	startPartition := producerIndex * partitionsPerProducer
-	endPartition := (producerIndex + 1) * partitionsPerProducer
-	if endPartition > cfg.Partitions.Count {
-		endPartition = cfg.Partitions.Count
-	}
+	endPartition := min((producerIndex+1)*partitionsPerProducer, cfg.Partitions.Count)
 
 	partitionIDs := make([]int, 0, endPartition-startPartition)
 	partitionWeights := make([]int64, 0, endPartition-startPartition)
@@ -959,7 +950,7 @@ func handleChaosEvent(
 		if count <= 0 {
 			return
 		}
-		for i := 0; i < count; i++ {
+		for range count {
 			id := fmt.Sprintf("worker-%d", nextWorkerIndex(goroutineRegistry))
 			spawnAllInOneWorker(ctx, id)
 		}
@@ -1543,7 +1534,7 @@ func handleScaleUpEvent(
 
 	currentCount := processMgr.GetWorkerCount()
 
-	for i := 0; i < count; i++ {
+	for i := range count {
 		workerID := fmt.Sprintf("worker-%d", currentCount+i)
 		log.Printf("Try to start worker %s", workerID)
 		if err := processMgr.StartWorker(ctx, workerID); err != nil {
@@ -1578,10 +1569,7 @@ func handleScaleDownEvent(count int, processMgr *coordinator.ProcessManager, met
 	}
 
 	// Stop up to 'count' workers
-	stopCount := count
-	if stopCount > len(workers) {
-		stopCount = len(workers)
-	}
+	stopCount := min(count, len(workers))
 
 	for i := 0; i < stopCount; i++ {
 		if err := processMgr.StopProcess(workers[i].ID, 10*time.Second); err != nil {

@@ -3,6 +3,7 @@ package testutil
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -140,13 +141,7 @@ func (st *StateTracker) HasState(state types.State) bool {
 	st.mu.RLock()
 	defer st.mu.RUnlock()
 
-	for _, s := range st.States {
-		if s == state {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(st.States, state)
 }
 
 // GetStates returns a copy of all states.

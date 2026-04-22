@@ -172,8 +172,7 @@ func TestPartitionConsumer_ProcessIterator_FiltersGracefulErrors(t *testing.T) {
 				return nil
 			})
 
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+			ctx := t.Context()
 
 			exit, iterErr := pc.processIterator(ctx, mockIter, handler)
 			require.False(t, exit, "should not signal exit for iterator error")

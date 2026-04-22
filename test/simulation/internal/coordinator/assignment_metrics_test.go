@@ -1,7 +1,6 @@
 package coordinator
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -13,8 +12,7 @@ import (
 func TestCoordinatorAssignmentMetrics(t *testing.T) {
 	collector := metrics.NewCollectorWithRegistry(prometheus.NewRegistry())
 	coord := NewCoordinator(10, collector, DupTraceSettings{}, false, "")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go coord.Start(ctx)
 
 	ch := coord.GetAssignmentsChannel()

@@ -131,8 +131,7 @@ func TestChaosController_DisabledNoGoroutine(t *testing.T) {
 	}
 
 	chaosCtrl := NewChaosController(cfg)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	chaosCtrl.Start(ctx)
 	time.Sleep(200 * time.Millisecond)

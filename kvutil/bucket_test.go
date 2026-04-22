@@ -33,7 +33,7 @@ func TestConcurrentKVBucketCreation(t *testing.T) {
 		kvs := make([]jetstream.KeyValue, numWorkers)
 
 		// Start 5 goroutines all trying to create the same bucket
-		for i := 0; i < numWorkers; i++ {
+		for i := range numWorkers {
 			wg.Add(1) //nolint:revive // Standard pattern for concurrent operations
 			go func(idx int) {
 				defer wg.Done()
@@ -88,7 +88,7 @@ func TestConcurrentKVBucketCreation(t *testing.T) {
 		var wg sync.WaitGroup
 		successCount := make(chan int, numWorkers)
 
-		for i := 0; i < numWorkers; i++ {
+		for i := range numWorkers {
 			wg.Add(1) //nolint:revive // Standard pattern for concurrent operations
 			go func(idx int) {
 				defer wg.Done()
@@ -97,7 +97,7 @@ func TestConcurrentKVBucketCreation(t *testing.T) {
 				var err error
 				maxRetries := 5
 
-				for attempt := 0; attempt < maxRetries; attempt++ {
+				for attempt := range maxRetries {
 					cfg := jetstream.KeyValueConfig{
 						Bucket:  bucketName,
 						History: 1,
@@ -246,7 +246,7 @@ func TestEnsureKVBucketWithRetry(t *testing.T) {
 			TTL:     5 * time.Second,
 		}
 
-		for i := 0; i < numWorkers; i++ {
+		for i := range numWorkers {
 			wg.Add(1) //nolint:revive // Standard pattern for concurrent operations
 			go func(idx int) {
 				defer wg.Done()

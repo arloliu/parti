@@ -45,7 +45,7 @@ func TestStateMachine_ColdStart(t *testing.T) {
 	defer cluster.StopWorkers()
 
 	// Add 3 workers with state tracking
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		cluster.AddWorker(ctx)
 	}
 
@@ -103,7 +103,7 @@ func TestStateMachine_PlannedScale(t *testing.T) {
 
 	// Start initial 3 workers
 	t.Log("Starting initial 3 workers...")
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		cluster.AddWorker(ctx)
 	}
 	cluster.StartWorkers(ctx)
@@ -130,7 +130,7 @@ func TestStateMachine_PlannedScale(t *testing.T) {
 	// Add 2 more workers (planned scale: 3 → 5)
 	t.Log("Adding 2 more workers (planned scale)...")
 	startScaleTime := time.Now()
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		mgr := cluster.AddWorker(ctx)
 		err := mgr.Start(ctx)
 		if err != nil {
@@ -201,7 +201,7 @@ func TestStateMachine_Emergency(t *testing.T) {
 
 	// Start 3 workers
 	t.Log("Starting 3 workers...")
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		cluster.AddWorker(ctx)
 	}
 	cluster.StartWorkers(ctx)
@@ -356,7 +356,7 @@ func TestStateMachine_Restart(t *testing.T) {
 
 	// Start initial 10 workers
 	t.Log("Starting initial 10 workers...")
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		cluster1.AddWorkerWithoutTracking(ctx)
 	}
 	cluster1.StartWorkers(ctx)
@@ -381,7 +381,7 @@ func TestStateMachine_Restart(t *testing.T) {
 	t.Log("Starting 10 new workers (restart scenario)...")
 	startTime := time.Now()
 
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		cluster2.AddWorkerWithoutTracking(ctx)
 	}
 	cluster2.StartWorkers(ctx)

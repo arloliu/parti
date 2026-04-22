@@ -50,11 +50,9 @@ func TestClaimBasedResolver_Chaos_ConcurrentUpdates(t *testing.T) {
 	var wg sync.WaitGroup
 
 	// Writers
-	for i := 0; i < numWorkers; i++ {
+	for i := range numWorkers {
 		workerID := fmt.Sprintf("w%d", i)
-		wg.Add(1) //nolint:revive
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for {
 				select {
 				case <-ctx.Done():
@@ -89,14 +87,12 @@ func TestClaimBasedResolver_Chaos_ConcurrentUpdates(t *testing.T) {
 					time.Sleep(time.Duration(rand.IntN(10)) * time.Millisecond)
 				}
 			}
-		}()
+		})
 	}
 
 	// Readers
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1) //nolint:revive
-		go func() {
-			defer wg.Done()
+	for range numWorkers {
+		wg.Go(func() {
 			for {
 				select {
 				case <-ctx.Done():
@@ -113,14 +109,14 @@ func TestClaimBasedResolver_Chaos_ConcurrentUpdates(t *testing.T) {
 					time.Sleep(time.Duration(rand.IntN(5)) * time.Millisecond)
 				}
 			}
-		}()
+		})
 	}
 
 	wg.Wait()
 
 	time.Sleep(200 * time.Millisecond)
 
-	for i := 0; i < numPartitions; i++ {
+	for i := range numPartitions {
 		pid := fmt.Sprintf("p%d", i)
 		key := "claims/" + pid
 

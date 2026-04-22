@@ -248,7 +248,7 @@ func TestBroadcast_TwoInstancesFanOut(t *testing.T) {
 
 	totalMessages := int32(10)
 	for i := range totalMessages {
-		require.NoError(t, nc.Publish("bcfan.events", []byte(fmt.Sprintf("msg-%d", i))))
+		require.NoError(t, nc.Publish("bcfan.events", fmt.Appendf(nil, "msg-%d", i)))
 	}
 	require.NoError(t, nc.Flush())
 

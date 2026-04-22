@@ -45,7 +45,7 @@ func TestStableID_PersistentStorage(t *testing.T) {
 		kv1, err := js1.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "parti-stableid", TTL: ttl, Storage: jetstream.FileStorage})
 		require.NoError(t, err)
 
-		for i := 0; i < 3; i++ {
+		for i := range 3 {
 			c := stableid.NewClaimer(kv1, "simulation-worker", 0, 999, ttl, nil)
 			wid, err := c.Claim(ctx)
 			require.NoError(t, err)
@@ -67,7 +67,7 @@ func TestStableID_PersistentStorage(t *testing.T) {
 		require.NoError(t, err)
 
 		claimed := make([]string, 3)
-		for i := 0; i < 3; i++ {
+		for i := range 3 {
 			c := stableid.NewClaimer(kv2, "simulation-worker", 0, 999, ttl, nil)
 			id, err := c.Claim(ctx)
 			require.NoError(t, err)

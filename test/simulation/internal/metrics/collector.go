@@ -660,7 +660,7 @@ func (c *Collector) IncMovedPartitions(n int) {
 	if n <= 0 {
 		return
 	}
-	for i := 0; i < n; i++ { // increment by n (counter has no Add in client_golang v1)
+	for range n { // increment by n (counter has no Add in client_golang v1)
 		c.assignmentMovedPartitionsTotal.Inc()
 	}
 	c.assignMu.Lock()
@@ -674,7 +674,7 @@ func (c *Collector) ObserveHoleLifetime(d time.Duration) {
 }
 
 func (c *Collector) IncHolesHealed(n int) {
-	for i := 0; i < n; i++ {
+	for range n {
 		c.holesHealedTotal.Inc()
 	}
 }

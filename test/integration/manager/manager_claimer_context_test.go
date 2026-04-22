@@ -97,7 +97,7 @@ func TestClaimerContextLifecycle_MultipleWorkers(t *testing.T) {
 	workerIDs := make([]string, numWorkers)
 
 	// Start all workers concurrently (simulating real deployment)
-	for i := 0; i < numWorkers; i++ {
+	for i := range numWorkers {
 		// Each worker has its own startup and manager context
 		startupCtx, cancelStartup := context.WithTimeout(context.Background(), 10*time.Second)
 

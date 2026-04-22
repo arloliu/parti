@@ -227,7 +227,7 @@ func TestQueue_ReceivesMessages(t *testing.T) {
 	t.Cleanup(func() { _ = q.Stop(ctx) })
 
 	// Publish messages
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		require.NoError(t, nc.Publish("qmsg.events", []byte("msg")))
 	}
 	_ = nc.Flush()

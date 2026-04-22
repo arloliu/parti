@@ -35,7 +35,7 @@ func TestLeaderElection_BasicFailover(t *testing.T) {
 	debugLogger := logging.NewNop()
 
 	// Add and start 3 workers
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		mgr := cluster.AddWorker(ctx, debugLogger)
 		err := mgr.Start(ctx)
 		require.NoError(t, err, "worker %d failed to start", i)
@@ -130,7 +130,7 @@ func TestLeaderElection_ColdStart(t *testing.T) {
 
 	// Start 5 workers simultaneously (cold start)
 	t.Log("Starting 5 workers simultaneously...")
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		mgr := cluster.AddWorker(ctx)
 		err := mgr.Start(ctx)
 		require.NoError(t, err, "worker %d failed to start", i)
@@ -172,7 +172,7 @@ func TestLeaderElection_OnlyLeaderRunsCalculator(t *testing.T) {
 	cluster := testutil.NewFastWorkerCluster(t, nc, 10)
 
 	// Add and start 3 workers
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		mgr := cluster.AddWorker(ctx)
 		err := mgr.Start(ctx)
 		require.NoError(t, err, "worker %d failed to start", i)
@@ -225,7 +225,7 @@ func TestLeaderElection_LeaderRenewal(t *testing.T) {
 	cluster := testutil.NewFastWorkerCluster(t, nc, 10)
 
 	// Add and start 2 workers
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		mgr := cluster.AddWorker(ctx)
 		err := mgr.Start(ctx)
 		require.NoError(t, err, "worker %d failed to start", i)
@@ -290,7 +290,7 @@ func TestLeaderElection_AssignmentPreservation(t *testing.T) {
 	debugLogger := logging.NewNop()
 
 	// Start 3 workers
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		mgr := cluster.AddWorker(ctx, debugLogger)
 		err := mgr.Start(ctx)
 		require.NoError(t, err, "worker %d failed to start", i)
@@ -470,7 +470,7 @@ func TestLeaderElection_AssignmentVersioning(t *testing.T) {
 	debugLogger := logging.NewNop()
 
 	// Start 3 workers
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		mgr := cluster.AddWorker(ctx, debugLogger)
 		err := mgr.Start(ctx)
 		require.NoError(t, err, "worker %d failed to start", i)
@@ -603,7 +603,7 @@ func TestLeaderElection_NoOrphansOnFailover(t *testing.T) {
 	debugLogger := logging.NewNop()
 
 	// Start 4 workers simultaneously for realistic concurrent startup
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		mgr := cluster.AddWorker(ctx, debugLogger)
 		err := mgr.Start(ctx)
 		require.NoError(t, err, "worker %d failed to start", i)
@@ -675,7 +675,7 @@ func TestLeaderElection_NoOrphansOnFailover(t *testing.T) {
 
 		// Verify complete coverage: all 20 partition keys exist
 		expectedKeys := make(map[string]bool)
-		for i := 0; i < 20; i++ {
+		for i := range 20 {
 			expectedKeys[fmt.Sprintf("partition-%d", i)] = true
 		}
 		for expectedKey := range expectedKeys {
@@ -709,7 +709,7 @@ func TestLeaderElection_RapidChurn(t *testing.T) {
 	cluster := testutil.NewFastWorkerCluster(t, nc, 20)
 
 	// Start 4 workers (need extras since we'll kill 3)
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		mgr := cluster.AddWorker(ctx)
 		err := mgr.Start(ctx)
 		require.NoError(t, err, "worker %d failed to start", i)
@@ -808,7 +808,7 @@ func TestLeaderElection_ShutdownDuringRebalancing(t *testing.T) {
 	cluster := testutil.NewFastWorkerCluster(t, nc, 20)
 
 	// Start 2 workers and wait for stability
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		mgr := cluster.AddWorker(ctx)
 		err := mgr.Start(ctx)
 		require.NoError(t, err)
@@ -924,7 +924,7 @@ func TestLeaderElection_ShutdownDuringEmergency(t *testing.T) {
 	cluster := testutil.NewFastWorkerCluster(t, nc, 20)
 
 	// Start 4 workers
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		mgr := cluster.AddWorker(ctx)
 		err := mgr.Start(ctx)
 		require.NoError(t, err)
@@ -1117,7 +1117,7 @@ func TestLeaderElection_FollowersKeepAssignmentDuringCleanup(t *testing.T) {
 	debugLogger := logging.NewNop()
 
 	// Start 3 workers
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		mgr := cluster.AddWorker(ctx, debugLogger)
 		err := mgr.Start(ctx)
 		require.NoError(t, err, "worker %d failed to start", i)

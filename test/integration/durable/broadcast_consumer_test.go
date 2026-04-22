@@ -76,7 +76,7 @@ func TestBroadcastConsumer_Integration_ReceivesAllMessages(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// Publish 5 messages to each partition
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		require.NoError(t, nc.Publish("bc.region.us-east.events", []byte("msg")))
 		require.NoError(t, nc.Publish("bc.region.us-west.events", []byte("msg")))
 		require.NoError(t, nc.Publish("bc.region.eu-central.events", []byte("msg")))
@@ -149,7 +149,7 @@ func TestBroadcastConsumer_Integration_IgnoresPartitionUpdates(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// Publish to both partitions
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		require.NoError(t, nc.Publish("bcd.p1.events", []byte("msg")))
 		require.NoError(t, nc.Publish("bcd.p2.events", []byte("msg")))
 	}
@@ -173,7 +173,7 @@ func TestBroadcastConsumer_Integration_IgnoresPartitionUpdates(t *testing.T) {
 	atomic.StoreInt32(&p2Count, 0)
 
 	// Publish again
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		require.NoError(t, nc.Publish("bcd.p1.events", []byte("msg2")))
 		require.NoError(t, nc.Publish("bcd.p2.events", []byte("msg2")))
 	}
@@ -231,7 +231,7 @@ func TestBroadcastConsumer_Integration_Close(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// Publish some messages
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		require.NoError(t, nc.Publish("bcc.test.events", []byte("msg")))
 	}
 	_ = nc.Flush()
@@ -252,7 +252,7 @@ func TestBroadcastConsumer_Integration_Close(t *testing.T) {
 
 	// After close, publishing more messages should not increment counter
 	beforeClose := atomic.LoadInt32(&handled)
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		require.NoError(t, nc.Publish("bcc.test.events", []byte("msg2")))
 	}
 	_ = nc.Flush()

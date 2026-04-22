@@ -45,7 +45,7 @@ func TestIntegration_Emergency_WorkerCrash_ReassignsPartitions(t *testing.T) {
 	debugLogger := logging.NewTest(t)
 
 	// Start 3 workers with debug logging
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		cluster.AddWorker(ctx, debugLogger)
 	}
 	cluster.StartWorkers(ctx)
@@ -123,7 +123,7 @@ func TestIntegration_Emergency_CascadingFailures_HandlesGracefully(t *testing.T)
 	cluster.Config = cfg
 	defer cluster.StopWorkers()
 
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		cluster.AddWorker(ctx)
 	}
 	cluster.StartWorkers(ctx)
@@ -212,7 +212,7 @@ func TestIntegration_Emergency_K8sRollingUpdate_NoDataLoss(t *testing.T) {
 	cluster.Config = cfg
 	defer cluster.StopWorkers()
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		cluster.AddWorker(ctx)
 	}
 	cluster.StartWorkers(ctx)
@@ -222,7 +222,7 @@ func TestIntegration_Emergency_K8sRollingUpdate_NoDataLoss(t *testing.T) {
 	cluster.VerifyTotalPartitionCount(15)
 
 	// Rolling update: Restart each pod one by one
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		t.Logf("Rolling update: Restarting worker %d", i)
 
 		// Stop worker
@@ -298,7 +298,7 @@ func TestIntegration_Emergency_SlowWorker_DoesNotBlockSystem(t *testing.T) {
 	cluster.Config = cfg
 	defer cluster.StopWorkers()
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		cluster.AddWorker(ctx)
 	}
 	cluster.StartWorkers(ctx)

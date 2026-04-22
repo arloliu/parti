@@ -104,7 +104,7 @@ func TestWorkerConsumer_Integration(t *testing.T) {
 	// Scale test: 100 partitions
 	count := 100
 	partitions := make([]types.Partition, count)
-	for i := 0; i < count; i++ {
+	for i := range count {
 		partitions[i] = types.Partition{Keys: []string{fmt.Sprintf("scale-%d", i)}}
 	}
 
@@ -112,7 +112,7 @@ func TestWorkerConsumer_Integration(t *testing.T) {
 	require.NoError(t, err)
 
 	// Publish to all 100 partitions
-	for i := 0; i < count; i++ {
+	for i := range count {
 		subject := fmt.Sprintf("events.scale-%d", i)
 		msg := fmt.Sprintf("msg-%d", i)
 		_, err = js.Publish(ctx, subject, []byte(msg))
@@ -122,7 +122,7 @@ func TestWorkerConsumer_Integration(t *testing.T) {
 	// Verify all messages received
 	receivedScale := make(map[string]bool)
 	timeout := time.After(5 * time.Second)
-	for i := 0; i < count; i++ {
+	for range count {
 		select {
 		case data := <-receivedCh:
 			receivedScale[data] = true
@@ -131,7 +131,7 @@ func TestWorkerConsumer_Integration(t *testing.T) {
 		}
 	}
 
-	for i := 0; i < count; i++ {
+	for i := range count {
 		msg := fmt.Sprintf("msg-%d", i)
 		require.True(t, receivedScale[msg], "Missing message %s", msg)
 	}

@@ -50,7 +50,7 @@ func TestIntegration_K8sRollingUpdate_PreservesAssignments(t *testing.T) {
 
 	// Start 10 workers
 	t.Log("Starting 10 workers...")
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		mgr := cluster.AddWorker(ctx)
 		err := mgr.Start(ctx)
 		require.NoError(t, err)
@@ -81,7 +81,7 @@ func TestIntegration_K8sRollingUpdate_PreservesAssignments(t *testing.T) {
 	// Perform rolling update: replace each worker one by one
 	t.Log("Starting rolling update...")
 	originalWorkerCount := len(cluster.Workers)
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		workerToReplace := cluster.Workers[i]
 		oldWorkerID := workerToReplace.WorkerID()
 		t.Logf("Rolling update step %d/10: Replacing worker %s", i+1, oldWorkerID)
@@ -101,7 +101,7 @@ func TestIntegration_K8sRollingUpdate_PreservesAssignments(t *testing.T) {
 			time.Sleep(250 * time.Millisecond) // intentional: polling interval for partition coverage check
 			uniqDuring := make(map[string]struct{})
 			// Only count workers from original slice (0 to originalWorkerCount-1)
-			for j := 0; j < originalWorkerCount; j++ {
+			for j := range originalWorkerCount {
 				if j == i {
 					continue // Skip the stopped worker
 				}
@@ -208,7 +208,7 @@ func TestIntegration_NetworkPartition_HealsGracefully(t *testing.T) {
 
 	// Start 6 workers
 	t.Log("Starting 6 workers...")
-	for i := 0; i < 6; i++ {
+	for range 6 {
 		mgr := cluster.AddWorker(ctx)
 		err := mgr.Start(ctx)
 		require.NoError(t, err)
@@ -231,7 +231,7 @@ func TestIntegration_NetworkPartition_HealsGracefully(t *testing.T) {
 	// SIMULATE NETWORK PARTITION: Stop first 3 workers (group A)
 	t.Log("Simulating network partition: stopping group A (3 workers)...")
 	groupAIDs := make([]string, 3)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		groupAIDs[i] = cluster.Workers[i].WorkerID()
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		err := cluster.Workers[i].Stop(stopCtx)
@@ -265,7 +265,7 @@ func TestIntegration_NetworkPartition_HealsGracefully(t *testing.T) {
 	// HEAL NETWORK PARTITION: Restart group A workers
 	t.Log("Healing network partition: restarting group A...")
 	newGroupAWorkers := make([]*parti.Manager, 3)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		mgr := cluster.AddWorker(ctx)
 		err := mgr.Start(ctx)
 		require.NoError(t, err, "failed to restart worker %d", i)
@@ -334,7 +334,7 @@ func TestIntegration_HighChurn_SystemStable(t *testing.T) { //nolint:cyclop
 
 	// Start initial 5 workers
 	t.Log("Starting initial 5 workers...")
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		mgr := cluster.AddWorker(ctx)
 		err := mgr.Start(ctx)
 		require.NoError(t, err)
@@ -351,10 +351,7 @@ func TestIntegration_HighChurn_SystemStable(t *testing.T) { //nolint:cyclop
 	defer churnCancel()
 
 	var churnWg sync.WaitGroup
-	churnWg.Add(1)
-	go func() {
-		defer churnWg.Done()
-
+	churnWg.Go(func() {
 		churnCount := 0
 		for {
 			select {
@@ -408,14 +405,11 @@ func TestIntegration_HighChurn_SystemStable(t *testing.T) { //nolint:cyclop
 				}
 			}
 		}
-	}()
+	})
 
 	// Monitor partition coverage during churn
 	monitorWg := sync.WaitGroup{}
-	monitorWg.Add(1)
-	go func() {
-		defer monitorWg.Done()
-
+	monitorWg.Go(func() {
 		monitorTicker := time.NewTicker(3 * time.Second)
 		defer monitorTicker.Stop()
 
@@ -444,7 +438,7 @@ func TestIntegration_HighChurn_SystemStable(t *testing.T) { //nolint:cyclop
 				}
 			}
 		}
-	}()
+	})
 
 	// Wait for churn period to complete
 	churnWg.Wait()
@@ -498,7 +492,7 @@ func TestIntegration_MassWorkerFailure_Recovers(t *testing.T) {
 
 	// Start 10 workers
 	t.Log("Starting 10 workers...")
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		mgr := cluster.AddWorker(ctx)
 		err := mgr.Start(ctx)
 		require.NoError(t, err)
@@ -525,7 +519,7 @@ func TestIntegration_MassWorkerFailure_Recovers(t *testing.T) {
 	// MASS FAILURE: Stop 8 out of 10 workers
 	t.Log("MASS FAILURE: Stopping 8 workers simultaneously...")
 	var failWg sync.WaitGroup
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		failWg.Add(1)
 		go func(idx int) {
 			defer failWg.Done()
@@ -568,7 +562,7 @@ func TestIntegration_MassWorkerFailure_Recovers(t *testing.T) {
 	// Gradually restart failed workers
 	t.Log("Restarting failed workers...")
 	newWorkers := make([]*parti.Manager, 8)
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		mgr := cluster.AddWorker(ctx)
 		err := mgr.Start(ctx)
 		require.NoError(t, err, "failed to restart worker %d", i)
@@ -631,7 +625,7 @@ func TestIntegration_LeaderFailover_DuringRebalance(t *testing.T) {
 
 	// Start initial 5 workers
 	t.Log("Starting initial 5 workers...")
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		mgr := cluster.AddWorker(ctx)
 		err := mgr.Start(ctx)
 		require.NoError(t, err)
@@ -659,7 +653,7 @@ func TestIntegration_LeaderFailover_DuringRebalance(t *testing.T) {
 	// Add 3 new workers to trigger rebalancing
 	t.Log("Adding 3 new workers to trigger rebalancing...")
 	initialVersion := leaderMgr.CurrentAssignment().Version
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		mgr := cluster.AddWorker(ctx)
 		err := mgr.Start(ctx)
 		require.NoError(t, err)
@@ -779,7 +773,7 @@ func TestScenario_RapidScaling_StabilizationWindows(t *testing.T) {
 
 	// Start 3 initial workers
 	t.Log("Starting 3 initial workers")
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		mgr := cluster.AddWorker(ctx, debugLogger)
 		err := mgr.Start(ctx)
 		require.NoError(t, err, "failed to start initial worker %d", i)
@@ -798,7 +792,7 @@ func TestScenario_RapidScaling_StabilizationWindows(t *testing.T) {
 	scaleStart := time.Now()
 
 	// Start all 7 workers concurrently
-	for i := 0; i < 7; i++ {
+	for i := range 7 {
 		mgr := cluster.AddWorker(ctx, debugLogger)
 		// Start each worker in a goroutine to minimize time between starts
 		go func(m *parti.Manager, idx int) {
@@ -880,7 +874,7 @@ func TestScenario_SlowHeartbeats_NearExpiryBoundary(t *testing.T) {
 
 	// Start 3 workers
 	t.Log("Starting 3 workers with tight heartbeat timing")
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		mgr := cluster.AddWorker(ctx, debugLogger)
 		err := mgr.Start(ctx)
 		require.NoError(t, err, "failed to start worker %d", i)
@@ -951,7 +945,7 @@ func TestScenario_ConcurrentLeaderElection_RaceCondition(t *testing.T) {
 
 	// Start 5 workers simultaneously (maximize election contention)
 	t.Log("Starting 5 workers simultaneously to trigger election race")
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		mgr := cluster.AddWorker(ctx, debugLogger)
 		// Start immediately without waiting - simulate simultaneous startup
 		go func(m *parti.Manager, idx int) {

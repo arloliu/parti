@@ -103,11 +103,7 @@ func NewResourceMonitor() *ResourceMonitor {
 // Parameters:
 //   - interval: How often to sample resources (e.g., 1 * time.Second)
 func (rm *ResourceMonitor) Start(interval time.Duration) {
-	rm.wg.Add(1)
-
-	go func() {
-		defer rm.wg.Done()
-
+	rm.wg.Go(func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
@@ -121,7 +117,7 @@ func (rm *ResourceMonitor) Start(interval time.Duration) {
 				rm.sample()
 			}
 		}
-	}()
+	})
 }
 
 // Stop ends sampling and returns the final resource report.

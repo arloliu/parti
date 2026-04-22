@@ -182,7 +182,7 @@ func TestClaimBasedResolver_Concurrency_ForceRefreshAndWatcher(t *testing.T) {
 	// We run this in a loop to increase chance of hitting the race if it exists.
 
 	iterations := 100
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		// Reset cache
 		empty := make(map[string]claimEntry)
 		r.cache.Store(&empty)

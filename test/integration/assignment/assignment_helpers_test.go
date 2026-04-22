@@ -3,6 +3,7 @@ package assignment_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,12 +45,13 @@ func partitionKey(p types.Partition) string {
 		return ""
 	}
 
-	result := p.Keys[0]
+	var result strings.Builder
+	result.WriteString(p.Keys[0])
 	for i := 1; i < len(p.Keys); i++ {
-		result += ":" + p.Keys[i]
+		result.WriteString(":" + p.Keys[i])
 	}
 
-	return result
+	return result.String()
 }
 
 // partitionSetsEqual compares two partition slices for equality (ignoring order).
@@ -114,7 +116,7 @@ func setupManagers(
 	t.Helper()
 
 	managers := make([]*parti.Manager, numManagers)
-	for i := 0; i < numManagers; i++ {
+	for i := range numManagers {
 		js, err := jetstream.New(conn)
 		require.NoError(t, err)
 

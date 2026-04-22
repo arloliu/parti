@@ -237,7 +237,7 @@ func TestVerify_InactiveThresholdSemantics(t *testing.T) {
 		// — this forces the iterator into "idle" right after and creates a
 		// moment where the active pull has just completed and a new one
 		// hasn't been issued yet.
-		for i := 0; i < 5; i++ {
+		for range 5 {
 			_, err := js.Publish(context.Background(), "VERIFYS6.evt", []byte("msg"))
 			require.NoError(t, err)
 		}
@@ -252,7 +252,7 @@ func TestVerify_InactiveThresholdSemantics(t *testing.T) {
 
 		// Drain all 5 messages; after acking the last one, the iterator
 		// has no active pull but an idle one should be re-issued quickly.
-		for i := 0; i < 5; i++ {
+		for range 5 {
 			msg, err := iter.Next()
 			require.NoError(t, err)
 			_ = msg.Ack()
@@ -306,7 +306,7 @@ func TestVerify_InactiveThresholdSemantics(t *testing.T) {
 		cons := makeConsumer(t, "VERIFYS7", "verify-c7")
 
 		// Publish messages so we can drain them and reach the "between-pulls" state.
-		for i := 0; i < 3; i++ {
+		for range 3 {
 			_, err := js.Publish(context.Background(), "VERIFYS7.evt", []byte("msg"))
 			require.NoError(t, err)
 		}
@@ -319,7 +319,7 @@ func TestVerify_InactiveThresholdSemantics(t *testing.T) {
 		require.NoError(t, err)
 
 		// Drain messages.
-		for i := 0; i < 3; i++ {
+		for range 3 {
 			msg, err := iter.Next()
 			require.NoError(t, err)
 			_ = msg.Ack()

@@ -1,7 +1,6 @@
 package coordinator
 
 import (
-	"context"
 	"os/exec"
 	"syscall"
 	"testing"
@@ -26,8 +25,7 @@ func TestProcessManager_SignalProcess(t *testing.T) {
 	// So we can't easily use "sleep" with StartWorker.
 	// We should probably add a generic StartProcess or just manually populate the map for testing.
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	cmd := exec.CommandContext(ctx, "sleep", "10")
 	err = cmd.Start()

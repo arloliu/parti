@@ -170,8 +170,8 @@ func (p *AssignmentPublisher) CleanupAllAssignments(ctx context.Context) error {
 
 	var workersToRemove []string
 	for _, key := range keys {
-		if strings.HasPrefix(key, p.keyPrefix) {
-			workersToRemove = append(workersToRemove, strings.TrimPrefix(key, p.keyPrefix))
+		if after, ok := strings.CutPrefix(key, p.keyPrefix); ok {
+			workersToRemove = append(workersToRemove, after)
 		}
 	}
 

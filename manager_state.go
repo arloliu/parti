@@ -3,6 +3,7 @@ package parti
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/arloliu/parti/v2/types"
@@ -174,13 +175,7 @@ func (m *Manager) isValidTransition(from, to State) bool {
 		return false
 	}
 
-	for _, allowed := range allowedStates {
-		if allowed == to {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(allowedStates, to)
 }
 
 // syncStateFromCalculator updates Manager state based on Calculator state.

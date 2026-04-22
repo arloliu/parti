@@ -113,7 +113,7 @@ func TestProcessingGate_Manager_Handoff(t *testing.T) {
 	// Publish batch1 and expect only m1 to process
 	subject := "events." + pid
 	const batch1 = 12
-	for i := 0; i < batch1; i++ {
+	for range batch1 {
 		_, err := js.Publish(ctx, subject, nil)
 		require.NoError(t, err)
 	}
@@ -185,7 +185,7 @@ func TestProcessingGate_Manager_Handoff(t *testing.T) {
 	// Publish batch2 and expect w2 to process at least that many beyond its baseline
 	w2Base := atomic.LoadInt32(&w2Processed)
 	const batch2 = 10
-	for i := 0; i < batch2; i++ {
+	for range batch2 {
 		_, err := js.Publish(ctx, subject, nil)
 		require.NoError(t, err)
 	}

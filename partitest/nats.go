@@ -125,7 +125,7 @@ func StartEmbeddedNATSCluster(t *testing.T) ([]*server.Server, *nats.Conn) {
 	clusterPorts := make([]int, clusterSize)
 	clientPorts := make([]int, clusterSize)
 	var err error
-	for i := 0; i < clusterSize; i++ {
+	for i := range clusterSize {
 		clusterPorts[i], err = getFreePort()
 		if err != nil {
 			t.Fatalf("Failed to get free port: %v", err)
@@ -140,7 +140,7 @@ func StartEmbeddedNATSCluster(t *testing.T) ([]*server.Server, *nats.Conn) {
 	routes := buildClusterRoutes(clusterSize, clusterPorts)
 
 	// Start all nodes
-	for i := 0; i < clusterSize; i++ {
+	for i := range clusterSize {
 		servers[i] = startClusterNode(t, i, clientPorts[i], clusterPorts[i], routes, servers)
 	}
 
@@ -198,7 +198,7 @@ func startClusterNode(t *testing.T, index int, clientPort, clusterPort int, rout
 // buildClusterRoutes builds the route URLs for cluster formation.
 func buildClusterRoutes(count int, clusterPorts []int) []*url.URL {
 	routes := make([]*url.URL, count)
-	for j := 0; j < count; j++ {
+	for j := range count {
 		routeURL, _ := url.Parse(fmt.Sprintf("nats://127.0.0.1:%d", clusterPorts[j]))
 		routes[j] = routeURL
 	}

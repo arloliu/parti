@@ -1,6 +1,7 @@
 package assignment
 
 import (
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -132,12 +133,6 @@ func TestCalculator_EmergencyMetrics(t *testing.T) {
 	}
 	require.True(t, foundChange, "should record removal of 1 worker")
 
-	foundActive := false
-	for _, count := range metrics.activeWorkers {
-		if count == 1 {
-			foundActive = true
-			break
-		}
-	}
+	foundActive := slices.Contains(metrics.activeWorkers, 1)
 	require.True(t, foundActive, "should record 1 active worker")
 }

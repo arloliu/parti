@@ -129,11 +129,7 @@ func calculateBackoff(attempt int) time.Duration {
 	base := time.Duration(1<<uint(attempt)) * 20 * time.Millisecond //nolint:gosec // attempt is bounded, no overflow risk
 	//nolint:gosec // weak random is sufficient for jitter
 	jitter := time.Duration(rand.Intn(20)-10) * time.Millisecond
-	delay := base + jitter
-
-	if delay > 500*time.Millisecond {
-		delay = 500 * time.Millisecond
-	}
+	delay := min(base+jitter, 500*time.Millisecond)
 	if delay < 10*time.Millisecond {
 		delay = 10 * time.Millisecond
 	}

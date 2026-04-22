@@ -272,10 +272,7 @@ func (wch *WeightedConsistentHash) prepare(workers []string, partitionsLen int) 
 	// Heuristic: assume roughly even distribution, allocate ceil(partitions/workers) per bucket.
 	capPer := 0
 	if len(sortedWorkers) > 0 && partitionsLen > 0 {
-		capPer = (partitionsLen + len(sortedWorkers) - 1) / len(sortedWorkers)
-		if capPer < 1 {
-			capPer = 1
-		}
+		capPer = max((partitionsLen+len(sortedWorkers)-1)/len(sortedWorkers), 1)
 	}
 	for i := range buckets {
 		if capPer > 0 {

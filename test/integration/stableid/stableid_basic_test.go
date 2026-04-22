@@ -49,7 +49,7 @@ func TestStableID_ConcurrentClaiming(t *testing.T) {
 	results := make(chan string, num)
 	errs := make(chan error, num)
 
-	for i := 0; i < num; i++ {
+	for range num {
 		go func() {
 			c := stableid.NewClaimer(kv, "worker", 0, 9, 2*time.Second, nil)
 			id, err := c.Claim(ctx)
@@ -62,7 +62,7 @@ func TestStableID_ConcurrentClaiming(t *testing.T) {
 	}
 
 	got := map[string]bool{}
-	for i := 0; i < num; i++ {
+	for range num {
 		select {
 		case id := <-results:
 			require.False(t, got[id], "duplicate id %s", id)

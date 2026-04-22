@@ -87,7 +87,7 @@ func TestWorkerConsumer_UpdateAndPullLoop_ProcessesMessages(t *testing.T) {
 	}
 
 	// Publish a few messages to the subject
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		require.NoError(t, nc.Publish("events.a.1", []byte("m")))
 	}
 	_ = nc.Flush()
@@ -191,7 +191,7 @@ func TestWorkerConsumer_PullGating_SuppressesUntilOwnerStable(t *testing.T) {
 	require.Equal(t, "a.1", wc.extractPartitionID("pg.a.1"))
 
 	// Publish 3 messages pre-claim; expect none handled yet (gated by processing gate)
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		require.NoError(t, nc.Publish("pg.a.1", []byte("m")))
 	}
 	_ = nc.Flush()
@@ -208,7 +208,7 @@ func TestWorkerConsumer_PullGating_SuppressesUntilOwnerStable(t *testing.T) {
 	require.NoError(t, err)
 
 	// Publish 3 more messages after claim becomes visible to ensure delivery post-claim
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		require.NoError(t, nc.Publish("pg.a.1", []byte("m2")))
 	}
 	_ = nc.Flush()
@@ -565,8 +565,8 @@ func TestWorkerConsumer_ManualAck_MaxAckPending_ThrottlesDelivery(t *testing.T) 
 	time.Sleep(200 * time.Millisecond)
 
 	// publish 5 messages
-	for i := 0; i < 5; i++ {
-		require.NoError(t, nc.Publish("mack.a.1", []byte(fmt.Sprintf("m%d", i))))
+	for i := range 5 {
+		require.NoError(t, nc.Publish("mack.a.1", fmt.Appendf(nil, "m%d", i)))
 	}
 	_ = nc.Flush()
 
@@ -686,7 +686,7 @@ func TestWorkerConsumer_UpdateRemovesSubject_StopsLoopKeepsDurable(t *testing.T)
 	require.NoError(t, err)
 
 	// Publish more; loop is stopped so handler should not increment
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		require.NoError(t, nc.Publish("stop.a.1", []byte("y")))
 	}
 	_ = nc.Flush()

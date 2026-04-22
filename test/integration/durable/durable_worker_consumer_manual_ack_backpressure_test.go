@@ -33,7 +33,7 @@ func TestWorkerConsumer_ManualAck_Backpressure(t *testing.T) {
 
 	// Publish a batch of messages
 	total := 10
-	for i := 0; i < total; i++ {
+	for range total {
 		_, err = js.Publish(ctx, "jobs.1", []byte("m"))
 		require.NoError(t, err)
 	}
@@ -51,7 +51,7 @@ func TestWorkerConsumer_ManualAck_Backpressure(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 		ticker := time.NewTicker(150 * time.Millisecond)
 		defer ticker.Stop()
-		for i := 0; i < total; i++ {
+		for range total {
 			msg := <-workCh
 			// Optional: extend AckWait once for long work
 			_ = msg.InProgress()

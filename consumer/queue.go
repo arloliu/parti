@@ -250,10 +250,7 @@ func NewQueue(
 
 // defaultIterFactory creates a messages iterator with heartbeat and expiry.
 func defaultIterFactory(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error) {
-	heartbeat := expiry / 2
-	if heartbeat < 100*time.Millisecond {
-		heartbeat = 100 * time.Millisecond
-	}
+	heartbeat := max(expiry/2, 100*time.Millisecond)
 	return cons.Messages(
 		jetstream.PullMaxMessages(batch),
 		jetstream.PullExpiry(expiry),

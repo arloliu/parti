@@ -232,10 +232,9 @@ func NewWorker(cfg Config) (*Worker, error) { //nolint:cyclop
 		consumerBatchSize:   cfg.ConsumerBatchSize,
 	}
 
-	perSubMaxAckPending := worker.consumerBatchSize * 2
-	if perSubMaxAckPending < 8 { // preserve a small minimum
-		perSubMaxAckPending = 8
-	}
+	perSubMaxAckPending := max(worker.consumerBatchSize*2,
+		// preserve a small minimum
+		8)
 	// Create durable helper early so manager can drive updates via option.
 	helperConfig := durable.WorkerConsumerConfig{
 		ConsumerPrefix:  "simulation",
@@ -383,10 +382,7 @@ func (w *Worker) Start(ctx context.Context) error {
 
 	// If concurrency > 1, start keyed-serialization shards before manager so handler has live queues
 	if w.handlerConcurrency > 1 {
-		w.shardCount = w.handlerConcurrency
-		if w.shardCount < 1 {
-			w.shardCount = 1
-		}
+		w.shardCount = max(w.handlerConcurrency, 1)
 		w.shardChans = make([]chan jetstream.Msg, w.shardCount)
 		for i := 0; i < w.shardCount; i++ {
 			buf := 2 * w.consumerBatchSize

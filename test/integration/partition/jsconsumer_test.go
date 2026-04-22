@@ -39,7 +39,7 @@ func TestJSConsumer_PublishBeforeAndAfterStart(t *testing.T) {
 
 	// Step 1: Publish 3 messages BEFORE consumer starts
 	for i := 1; i <= 3; i++ {
-		_, err = js.Publish(ctx, "repro.0", []byte(fmt.Sprintf("before-%d", i)))
+		_, err = js.Publish(ctx, "repro.0", fmt.Appendf(nil, "before-%d", i))
 		require.NoError(t, err)
 	}
 	t.Log("Step 1: Published 3 messages before consumer start")
@@ -82,7 +82,7 @@ func TestJSConsumer_PublishBeforeAndAfterStart(t *testing.T) {
 
 	// Step 3: Publish 3 MORE messages after initial batch consumed
 	for i := 1; i <= 3; i++ {
-		_, err = js.Publish(ctx, "repro.0", []byte(fmt.Sprintf("after-%d", i)))
+		_, err = js.Publish(ctx, "repro.0", fmt.Appendf(nil, "after-%d", i))
 		require.NoError(t, err)
 	}
 	t.Log("Step 3: Published 3 more messages after initial batch consumed")
@@ -127,7 +127,7 @@ func TestJSConsumer_PublishAfterMultipleIteratorCycles(t *testing.T) {
 
 	// Publish initial messages
 	for i := 1; i <= 3; i++ {
-		_, err = js.Publish(ctx, "cycles.0", []byte(fmt.Sprintf("initial-%d", i)))
+		_, err = js.Publish(ctx, "cycles.0", fmt.Appendf(nil, "initial-%d", i))
 		require.NoError(t, err)
 	}
 	t.Log("Step 1: Published 3 initial messages")
@@ -171,7 +171,7 @@ func TestJSConsumer_PublishAfterMultipleIteratorCycles(t *testing.T) {
 
 	// Publish more messages after the long gap
 	for i := 1; i <= 3; i++ {
-		_, err = js.Publish(ctx, "cycles.0", []byte(fmt.Sprintf("later-%d", i)))
+		_, err = js.Publish(ctx, "cycles.0", fmt.Appendf(nil, "later-%d", i))
 		require.NoError(t, err)
 	}
 	t.Log("Step 4: Published 3 more messages after long gap")

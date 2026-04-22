@@ -359,10 +359,8 @@ func parseRunLog(path string, verbose bool) ([]TimelineEvent, error) {
 func findColumn(header []string, candidates []string) (int, error) {
 	for i, h := range header {
 		lo := strings.ToLower(strings.TrimSpace(h))
-		for _, c := range candidates {
-			if lo == c {
-				return i, nil
-			}
+		if slices.Contains(candidates, lo) {
+			return i, nil
 		}
 	}
 

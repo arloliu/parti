@@ -92,7 +92,7 @@ func TestProcessingGate_Exclusivity(t *testing.T) {
 
 	// Publish a first batch while owner is w1
 	const batch1 = 12
-	for i := 0; i < batch1; i++ {
+	for range batch1 {
 		_, err := js.Publish(ctx, subject, nil)
 		require.NoError(t, err)
 	}
@@ -184,7 +184,7 @@ func TestProcessingGate_Handoff_CustomResolver(t *testing.T) {
 
 	// Batch 1: owned by w1
 	const batch1 = 8
-	for i := 0; i < batch1; i++ {
+	for range batch1 {
 		_, err := js.Publish(ctx, subject, nil)
 		require.NoError(t, err)
 	}
@@ -201,7 +201,7 @@ func TestProcessingGate_Handoff_CustomResolver(t *testing.T) {
 	// Batch 2: should be processed by w2; account for prior NAK backlog redeliveries
 	const batch2 = 7
 	w2Base := atomic.LoadInt32(&w2Processed)
-	for i := 0; i < batch2; i++ {
+	for range batch2 {
 		_, err := js.Publish(ctx, subject, nil)
 		require.NoError(t, err)
 	}

@@ -67,7 +67,7 @@ func TestManager_WaitState_MultipleWaiters(t *testing.T) {
 	numWaiters := 5
 	results := make(chan error, numWaiters)
 
-	for i := 0; i < numWaiters; i++ {
+	for range numWaiters {
 		go func() {
 			errCh := m.WaitState(StateStable, 2*time.Second)
 			results <- <-errCh
@@ -79,7 +79,7 @@ func TestManager_WaitState_MultipleWaiters(t *testing.T) {
 	m.state.Store(int32(StateStable))
 
 	// All waiters should succeed
-	for i := 0; i < numWaiters; i++ {
+	for i := range numWaiters {
 		err := <-results
 		require.NoError(t, err, "Waiter %d should succeed", i)
 	}

@@ -197,8 +197,8 @@ func StartExternalNATS(t *testing.T) (*nats.Conn, func()) {
 	go func() {
 		for scanner.Scan() {
 			line := scanner.Text()
-			if strings.HasPrefix(line, "NATS_URL=") {
-				natsURL = strings.TrimPrefix(line, "NATS_URL=")
+			if after, ok := strings.CutPrefix(line, "NATS_URL="); ok {
+				natsURL = after
 			}
 			if strings.Contains(line, "NATS_READY=true") {
 				resultChan <- true
@@ -307,8 +307,8 @@ func StartExternalNATSWithContext(ctx context.Context, t *testing.T) (*nats.Conn
 	go func() {
 		for scanner.Scan() {
 			line := scanner.Text()
-			if strings.HasPrefix(line, "NATS_URL=") {
-				natsURL = strings.TrimPrefix(line, "NATS_URL=")
+			if after, ok := strings.CutPrefix(line, "NATS_URL="); ok {
+				natsURL = after
 			}
 			if strings.Contains(line, "NATS_READY=true") {
 				resultChan <- true

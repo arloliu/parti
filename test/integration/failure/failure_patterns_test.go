@@ -68,7 +68,7 @@ func TestPattern_ThunderingHerd_AllWorkersRestartSimultaneously(t *testing.T) {
 
 	// Start 10 workers
 	t.Log("Starting 10 workers...")
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		mgr := cluster.AddWorker(ctx)
 		err := mgr.Start(ctx)
 		require.NoError(t, err)
@@ -125,7 +125,7 @@ func TestPattern_ThunderingHerd_AllWorkersRestartSimultaneously(t *testing.T) {
 	t.Log("Restarting all 10 workers simultaneously (thundering herd)...")
 	startRestart := time.Now()
 	var restartWg sync.WaitGroup
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		restartWg.Add(1)
 		go func(idx int) {
 			defer restartWg.Done()
@@ -229,7 +229,7 @@ func TestPattern_SplitBrain_DualLeaders(t *testing.T) {
 
 	// Start 4 workers
 	t.Log("Starting 4 workers...")
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		mgr := cluster.AddWorker(ctx)
 		err := mgr.Start(ctx)
 		require.NoError(t, err)
@@ -275,7 +275,7 @@ func TestPattern_SplitBrain_DualLeaders(t *testing.T) {
 
 	// Poll for a short period to verify leadership remains stable
 	// (no split-brain even with all workers connected)
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		time.Sleep(500 * time.Millisecond)
 
 		currentLeaderCount := 0
@@ -397,7 +397,7 @@ func TestPattern_GrayFailure_SlowButNotDead(t *testing.T) {
 
 	// Start 5 workers
 	t.Log("Starting 5 workers...")
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		mgr := cluster.AddWorker(ctx)
 		err := mgr.Start(ctx)
 		require.NoError(t, err)

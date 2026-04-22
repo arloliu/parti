@@ -86,10 +86,7 @@ func TestMemoryBenchmark_IsolatedParti(t *testing.T) {
 			t.Logf("  Start: %d", report.StartGoroutines)
 			t.Logf("  End:   %d", report.EndGoroutines)
 			t.Logf("  Peak:  %d", report.PeakGoroutines)
-			peakAdditionalGoroutines := report.PeakGoroutines - report.StartGoroutines
-			if peakAdditionalGoroutines < 0 {
-				peakAdditionalGoroutines = 0
-			}
+			peakAdditionalGoroutines := max(report.PeakGoroutines-report.StartGoroutines, 0)
 			t.Logf("  Peak Additional: %d", peakAdditionalGoroutines)
 			t.Logf("  Leak:  %d", report.GoroutineLeak)
 			if tt.workers > 0 {

@@ -57,7 +57,7 @@ func TestStateMachine_ConcurrentTransitions_OnlyOneSucceeds(t *testing.T) {
 	const numGoroutines = 10
 	var wg sync.WaitGroup
 
-	for i := 0; i < numGoroutines; i++ {
+	for range numGoroutines {
 		wg.Go(func() {
 			// All trying to transition from Idle -> Scaling
 			// Use 200ms window to ensure all goroutines start before first completes
@@ -118,7 +118,7 @@ func TestStateMachine_ConcurrentIdenticalTransitions_Idempotent(t *testing.T) {
 	const numAttempts = 5
 	var wg sync.WaitGroup
 
-	for i := 0; i < numAttempts; i++ {
+	for range numAttempts {
 		wg.Go(func() {
 			// These should all return false (already in Scaling)
 			sm.EnterScaling(context.Background(), "duplicate", 500*time.Millisecond)
@@ -259,7 +259,7 @@ func TestStateMachine_RapidTransitions_AllOrdered(t *testing.T) {
 	}()
 
 	// Trigger rapid transitions with minimal delays
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		sm.EnterScaling(context.Background(), "rapid_test", 50*time.Millisecond)
 		time.Sleep(5 * time.Millisecond) // Very short delay
 	}
@@ -310,7 +310,7 @@ func TestStateMachine_ConcurrentEmergency_LastWins(t *testing.T) {
 	var wg sync.WaitGroup
 	reasons := make([]string, numEmergencies)
 
-	for i := 0; i < numEmergencies; i++ {
+	for i := range numEmergencies {
 		reasons[i] = "emergency_" + string(rune('A'+i))
 		wg.Go(func() {
 			sm.EnterEmergency(context.Background())

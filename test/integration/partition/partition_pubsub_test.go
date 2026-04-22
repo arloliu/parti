@@ -283,7 +283,7 @@ func TestMultiplePartitionConsumers(t *testing.T) {
 
 	// Publish to each partition
 	for i, key := range keysForPartition {
-		_, err = pub.Publish(ctx, key, []byte(fmt.Sprintf("msg-%d", i)))
+		_, err = pub.Publish(ctx, key, fmt.Appendf(nil, "msg-%d", i))
 		require.NoError(t, err)
 	}
 

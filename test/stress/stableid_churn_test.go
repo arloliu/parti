@@ -31,7 +31,7 @@ func TestStableID_Stress_HighRevisionChurn(t *testing.T) {
 	require.NoError(t, err)
 
 	// Simulate many previous runs by claiming and letting TTL expire repeatedly
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		c := stableid.NewClaimer(kv, "worker", 0, 2, 200*time.Millisecond, nil)
 		_, err := c.Claim(ctx)
 		require.NoError(t, err)
@@ -92,7 +92,7 @@ func TestStableID_Stress_ConcurrentReclaimAfterCrash(t *testing.T) {
 	require.NoError(t, err)
 
 	// Pre-claim a few IDs without renewal (simulate crash)
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		c := stableid.NewClaimer(kv, "worker", 0, 9, 200*time.Millisecond, nil)
 		_, err := c.Claim(ctx)
 		require.NoError(t, err)
@@ -105,7 +105,7 @@ func TestStableID_Stress_ConcurrentReclaimAfterCrash(t *testing.T) {
 	n := 8
 	res := make(chan string, n)
 	errCh := make(chan error, n)
-	for i := 0; i < n; i++ {
+	for range n {
 		go func() {
 			c := stableid.NewClaimer(kv, "worker", 0, 9, 200*time.Millisecond, nil)
 			id, err := c.Claim(ctx)
@@ -118,7 +118,7 @@ func TestStableID_Stress_ConcurrentReclaimAfterCrash(t *testing.T) {
 	}
 
 	claimed := map[string]bool{}
-	for i := 0; i < n; i++ {
+	for range n {
 		select {
 		case id := <-res:
 			require.False(t, claimed[id], "duplicate claim %s", id)

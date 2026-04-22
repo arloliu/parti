@@ -104,7 +104,7 @@ func TestWorkerConsumer_TransientIteratorFailures(t *testing.T) {
 	require.NoError(t, err)
 
 	// Publish a few messages that will be consumed after iterator recovers.
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		_, err = js.Publish(ctx, "work.1", []byte("m"))
 		require.NoError(t, err)
 	}

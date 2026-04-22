@@ -35,7 +35,7 @@ func TestEmergencyHysteresis_TransientDisappearance(t *testing.T) {
 	cluster.Config = cfg
 	defer cluster.StopWorkers()
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		cluster.AddWorker(ctx)
 	}
 	cluster.StartWorkers(ctx)
@@ -99,7 +99,7 @@ func TestEmergencyHysteresis_ConfirmedDisappearance(t *testing.T) {
 	cluster.Config = cfg
 	defer cluster.StopWorkers()
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		cluster.AddWorker(ctx)
 	}
 	cluster.StartWorkers(ctx)
@@ -160,7 +160,7 @@ func TestEmergencyHysteresis_MultipleWorkerFailures(t *testing.T) {
 	cluster.Config = cfg
 	defer cluster.StopWorkers()
 
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		cluster.AddWorker(ctx)
 	}
 	cluster.StartWorkers(ctx)
@@ -171,7 +171,7 @@ func TestEmergencyHysteresis_MultipleWorkerFailures(t *testing.T) {
 
 	// Stop two workers
 	t.Log("Stopping workers 0 and 1")
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		workerToStop := cluster.Workers[i]
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
 		err := workerToStop.Stop(stopCtx)

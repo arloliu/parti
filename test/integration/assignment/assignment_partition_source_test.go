@@ -150,7 +150,7 @@ func TestPartitionSource_ConcurrentAccess(t *testing.T) {
 
 	// Create source with initial partitions
 	initialPartitions := make([]types.Partition, 100)
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		initialPartitions[i] = types.Partition{
 			Keys:   []string{fmt.Sprintf("partition-%03d", i)},
 			Weight: 100,
@@ -172,10 +172,10 @@ func TestPartitionSource_ConcurrentAccess(t *testing.T) {
 	errChan := make(chan error, numReaders+numWriters)
 
 	// Start readers
-	for i := 0; i < numReaders; i++ {
+	for i := range numReaders {
 		readerID := i
 		wg.Go(func() {
-			for j := 0; j < iterations; j++ {
+			for j := range iterations {
 				partitions, err := src.List(ctx)
 				if err != nil {
 					errChan <- fmt.Errorf("reader %d: iteration %d: %w", readerID, j, err)
@@ -200,13 +200,13 @@ func TestPartitionSource_ConcurrentAccess(t *testing.T) {
 	}
 
 	// Start writers
-	for i := 0; i < numWriters; i++ {
+	for i := range numWriters {
 		wg.Go(func() {
-			for j := 0; j < iterations; j++ {
+			for j := range iterations {
 				// Alternate between different partition counts
 				partCount := 50 + (j % 50) // 50-99 partitions
 				newPartitions := make([]types.Partition, partCount)
-				for k := 0; k < partCount; k++ {
+				for k := range partCount {
 					newPartitions[k] = types.Partition{
 						Keys:   []string{fmt.Sprintf("partition-%03d", k)},
 						Weight: 100 + int64(k),

@@ -90,7 +90,7 @@ func TestCalculator_InitialAssignment_TwoPhase(t *testing.T) {
 
 		// Verify FINAL assignment redistributed partitions to all 3 workers
 		var finalAssignments [3]types.Assignment
-		for i := 0; i < 3; i++ {
+		for i := range 3 {
 			entry, err := assignmentKV.Get(ctx, "assignment.worker-"+string(rune('0'+i)))
 			require.NoError(t, err, "worker-%d should have assignment", i)
 
@@ -104,7 +104,7 @@ func TestCalculator_InitialAssignment_TwoPhase(t *testing.T) {
 
 		// Verify total partition coverage
 		totalPartitions := 0
-		for i := 0; i < 3; i++ {
+		for i := range 3 {
 			totalPartitions += len(finalAssignments[i].Partitions)
 			t.Logf("worker-%d: %d partitions (version %d)", i,
 				len(finalAssignments[i].Partitions), finalAssignments[i].Version)
@@ -233,7 +233,7 @@ func TestCalculator_InitialAssignment_TwoPhase(t *testing.T) {
 		heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-multi-start-heartbeat")
 
 		// Create 3 workers BEFORE calculator starts
-		for i := 0; i < 3; i++ {
+		for i := range 3 {
 			_, err := heartbeatKV.Put(ctx, "worker-hb.worker-"+string(rune('0'+i)),
 				[]byte(time.Now().Format(time.RFC3339Nano)))
 			require.NoError(t, err)
@@ -274,7 +274,7 @@ func TestCalculator_InitialAssignment_TwoPhase(t *testing.T) {
 
 		// Verify all 3 workers got assignments immediately
 		immediatePartitionCount := 0
-		for i := 0; i < 3; i++ {
+		for i := range 3 {
 			entry, err := assignmentKV.Get(ctx, "assignment.worker-"+string(rune('0'+i)))
 			if err == nil {
 				var assignment types.Assignment
@@ -291,7 +291,7 @@ func TestCalculator_InitialAssignment_TwoPhase(t *testing.T) {
 
 		// Verify final distribution
 		finalPartitionCount := 0
-		for i := 0; i < 3; i++ {
+		for i := range 3 {
 			entry, err := assignmentKV.Get(ctx, "assignment.worker-"+string(rune('0'+i)))
 			require.NoError(t, err)
 

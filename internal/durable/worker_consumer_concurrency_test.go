@@ -174,7 +174,7 @@ func TestWorkerConsumer_FlipSetsWithClose(t *testing.T) {
 	go func() {
 		defer close(doneCh)
 		idx := 0
-		for i := 0; i < 20; i++ {
+		for range 20 {
 			select {
 			case <-flipCtx.Done():
 				return

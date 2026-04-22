@@ -61,7 +61,7 @@ func TestStatic_AutoRecovery_ManualAck_RecoverFromLastProcessed_ExplicitDelete(t
 	t.Cleanup(func() { _ = sc.Stop(ctx) })
 
 	for i := range 3 {
-		_, err = js.Publish(ctx, "sar.mlkp.0", []byte(fmt.Sprintf("pre-%d", i)))
+		_, err = js.Publish(ctx, "sar.mlkp.0", fmt.Appendf(nil, "pre-%d", i))
 		require.NoError(t, err)
 	}
 	for range 3 {
@@ -96,7 +96,7 @@ func TestStatic_AutoRecovery_ManualAck_RecoverFromLastProcessed_ExplicitDelete(t
 	}, 10*time.Second, 10*time.Millisecond, "recovery should recreate the static durable")
 
 	for i := range 3 {
-		_, err = js.Publish(ctx, "sar.mlkp.0", []byte(fmt.Sprintf("post-%d", i)))
+		_, err = js.Publish(ctx, "sar.mlkp.0", fmt.Appendf(nil, "post-%d", i))
 		require.NoError(t, err)
 	}
 
@@ -145,7 +145,7 @@ func TestStatic_AutoRecovery_RecoverFromNew_ExplicitDelete(t *testing.T) {
 	t.Cleanup(func() { _ = sc.Stop(ctx) })
 
 	for i := range 3 {
-		_, err = js.Publish(ctx, "sar.new.0", []byte(fmt.Sprintf("pre-%d", i)))
+		_, err = js.Publish(ctx, "sar.new.0", fmt.Appendf(nil, "pre-%d", i))
 		require.NoError(t, err)
 	}
 	for range 3 {
@@ -167,7 +167,7 @@ func TestStatic_AutoRecovery_RecoverFromNew_ExplicitDelete(t *testing.T) {
 	}, 10*time.Second, 10*time.Millisecond, "recovery should recreate the static durable")
 
 	for i := range 3 {
-		_, err = js.Publish(ctx, "sar.new.0", []byte(fmt.Sprintf("post-%d", i)))
+		_, err = js.Publish(ctx, "sar.new.0", fmt.Appendf(nil, "post-%d", i))
 		require.NoError(t, err)
 	}
 
@@ -215,7 +215,7 @@ func TestStatic_AutoRecovery_RecoverFromLastProcessed_ExplicitDelete(t *testing.
 	t.Cleanup(func() { _ = sc.Stop(ctx) })
 
 	for i := range 3 {
-		_, err = js.Publish(ctx, "sar.lkp.0", []byte(fmt.Sprintf("pre-%d", i)))
+		_, err = js.Publish(ctx, "sar.lkp.0", fmt.Appendf(nil, "pre-%d", i))
 		require.NoError(t, err)
 	}
 	for range 3 {
@@ -249,7 +249,7 @@ func TestStatic_AutoRecovery_RecoverFromLastProcessed_ExplicitDelete(t *testing.
 	}, 10*time.Second, 10*time.Millisecond, "recovery should recreate the static durable")
 
 	for i := range 3 {
-		_, err = js.Publish(ctx, "sar.lkp.0", []byte(fmt.Sprintf("post-%d", i)))
+		_, err = js.Publish(ctx, "sar.lkp.0", fmt.Appendf(nil, "post-%d", i))
 		require.NoError(t, err)
 	}
 

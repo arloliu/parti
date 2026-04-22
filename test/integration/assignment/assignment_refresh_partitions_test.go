@@ -90,7 +90,7 @@ func TestRefreshPartitions_Removal(t *testing.T) {
 
 	require.Empty(t, removedStillAssigned, "Removed partitions still assigned: %v", removedStillAssigned)
 
-	for i := 0; i < 70; i++ {
+	for i := range 70 {
 		partKey := fmt.Sprintf("[partition %03d]", i)
 		require.True(t, assignedPartitions[partKey], "Partition %s not assigned", partKey)
 	}
@@ -127,7 +127,7 @@ func TestRefreshPartitions_WeightChange(t *testing.T) {
 	// Change weights: first 30 → weight 200, last 30 → weight 100
 	t.Log("Changing weights: first 30 → weight 200, last 30 → weight 100...")
 	weightedPartitions := makePartitions(60, 100)
-	for i := 0; i < 30; i++ {
+	for i := range 30 {
 		weightedPartitions[i].Weight = 200
 	}
 

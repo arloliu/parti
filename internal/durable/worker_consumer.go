@@ -702,11 +702,8 @@ func (wc *WorkerConsumer) shouldSuppressPull(partitionID string) (bool, string) 
 
 	allowed := false
 	if wc.config.ProcessingGate != nil {
-		for _, s := range wc.config.ProcessingGate.AllowedStates {
-			if state == s {
-				allowed = true
-				break
-			}
+		if slices.Contains(wc.config.ProcessingGate.AllowedStates, state) {
+			allowed = true
 		}
 	} else {
 		// Fallback if ProcessingGate is not configured but PullGatingEnabled is true
@@ -724,10 +721,7 @@ func (wc *WorkerConsumer) shouldSuppressPull(partitionID string) (bool, string) 
 // PullHeartbeat is set to expiry/2 (min 100ms) so that ErrNoHeartbeat
 // fires reliably when the consumer is deleted — enabling Path B detection.
 func defaultIterFactory(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error) {
-	heartbeat := expiry / 2
-	if heartbeat < 100*time.Millisecond {
-		heartbeat = 100 * time.Millisecond
-	}
+	heartbeat := max(expiry/2, 100*time.Millisecond)
 	return cons.Messages(
 		jetstream.PullMaxMessages(batch),
 		jetstream.PullExpiry(expiry),

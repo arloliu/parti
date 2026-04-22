@@ -87,7 +87,7 @@ func TestExternalNATS_ParallelExecution(t *testing.T) {
 	}
 
 	// Run multiple servers concurrently
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		t.Run(string(rune('A'+i)), func(t *testing.T) {
 			t.Parallel()
 

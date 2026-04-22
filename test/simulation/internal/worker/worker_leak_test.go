@@ -147,7 +147,7 @@ func TestWorker_MultipleStarts(t *testing.T) {
 	defer cancel()
 
 	// Call Start() multiple times (simulating chaos restarts)
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		err = worker.Start(ctx)
 		require.NoError(t, err)
 		time.Sleep(100 * time.Millisecond)

@@ -203,7 +203,7 @@ func TestDegradedMode_NoEmergencyFromStaleness(t *testing.T) {
 
 	// Monitor state for extended period to verify no Emergency state
 	t.Log("Monitoring system for 30 seconds to ensure no spurious Emergency states...")
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		time.Sleep(5 * time.Second)
 
 		// Verify no worker enters Emergency state
@@ -274,7 +274,7 @@ func TestDegradedMode_RecoveryGracePeriod(t *testing.T) {
 
 	// Monitor leader for stability
 	t.Log("Monitoring leader stability for 20 seconds...")
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		time.Sleep(5 * time.Second)
 
 		if leader.IsLeader() {

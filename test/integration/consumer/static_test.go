@@ -226,7 +226,7 @@ func TestStatic_PublishBeforeStart(t *testing.T) {
 
 	// Publish BEFORE consumer starts
 	for i := range 3 {
-		_, err = js.Publish(ctx, "stb.0", []byte(fmt.Sprintf("before-%d", i)))
+		_, err = js.Publish(ctx, "stb.0", fmt.Appendf(nil, "before-%d", i))
 		require.NoError(t, err)
 	}
 
@@ -365,7 +365,7 @@ func TestStatic_WithDispatchByKey(t *testing.T) {
 	msgsPerKey := 5
 	for _, key := range keys {
 		for seq := range msgsPerKey {
-			err := pub.Publish(ctx, key, []byte(fmt.Sprintf("%d", seq)))
+			err := pub.Publish(ctx, key, fmt.Appendf(nil, "%d", seq))
 			require.NoError(t, err)
 		}
 	}

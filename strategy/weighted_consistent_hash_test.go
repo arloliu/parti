@@ -230,7 +230,7 @@ func TestWeightedConsistentHash_WithDeviceData(t *testing.T) {
 
 	// Define workers - 50 workers
 	workers := make([]string, 50)
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		workers[i] = fmt.Sprintf("worker-%d", i+1)
 	}
 
@@ -304,7 +304,7 @@ func TestWeightedConsistentHash_MinPartitionCount(t *testing.T) {
 		Weight: 1000,
 	})
 	// Add normal partitions
-	for i := 0; i < 30; i++ {
+	for i := range 30 {
 		partitions = append(partitions, types.Partition{
 			Keys:   []string{fmt.Sprintf("normal-%d", i)},
 			Weight: 10,
@@ -409,7 +409,7 @@ func TestWeightedConsistentHash_MinPartitionCount_WithDeviceData(t *testing.T) {
 
 	// Define workers
 	workers := make([]string, workerCount)
-	for i := 0; i < workerCount; i++ {
+	for i := range workerCount {
 		workers[i] = fmt.Sprintf("worker-%d", i+1)
 	}
 

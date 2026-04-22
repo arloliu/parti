@@ -24,7 +24,7 @@ func (nopUpdater2) UpdateWorkerConsumer(ctx context.Context, workerID string, pa
 // makePartitions creates n simple single-key partitions.
 func makePartitions(n int) []parti.Partition {
 	out := make([]parti.Partition, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		out[i] = parti.Partition{Keys: []string{fmt.Sprintf("p%02d", i)}}
 	}
 	return out
@@ -105,7 +105,7 @@ func TestHandoffConflictStress(t *testing.T) {
 
 	// Rapidly update partitions to induce rebalances; use adaptive stabilization loop.
 	// Metrics recorder has been injected via options; continue churn and let conflicts accumulate.
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		if i%2 == 0 {
 			_ = src.Update(ctx, makePartitions(10))
 		} else {

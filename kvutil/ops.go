@@ -134,9 +134,9 @@ func ListKeys(ctx context.Context, kv jetstream.KeyValue, prefix string, stripPr
 
 	var out []string
 	for _, k := range keys {
-		if strings.HasPrefix(k, prefix) {
+		if after, ok := strings.CutPrefix(k, prefix); ok {
 			if stripPrefix {
-				out = append(out, strings.TrimPrefix(k, prefix))
+				out = append(out, after)
 			} else {
 				out = append(out, k)
 			}

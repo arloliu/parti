@@ -78,7 +78,7 @@ func TestBroadcast_AutoRecovery_ManualAck_RecoverFromLastProcessed_ExplicitDelet
 	t.Cleanup(func() { _ = bc.Stop(ctx) })
 
 	for i := range 3 {
-		_, err = js.Publish(ctx, "bc.mlkp.x", []byte(fmt.Sprintf("pre-%d", i)))
+		_, err = js.Publish(ctx, "bc.mlkp.x", fmt.Appendf(nil, "pre-%d", i))
 		require.NoError(t, err)
 	}
 	for range 3 {
@@ -112,7 +112,7 @@ func TestBroadcast_AutoRecovery_ManualAck_RecoverFromLastProcessed_ExplicitDelet
 	}, 10*time.Second, 10*time.Millisecond, "recovery should recreate the broadcast durable")
 
 	for i := range 3 {
-		_, err = js.Publish(ctx, "bc.mlkp.x", []byte(fmt.Sprintf("post-%d", i)))
+		_, err = js.Publish(ctx, "bc.mlkp.x", fmt.Appendf(nil, "post-%d", i))
 		require.NoError(t, err)
 	}
 
@@ -171,7 +171,7 @@ func TestBroadcast_AutoRecovery_RecoverFromNew_ExplicitDelete(t *testing.T) {
 
 	// Publish and consume initial batch.
 	for i := range 3 {
-		_, err = js.Publish(ctx, "bcar.new.events", []byte(fmt.Sprintf("pre-%d", i)))
+		_, err = js.Publish(ctx, "bcar.new.events", fmt.Appendf(nil, "pre-%d", i))
 		require.NoError(t, err)
 	}
 	for range 3 {
@@ -198,7 +198,7 @@ func TestBroadcast_AutoRecovery_RecoverFromNew_ExplicitDelete(t *testing.T) {
 	// With RecoverFromNew, publish post-delete messages. These MUST be received,
 	// but pre-delete messages MUST NOT be replayed.
 	for i := range 3 {
-		_, err = js.Publish(ctx, "bcar.new.events", []byte(fmt.Sprintf("post-%d", i)))
+		_, err = js.Publish(ctx, "bcar.new.events", fmt.Appendf(nil, "post-%d", i))
 		require.NoError(t, err)
 	}
 
@@ -258,7 +258,7 @@ func TestBroadcast_AutoRecovery_RecoverFromLastProcessed_ExplicitDelete(t *testi
 	// Publish and consume initial batch. All messages will be auto-acked;
 	// the checkpoint will track the highest acked stream sequence.
 	for i := range 3 {
-		_, err = js.Publish(ctx, "bcar.lkp.events", []byte(fmt.Sprintf("pre-%d", i)))
+		_, err = js.Publish(ctx, "bcar.lkp.events", fmt.Appendf(nil, "pre-%d", i))
 		require.NoError(t, err)
 	}
 	for range 3 {
@@ -279,7 +279,7 @@ func TestBroadcast_AutoRecovery_RecoverFromLastProcessed_ExplicitDelete(t *testi
 	// Publish post-delete messages.
 	time.Sleep(100 * time.Millisecond)
 	for i := range 3 {
-		_, err = js.Publish(ctx, "bcar.lkp.events", []byte(fmt.Sprintf("post-%d", i)))
+		_, err = js.Publish(ctx, "bcar.lkp.events", fmt.Appendf(nil, "post-%d", i))
 		require.NoError(t, err)
 	}
 

@@ -59,7 +59,7 @@ func CreateStream(nc *nats.Conn, partitionCount int) error {
 
 	// Create stream that matches all partition subjects
 	subjects := make([]string, partitionCount)
-	for i := 0; i < partitionCount; i++ {
+	for i := range partitionCount {
 		subjects[i] = fmt.Sprintf("simulation.partition.%d", i)
 	}
 

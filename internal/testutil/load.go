@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -384,21 +385,22 @@ func (lm *LoadMetrics) Report() string {
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
 
-	report := "\n=== Load Test Report ===\n"
-	report += fmt.Sprintf("Description: %s\n", lm.Config.Description)
-	report += fmt.Sprintf("Duration: %v\n", lm.Duration())
-	report += "\nConfiguration:\n"
-	report += fmt.Sprintf("  Workers: %d\n", lm.Config.WorkerCount)
-	report += fmt.Sprintf("  Partitions: %d\n", lm.Config.PartitionCount)
-	report += fmt.Sprintf("  Churn Rate: %v\n", lm.Config.ChurnRate)
+	var report strings.Builder
+	report.WriteString("\n=== Load Test Report ===\n")
+	report.WriteString(fmt.Sprintf("Description: %s\n", lm.Config.Description))
+	report.WriteString(fmt.Sprintf("Duration: %v\n", lm.Duration()))
+	report.WriteString("\nConfiguration:\n")
+	report.WriteString(fmt.Sprintf("  Workers: %d\n", lm.Config.WorkerCount))
+	report.WriteString(fmt.Sprintf("  Partitions: %d\n", lm.Config.PartitionCount))
+	report.WriteString(fmt.Sprintf("  Churn Rate: %v\n", lm.Config.ChurnRate))
 
-	report += "\nRebalance Metrics:\n"
-	report += fmt.Sprintf("  Count: %d\n", lm.RebalanceCount)
+	report.WriteString("\nRebalance Metrics:\n")
+	report.WriteString(fmt.Sprintf("  Count: %d\n", lm.RebalanceCount))
 	if len(lm.RebalanceLatency) > 0 {
-		report += fmt.Sprintf("  Avg Latency: %v\n", lm.AvgRebalanceLatency())
-		report += fmt.Sprintf("  P50 Latency: %v\n", lm.LatencyPercentile(0.50))
-		report += fmt.Sprintf("  P95 Latency: %v\n", lm.LatencyPercentile(0.95))
-		report += fmt.Sprintf("  P99 Latency: %v\n", lm.LatencyPercentile(0.99))
+		report.WriteString(fmt.Sprintf("  Avg Latency: %v\n", lm.AvgRebalanceLatency()))
+		report.WriteString(fmt.Sprintf("  P50 Latency: %v\n", lm.LatencyPercentile(0.50)))
+		report.WriteString(fmt.Sprintf("  P95 Latency: %v\n", lm.LatencyPercentile(0.95)))
+		report.WriteString(fmt.Sprintf("  P99 Latency: %v\n", lm.LatencyPercentile(0.99)))
 	}
 
 	// Calculate peak memory inline (can't call PeakMemoryMB() while holding lock)
@@ -417,22 +419,22 @@ func (lm *LoadMetrics) Report() string {
 		}
 	}
 
-	report += "\nResource Usage:\n"
-	report += fmt.Sprintf("  Peak Memory: %.2f MB\n", peakMemory)
-	report += fmt.Sprintf("  Peak Goroutines: %d\n", peakGoroutines)
-	report += fmt.Sprintf("  Samples: %d\n", len(lm.MemoryUsageMB))
+	report.WriteString("\nResource Usage:\n")
+	report.WriteString(fmt.Sprintf("  Peak Memory: %.2f MB\n", peakMemory))
+	report.WriteString(fmt.Sprintf("  Peak Goroutines: %d\n", peakGoroutines))
+	report.WriteString(fmt.Sprintf("  Samples: %d\n", len(lm.MemoryUsageMB)))
 
 	if len(lm.Errors) > 0 {
-		report += fmt.Sprintf("\nErrors: %d\n", len(lm.Errors))
+		report.WriteString(fmt.Sprintf("\nErrors: %d\n", len(lm.Errors)))
 		for i, err := range lm.Errors {
 			if i < 5 { // Show first 5 errors
-				report += fmt.Sprintf("  %d: %v\n", i+1, err)
+				report.WriteString(fmt.Sprintf("  %d: %v\n", i+1, err))
 			}
 		}
 		if len(lm.Errors) > 5 {
-			report += fmt.Sprintf("  ... and %d more\n", len(lm.Errors)-5)
+			report.WriteString(fmt.Sprintf("  ... and %d more\n", len(lm.Errors)-5))
 		}
 	}
 
-	return report
+	return report.String()
 }

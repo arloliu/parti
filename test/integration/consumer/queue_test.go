@@ -53,7 +53,7 @@ func TestQueue_StartStopMessages(t *testing.T) {
 	require.NoError(t, q.Start(ctx))
 
 	for i := range 5 {
-		_, err = js.Publish(ctx, "q.events", []byte(fmt.Sprintf("msg-%d", i)))
+		_, err = js.Publish(ctx, "q.events", fmt.Appendf(nil, "msg-%d", i))
 		require.NoError(t, err)
 	}
 
@@ -128,7 +128,7 @@ func TestQueue_LoadBalanceAcrossInstances(t *testing.T) {
 
 	totalMessages := 20
 	for i := range totalMessages {
-		_, err = js.Publish(ctx, "qlb.events", []byte(fmt.Sprintf("msg-%d", i)))
+		_, err = js.Publish(ctx, "qlb.events", fmt.Appendf(nil, "msg-%d", i))
 		require.NoError(t, err)
 	}
 
@@ -353,7 +353,7 @@ func TestQueue_IteratorFactoryFaultInjection(t *testing.T) {
 
 	// Publish messages before starting the consumer
 	for i := range 5 {
-		_, err = js.Publish(ctx, "qif.events", []byte(fmt.Sprintf("msg-%d", i)))
+		_, err = js.Publish(ctx, "qif.events", fmt.Appendf(nil, "msg-%d", i))
 		require.NoError(t, err)
 	}
 
@@ -371,10 +371,7 @@ func TestQueue_IteratorFactoryFaultInjection(t *testing.T) {
 			return nil, fmt.Errorf("simulated iterator creation failure #%d", call)
 		}
 		// Delegate to real factory
-		heartbeat := expiry / 2
-		if heartbeat < 100*time.Millisecond {
-			heartbeat = 100 * time.Millisecond
-		}
+		heartbeat := max(expiry/2, 100*time.Millisecond)
 
 		return cons.Messages(
 			jetstream.PullMaxMessages(batch),

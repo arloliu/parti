@@ -104,7 +104,7 @@ func TestDynamic_AutoRecovery_RecoverFromNew_ExplicitDelete(t *testing.T) {
 
 	// Publish and consume initial batch.
 	for i := range 3 {
-		_, err = js.Publish(ctx, subject, []byte(fmt.Sprintf("pre-%d", i)))
+		_, err = js.Publish(ctx, subject, fmt.Appendf(nil, "pre-%d", i))
 		require.NoError(t, err)
 	}
 	for range 3 {
@@ -137,7 +137,7 @@ func TestDynamic_AutoRecovery_RecoverFromNew_ExplicitDelete(t *testing.T) {
 	// With RecoverFromNew, publish post-delete messages. These MUST be received,
 	// but pre-delete messages MUST NOT be replayed.
 	for i := range 3 {
-		_, err = js.Publish(ctx, subject, []byte(fmt.Sprintf("post-%d", i)))
+		_, err = js.Publish(ctx, subject, fmt.Appendf(nil, "post-%d", i))
 		require.NoError(t, err)
 	}
 
@@ -192,7 +192,7 @@ func TestDynamic_AutoRecovery_RecoverFromLastProcessed_ExplicitDelete(t *testing
 
 	// Publish and consume initial batch. All messages will be auto-acked.
 	for i := range 3 {
-		_, err = js.Publish(ctx, subject, []byte(fmt.Sprintf("pre-%d", i)))
+		_, err = js.Publish(ctx, subject, fmt.Appendf(nil, "pre-%d", i))
 		require.NoError(t, err)
 	}
 	for range 3 {
@@ -220,7 +220,7 @@ func TestDynamic_AutoRecovery_RecoverFromLastProcessed_ExplicitDelete(t *testing
 	// Publish post-delete messages.
 	time.Sleep(100 * time.Millisecond)
 	for i := range 3 {
-		_, err = js.Publish(ctx, subject, []byte(fmt.Sprintf("post-%d", i)))
+		_, err = js.Publish(ctx, subject, fmt.Appendf(nil, "post-%d", i))
 		require.NoError(t, err)
 	}
 
@@ -279,7 +279,7 @@ func TestDynamic_AutoRecovery_ManualAck_RecoverFromLastProcessed_ExplicitDelete(
 	require.NoError(t, dc.Update(ctx, "worker-1", []types.Partition{{Keys: []string{"a"}}}))
 
 	for i := range 3 {
-		_, err = js.Publish(ctx, subject, []byte(fmt.Sprintf("pre-%d", i)))
+		_, err = js.Publish(ctx, subject, fmt.Appendf(nil, "pre-%d", i))
 		require.NoError(t, err)
 	}
 	for range 3 {
@@ -304,7 +304,7 @@ func TestDynamic_AutoRecovery_ManualAck_RecoverFromLastProcessed_ExplicitDelete(
 
 	time.Sleep(100 * time.Millisecond)
 	for i := range 3 {
-		_, err = js.Publish(ctx, subject, []byte(fmt.Sprintf("post-%d", i)))
+		_, err = js.Publish(ctx, subject, fmt.Appendf(nil, "post-%d", i))
 		require.NoError(t, err)
 	}
 

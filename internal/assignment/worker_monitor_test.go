@@ -404,8 +404,7 @@ func TestWorkerMonitor_ProcessWatcherEvents_ClosedChannel(t *testing.T) {
 		errCh:   errCh,
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	done := make(chan struct{})
 	go func() {

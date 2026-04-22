@@ -95,7 +95,7 @@ func TestSubscriptionHelper_UpdateOnRebalance(t *testing.T) {
 
 	// Create initial partition source with 30 partitions
 	initialPartitions := make([]types.Partition, 30)
-	for i := 0; i < 30; i++ {
+	for i := range 30 {
 		initialPartitions[i] = types.Partition{
 			Keys:   []string{fmt.Sprintf("partition-%03d", i)},
 			Weight: 100,
@@ -127,7 +127,7 @@ func TestSubscriptionHelper_UpdateOnRebalance(t *testing.T) {
 
 	js, err := jetstream.New(conn)
 	require.NoError(t, err)
-	for i := 0; i < numManagers; i++ {
+	for i := range numManagers {
 		manager, err := parti.NewManager(cfg, js, partitionSource, strategy.NewRoundRobin(), parti.WithLogger(debugLogger))
 		require.NoError(t, err, "Failed to create manager %d", i)
 		managers[i] = manager

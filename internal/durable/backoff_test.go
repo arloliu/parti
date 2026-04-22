@@ -41,7 +41,7 @@ func TestJitterBackoff_BasicBoundsAndCapStickiness(t *testing.T) {
 	rng := newRetryRNG(42)
 
 	prev := time.Duration(0)
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		next := jitterBackoff(prev, base, mult, capDur, rng)
 		require.GreaterOrEqual(t, next, minDuration(base, capDur))
 		require.LessOrEqual(t, next, capDur)
@@ -51,7 +51,7 @@ func TestJitterBackoff_BasicBoundsAndCapStickiness(t *testing.T) {
 	// When starting from cap, subsequent values must remain <= cap and >= base
 	rng2 := newRetryRNG(99)
 	prev = capDur
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		next := jitterBackoff(prev, base, mult, capDur, rng2)
 		require.GreaterOrEqual(t, next, base)
 		require.LessOrEqual(t, next, capDur)
@@ -83,7 +83,7 @@ func TestJitterBackoff_VarianceAcrossSeeds(t *testing.T) {
 	for s := int64(1); s <= seeds; s++ {
 		prev := time.Duration(0)
 		rng := newRetryRNG(s)
-		for i := 0; i < steps; i++ {
+		for range steps {
 			prev = jitterBackoff(prev, base, mult, capDur, rng)
 		}
 		lasts = append(lasts, prev)
@@ -108,7 +108,7 @@ func TestJitterBackoff_CrossWorkerStddev(t *testing.T) {
 		rng := newRetryRNG(s)
 		prev := time.Duration(0)
 		// Advance several steps to accumulate divergence
-		for i := 0; i < 4; i++ {
+		for range 4 {
 			prev = jitterBackoff(prev, base, mult, capDur, rng)
 			require.LessOrEqual(t, prev, capDur, "backoff exceeded cap: %s > %s", prev, capDur)
 		}
@@ -156,7 +156,7 @@ func TestJitterBackoff_DistributionOrdering(t *testing.T) {
 
 	samples := make([]time.Duration, 0, 30)
 	prev := time.Duration(0)
-	for i := 0; i < 30; i++ {
+	for range 30 {
 		prev = jitterBackoff(prev, base, mult, capDur, rng)
 		samples = append(samples, prev)
 	}

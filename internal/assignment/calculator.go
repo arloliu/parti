@@ -245,11 +245,9 @@ func (c *Calculator) Start(ctx context.Context) error {
 	// Start partition monitoring if supported
 	if watchable, ok := c.Source.(types.WatchablePartitionSource); ok {
 		c.Logger.Info("starting partition monitor")
-		c.wg.Add(1)
-		go func() {
-			defer c.wg.Done()
+		c.wg.Go(func() {
 			c.monitorPartitions(ctx, watchable)
-		}()
+		})
 	}
 
 	// Step 2: Enter stabilization window.

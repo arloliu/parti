@@ -56,10 +56,7 @@ func EnsureConsumer(ctx context.Context, js jetstream.JetStream, streamName stri
 		if i < maxAttempts-1 {
 			// Simple jittered backoff: ~50ms, ~100ms
 			//nolint:gosec // weak random is sufficient for jitter
-			delay := time.Duration(i+1)*50*time.Millisecond + time.Duration(rand.Intn(20))*time.Millisecond
-			if delay > 200*time.Millisecond {
-				delay = 200 * time.Millisecond
-			}
+			delay := min(time.Duration(i+1)*50*time.Millisecond+time.Duration(rand.Intn(20))*time.Millisecond, 200*time.Millisecond)
 
 			select {
 			case <-ctx.Done():

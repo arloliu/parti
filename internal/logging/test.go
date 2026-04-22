@@ -2,6 +2,7 @@ package logging
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/arloliu/parti/v2/types"
@@ -65,14 +66,14 @@ func formatKeyValues(keysAndValues []any) string {
 		return ""
 	}
 
-	result := ""
+	var result strings.Builder
 	for i := 0; i < len(keysAndValues); i += 2 {
 		if i+1 < len(keysAndValues) {
-			result += fmt.Sprintf("%v=%v ", keysAndValues[i], keysAndValues[i+1])
+			result.WriteString(fmt.Sprintf("%v=%v ", keysAndValues[i], keysAndValues[i+1]))
 		} else {
-			result += fmt.Sprintf("%v=<missing> ", keysAndValues[i])
+			result.WriteString(fmt.Sprintf("%v=<missing> ", keysAndValues[i]))
 		}
 	}
 
-	return result
+	return result.String()
 }

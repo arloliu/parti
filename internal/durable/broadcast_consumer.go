@@ -202,7 +202,7 @@ func (bc *BroadcastConsumer) startConsumerLoop(ctx context.Context) error {
 		attempts = 3
 	)
 
-	for i := 0; i < attempts; i++ {
+	for range attempts {
 		durableName := bc.durableName()
 		cons, consCfg, err = bc.ensureConsumer(ctx, durableName)
 		if err == nil {

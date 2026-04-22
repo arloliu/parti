@@ -443,7 +443,7 @@ func (pc *partitionConsumer) ensureConsumer(ctx context.Context) (jetstream.Cons
 	var lastErr error
 	const maxAttempts = 3
 
-	for i := 0; i < maxAttempts; i++ {
+	for i := range maxAttempts {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}

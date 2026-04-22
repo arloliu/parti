@@ -220,15 +220,15 @@ func TestWeightedPartitions_LoadBalancing(t *testing.T) {
 
 	// 10 light (w=1), 5 medium (w=2), 2 heavy (w=5)
 	partitions := make([]types.Partition, 0, 17)
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		partitions = append(partitions, types.Partition{Keys: []string{"light", string(rune('A' + i))}, Weight: 1})
 	}
 
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		partitions = append(partitions, types.Partition{Keys: []string{"medium", string(rune('A' + i))}, Weight: 2})
 	}
 
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		partitions = append(partitions, types.Partition{Keys: []string{"heavy", string(rune('A' + i))}, Weight: 5})
 	}
 

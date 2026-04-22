@@ -52,8 +52,7 @@ func TestChaos_WorkerPause(t *testing.T) {
 	w, err := worker.NewWorker(cfg)
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	err = w.Start(ctx)
 	require.NoError(t, err)
@@ -165,8 +164,7 @@ func TestChaos_NetworkDisconnect(t *testing.T) {
 	require.NoError(t, err)
 	w.SetNetworkControl(netCtrl)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	err = w.Start(ctx)
 	require.NoError(t, err)

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"sync"
 	"time"
@@ -469,10 +470,7 @@ func (c *Coordinator) processCatchUpProgress(workerID string, partitionID int, c
 
 	// Calculate processed count for this partition
 	if currentSeq > prs.startSeq {
-		effectiveSeq := currentSeq
-		if effectiveSeq > prs.targetSeq {
-			effectiveSeq = prs.targetSeq
-		}
+		effectiveSeq := min(currentSeq, prs.targetSeq)
 		newProcessed := effectiveSeq - prs.startSeq
 		if newProcessed > prs.processed {
 			diff := newProcessed - prs.processed
@@ -608,13 +606,9 @@ func (c *Coordinator) printDuplicateTrace(now time.Time) {
 func (c *Coordinator) printStartLatencyAudit() {
 	c.startLatencyMu.Lock()
 	initial := make(map[string]time.Duration, len(c.initialStartLatencies))
-	for w, d := range c.initialStartLatencies {
-		initial[w] = d
-	}
+	maps.Copy(initial, c.initialStartLatencies)
 	takeover := make(map[string]time.Duration, len(c.takeoverStartLatencies))
-	for w, d := range c.takeoverStartLatencies {
-		takeover[w] = d
-	}
+	maps.Copy(takeover, c.takeoverStartLatencies)
 	initialBudget := c.slowStartBudgetInitial
 	takeoverBudget := c.slowStartBudgetTakeover
 	c.startLatencyMu.Unlock()
@@ -811,9 +805,7 @@ func (c *Coordinator) PrintReport() {
 		c.ownersMu.RLock()
 		activeCount := len(c.activeOwners)
 		activeSnapshot := make(map[int]string, activeCount)
-		for pid, wid := range c.activeOwners {
-			activeSnapshot[pid] = wid
-		}
+		maps.Copy(activeSnapshot, c.activeOwners)
 		c.ownersMu.RUnlock()
 		c.printOwnershipAudit(activeSnapshot)
 
@@ -1037,10 +1029,9 @@ func (c *Coordinator) runMetricsTicker(ctx context.Context) {
 
 			// Healing rate (healed holes per second over interval)
 			currentHealed := c.tracker.GetHolesHealedCount()
-			delta := currentHealed - prevHealed
-			if delta < 0 { // defensive reset
-				delta = 0
-			}
+			delta := max(currentHealed-prevHealed,
+				// defensive reset
+				0)
 			perSecond := float64(delta) / interval.Seconds()
 			c.metricsCollector.SetHolesHealedRate(perSecond)
 			prevHealed = currentHealed
@@ -1168,10 +1159,9 @@ func (c *Coordinator) processAssignments(ctx context.Context) { //nolint:gocyclo
 				}
 			}
 
-			unassigned := c.totalPartitions - len(global)
-			if unassigned < 0 { // sanity
-				unassigned = 0
-			}
+			unassigned := max(c.totalPartitions-len(global),
+				// sanity
+				0)
 			c.metricsCollector.SetUnassignedPartitions(unassigned)
 
 			// Build current partition owner map (first seen worker wins if overlaps)

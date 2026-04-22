@@ -3,6 +3,7 @@ package testutil
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"sync"
 	"time"
 
@@ -101,9 +102,7 @@ func (c *HandoffClaimCollector) WaitForAllStable(ctx context.Context, ids []stri
 		c.mu.RLock()
 		// snapshot of latest to minimize lock hold time
 		latestCopy := make(map[string]parti.HandoffClaim, len(c.latest))
-		for k, v := range c.latest {
-			latestCopy[k] = v
-		}
+		maps.Copy(latestCopy, c.latest)
 		for id := range set {
 			claim, ok := latestCopy[id]
 			if !ok {
@@ -213,7 +212,7 @@ func hasSubsequence(seq, exp []parti.HandoffClaimState) bool {
 	}
 	for i := 0; i <= len(seq)-len(exp); i++ {
 		ok := true
-		for j := 0; j < len(exp); j++ {
+		for j := range exp {
 			if seq[i+j] != exp[j] {
 				ok = false
 				break

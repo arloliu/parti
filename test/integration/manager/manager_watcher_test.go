@@ -67,7 +67,7 @@ func TestWatcher_FastDetection(t *testing.T) {
 	var assignment4 types.Assignment
 	gotAssignment := false
 
-	for i := 0; i < 100; i++ { // 100 * 100ms = 10s timeout
+	for range 100 { // 100 * 100ms = 10s timeout
 		time.Sleep(100 * time.Millisecond)
 		assignment4 = mgr4.CurrentAssignment()
 		if len(assignment4.Partitions) > 0 {

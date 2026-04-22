@@ -16,12 +16,12 @@ var errInvalidSubject = errors.New("invalid subject")
 // parseSubjectTemplateParts extracts the prefix and suffix surrounding the partition placeholder.
 // Returns ok=false if the placeholder is not present.
 func parseSubjectTemplateParts(tmpl string) (prefix, suffix string, ok bool) {
-	idx := strings.Index(tmpl, partitionPlaceholder)
-	if idx < 0 {
+	before, after, ok0 := strings.Cut(tmpl, partitionPlaceholder)
+	if !ok0 {
 		return "", "", false
 	}
 
-	return tmpl[:idx], tmpl[idx+len(partitionPlaceholder):], true
+	return before, after, true
 }
 
 func validateSubjectTokens(subject string, allowWildcard bool) error {
