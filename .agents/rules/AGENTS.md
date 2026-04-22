@@ -24,6 +24,8 @@
   *Performance optimizations (xxh3, allocations) and security boundaries.*
 - **[700-lint-after-write.md](700-lint-after-write.md)**
   *Automated linting workflow and common fixes.*
+- **[800-modernize-after-write.md](800-modernize-after-write.md)**
+  *Run `go fix` on touched packages; avoid repo-wide sweeps in feature commits.*
 
 ---
 *Rules are split for readability and context optimization.*

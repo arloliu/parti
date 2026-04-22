@@ -15,6 +15,7 @@ Rules are loaded in numeric order before any work begins. See [`.agents/rules/AG
 | [`500-workflow.md`](.agents/rules/500-workflow.md) | Git conventions, pre-commit checks, make targets reference |
 | [`600-perf-sec.md`](.agents/rules/600-perf-sec.md) | Performance optimizations (xxh3, allocations) and security boundaries |
 | [`700-lint-after-write.md`](.agents/rules/700-lint-after-write.md) | Automated linting workflow and common fixes |
+| [`800-modernize-after-write.md`](.agents/rules/800-modernize-after-write.md) | Run `go fix` on touched packages; avoid repo-wide sweeps in feature commits |
 
 ## Skills
 
