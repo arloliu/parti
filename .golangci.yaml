@@ -1,73 +1,88 @@
+# golangci-lint configuration
+# ============================
+# Strategy: opt into a broad correctness / security / style set, stay near
+# defaults, narrow individual rules only where signal:noise is poor in this
+# codebase. Every disabled rule or custom argument carries a comment
+# explaining why.
+#
+# Tested against golangci-lint v2.11.4 (see Makefile GOLANGCI_LINT_VERSION).
+
 version: "2"
+
 linters:
   enable:
-    - asasalint
-    - asciicheck
-    - bidichk
-    - bodyclose
-    - copyloopvar
-    - cyclop
-    - decorder
-    - durationcheck
-    - errname
-    - errorlint
-    - exhaustive
-    - fatcontext
-    - gocheckcompilerdirectives
-    - gocritic
-    - gocyclo
-    - gomoddirectives
-    - gomodguard
-    - goprintffuncname
-    - gosec
-    - loggercheck
-    - makezero
-    - misspell
-    - musttag
-    - nakedret
-    - nilnil
-    - nlreturn
-    - noctx
-    - nolintlint
-    - nosprintfhostport
-    - prealloc
-    - predeclared
-    - reassign
-    - revive
-    - rowserrcheck
-    - sqlclosecheck
-    - testableexamples
-    - tparallel
-    - unconvert
-    - unparam
-    - usestdlibvars
-    - wastedassign
-    - whitespace
+    # -- Correctness (catches real bugs) --
+    - bodyclose        # close HTTP response bodies
+    - copyloopvar      # Go 1.22+ loop-variable semantics
+    - durationcheck    # multiplying two durations
+    - errname          # error sentinel/type naming
+    - errorlint        # %w vs %s, errors.Is / errors.As
+    - exhaustive       # exhaustive switch / map
+    - fatcontext       # deep / pointless context wrapping
+    - goprintffuncname # custom printf-like funcs named *f
+    - loggercheck      # structured-logger key/value pairs
+    - makezero         # non-zero initial make() length
+    - musttag          # struct tags on marshaled types
+    - nilnil           # return (nil, nil)
+    - noctx            # HTTP calls without context
+    - reassign         # reassigning top-level vars
+    - rowserrcheck     # database/sql rows.Err
+    - sqlclosecheck    # close database/sql rows/stmts
+    - wastedassign     # assignments never read
+
+    # -- Security --
+    - asasalint   # arg-as-arg (slice-unpacking gotchas)
+    - asciicheck  # non-ASCII identifiers
+    - bidichk     # bidirectional text attacks
+    - gosec       # security static analysis
+
+    # -- Style / readability --
+    - decorder          # consistent file structure
+    - misspell          # common misspellings
+    - nakedret          # naked returns
+    - nlreturn          # blank line before return
+    - nolintlint        # well-formed //nolint directives
+    - nosprintfhostport # host:port via Sprintf
+    - predeclared       # shadowing predeclared identifiers
+    - unconvert         # redundant type conversions
+    - unparam           # unused function parameters
+    - usestdlibvars     # use stdlib constants
+    - whitespace        # trailing whitespace
+
+    # -- Complexity / performance --
+    - cyclop   # cyclomatic complexity per function
+    - gocyclo  # cyclomatic complexity per function (alt)
+    - prealloc # preallocate slice capacity
+
+    # -- Module hygiene --
+    - gomoddirectives # go.mod directive hygiene
+    - gomodguard      # blocked / replace modules
+
+    # -- Meta-linters (umbrella) --
+    - gocritic # large opinionated check suite
+    - revive   # configurable linter (see settings)
+
+    # -- Compiler / build --
+    - gocheckcompilerdirectives # //go: directive correctness
+
+    # -- Test-only --
+    - testableexamples # Godoc examples actually runnable
+    - tparallel        # t.Parallel discipline
+
+  # Settings are sorted alphabetically by linter name for easy lookup.
   settings:
     cyclop:
       max-complexity: 22
       package-average: 15
+
     errcheck:
       check-type-assertions: true
+
     exhaustive:
       check:
         - switch
         - map
-    exhaustruct:
-      exclude:
-        - ^net/http.Client$
-        - ^net/http.Cookie$
-        - ^net/http.Request$
-        - ^net/http.Response$
-        - ^net/http.Server$
-        - ^net/http.Transport$
-        - ^net/url.URL$
-        - ^os/exec.Cmd$
-        - ^reflect.StructField$
-        - ^github.com/spf13/cobra.Command$
-        - ^github.com/spf13/cobra.CompletionOptions$
-        - ^github.com/stretchr/testify/mock.Mock$
-        - ^gopkg.in/yaml.v3.Node$
+
     gocritic:
       settings:
         captLocal:
@@ -76,15 +91,10 @@ linters:
           minThreshold: 3
         underef:
           skipRecvDeref: false
+
     gocyclo:
       min-complexity: 30
-    gosec:
-      # G706 (log injection via taint analysis) has high false-positive rate
-      # in test simulation code where inputs are internally generated and
-      # there is no untrusted user input. G118 (context discipline) IS
-      # enabled — it catches real cancel-fn leaks and misplaced contexts.
-      excludes:
-        - G706
+
     gomodguard:
       blocked:
         modules:
@@ -99,40 +109,85 @@ linters:
           - github.com/gofrs/uuid:
               recommendations:
                 - github.com/google/uuid
-              reason: gofrs' package is not go module
+              reason: gofrs' package is not a Go module
+
+    gosec:
+      # G706 (log-injection via taint analysis) produces false positives in
+      # test/simulation code where inputs are internally generated. G118
+      # (context discipline) is intentionally kept on — it catches real
+      # cancel-fn leaks.
+      excludes:
+        - G706
+
     govet:
-      disable:
-        - fieldalignment
-        - shadow
       enable-all: true
+      disable:
+        - fieldalignment # memory-layout micro-optimization, noisy
+        - shadow         # too many false positives on err shadowing
+
     nakedret:
       max-func-lines: 40
+
     nlreturn:
       block-size: 7
+
     nolintlint:
       require-explanation: false
       require-specific: true
+
     revive:
       enable-all-rules: true
       rules:
-        - name: add-constant
+        # -- Disabled: not applicable to this codebase --
+        - name: add-constant        # magic-number policing is too noisy
           disabled: true
-        - name: cyclomatic
+        - name: cognitive-complexity # covered by cyclop/gocyclo
           disabled: true
-        - name: cognitive-complexity
+        - name: cyclomatic           # covered by cyclop/gocyclo
           disabled: true
-        - name: context-as-argument
-          severity: warning
-          disabled: false
-          exclude:
-            - '**/*_test.go'
+        - name: flag-parameter       # library API takes bool toggles legitimately
+          disabled: true
+        - name: line-length-limit    # formatting is enforced by gofmt
+          disabled: true
+        - name: max-public-structs   # leaf-package types/ intentionally exposes many
+          disabled: true
+        - name: package-naming
+          # types/ is this module's public leaf package
+          # (github.com/arloliu/parti/v2/types). Renaming is a breaking v2.x
+          # change for every downstream user.
+          disabled: true
+        - name: unchecked-type-assertion
+          # errcheck check-type-assertions already covers this with fewer
+          # false positives.
+          disabled: true
+        - name: unexported-return  # helpers returning internal types are fine
+          disabled: true
+        - name: unused-parameter   # too noisy on interface implementations
+          disabled: true
+        - name: unused-receiver    # too noisy on method-set conformance
+          disabled: true
+        - name: var-declaration    # stylistic, not a correctness issue
+          disabled: true
+
+        # -- Customized: enabled with specific arguments or excludes --
         - name: comment-spacings
           arguments:
             - nolint
           severity: warning
-          disabled: false
           exclude:
             - ""
+
+        - name: context-as-argument
+          severity: warning
+          exclude:
+            - '**/*_test.go'
+
+        - name: enforce-switch-style
+          arguments: ["allowNoDefault"]
+          severity: warning
+          exclude:
+            - '**/*_test.go'
+
         - name: exported
           arguments:
             - disableStutteringCheck
@@ -140,90 +195,59 @@ linters:
             - checkPublicInterface
             - sayRepetitiveInsteadOfStutters
           severity: warning
-          disabled: false
           exclude:
             - ""
-        - name: flag-parameter
-          disabled: true
+
         - name: function-length
           arguments:
-            - 100
-            - 0
+            - 100 # max statements
+            - 0   # max lines (0 = unlimited)
           severity: warning
-          disabled: false
           exclude:
             - '**/*_test.go'
+
         - name: import-shadowing
           severity: warning
-          disabled: false
           exclude:
             - '**/*_test.go'
-        - name: line-length-limit
-          disabled: true
-        - name: max-public-structs
-          severity: warning
-          disabled: true
-        - name: unused-parameter
-          disabled: true
-        - name: unused-receiver
-          disabled: true
-        - name: unchecked-type-assertion
-          arguments:
-            - acceptIgnoredAssertionResult: true
-          severity: warning
-          disabled: true
+
+        - name: receiver-naming
           exclude:
             - '**/*_test.go'
-        - name: enforce-switch-style
-          severity: warning
-          disabled: false
-          exclude:
-            - '**/*_test.go'
-          arguments: [ "allowNoDefault" ]
+
         - name: unhandled-error
+          # Writes to *strings.Builder / *bytes.Buffer cannot fail, and
+          # fmt.Fprintf/Fprintln to those writers inherits the same property
+          # — staticcheck QF1012 actively recommends this idiom over
+          # WriteString(fmt.Sprintf(...)).
           arguments:
             - fmt.Errorf
             - fmt.Printf
             - fmt.Println
-            # fmt.Fprintf/Fprintln to in-memory writers (Builder, Buffer)
-            # cannot fail; staticcheck QF1012 actively recommends this
-            # pattern over WriteString(fmt.Sprintf).
             - fmt.Fprintf
             - fmt.Fprintln
             - strings.Builder.*
             - bytes.Buffer.*
           severity: warning
-          disabled: false
           exclude:
             - ""
-        - name: receiver-naming
-          disabled: false
-          exclude:
-            - '**/*_test.go'
-        - name: unexported-return
-          disabled: true
-        - name: var-declaration
-          disabled: true
+
         - name: var-naming
           arguments:
             - []
             - []
             - - skipPackageNameChecks: true
           severity: warning
-          disabled: false
-        # types/ is this module's public leaf package (github.com/arloliu/parti/v2/types).
-        # Renaming it is a breaking change for every downstream user, so this
-        # stylistic guidance from the Go blog is not actionable here. Keep
-        # revive enabled in general; only package-naming is disabled.
-        - name: package-naming
-          disabled: true
+
     rowserrcheck:
       packages:
         - github.com/jmoiron/sqlx
+
     staticcheck:
       checks:
         - all
-        - "-ST1003"
+        - "-ST1003" # identifier-naming conventions; too noisy on existing API
+
   exclusions:
     generated: lax
     presets:
@@ -232,12 +256,15 @@ linters:
       - legacy
       - std-error-handling
     rules:
+      # Suppress godot inside IDE hints / TODOs
       - linters:
           - godot
         source: (noinspection|TODO)
+      # Suppress gocritic on IDE hints
       - linters:
           - gocritic
         source: //noinspection
+      # Relax noisy checks inside test files
       - linters:
           - bodyclose
           - dupl
@@ -246,7 +273,7 @@ linters:
           - noctx
           - wrapcheck
         path: _test\.go
-    paths:
+    paths: &excluded-paths
       - vendor
       - evaluations
       - examples
@@ -256,20 +283,13 @@ linters:
       - third_party$
       - builtin$
       - examples$
-issues:
-  max-same-issues: 50
+
 formatters:
   enable:
     - goimports
   exclusions:
     generated: lax
-    paths:
-      - vendor
-      - evaluations
-      - examples
-      - docs
-      - testdata
-      - tools
-      - third_party$
-      - builtin$
-      - examples$
+    paths: *excluded-paths
+
+issues:
+  max-same-issues: 50
