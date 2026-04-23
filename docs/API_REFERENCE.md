@@ -799,9 +799,26 @@ type Config struct {
 
 **Methods**:
 
+#### DefaultConfig
+
+Returns a `Config` with every field populated at its default value. Use this when you want to start from defaults and tweak a few fields; it is equivalent to calling `SetDefaults` on a zero-valued `Config`.
+
+```go
+func DefaultConfig() Config
+```
+
+**Example**:
+```go
+cfg := parti.DefaultConfig()
+cfg.WorkerIDPrefix = "orders"
+cfg.WorkerIDMax = 99
+```
+
+`DefaultConfig` panics only if Parti's own struct tags are malformed (a library bug, not a runtime condition).
+
 #### SetDefaults
 
-Fills in missing configuration values with defaults.
+Fills in missing configuration values with defaults. Prefer `DefaultConfig()` for new configurations; use `SetDefaults` when you already have a partially-populated `Config` (e.g., loaded from YAML) and want to backfill zero-valued fields.
 
 ```go
 func SetDefaults(cfg *Config) error
@@ -1078,13 +1095,16 @@ p := Partition{
 **Helpers**:
 
 ```go
-func (p Partition) SubjectKey() string // Keys joined with '.' (e.g., "orders.0")
-func (p Partition) ID() string         // Keys joined with '-' (e.g., "orders-0")
-func (p Partition) Compare(q Partition) int // Lexicographic key comparison: -1,0,+1
+func (p Partition) SubjectKey() string          // Keys joined with '.' (e.g., "orders.0")
+func (p Partition) ID() string                  // Keys joined with '-' (e.g., "orders-0")
+func (p Partition) HashID() uint64              // Stable 64-bit XXH3 hash of Keys (0 if empty)
+func (p Partition) HashIDSeed(seed uint64) uint64 // HashID with an explicit seed (seed==0 → HashID)
+func (p Partition) Compare(q Partition) int     // Lexicographic key comparison: -1,0,+1
 ```
 
 Use `SubjectKey()` for JetStream subject templating and `FilterSubjects` construction.
-Use `ID()` for durable names (e.g., `<ConsumerPrefix>-<ID()>`) and hashing contexts.
+Use `ID()` for durable names (e.g., `<ConsumerPrefix>-<ID()>`).
+Use `HashID()` / `HashIDSeed()` in custom assignment strategies or caches that need a stable, allocation-free partition hash. Chained XXH3 hashing avoids key-boundary ambiguity without concatenation.
 Use `Compare()` as a stable, allocation-free tie-breaker (keys only, weight ignored) in ordering.
 
 ---
@@ -1096,14 +1116,19 @@ Contains the current partition assignment for a worker.
 ```go
 type Assignment struct {
     Version    int64       // Monotonically increasing version
-    Lifecycle  string      // Assignment phase (e.g., "stable", "scaling")
+    Lifecycle  string      // Scaling reason that drove this assignment (see below)
     Partitions []Partition // Assigned partitions
 }
 ```
 
 **Fields**:
 - `Version`: Monotonically increasing assignment version
-- `Lifecycle`: Assignment phase ("cold_start", "post_cold_start", "stable")
+- `Lifecycle`: Reason the leader recomputed this assignment. One of:
+  - `"cold_start"` — initial startup, or a mass-failure event that exceeds `RestartDetectionRatio` (uses `ColdStartWindow` to stabilize)
+  - `"planned_scale"` — rolling update or planned membership change within the planned-scale window
+  - `"emergency"` — worker failure detected, immediate rebalance
+  - `"restart"` — previously-known worker returned after a transient absence
+  - `"stable"` — no scaling event in progress (steady state)
 - `Partitions`: List of partitions assigned to this worker
 
 **Example**:
@@ -1207,14 +1232,23 @@ func NewWeightedConsistentHash(opts ...WeightedConsistentHashOption) *WeightedCo
 #### WithWeightedVirtualNodes
 Sets the number of virtual nodes per worker (default: 150).
 
+#### WithWeightedHashSeed
+Sets a custom hash seed for the underlying consistent hash ring. Use this to de-correlate hash distributions across clusters that share worker IDs or partition keys.
+
 #### WithOverloadThreshold
 Sets the maximum allowed load variance (default: 1.2 or 120%).
 
 #### WithExtremeThreshold
-Sets the threshold for identifying "extreme" (heavy) partitions (default: 20.0).
+Sets the multiplier used to classify "extreme" (heavy) partitions for special handling (default: 20.0).
+
+#### WithDefaultWeight
+Default weight applied when a partition reports `Weight == 0`. Lets you keep `Partition.Weight` unset for the common case while still differentiating weighted partitions (default: 1; values < 1 are clamped to 1).
 
 #### WithMinPartitionCount
-Sets the minimum partition count factor (default: 0.3).
+Sets the minimum partition count factor — the minimum percentage of the average partition count that a worker must accept before load shedding kicks in (default: 0.3, i.e., 30% of average).
+
+#### WithWeightedLogger
+Sets the logger used for configuration warnings and debug diagnostics inside the strategy. Defaults to a no-op logger.
 
 **Example**:
 ```go

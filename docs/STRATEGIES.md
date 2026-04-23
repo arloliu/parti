@@ -95,7 +95,7 @@ The default strategy. Distributes partitions using consistent hashing for stable
 ```go
 import "github.com/arloliu/parti/v2/strategy"
 
-// Default: 100 virtual nodes
+// Default: 150 virtual nodes
 s := strategy.NewConsistentHash()
 
 // Custom virtual nodes (more = better distribution, more memory)
