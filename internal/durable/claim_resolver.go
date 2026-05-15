@@ -76,13 +76,18 @@ type pending struct {
 // The resolver runs two supervised background goroutines after Start:
 //
 //   - a watcher supervisor that re-establishes the KV watcher with exponential
-//     backoff if the Updates() channel closes (NATS reconnect, server-side
-//     consumer GC, etc.);
+//     backoff if the Updates() channel closes (cooperative watcher.Stop, the
+//     underlying nats.Conn closing, or a server-side subscription teardown);
 //   - a periodic reconciler that walks the claims bucket on a fixed cadence and
 //     applies any state the watcher missed.
 //
-// Both goroutines funnel updates through the same revision-aware apply path,
-// so they converge on identical cache state given identical KV state.
+// In practice the supervisor covers explicit close events; silent failure
+// modes — NATS reconnect across a server restart (the nats.go KV watcher does
+// not surface restarts as Updates() close), an idle JetStream consumer that
+// stops emitting without closing, or any other event-drought — are recovered
+// by the reconciler. Both goroutines funnel updates through the same
+// revision-aware apply path, so they converge on identical cache state given
+// identical KV state.
 type ClaimBasedResolver struct {
 	kv         jetstream.KeyValue
 	claimsPref string
@@ -554,9 +559,12 @@ func (r *ClaimBasedResolver) processWatcher(ctx context.Context, watcher jetstre
 			return nil
 		case upd, ok := <-watcher.Updates():
 			if !ok {
-				// Channel closed (NATS reconnect, server-side consumer GC,
-				// transient error). Flush whatever we have queued and ask the
-				// supervisor to restart the watcher.
+				// Channel closed (cooperative watcher.Stop, nats.Conn close,
+				// server-side subscription teardown). Silent stalls — e.g.,
+				// the nats.go KV watcher does NOT surface NATS server restarts
+				// here — are recovered by the periodic reconciler, not this
+				// branch. Flush whatever we have queued and ask the supervisor
+				// to restart the watcher.
 				r.applyPendingBatch(pendingByPID, "watcher_close")
 				return errWatcherClosed
 			}
