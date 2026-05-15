@@ -402,5 +402,6 @@ func toSubscriptionResolverConfig(cfg ResolverConfig) durable.ResolverConfig {
 		HandoffClaimsPrefix: cfg.HandoffClaimsPrefix,
 		BatchWindow:         cfg.BatchWindow,
 		BatchMaxItems:       cfg.BatchMaxItems,
+		ReconcileInterval:   cfg.ReconcileInterval,
 	}
 }

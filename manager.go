@@ -345,6 +345,16 @@ func (m *Manager) Start(ctx context.Context) (startErr error) {
 	}
 	defer cancel()
 
+	// Warn when the audit grace is shorter than the claim resolver's default
+	// reconcile cadence. After a silent watcher stall (e.g., NATS server
+	// restart, which the nats.go KV watcher does NOT surface as an Updates()
+	// close), the worker's resolver cache only re-syncs on the next reconcile
+	// tick — by default 30s. If the leader-side audit grace
+	// (5 × HeartbeatTTL) is shorter, the audit can escalate audit_repair
+	// while the worker's cache is still stale. The fix is to tune
+	// consumer.ResolverConfig.ReconcileInterval at the consumer config layer.
+	m.warnOnShortAuditGrace()
+
 	// Auto-cleanup on startup failure: release any partially-acquired resources
 	// so callers do not need to call Stop after a failed Start.
 	defer func() {

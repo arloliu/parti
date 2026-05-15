@@ -75,6 +75,18 @@ type ResolverConfig struct {
 	// into a single apply. If zero, a default (1024) is used. Ignored when a custom
 	// OwnershipResolver is provided.
 	BatchMaxItems int `default:"1024" validate:"gt=0"`
+
+	// ReconcileInterval is the cadence at which the auto-created claim-based
+	// resolver re-lists the handoff bucket and reconciles its cache against
+	// KV. This is the recovery path for silent watcher stalls (the nats.go
+	// KV watcher does NOT surface NATS server restarts as Updates() channel
+	// close; only explicit Stop / connection close / subscription teardown
+	// does). After such a stall the cache stays stale for at most one
+	// reconcile period.
+	//
+	// Defaults to 30s when zero. Negative values are rejected at startup.
+	// Ignored when a custom OwnershipResolver is provided.
+	ReconcileInterval time.Duration `default:"30s" validate:"gte=0"`
 }
 
 // WorkerConsumerConfig configures the single durable per-worker consumer helper.

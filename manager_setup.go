@@ -199,6 +199,37 @@ func (m *Manager) warnOnStorageMismatch(
 	)
 }
 
+// resolverReconcileDefault mirrors durable.defaultReconcileInterval. It is
+// duplicated here (rather than imported) because the internal/durable package
+// is not part of the manager's public dependency set and a private numeric
+// constant is sufficient context for the warning threshold.
+const resolverReconcileDefault = 30 * time.Second
+
+// warnOnShortAuditGrace emits a one-shot WARN when two-phase handoff is
+// enabled and the effective audit grace (5 × HeartbeatTTL) is shorter than
+// the claim resolver's default reconcile cadence. See manager.Start for the
+// motivating failure mode (silent KV watcher stall after a NATS server
+// restart).
+func (m *Manager) warnOnShortAuditGrace() {
+	if !m.cfg.EnableTwoPhaseHandoff {
+		return
+	}
+	auditGrace := 5 * m.cfg.HeartbeatTTL
+	if auditGrace >= resolverReconcileDefault {
+		return
+	}
+	m.logger.Warn(
+		"audit grace (5 × HeartbeatTTL) is shorter than the default claim "+
+			"resolver reconcile interval (30s); after a silent watcher stall "+
+			"the leader can escalate audit_repair before the worker's resolver "+
+			"cache has recovered. Set consumer.ResolverConfig.ReconcileInterval "+
+			"to at most HeartbeatTTL to close this gap.",
+		"heartbeat_ttl", m.cfg.HeartbeatTTL,
+		"audit_grace", auditGrace,
+		"resolver_reconcile_default", resolverReconcileDefault,
+	)
+}
+
 // storageTypeName renders jetstream.StorageType as a human-readable string.
 // The underlying type is uint8 and logs would otherwise show opaque integers.
 func storageTypeName(s jetstream.StorageType) string {

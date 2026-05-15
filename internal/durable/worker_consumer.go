@@ -607,7 +607,17 @@ func (wc *WorkerConsumer) ensureGateResolver(ctx context.Context) error {
 		return fmt.Errorf("ensure handoff KV bucket %s: %w", wc.config.Resolver.HandoffBucketName, err)
 	}
 
-	resolver := NewClaimBasedResolver(kv, wc.config.Resolver.HandoffClaimsPrefix, wc.logger)
+	// ReconcileInterval is normalised to the 30s default by
+	// WorkerConsumerConfig.SetDefaults via the `default:"30s"` struct tag,
+	// so the value is always positive here. The resolver-package contract
+	// is preserved: direct callers of NewClaimBasedResolver who pass 0 via
+	// WithReconcileInterval still get polling disabled.
+	resolver := NewClaimBasedResolver(
+		kv,
+		wc.config.Resolver.HandoffClaimsPrefix,
+		wc.logger,
+		WithReconcileInterval(wc.config.Resolver.ReconcileInterval),
+	)
 	resolver.SetBatching(wc.config.Resolver.BatchWindow, wc.config.Resolver.BatchMaxItems)
 	if wc.resolverMetrics != nil {
 		resolver.SetMetrics(wc.resolverMetrics)
