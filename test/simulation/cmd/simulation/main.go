@@ -185,7 +185,7 @@ func main() {
 	log.Println("Shutdown complete")
 }
 
-func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldown time.Duration) error { //nolint:cyclop,revive,gocyclo
+func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldown time.Duration) error { //nolint:cyclop,revive,gocyclo,nolintlint
 	// Quiesced-drain flag toggled at cooldown start to suppress gap escalations
 	var inCooldown atomic.Bool
 	// Start embedded NATS if configured
