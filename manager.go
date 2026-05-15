@@ -81,10 +81,11 @@ type Manager struct {
 	heartbeatKV  jetstream.KeyValue
 
 	// State management
-	state      atomic.Int32 // State
-	workerID   atomic.Value // string
-	isLeader   atomic.Bool  // leadership status
-	assignment atomic.Value // Assignment
+	state        atomic.Int32  // State
+	workerID     atomic.Value  // string
+	isLeader     atomic.Bool   // leadership status
+	assignment   atomic.Value  // Assignment
+	capabilities atomic.Uint32 // capability bitmask; see types.CapXxx constants
 
 	// Degraded mode tracking
 	degradedSince      atomic.Int64  // UnixNano when degraded mode entered; 0 = not degraded
@@ -343,6 +344,12 @@ func (m *Manager) Start(ctx context.Context) (startErr error) {
 	}
 	// Start background maintenance (periodic claim sweep for two-phase; no-op for direct).
 	m.handoffCoordinator.Start(m.ctx)
+	// Report CapTwoPhaseHandoff only after the coordinator is successfully wired
+	// and started. The manager is one-shot (Stop transitions to StateShutdown with
+	// no restart path), so there is no need to clear this bit on Stop.
+	if m.cfg.EnableTwoPhaseHandoff {
+		m.SetCapability(types.CapTwoPhaseHandoff, true)
+	}
 
 	// Store KV buckets for later use
 	m.assignmentKV = assignmentKV
@@ -545,6 +552,41 @@ func (m *Manager) CurrentAssignment() Assignment {
 //   - State: The current state (e.g., StateInit, StateStable).
 func (m *Manager) State() State {
 	return State(m.state.Load())
+}
+
+// SetCapability sets or clears a single capability bit in the manager's
+// heartbeat capability bitmask.
+//
+// Called by the component that actually wires the corresponding safety
+// mechanism — not by config-reading code. Examples:
+//   - The two-phase handoff coordinator calls SetCapability(types.CapTwoPhaseHandoff, true)
+//     after successfully starting, and (…, false) on Stop.
+//   - The consumer/updater calls SetCapability(types.CapProcessingGate, true)
+//     when it wraps handlers with the processing gate.
+//   - The heartbeat publisher's CapAckV1 bit is set by startHeartbeat after
+//     the publisher starts successfully.
+//
+// Parameters:
+//   - capBit: Capability bit to set or clear (e.g., types.CapAckV1)
+//   - active: true to set the bit, false to clear it
+func (m *Manager) SetCapability(capBit uint32, active bool) {
+	if active {
+		m.capabilities.Or(capBit)
+	} else {
+		m.capabilities.And(^capBit)
+	}
+}
+
+// Capabilities returns the current capability bitmask as an atomic snapshot.
+//
+// The heartbeat publisher calls this on every heartbeat composition to embed
+// the current runtime wire-up state. Do not cache the result — always read
+// via this method so the heartbeat reflects live state.
+//
+// Returns:
+//   - uint32: Current capability bitmask (OR of active types.CapXxx constants)
+func (m *Manager) Capabilities() uint32 {
+	return m.capabilities.Load()
 }
 
 // invokeHook executes a hook function asynchronously with error logging.

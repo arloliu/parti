@@ -3,7 +3,11 @@ package parti
 import (
 	"context"
 	"testing"
+	"time"
 
+	"github.com/arloliu/parti/v2/partitest"
+	"github.com/arloliu/parti/v2/source"
+	"github.com/arloliu/parti/v2/strategy"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -112,5 +116,134 @@ func TestNewManager_RequiredParameters(t *testing.T) {
 		require.Error(t, err)
 		require.ErrorIs(t, err, types.ErrAssignmentStrategyRequired)
 		require.Nil(t, mgr)
+	})
+}
+
+// TestManager_SetCapability_AtomicBitmask verifies that SetCapability correctly
+// sets and clears individual bits in the capability bitmask, and that Capabilities
+// reflects the live value after each mutation.
+//
+// SetCapability and Capabilities only touch the atomic.Uint32 capabilities field;
+// no NATS connection or other infrastructure is needed.
+func TestManager_SetCapability_AtomicBitmask(t *testing.T) {
+	// Construct a minimal Manager directly — no NATS required for this test.
+	mgr := &Manager{}
+
+	// Initially all bits are clear.
+	require.Equal(t, uint32(0), mgr.Capabilities())
+
+	// Set CapAckV1.
+	mgr.SetCapability(types.CapAckV1, true)
+	require.NotZero(t, mgr.Capabilities()&types.CapAckV1, "CapAckV1 should be set")
+
+	// Set CapTwoPhaseHandoff — must not disturb CapAckV1.
+	mgr.SetCapability(types.CapTwoPhaseHandoff, true)
+	require.NotZero(t, mgr.Capabilities()&types.CapAckV1)
+	require.NotZero(t, mgr.Capabilities()&types.CapTwoPhaseHandoff)
+
+	// Clear CapAckV1 — must not disturb CapTwoPhaseHandoff.
+	mgr.SetCapability(types.CapAckV1, false)
+	require.Zero(t, mgr.Capabilities()&types.CapAckV1, "CapAckV1 should be cleared")
+	require.NotZero(t, mgr.Capabilities()&types.CapTwoPhaseHandoff, "CapTwoPhaseHandoff must remain set")
+
+	// Set all three capability bits.
+	mgr.SetCapability(types.CapAckV1, true)
+	mgr.SetCapability(types.CapProcessingGate, true)
+	all := types.CapAckV1 | types.CapTwoPhaseHandoff | types.CapProcessingGate
+	require.Equal(t, all, mgr.Capabilities())
+
+	// Clear all.
+	mgr.SetCapability(types.CapAckV1, false)
+	mgr.SetCapability(types.CapTwoPhaseHandoff, false)
+	mgr.SetCapability(types.CapProcessingGate, false)
+	require.Equal(t, uint32(0), mgr.Capabilities())
+}
+
+// TestManager_CapTwoPhaseHandoff_ReportsWhenWired verifies that CapTwoPhaseHandoff
+// is set after a successful Start with EnableTwoPhaseHandoff=true, and remains
+// clear when the feature is disabled.
+//
+// This is an integration test because CapTwoPhaseHandoff is set inside Start()
+// after the coordinator is wired to its KV bucket — unit-stubbing that path would
+// bypass the production wire-up sequence.
+func TestManager_CapTwoPhaseHandoff_ReportsWhenWired(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	_, nc := partitest.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	partitions := []types.Partition{
+		{Keys: []string{"p0"}, Weight: 100},
+	}
+	src := source.NewStatic(partitions)
+	assignStrat := strategy.NewConsistentHash()
+
+	baseCfg := func() *Config {
+		return &Config{
+			WorkerIDPrefix:        "worker",
+			WorkerIDMin:           0,
+			WorkerIDMax:           9,
+			WorkerIDTTL:           10 * time.Second,
+			HeartbeatInterval:     500 * time.Millisecond,
+			HeartbeatTTL:          2 * time.Second,
+			ElectionTimeout:       2 * time.Second,
+			StartupTimeout:        15 * time.Second,
+			ShutdownTimeout:       5 * time.Second,
+			ColdStartWindow:       1 * time.Second,
+			PlannedScaleWindow:    500 * time.Millisecond,
+			RestartDetectionRatio: 0.5,
+			RebalanceCooldown:     100 * time.Millisecond,
+			EmergencyGracePeriod:  750 * time.Millisecond,
+			KVBuckets: KVBucketConfig{
+				StableIDBucket:   "parti-stableid",
+				ElectionBucket:   "parti-election",
+				HeartbeatBucket:  "parti-heartbeat",
+				AssignmentBucket: "parti-assignment",
+				HandoffBucket:    "parti-handoff",
+				HandoffTTL:       30 * time.Second,
+			},
+		}
+	}
+
+	t.Run("two-phase enabled: bit set after Start", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.EnableTwoPhaseHandoff = true
+
+		mgr, err := NewManager(cfg, js, src, assignStrat)
+		require.NoError(t, err)
+
+		require.NoError(t, mgr.Start(ctx))
+		defer func() {
+			stopCtx, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel2()
+			_ = mgr.Stop(stopCtx)
+		}()
+
+		require.NotZero(t, mgr.Capabilities()&types.CapTwoPhaseHandoff,
+			"CapTwoPhaseHandoff must be set when EnableTwoPhaseHandoff=true and Start succeeds")
+	})
+
+	t.Run("two-phase disabled: bit clear after Start", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.EnableTwoPhaseHandoff = false
+
+		mgr, err := NewManager(cfg, js, src, assignStrat)
+		require.NoError(t, err)
+
+		require.NoError(t, mgr.Start(ctx))
+		defer func() {
+			stopCtx, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel2()
+			_ = mgr.Stop(stopCtx)
+		}()
+
+		require.Zero(t, mgr.Capabilities()&types.CapTwoPhaseHandoff,
+			"CapTwoPhaseHandoff must be clear when EnableTwoPhaseHandoff=false")
 	})
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/arloliu/parti/v2/internal/election"
 	"github.com/arloliu/parti/v2/internal/heartbeat"
 	"github.com/arloliu/parti/v2/internal/stableid"
+	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -229,18 +230,30 @@ func (m *Manager) electionRevision() uint64 {
 }
 
 // startHeartbeat starts publishing heartbeats.
+//
+// Wires the capability function so every heartbeat reflects the manager's
+// live runtime capability bitmask. Sets CapAckV1 after a successful start
+// because ack-publishing capability is intrinsic to the v1 publisher.
 func (m *Manager) startHeartbeat(kv jetstream.KeyValue) error {
 	workerID := m.WorkerID()
 	publisher := heartbeat.New(kv, "heartbeat", workerID, m.cfg.HeartbeatInterval, m.metrics, m.logger)
 	// Feed publish failures into the degraded-mode circuit so sustained KV
 	// errors (connection loss or bucket wipe) drive the manager into Degraded.
 	publisher.SetOnError(m.recordKVError)
+	// Wire the capability function so the publisher reads the live bitmask on
+	// every heartbeat composition, reflecting runtime wire-up state.
+	publisher.SetCapabilitiesFn(m.Capabilities)
 	m.heartbeat = publisher
 
 	// Start heartbeat in background
 	if err := publisher.Start(m.ctx); err != nil {
 		return fmt.Errorf("failed to start publisher: %w", err)
 	}
+
+	// CapAckV1 is intrinsic to the v1 publisher: if we reach here, the worker
+	// is ack-capable. Set the bit after a successful start so it is reflected
+	// in all subsequent heartbeats.
+	m.SetCapability(types.CapAckV1, true)
 
 	return nil
 }

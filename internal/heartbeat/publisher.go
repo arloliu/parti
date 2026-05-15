@@ -2,6 +2,7 @@ package heartbeat
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -22,17 +23,50 @@ var (
 	ErrNoWorkerID     = errors.New("worker ID not set")
 )
 
+// AppliedAssignment is a DTO carrying the state of the last successfully applied
+// assignment. The manager passes this to Publisher.SetAppliedAssignment after a
+// successful Apply call. All fields map 1:1 to the corresponding Heartbeat fields.
+type AppliedAssignment struct {
+	LeaderRevision        uint64
+	AppliedVersion        int64
+	AppliedDigest         uint64
+	AppliedSourceRevision uint64
+	AppliedSourceRevKnown bool
+	AppliedAt             time.Time
+}
+
+// appliedSnapshot is the internal copy of AppliedAssignment plus SchemaVersion.
+// SchemaVersion is set to 1 on the first successful SetAppliedAssignment call.
+type appliedSnapshot struct {
+	SchemaVersion         uint8
+	LeaderRevision        uint64
+	AppliedVersion        int64
+	AppliedDigest         uint64
+	AppliedSourceRevision uint64
+	AppliedSourceRevKnown bool
+	AppliedAt             time.Time
+}
+
 // Publisher publishes periodic heartbeats to NATS KV.
 //
 // Each worker maintains a heartbeat key in a KV bucket with a TTL.
 // If the worker crashes or stops publishing, the key expires and other
 // workers detect its absence.
+//
+// Heartbeats are published as JSON-encoded Heartbeat objects (v1 format).
+// Legacy workers that publish raw RFC3339 timestamp strings are supported
+// on the reader side via types.DecodeHeartbeat.
 type Publisher struct {
 	kv       jetstream.KeyValue
 	prefix   string
 	workerID string
 	interval time.Duration
 
+	// capsFn returns the current capability bitmask. Set once at construction
+	// via SetCapabilitiesFn before Start is called.
+	capsFn func() uint32
+
+	// mu guards lifecycle fields: started, ticker, metrics, workerID.
 	mu      sync.Mutex
 	started bool
 	stopCh  chan struct{}
@@ -41,6 +75,11 @@ type Publisher struct {
 	logger  types.Logger
 	metrics types.WorkerMetrics
 	onError atomic.Pointer[func(error)]
+
+	// appliedMu guards the applied snapshot; separate from mu so the publish
+	// loop does not contend with lifecycle operations.
+	appliedMu sync.RWMutex
+	applied   appliedSnapshot
 }
 
 // New creates a new heartbeat publisher with dependency injection.
@@ -95,6 +134,20 @@ func New(
 	}
 }
 
+// SetCapabilitiesFn registers a function that returns the current capability
+// bitmask. The publisher calls this function on every heartbeat composition.
+//
+// Call before Start. The function must be safe to call concurrently.
+//
+// Parameters:
+//   - fn: Returns the current capability bitmask; nil is treated as "no capabilities"
+func (p *Publisher) SetCapabilitiesFn(fn func() uint32) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.capsFn = fn
+}
+
 // SetOnError registers a callback invoked on each heartbeat publish failure.
 //
 // Safe to call concurrently with the running publish goroutine; the update is
@@ -110,6 +163,57 @@ func (p *Publisher) SetOnError(fn func(error)) {
 		return
 	}
 	p.onError.Store(&fn)
+}
+
+// SetAppliedAssignment records a successfully applied assignment.
+//
+// Thread-safe and idempotent; monotone in AppliedVersion — calls with a
+// version lower than the current snapshot are ignored (no regression).
+// Equal versions are accepted (idempotent re-application).
+//
+// Call this from the manager after the handoff coordinator's Apply succeeds.
+//
+// Parameters:
+//   - snap: The applied assignment state to record
+func (p *Publisher) SetAppliedAssignment(snap AppliedAssignment) {
+	p.appliedMu.Lock()
+	defer p.appliedMu.Unlock()
+
+	if snap.AppliedVersion < p.applied.AppliedVersion {
+		return // monotone — do not regress
+	}
+
+	p.applied = appliedSnapshot{
+		SchemaVersion:         1,
+		LeaderRevision:        snap.LeaderRevision,
+		AppliedVersion:        snap.AppliedVersion,
+		AppliedDigest:         snap.AppliedDigest,
+		AppliedSourceRevision: snap.AppliedSourceRevision,
+		AppliedSourceRevKnown: snap.AppliedSourceRevKnown,
+		AppliedAt:             snap.AppliedAt,
+	}
+}
+
+// PublishNow forces an immediate out-of-band heartbeat publish.
+//
+// Used by the manager after SetAppliedAssignment so the leader's audit
+// observes the new applied state within one heartbeat round-trip instead
+// of waiting up to HeartbeatInterval.
+//
+// Parameters:
+//   - ctx: Context for the KV Put operation
+//
+// Returns:
+//   - error: KV write error, or ErrNotStarted if publisher is not running
+func (p *Publisher) PublishNow(ctx context.Context) error {
+	p.mu.Lock()
+	if !p.started {
+		p.mu.Unlock()
+		return ErrNotStarted
+	}
+	p.mu.Unlock()
+
+	return p.publish(ctx)
 }
 
 // Start begins publishing heartbeats in the background.
@@ -222,13 +326,44 @@ func (p *Publisher) publishLoop() {
 	}
 }
 
-// publish writes the heartbeat to NATS KV.
+// build composes a Heartbeat value from the current applied snapshot and the
+// capabilities function. Timestamp is always set to time.Now().
+func (p *Publisher) build() types.Heartbeat {
+	p.appliedMu.RLock()
+	snap := p.applied
+	p.appliedMu.RUnlock()
+
+	var caps uint32
+	if p.capsFn != nil {
+		caps = p.capsFn()
+	}
+	caps |= types.CapAckV1 // intrinsic: this publisher always emits v1 JSON, which is the definition of CapAckV1
+
+	return types.Heartbeat{
+		WorkerID:              p.workerID,
+		SchemaVersion:         1, // v1 JSON writers always emit SchemaVersion=1; 0 is only for decoded legacy payloads
+		Capabilities:          caps,
+		LeaderRevision:        snap.LeaderRevision,
+		AppliedVersion:        snap.AppliedVersion,
+		AppliedDigest:         snap.AppliedDigest,
+		AppliedSourceRevision: snap.AppliedSourceRevision,
+		AppliedSourceRevKnown: snap.AppliedSourceRevKnown,
+		AppliedAt:             snap.AppliedAt,
+		Timestamp:             time.Now(),
+	}
+}
+
+// publish writes the heartbeat to NATS KV as a v1 JSON payload.
 func (p *Publisher) publish(ctx context.Context) error {
 	key := p.keyForWorker(p.workerID)
-	value := []byte(time.Now().Format(time.RFC3339Nano))
 
-	// Try to update first (more common case)
-	_, err := p.kv.Put(ctx, key, value)
+	hb := p.build()
+	value, err := json.Marshal(hb)
+	if err != nil {
+		return fmt.Errorf("failed to marshal heartbeat for %s: %w", p.workerID, err)
+	}
+
+	_, err = p.kv.Put(ctx, key, value)
 	if err != nil {
 		return fmt.Errorf("failed to publish heartbeat for %s: %w", p.workerID, err)
 	}
