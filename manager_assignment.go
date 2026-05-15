@@ -103,6 +103,7 @@ func (m *Manager) startCalculator(assignmentKV, heartbeatKV jetstream.KeyValue) 
 		Logger:               m.logger,
 		StateProvider:        m, // Pass manager as state provider for degraded mode checks
 		LeaderRevision:       m.electionRevision,
+		LeaderCheck:          m.checkElectionLeadership,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create calculator: %w", err)

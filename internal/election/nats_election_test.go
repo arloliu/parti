@@ -1,6 +1,7 @@
 package election
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -8,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/arloliu/parti/v2/partitest"
+	"github.com/arloliu/parti/v2/types"
 )
 
 func TestNATSElection_RequestLeadership(t *testing.T) {
@@ -416,4 +418,60 @@ func TestNATSElection_Revision_StableAcrossRenewals(t *testing.T) {
 	// The new leader's term revision must be strictly greater than the old one.
 	require.Greater(t, e2.Revision(), termRev,
 		"new leader's term revision must exceed previous leader's term revision")
+}
+
+// TestNATSElection_CheckLeadership_LiveKVRevision verifies that CheckLeadership
+// reads the live election KV key and returns ErrLeadershipRevisionMismatch
+// whenever the claimed revision does not match the live one — including the
+// case where leadership has been taken over by another worker but the former
+// leader's local cached termRevision is still stable. This is the live fence
+// the assignment publisher relies on for its pre-alias and post-alias
+// leadership rechecks (P0-1).
+func TestNATSElection_CheckLeadership_LiveKVRevision(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	_, nc := partitest.StartEmbeddedNATS(t)
+	kv := partitest.CreateJetStreamKV(t, nc, "test-election-checkleadership")
+
+	e := NewNATSElection(kv, "leader")
+	isLeader, err := e.RequestLeadership(ctx, "worker-1", 30)
+	require.NoError(t, err)
+	require.True(t, isLeader)
+	claimed := e.Revision()
+	require.NotZero(t, claimed)
+
+	// Happy path: claimed matches live.
+	require.NoError(t, e.CheckLeadership(ctx, claimed))
+
+	// Wrong revision claim: returns ErrLeadershipRevisionMismatch.
+	err = e.CheckLeadership(ctx, claimed+1)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, types.ErrLeadershipRevisionMismatch),
+		"want ErrLeadershipRevisionMismatch, got %v", err)
+
+	// Zero claim: also a mismatch.
+	err = e.CheckLeadership(ctx, 0)
+	require.True(t, errors.Is(err, types.ErrLeadershipRevisionMismatch))
+
+	// Simulate takeover: delete the leader key out from under e (a real takeover
+	// would atomically replace it; for this unit test we model the absence
+	// path explicitly). e.Revision() still returns the stable termRevision —
+	// CheckLeadership must read the LIVE state and detect the mismatch.
+	require.NoError(t, kv.Delete(ctx, "leader"))
+	require.Equal(t, claimed, e.Revision(), "cached Revision must still report the stable term")
+	err = e.CheckLeadership(ctx, claimed)
+	require.True(t, errors.Is(err, types.ErrLeadershipRevisionMismatch),
+		"missing leader key must surface as ErrLeadershipRevisionMismatch, got %v", err)
+
+	// Now another worker takes over at a fresh revision; the former leader's
+	// cached termRevision is unchanged but CheckLeadership must reject the
+	// stale claim on a LIVE basis.
+	e2 := NewNATSElection(kv, "leader")
+	isLeader, err = e2.RequestLeadership(ctx, "worker-2", 30)
+	require.NoError(t, err)
+	require.True(t, isLeader)
+	require.NotEqual(t, claimed, e2.Revision())
+	err = e.CheckLeadership(ctx, claimed)
+	require.True(t, errors.Is(err, types.ErrLeadershipRevisionMismatch),
+		"stale leader claim against new term must be rejected, got %v", err)
 }

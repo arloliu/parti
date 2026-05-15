@@ -106,6 +106,49 @@ var (
 
 	// ErrDeleteFailed is returned when deleting assignment from NATS KV fails.
 	ErrDeleteFailed = errors.New("failed to delete assignment")
+
+	// ErrCoverageMismatch is returned by the publisher when the set of
+	// partition CanonicalIDs assigned across all workers does not exactly
+	// match the source partition set. The strategy is buggy or the source
+	// snapshot raced the assignment computation; the publisher refuses to
+	// commit the batch rather than orphan or duplicate partitions.
+	ErrCoverageMismatch = errors.New("assignment coverage mismatch")
+
+	// ErrPayloadHashCollisionOrCorruption is returned when verifying a
+	// content-addressable assignment payload key (kv.Create returns
+	// ErrKeyExists, but the stored bytes hash differs from the computed
+	// PayloadHash). This indicates either a sha256 collision (extraordinary)
+	// or KV corruption / external tampering; in either case the publisher
+	// aborts the batch.
+	ErrPayloadHashCollisionOrCorruption = errors.New("assignment payload hash collision or corruption")
+
+	// ErrLeadershipLostPreAlias is returned when the publisher's pre-alias
+	// leadership recheck observes that the claimed LeaderRevision no longer
+	// matches the live election state. The batch aborts before any legacy
+	// alias write lands.
+	ErrLeadershipLostPreAlias = errors.New("leadership lost before alias barrier")
+
+	// ErrLeadershipLostPostAlias is returned when the publisher's post-alias
+	// leadership recheck observes that the claimed LeaderRevision no longer
+	// matches the live election state. The batch aborts before the commit
+	// CAS is attempted.
+	ErrLeadershipLostPostAlias = errors.New("leadership lost after alias barrier")
+
+	// ErrLeadershipRevisionMismatch is returned by an election agent's
+	// CheckLeadership-style live verifier when the claimed leader-key revision
+	// no longer matches the live KV revision (or the leader key has been
+	// deleted). It is wrapped by ErrLeadershipLostPreAlias /
+	// ErrLeadershipLostPostAlias depending on the publisher call site.
+	ErrLeadershipRevisionMismatch = errors.New("leader key revision mismatch")
+
+	// ErrAliasBarrierFailed is returned when the bounded alias-write retries
+	// for a legacy-in-batch worker are exhausted. The batch aborts; the
+	// audit will republish on the next cycle.
+	ErrAliasBarrierFailed = errors.New("legacy alias barrier failed")
+
+	// ErrCommitCASFailed is returned when the commit CAS write loses to a
+	// concurrent leader. Surrender; do not retry.
+	ErrCommitCASFailed = errors.New("commit CAS failed; surrendering")
 )
 
 // Common errors - Shared errors used across multiple components.

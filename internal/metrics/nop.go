@@ -134,6 +134,55 @@ func (n *NopMetrics) RecordAssignmentChange(_ /* added */, _ /* removed */ int, 
 	// No-op
 }
 
+// PublisherMetrics implementation
+
+// IncrementPayloadsCreated discards the payloads-created counter.
+func (n *NopMetrics) IncrementPayloadsCreated() {
+	// No-op
+}
+
+// IncrementPayloadsReused discards the payloads-reused counter.
+func (n *NopMetrics) IncrementPayloadsReused() {
+	// No-op
+}
+
+// ObservePayloadBytesWritten discards the payload bytes-written histogram.
+func (n *NopMetrics) ObservePayloadBytesWritten(_ /* bytes */ int) {
+	// No-op
+}
+
+// ObserveCommitBytesWritten discards the commit bytes-written histogram.
+func (n *NopMetrics) ObserveCommitBytesWritten(_ /* bytes */ int) {
+	// No-op
+}
+
+// IncrementBatchAborted discards the batch-aborted counter.
+func (n *NopMetrics) IncrementBatchAborted(_ /* reason */ string) {
+	// No-op
+}
+
+// IncrementAliasBarrierFailed discards the alias-barrier-failed counter.
+func (n *NopMetrics) IncrementAliasBarrierFailed() {
+	// No-op
+}
+
+// IncrementAliasVisibleUncommitted discards the alias-visible-uncommitted counter.
+func (n *NopMetrics) IncrementAliasVisibleUncommitted() {
+	// No-op
+}
+
+// IncrementCommitAborts discards the commit-aborts counter.
+func (n *NopMetrics) IncrementCommitAborts() {
+	// No-op
+}
+
+// GCMetrics implementation
+
+// IncrementPayloadDeleteErrors discards the payload-delete-errors counter.
+func (n *NopMetrics) IncrementPayloadDeleteErrors() {
+	// No-op
+}
+
 // WorkerConsumerMetrics implementation
 
 // IncrementWorkerConsumerControlRetry discards the control-plane retry counter.

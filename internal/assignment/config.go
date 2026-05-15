@@ -1,6 +1,7 @@
 package assignment
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -11,13 +12,16 @@ import (
 )
 
 // CalculatorAndAssignmentMetrics combines the metrics interfaces needed by the calculator
-// and its sub-components (e.g., AssignmentPublisher).
+// and its sub-components (e.g., AssignmentPublisher and the payload GC loop).
 //
 // The calculator itself records CalculatorMetrics (rebalance durations, worker changes, etc.)
-// and delegates AssignmentMetrics to the AssignmentPublisher.
+// and delegates AssignmentMetrics, PublisherMetrics, and GCMetrics to the
+// AssignmentPublisher / GC.
 type CalculatorAndAssignmentMetrics interface {
 	types.CalculatorMetrics
 	types.AssignmentMetrics
+	types.PublisherMetrics
+	types.GCMetrics
 }
 
 // Config holds calculator configuration.
@@ -55,6 +59,19 @@ type Config struct {
 	// every published assignment so workers can detect assignments from a former
 	// leader. When nil, LeaderRevision defaults to 0 in published assignments.
 	LeaderRevision func() uint64
+
+	// LeaderCheck, if set, is invoked by the publisher's pre-alias and
+	// post-alias leadership fences (publish steps 5 and 7 of §3.5). It must
+	// perform a LIVE verification of the leader-key revision (e.g., a KV read
+	// of the election key) and return nil iff the live revision matches the
+	// claimed value. Returning a wrapped types.ErrLeadershipRevisionMismatch
+	// signals a takeover; any other error is treated as transient/abort.
+	//
+	// When nil, the publisher's leadership fences are no-ops (test-only). In
+	// production, the manager wires this to its election agent's CheckLeadership
+	// method so a former leader cannot pass the fence after another worker has
+	// taken over.
+	LeaderCheck func(ctx context.Context, claimed uint64) error
 }
 
 // Validate checks configuration validity.

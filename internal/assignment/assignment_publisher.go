@@ -1,7 +1,15 @@
 package assignment
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -11,307 +19,1095 @@ import (
 	"github.com/arloliu/parti/v2/kvutil"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/zeebo/xxh3"
 )
 
-// AssignmentPublisher handles publishing partition assignments to NATS KV.
+// Protocol-key suffixes for the refs-always commit model. All protocol keys
+// share an underscore-prefixed sub-component so they cannot collide with
+// worker IDs (a worker named "commit" or "payload" would otherwise be
+// ambiguous).
+const (
+	commitKeyName     = "_commit"      // singleton; full key: "<prefix>._commit"
+	commitLogPrefix   = "_commit_log." // full key: "<prefix>._commit_log.<V>"
+	payloadKeyPrefix  = "_payload."    // full key: "<prefix>._payload.<hex(sha256)>"
+	protocolKeyMarker = "_"            // any sub-component starting with '_' is a protocol key
+)
+
+// Bounded retry budget for the legacy alias barrier (publish step 6 of §3.5).
+// Three attempts with jittered backoff is the documented contract; failure
+// here aborts the batch.
+const (
+	aliasBarrierMaxAttempts = 3
+	aliasBarrierBaseBackoff = 50 * time.Millisecond
+	aliasBarrierMaxJitter   = 50 * time.Millisecond
+)
+
+// LeaderCheckFunc is the contract for the publisher's pre-alias and post-alias
+// leadership fences (publish steps 5 and 7 of §3.5).
 //
-// Manages version monotonicity across leader changes by discovering
-// the highest existing version on startup.
+// Production implementations MUST perform a live verification (e.g., a kv.Get
+// against the election leader key and a revision comparison) and return a
+// wrapped types.ErrLeadershipRevisionMismatch when the live revision differs
+// from claimed. A cached/stale check is NOT acceptable: a former leader whose
+// local term-revision has not yet been cleared could otherwise pass the fence
+// after another worker has taken over.
+//
+// Returning any non-nil error aborts the batch; the publisher wraps the
+// returned error with the appropriate sentinel
+// (types.ErrLeadershipLostPreAlias or types.ErrLeadershipLostPostAlias).
+type LeaderCheckFunc func(ctx context.Context, claimed uint64) error
+
+// AssignmentPublisher publishes partition assignments using the refs-always
+// commit model.
+//
+// On every Publish, the publisher:
+//  1. Writes content-addressable AssignmentPayload keys ("assignment._payload.<hex(sha256)>")
+//     via kv.Create with hash-verify on ErrKeyExists (immutable, dedupe-safe).
+//  2. Reads heartbeats to classify legacy (CapAckV1=0) workers in the batch.
+//  3. Brackets the legacy alias barrier with two leadership rechecks
+//     (pre-alias and post-alias).
+//  4. Writes mandatory "assignment.<W>" legacy aliases for legacy workers
+//     with bounded retries (failure aborts the batch).
+//  5. CAS-writes the AssignmentCommit to "assignment._commit" — this is the
+//     single atomic decision point.
+//  6. Best-effort writes the AssignmentCommitLog and compat-noise legacy
+//     aliases for commit-capable workers.
+//  7. Best-effort triggers GC.
+//
+// The publisher is intentionally agnostic to the strategy and source layout;
+// the calculator computes the assignment map and source snapshot and passes
+// them in via Publish.
 type AssignmentPublisher struct {
-	assignmentKV jetstream.KeyValue
-	prefix       string
-	keyPrefix    string // cached "prefix."
+	assignmentKV  jetstream.KeyValue
+	heartbeatKV   jetstream.KeyValue // for the legacy alias barrier classification
+	prefix        string             // assignment prefix, e.g. "assignment"
+	keyPrefix     string             // cached "<prefix>."
+	heartbeatPref string             // heartbeat prefix, e.g. "heartbeat"
+	hbKeyPrefix   string             // cached "<heartbeatPref>."
+
+	// leaderCheckFn performs a LIVE verification of the leader-key revision
+	// against the value claimed in PublishInput.LeaderRevision. Used by steps
+	// 5 (pre-alias) and 7 (post-alias). May be nil for tests / non-leader
+	// pseudo-publishers; if nil, leadership rechecks are skipped (NOT a
+	// production-safe configuration).
+	leaderCheckFn LeaderCheckFunc
+
+	// gcTriggerFn, if non-nil, is invoked best-effort after a successful
+	// commit so the GC loop wakes immediately instead of waiting for its
+	// next tick (publish step 12 of §3.5). Safe to leave nil.
+	gcTriggerFn func()
 
 	mu             sync.Mutex
 	currentVersion int64
+	lastCommitRev  uint64 // KV revision of "<prefix>._commit" at last successful commit
 	lastRebalance  time.Time
 
+	// inflightRefs records the payload keys this publisher has selected for an
+	// in-progress publish (after step 4 verify-back, before step 9 commit
+	// CAS). The GC consults LiveRefs() so it cannot delete a payload that an
+	// in-flight commit is about to reference (see §3.9 / P0-2). Populated as
+	// a stable snapshot before step 5 and cleared after step 9 returns.
+	inflightRefs sync.Map // map[string]struct{}
+
 	logger  types.Logger
-	metrics types.AssignmentMetrics
+	metrics PublisherDependentMetrics
 }
 
-// NewAssignmentPublisher creates a new assignment publisher.
+// PublisherDependentMetrics is the metrics surface the publisher (and GC) write to.
 //
-// Parameters:
-//   - assignmentKV: NATS KV bucket for assignments
-//   - prefix: Prefix for assignment keys (e.g., "assignment")
-//   - logger: Logger for publishing events
-//   - metrics: Metrics collector for assignment operations
+// The interface composes AssignmentMetrics (for legacy-style change tracking),
+// PublisherMetrics (refs-always counters), and GCMetrics (payload reaping).
+// Concrete MetricsCollector implementations satisfy all three.
+type PublisherDependentMetrics interface {
+	types.AssignmentMetrics
+	types.PublisherMetrics
+	types.GCMetrics
+}
+
+// PublisherConfig captures the publisher's construction-time dependencies.
 //
-// Returns:
-//   - *AssignmentPublisher: A new publisher instance
-func NewAssignmentPublisher(
-	assignmentKV jetstream.KeyValue,
-	prefix string,
-	logger types.Logger,
-	metrics types.AssignmentMetrics,
-) *AssignmentPublisher {
+// LeaderCheckFn is required for production correctness: it backs the
+// pre-alias and post-alias leadership rechecks (publish steps 5 and 7) and
+// MUST perform a live verification (see LeaderCheckFunc).
+// HeartbeatKV is required for the legacy alias barrier (publish step 6).
+// GCTriggerFn is optional and, if set, is called after a successful commit
+// to wake the GC loop (publish step 12).
+type PublisherConfig struct {
+	AssignmentKV    jetstream.KeyValue
+	HeartbeatKV     jetstream.KeyValue
+	Prefix          string // e.g. "assignment"
+	HeartbeatPrefix string // e.g. "heartbeat"
+	LeaderCheckFn   LeaderCheckFunc
+	GCTriggerFn     func()
+	Logger          types.Logger
+	Metrics         PublisherDependentMetrics
+}
+
+// NewAssignmentPublisher creates a publisher wired to the assignment KV bucket.
+//
+// LeaderCheckFn and HeartbeatKV may be nil only in narrow test contexts;
+// production calls MUST supply both. When LeaderCheckFn is nil, the
+// pre-alias and post-alias leadership rechecks become no-ops (every
+// Publish is treated as if leadership is held). When HeartbeatKV is nil,
+// the legacy alias barrier degrades into "treat all workers as commit-capable"
+// — the publisher will not write mandatory aliases and the cluster cannot
+// safely host pre-CapAckV1 workers.
+func NewAssignmentPublisher(cfg PublisherConfig) *AssignmentPublisher {
+	hbPrefix := cfg.HeartbeatPrefix
+	if hbPrefix == "" {
+		hbPrefix = "heartbeat"
+	}
+	logger := cfg.Logger
+	if logger == nil {
+		// Fallback to a nop logger via the existing pattern; importing logging
+		// would create a cycle in some test setups, so demand a real logger
+		// from callers in production.
+		logger = types.Logger(noopLogger{})
+	}
+	metrics := cfg.Metrics
+	if metrics == nil {
+		metrics = nopPublisherMetrics{}
+	}
+
 	return &AssignmentPublisher{
-		assignmentKV: assignmentKV,
-		prefix:       prefix,
-		keyPrefix:    fmt.Sprintf("%s.", prefix),
-		logger:       logger,
-		metrics:      metrics,
+		assignmentKV:  cfg.AssignmentKV,
+		heartbeatKV:   cfg.HeartbeatKV,
+		prefix:        cfg.Prefix,
+		keyPrefix:     cfg.Prefix + ".",
+		heartbeatPref: hbPrefix,
+		hbKeyPrefix:   hbPrefix + ".",
+		leaderCheckFn: cfg.LeaderCheckFn,
+		gcTriggerFn:   cfg.GCTriggerFn,
+		logger:        logger,
+		metrics:       metrics,
 	}
 }
 
-// DiscoverHighestVersion scans KV for the highest existing assignment version
-// and returns the set of worker IDs that currently have assignment keys.
+// noopLogger is a defensive fallback when no logger is supplied. Production
+// callers should always pass a real logger (logging.NewNop() is fine).
+type noopLogger struct{}
+
+func (noopLogger) Debug(_ string, _ ...any) {}
+func (noopLogger) Info(_ string, _ ...any)  {}
+func (noopLogger) Warn(_ string, _ ...any)  {}
+func (noopLogger) Error(_ string, _ ...any) {}
+func (noopLogger) Fatal(_ string, _ ...any) {}
+
+// nopPublisherMetrics is a defensive fallback metrics implementation.
+type nopPublisherMetrics struct{}
+
+func (nopPublisherMetrics) RecordAssignmentChange(_, _ int, _ int64) {}
+func (nopPublisherMetrics) IncrementPayloadsCreated()                {}
+func (nopPublisherMetrics) IncrementPayloadsReused()                 {}
+func (nopPublisherMetrics) ObservePayloadBytesWritten(_ int)         {}
+func (nopPublisherMetrics) ObserveCommitBytesWritten(_ int)          {}
+func (nopPublisherMetrics) IncrementBatchAborted(_ string)           {}
+func (nopPublisherMetrics) IncrementAliasBarrierFailed()             {}
+func (nopPublisherMetrics) IncrementAliasVisibleUncommitted()        {}
+func (nopPublisherMetrics) IncrementCommitAborts()                   {}
+func (nopPublisherMetrics) IncrementPayloadDeleteErrors()            {}
+
+// PublishInput captures the per-batch inputs to Publish that have to come from
+// the calculator (because the publisher does not own the strategy or the
+// source snapshot path). Group them in a struct so future additions don't
+// re-break callers.
+type PublishInput struct {
+	// Workers is the active worker set the assignments cover. Determines
+	// AssignmentCommit.Workers (sorted internally).
+	Workers []string
+
+	// Assignments maps worker ID → its assigned partition slice.
+	Assignments map[string][]types.Partition
+
+	// SourcePartitions is the full sorted-or-unsorted partition list from the
+	// source. The publisher uses it for the strict set-equality coverage check
+	// at publish step 3 (see §3.8). Pass exactly what was returned from the
+	// source snapshot — the publisher canonicalizes internally.
+	SourcePartitions []types.Partition
+
+	// SourceRevision and SourceRevisionKnown come from
+	// types.RevisionedPartitionSource.Snapshot when available. SourceRevision=0
+	// + SourceRevisionKnown=false is the legitimate non-revisioned-source
+	// state.
+	SourceRevision      uint64
+	SourceRevisionKnown bool
+
+	// LeaderRevision is the publisher's claimed leader epoch. Steps 5 and 7
+	// re-read the live election state and abort if it disagrees.
+	LeaderRevision uint64
+
+	// Lifecycle is the rebalance reason. Diagnostic only.
+	Lifecycle string
+
+	// WorkersToRemove is the list of legacy assignment.<W> aliases the
+	// publisher should sweep AFTER a successful commit. Workers not in
+	// AssignmentCommit.Workers are implicitly revoked at the commit level;
+	// alias sweeping is rolling-upgrade hygiene only.
+	WorkersToRemove []string
+}
+
+// Publish runs the 12-step refs-always commit flow described in §3.5 of the
+// partition-assignment robustness plan.
 //
-// Two uses:
-//  1. Version monotonicity across leader changes — the highest version found
-//     seeds p.currentVersion so subsequent publishes increment from there.
-//  2. Takeover hygiene — callers can seed their internal "currently assigned
-//     workers" map from the returned IDs so the next rebalance's
-//     workersToRemove computation sweeps keys for workers that are no longer
-//     alive. Without this, a new leader's first rebalance leaves stale
-//     assignment.<id> keys in KV and a restarted pod reclaiming the same ID
-//     would read stale partition data.
-//
-// Parameters:
-//   - ctx: Context for cancellation
+// The flow is:
+//  1. Verify set-equality coverage of Assignments against SourcePartitions.
+//  2. Build per-worker AssignmentPayloads, Create their content-addressable
+//     keys, and on ErrKeyExists verify-back via sha256 of the canonical
+//     uncompressed bytes.
+//  3. Pre-alias leadership recheck.
+//  4. Heartbeat-aware legacy alias barrier (mandatory pre-commit aliases for
+//     CapAckV1=0 workers in the batch, with bounded retries).
+//  5. Post-alias leadership recheck.
+//  6. CAS-write AssignmentCommit (THE commit point).
+//  7. Best-effort: write AssignmentCommitLog, write compat-noise aliases for
+//     commit-capable workers, sweep WorkersToRemove, schedule GC if wired.
 //
 // Returns:
-//   - []string: Worker IDs that currently have assignment keys in KV.
-//   - error: Nil on success, error on KV access failure
+//   - error: a typed sentinel from types/errors.go (ErrCoverageMismatch,
+//     ErrLeadershipLostPreAlias, ErrAliasBarrierFailed,
+//     ErrLeadershipLostPostAlias, ErrCommitCASFailed,
+//     ErrPayloadHashCollisionOrCorruption) wrapped with context where useful.
+func (p *AssignmentPublisher) Publish(ctx context.Context, in PublishInput) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if len(in.Workers) == 0 {
+		p.logger.Info("publish skipped: no active workers")
+		return nil
+	}
+
+	// --- step 3 of §3.5: publish-time set-equality coverage check ---
+	if err := p.checkCoverage(in.SourcePartitions, in.Assignments); err != nil {
+		p.metrics.IncrementBatchAborted("coverage_mismatch")
+		return err
+	}
+
+	// Tentative version for this batch — we increment local state ONLY on
+	// successful CAS at step 9. Increment now to compute the proposed V.
+	proposedVersion := p.currentVersion + 1
+
+	// --- step 4 of §3.5: write content-addressable payload keys ---
+	refs, payloadByWorker, err := p.writePayloads(ctx, in.Workers, in.Assignments)
+	if err != nil {
+		// Coverage was fine but a payload write failed; classify as a generic
+		// abort. We do not increment IncrementBatchAborted with a specific
+		// reason here because payload write failures are KV-layer faults
+		// rather than protocol-state aborts. Caller logs include the err.
+		return err
+	}
+
+	// --- in-flight refs registration (P0-2 / §3.9) ---
+	// Register every selected payload key BEFORE the leadership fence (and
+	// before the commit CAS) so a concurrent GC computing its live set after
+	// this point cannot delete a payload this in-flight commit will reference.
+	// The set is cleared on return whether the publish commits or aborts —
+	// aborted publishes' payloads are inert and may be reaped on the next GC
+	// pass anyway, but holding them through the abort window is safe and
+	// keeps the lifecycle simple.
+	for _, ref := range refs {
+		p.inflightRefs.Store(ref.Key, struct{}{})
+	}
+	defer func() {
+		for _, ref := range refs {
+			p.inflightRefs.Delete(ref.Key)
+		}
+	}()
+
+	// --- step 5 of §3.5: pre-alias leadership fence (LIVE) ---
+	if err := p.checkLeadership(ctx, in.LeaderRevision, types.ErrLeadershipLostPreAlias); err != nil {
+		p.metrics.IncrementBatchAborted("leadership_lost_pre_alias")
+		return err
+	}
+
+	// --- step 6 of §3.5: heartbeat-aware legacy alias barrier ---
+	legacyInBatch := p.classifyLegacyWorkers(ctx, in.Workers)
+	aliasWritten, err := p.runAliasBarrier(ctx, in, legacyInBatch, payloadByWorker, proposedVersion)
+	if err != nil {
+		return err
+	}
+
+	// --- step 7 of §3.5: post-alias leadership recheck (LIVE) ---
+	if err := p.checkLeadership(ctx, in.LeaderRevision, types.ErrLeadershipLostPostAlias); err != nil {
+		// This is the documented mixed-version exposure case (§3.5): some
+		// aliases may already be visible to old workers, but we did not
+		// attempt the commit CAS (so parti.publisher.commit_aborts does NOT
+		// fire — see test #62).
+		p.metrics.IncrementBatchAborted("leadership_lost_post_alias")
+		if aliasWritten {
+			p.metrics.IncrementAliasVisibleUncommitted()
+		}
+
+		return err
+	}
+
+	// --- step 8 of §3.5: build AssignmentCommit ---
+	sortedWorkers := make([]string, len(in.Workers))
+	copy(sortedWorkers, in.Workers)
+	slices.Sort(sortedWorkers)
+	batchDigest := computeBatchDigest(in.SourcePartitions)
+	commit := types.AssignmentCommit{
+		Version:             proposedVersion,
+		LeaderRevision:      in.LeaderRevision,
+		SourceRevision:      in.SourceRevision,
+		SourceRevisionKnown: in.SourceRevisionKnown,
+		PublishedAt:         time.Now().UTC(),
+		Workers:             sortedWorkers,
+		Payloads:            refs,
+		BatchDigest:         batchDigest,
+		PrevCommitRev:       p.lastCommitRev,
+		Lifecycle:           in.Lifecycle,
+	}
+	commitBytes, err := json.Marshal(commit)
+	if err != nil {
+		return fmt.Errorf("marshal commit: %w", err)
+	}
+
+	// --- step 9 of §3.5: CAS-write assignment._commit ---
+	commitKey := p.keyPrefix + commitKeyName
+	var newCommitRev uint64
+	if p.lastCommitRev == 0 {
+		newCommitRev, err = p.assignmentKV.Create(ctx, commitKey, commitBytes)
+	} else {
+		newCommitRev, err = p.assignmentKV.Update(ctx, commitKey, commitBytes, p.lastCommitRev)
+	}
+	if err != nil {
+		// CAS lost OR Create lost (another leader created the commit first).
+		// Either way: surrender. The lost batch's payload writes are inert;
+		// the legacy aliases written at step 6 are documented exposure.
+		p.metrics.IncrementCommitAborts()
+		p.metrics.IncrementBatchAborted("commit_cas_failed")
+		// Only count exposure when at least one alias actually landed.
+		if aliasWritten {
+			p.metrics.IncrementAliasVisibleUncommitted()
+		}
+
+		return fmt.Errorf("%w: %w", types.ErrCommitCASFailed, err)
+	}
+	// COMMIT POINT: from here on, this batch is the cluster's authoritative view.
+	p.lastCommitRev = newCommitRev
+	p.currentVersion = proposedVersion
+	p.metrics.ObserveCommitBytesWritten(len(commitBytes))
+
+	// --- step 10 of §3.5: best-effort commit log ---
+	if err := p.writeCommitLog(ctx, commit, refs); err != nil {
+		p.logger.Warn("commit log write failed (non-fatal)", "version", commit.Version, "error", err)
+	}
+
+	// --- step 11 of §3.5: best-effort compat-noise aliases for commit-capable workers ---
+	legacySet := make(map[string]struct{}, len(legacyInBatch))
+	for _, w := range legacyInBatch {
+		legacySet[w] = struct{}{}
+	}
+	for _, w := range sortedWorkers {
+		if _, isLegacy := legacySet[w]; isLegacy {
+			continue
+		}
+		payload := payloadByWorker[w]
+		legacy := buildLegacyAlias(payload, commit.Version, commit.LeaderRevision, commit.SourceRevision, commit.Lifecycle, len(sortedWorkers))
+		if err := p.writeLegacyAliasOnce(ctx, w, legacy); err != nil {
+			p.logger.Debug("compat-noise alias write failed (non-fatal)", "worker", w, "error", err)
+		}
+	}
+
+	// --- post-step: best-effort sweep of removed workers' legacy aliases ---
+	p.cleanupStaleAssignmentsLocked(ctx, in.WorkersToRemove)
+
+	// --- step 12 of §3.5: best-effort GC trigger ---
+	// Wake the background GC loop so the freshly-committed payloads' deltas
+	// (newly-orphaned older payloads) are reclaimed promptly. The trigger is
+	// non-blocking: if no listener is wired, this is a no-op.
+	if p.gcTriggerFn != nil {
+		p.gcTriggerFn()
+	}
+
+	// Bookkeeping & metrics.
+	p.lastRebalance = time.Now()
+	for _, parts := range in.Assignments {
+		p.metrics.RecordAssignmentChange(len(parts), 0, commit.Version)
+	}
+
+	p.logger.Info("assignment commit written",
+		"version", commit.Version,
+		"workers", len(commit.Workers),
+		"payloads", len(commit.Payloads),
+		"commit_bytes", len(commitBytes),
+		"lifecycle", commit.Lifecycle,
+		"source_revision_known", commit.SourceRevisionKnown,
+	)
+
+	return nil
+}
+
+// checkCoverage implements §3.8: strict set-equality of sorted CanonicalIDs
+// across the assignments union and the source snapshot. Catches duplicates
+// AND missing partitions, unlike the count-based check.
+func (p *AssignmentPublisher) checkCoverage(source []types.Partition, assignments map[string][]types.Partition) error {
+	union := unionPartitions(assignments)
+	got := canonicalIDSet(union) // sorted, deduped
+	expected := canonicalIDSet(source)
+	rawCount := len(union)
+	setOK := equalStringSlices(got, expected)
+	multisetOK := rawCount == len(expected)
+	if setOK && multisetOK {
+		return nil
+	}
+
+	// Concise diagnostic: count missing/extra/duplicates without dumping huge sets to logs.
+	gotSet := make(map[string]struct{}, len(got))
+	for _, id := range got {
+		gotSet[id] = struct{}{}
+	}
+	expSet := make(map[string]struct{}, len(expected))
+	for _, id := range expected {
+		expSet[id] = struct{}{}
+	}
+	missing := 0
+	for id := range expSet {
+		if _, ok := gotSet[id]; !ok {
+			missing++
+		}
+	}
+	extra := 0
+	for id := range gotSet {
+		if _, ok := expSet[id]; !ok {
+			extra++
+		}
+	}
+	duplicates := rawCount - len(got)
+	p.logger.Error("publish coverage mismatch",
+		"source_partitions", len(expected),
+		"assigned_unique", len(got),
+		"assigned_raw", rawCount,
+		"missing", missing,
+		"extra", extra,
+		"duplicates", duplicates,
+	)
+
+	return fmt.Errorf("%w: source=%d assigned_unique=%d assigned_raw=%d missing=%d extra=%d duplicates=%d",
+		types.ErrCoverageMismatch, len(expected), len(got), rawCount, missing, extra, duplicates)
+}
+
+// checkLeadership implements steps 5 and 7: invoke the live leader-check
+// callback and abort if it returns a non-nil error. When leaderCheckFn is
+// nil (test-only), the check is a no-op — production callers MUST set it.
+//
+// The caller selects the sentinel (pre-alias vs post-alias) so callers and
+// tests can distinguish the two phases. The callback's underlying error
+// (typically wrapping types.ErrLeadershipRevisionMismatch) is preserved in
+// the wrapped chain.
+func (p *AssignmentPublisher) checkLeadership(ctx context.Context, claimed uint64, sentinel error) error {
+	if p.leaderCheckFn == nil {
+		return nil
+	}
+	if err := p.leaderCheckFn(ctx, claimed); err != nil {
+		return fmt.Errorf("%w: claimed=%d: %w", sentinel, claimed, err)
+	}
+	return nil
+}
+
+// writePayloads implements step 4 of §3.5. Returns:
+//   - refs: AssignmentPayloadRef map, ready to embed in the commit
+//   - payloadByWorker: the canonical-form AssignmentPayloads, kept for legacy alias use
+//   - err: any non-recoverable KV or hash-mismatch error
+func (p *AssignmentPublisher) writePayloads(
+	ctx context.Context,
+	workers []string,
+	assignments map[string][]types.Partition,
+) (map[string]types.AssignmentPayloadRef, map[string]types.AssignmentPayload, error) {
+	refs := make(map[string]types.AssignmentPayloadRef, len(workers))
+	payloads := make(map[string]types.AssignmentPayload, len(workers))
+	// Iterate in sorted worker order for log determinism — KV order is irrelevant.
+	sorted := make([]string, len(workers))
+	copy(sorted, workers)
+	slices.Sort(sorted)
+	for _, w := range sorted {
+		parts := assignments[w]
+		// Canonicalize: sort partitions by CanonicalID so identical sets hash
+		// to the same key regardless of strategy iteration order.
+		canonical := make([]types.Partition, len(parts))
+		copy(canonical, parts)
+		slices.SortFunc(canonical, func(a, b types.Partition) int {
+			return strings.Compare(a.CanonicalID(), b.CanonicalID())
+		})
+		payload := types.AssignmentPayload{
+			SchemaVersion: types.AssignmentSchemaVersion,
+			Partitions:    canonical,
+		}
+		canonicalBytes, err := json.Marshal(payload)
+		if err != nil {
+			return nil, nil, fmt.Errorf("marshal payload worker=%s: %w", w, err)
+		}
+		hash := sha256.Sum256(canonicalBytes)
+		hashHex := hex.EncodeToString(hash[:])
+		key := p.keyPrefix + payloadKeyPrefix + hashHex
+
+		// Compress for storage. We hash the UNCOMPRESSED canonical bytes
+		// (above) so verify-on-ErrKeyExists decompresses then re-hashes. Two
+		// independent leaders writing the same logical payload may produce
+		// slightly different gzip headers (mtime/OS); that's fine — the hash
+		// is over the inner canonical bytes.
+		stored, err := gzipCompress(canonicalBytes)
+		if err != nil {
+			return nil, nil, fmt.Errorf("gzip payload worker=%s: %w", w, err)
+		}
+
+		setDigest := computeSetDigest(canonical)
+
+		rev, err := p.assignmentKV.Create(ctx, key, stored)
+		switch {
+		case err == nil:
+			p.metrics.IncrementPayloadsCreated()
+			p.metrics.ObservePayloadBytesWritten(len(stored))
+		case errors.Is(err, jetstream.ErrKeyExists):
+			// Verify-back: fetch the existing bytes, decompress, sha256, and
+			// compare with our hash. A mismatch is either a sha256 collision
+			// (extraordinary) or KV corruption.
+			entry, gerr := p.assignmentKV.Get(ctx, key)
+			if gerr != nil {
+				return nil, nil, fmt.Errorf("verify-back get worker=%s key=%s: %w", w, key, gerr)
+			}
+			plain, derr := gzipDecompress(entry.Value())
+			if derr != nil {
+				// Tolerate the case where some operator wrote uncompressed bytes
+				// (unlikely in production, but be defensive): treat the raw
+				// stored bytes as canonical and re-hash directly.
+				plain = entry.Value()
+			}
+			gotHash := sha256.Sum256(plain)
+			if !bytes.Equal(gotHash[:], hash[:]) {
+				return nil, nil, fmt.Errorf("%w: key=%s expected=%s got=%s",
+					types.ErrPayloadHashCollisionOrCorruption, key, hashHex, hex.EncodeToString(gotHash[:]))
+			}
+			p.metrics.IncrementPayloadsReused()
+			rev = entry.Revision()
+		default:
+			return nil, nil, fmt.Errorf("kv create payload worker=%s key=%s: %w", w, key, err)
+		}
+
+		refs[w] = types.AssignmentPayloadRef{
+			Key:         key,
+			PayloadHash: hashHex,
+			SetDigest:   setDigest,
+			Revision:    rev,
+		}
+		payloads[w] = payload
+	}
+
+	return refs, payloads, nil
+}
+
+// classifyLegacyWorkers reads each worker's heartbeat and returns the subset
+// that lack CapAckV1. A read failure or a malformed heartbeat is also
+// classified as legacy: we err on the safe side (treat unknown as legacy)
+// because writing an extra legacy alias for a commit-capable worker is harmless
+// (it goes into the compat-noise step 11 anyway), whereas SKIPPING the alias
+// for a true legacy worker silently orphans its V partitions.
+func (p *AssignmentPublisher) classifyLegacyWorkers(ctx context.Context, workers []string) []string {
+	if p.heartbeatKV == nil {
+		// No heartbeat KV wired — we can't classify; safest behavior is to
+		// treat NO worker as legacy (i.e. trust commit-only). This is the
+		// test-only fallback; production callers MUST wire HeartbeatKV.
+		return nil
+	}
+	out := make([]string, 0)
+	for _, w := range workers {
+		entry, err := p.heartbeatKV.Get(ctx, p.hbKeyPrefix+w)
+		if err != nil {
+			// Heartbeat missing or unreadable → treat as legacy (safe).
+			out = append(out, w)
+			continue
+		}
+		hb, derr := types.DecodeHeartbeat(entry.Value())
+		if derr != nil {
+			out = append(out, w)
+			continue
+		}
+		if hb.Capabilities&types.CapAckV1 == 0 {
+			out = append(out, w)
+		}
+	}
+
+	return out
+}
+
+// runAliasBarrier executes the heartbeat-aware mandatory legacy-alias writes
+// of publish step 6 with bounded retries.
+//
+// Returns:
+//   - aliasWritten: true if AT LEAST ONE legacy alias write succeeded. The
+//     caller uses this to gate the alias_visible_uncommitted exposure metric
+//     so a first-attempt failure (no alias landed) does not count as exposure.
+//   - err: a wrapped types.ErrAliasBarrierFailed when retries for any legacy
+//     worker are exhausted; nil when all (or none, if the batch is fully
+//     commit-capable) succeed.
+func (p *AssignmentPublisher) runAliasBarrier(
+	ctx context.Context,
+	in PublishInput,
+	legacyInBatch []string,
+	payloadByWorker map[string]types.AssignmentPayload,
+	proposedVersion int64,
+) (aliasWritten bool, err error) {
+	for _, w := range legacyInBatch {
+		payload, ok := payloadByWorker[w]
+		if !ok {
+			// Worker is in the batch but has no assignment slice — degenerate;
+			// we still write an empty payload alias so old workers see the
+			// "you're revoked" signal at version V.
+			payload = types.AssignmentPayload{SchemaVersion: types.AssignmentSchemaVersion}
+		}
+		legacy := buildLegacyAlias(payload, proposedVersion, in.LeaderRevision, in.SourceRevision, in.Lifecycle, len(in.Workers))
+		if werr := p.writeLegacyAliasWithRetry(ctx, w, legacy); werr != nil {
+			p.metrics.IncrementAliasBarrierFailed()
+			p.metrics.IncrementBatchAborted("alias_barrier_failed")
+			// Only count exposure when at least one earlier alias actually
+			// landed; otherwise no legacy worker can observe an uncommitted
+			// view (P2 fix).
+			if aliasWritten {
+				p.metrics.IncrementAliasVisibleUncommitted()
+			}
+
+			return aliasWritten, fmt.Errorf("%w: worker=%s: %w", types.ErrAliasBarrierFailed, w, werr)
+		}
+		aliasWritten = true
+	}
+
+	return aliasWritten, nil
+}
+
+// writeLegacyAliasWithRetry implements the bounded-retry-with-jitter alias
+// barrier write of step 6.
+func (p *AssignmentPublisher) writeLegacyAliasWithRetry(
+	ctx context.Context,
+	workerID string,
+	legacy types.Assignment,
+) error {
+	var lastErr error
+	for attempt := 0; attempt < aliasBarrierMaxAttempts; attempt++ {
+		// Re-check ctx between retries so a cancelled batch aborts promptly.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := p.writeLegacyAliasOnce(ctx, workerID, legacy)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if attempt == aliasBarrierMaxAttempts-1 {
+			break
+		}
+		// Backoff: base * 2^attempt + jitter ∈ [0, aliasBarrierMaxJitter).
+		backoff := aliasBarrierBaseBackoff << attempt
+		jitter := jitterDuration(aliasBarrierMaxJitter)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff + jitter):
+		}
+	}
+
+	return lastErr
+}
+
+// writeLegacyAliasOnce performs a single kv.Put for the legacy alias key.
+func (p *AssignmentPublisher) writeLegacyAliasOnce(ctx context.Context, workerID string, legacy types.Assignment) error {
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		return fmt.Errorf("marshal legacy alias worker=%s: %w", workerID, err)
+	}
+	key := p.keyPrefix + workerID
+	if _, err := p.assignmentKV.Put(ctx, key, data); err != nil {
+		return fmt.Errorf("kv put legacy alias key=%s: %w", key, err)
+	}
+
+	return nil
+}
+
+// writeCommitLog implements step 10 (best-effort).
+func (p *AssignmentPublisher) writeCommitLog(
+	ctx context.Context,
+	commit types.AssignmentCommit,
+	refs map[string]types.AssignmentPayloadRef,
+) error {
+	keys := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		keys = append(keys, ref.Key)
+	}
+	slices.Sort(keys)
+	// Deduplicate (cross-commit reuse can produce identical payload keys for
+	// multiple workers).
+	keys = slices.Compact(keys)
+	logEntry := types.AssignmentCommitLog{
+		Version:        commit.Version,
+		LeaderRevision: commit.LeaderRevision,
+		PublishedAt:    commit.PublishedAt,
+		PayloadKeys:    keys,
+	}
+	data, err := json.Marshal(logEntry)
+	if err != nil {
+		return fmt.Errorf("marshal commit log: %w", err)
+	}
+	key := fmt.Sprintf("%s%s%d", p.keyPrefix, commitLogPrefix, commit.Version)
+	if _, err := p.assignmentKV.Create(ctx, key, data); err != nil {
+		return fmt.Errorf("kv create commit log key=%s: %w", key, err)
+	}
+
+	return nil
+}
+
+// cleanupStaleAssignmentsLocked deletes legacy aliases for workers that have
+// left the cluster. Callers must already hold p.mu. Protocol keys (those whose
+// sub-component starts with "_") are filtered out — never delete _commit /
+// _commit_log.* / _payload.* via this path.
+func (p *AssignmentPublisher) cleanupStaleAssignmentsLocked(ctx context.Context, workersToRemove []string) {
+	for _, workerID := range workersToRemove {
+		if isProtocolSubcomponent(workerID) {
+			// Defensive: a protocol marker should never appear here, but if it
+			// does, refuse to act.
+			p.logger.Warn("refusing to delete protocol-key during stale-alias sweep", "worker_id", workerID)
+			continue
+		}
+		key := p.keyPrefix + workerID
+		if err := kvutil.DeleteKey(ctx, p.assignmentKV, key); err != nil {
+			p.logger.Warn("failed to delete stale legacy alias", "key", key, "error", err)
+		}
+	}
+}
+
+// DiscoverHighestVersion scans the assignment KV for the highest legacy
+// assignment version and returns the set of legacy worker IDs that still have
+// alias keys.
+//
+// Protocol keys (any sub-component starting with "_": _commit, _commit_log.*,
+// _payload.*) are filtered out and never interpreted as worker IDs. This is
+// the bootstrap path used by §3.7 "new-leader recovery" before the first
+// commit lands; once a commit exists, the publisher seeds currentVersion
+// from it instead.
+//
+// Returns:
+//   - workerIDs: sorted list of legacy worker IDs found
+//   - error: KV access failure (non-fatal in many bootstrap paths)
 func (p *AssignmentPublisher) DiscoverHighestVersion(ctx context.Context) ([]string, error) {
 	keys, err := kvutil.ListKeys(ctx, p.assignmentKV, p.keyPrefix, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list KV keys: %w", err)
 	}
 
-	p.logger.Debug("discovering highest version", "total_keys", len(keys), "prefix", p.prefix)
+	// First, seed lastCommitRev from the commit key if it exists. This handles
+	// the case where a prior leader already committed; takeover should
+	// continue the CAS chain instead of attempting Create and losing.
+	commitKey := p.keyPrefix + commitKeyName
+	if entry, gerr := p.assignmentKV.Get(ctx, commitKey); gerr == nil {
+		var commit types.AssignmentCommit
+		if jerr := json.Unmarshal(entry.Value(), &commit); jerr == nil {
+			p.mu.Lock()
+			p.lastCommitRev = entry.Revision()
+			if commit.Version > p.currentVersion {
+				p.currentVersion = commit.Version
+			}
+			p.mu.Unlock()
+		}
+	}
 
 	highestVersion := int64(0)
 	workerIDs := make([]string, 0, len(keys))
-	checkedCount := 0
 	for _, key := range keys {
-		checkedCount++
+		sub := strings.TrimPrefix(key, p.keyPrefix)
+		if isProtocolSubcomponent(sub) {
+			continue
+		}
 		asgn, _, err := kvutil.GetJSON[types.Assignment](ctx, p.assignmentKV, key)
-		if err != nil {
-			p.logger.Debug("failed to read/unmarshal assignment", "key", key, "error", err)
-			continue // Skip entries we can't read or are malformed
+		if err != nil || asgn == nil {
+			continue
 		}
-		if asgn == nil {
-			continue // Should not happen given ListKeys, but safe to check
-		}
-
-		p.logger.Debug("found assignment", "key", key, "version", asgn.Version)
 		if asgn.Version > highestVersion {
 			highestVersion = asgn.Version
 		}
-		workerIDs = append(workerIDs, strings.TrimPrefix(key, p.keyPrefix))
+		workerIDs = append(workerIDs, sub)
 	}
 
 	p.mu.Lock()
-	p.currentVersion = highestVersion
+	if highestVersion > p.currentVersion {
+		p.currentVersion = highestVersion
+	}
 	p.mu.Unlock()
 
-	if highestVersion > 0 {
-		p.logger.Info("discovered existing assignments", "highest_version", highestVersion, "checked_keys", checkedCount, "worker_keys", len(workerIDs))
-	} else {
-		p.logger.Debug("no existing assignments found", "checked_keys", checkedCount)
+	slices.Sort(workerIDs)
+	if highestVersion > 0 || len(workerIDs) > 0 {
+		p.logger.Info("discovered legacy assignments",
+			"highest_version", highestVersion,
+			"legacy_worker_keys", len(workerIDs),
+		)
 	}
 
 	return workerIDs, nil
 }
 
-// cleanupStaleAssignments removes assignment keys for specific workers.
+// CleanupAllAssignments removes all LEGACY assignment aliases from KV.
 //
-// This is a targeted cleanup method that avoids scanning the entire KV bucket.
+// Protocol keys (assignment._commit, assignment._commit_log.*,
+// assignment._payload.*) are NEVER deleted by this method — they are the
+// authoritative cluster state, and a successor leader needs them to continue
+// the CAS chain and to GC payloads safely.
 //
-// Parameters:
-//   - ctx: Context for cancellation
-//   - workersToRemove: List of worker IDs whose assignments should be deleted
-func (p *AssignmentPublisher) cleanupStaleAssignments(ctx context.Context, workersToRemove []string) {
-	if len(workersToRemove) == 0 {
-		return
-	}
-
-	deletedCount := 0
-	for _, workerID := range workersToRemove {
-		key := p.keyPrefix + workerID
-		p.logger.Debug("deleting stale assignment", "key", key, "worker_id", workerID)
-		if err := kvutil.DeleteKey(ctx, p.assignmentKV, key); err != nil {
-			p.logger.Warn("failed to delete stale assignment", "key", key, "error", err)
-			// Continue with other deletions even if one fails
-		} else {
-			deletedCount++
-		}
-	}
-
-	if deletedCount > 0 {
-		p.logger.Info("cleaned up stale assignments", "deleted_count", deletedCount)
-	}
-}
-
-// CleanupAllAssignments removes all assignment keys from KV.
-//
-// This should be called when the Calculator stops to provide a clean slate
-// for the new leader. It's safe to call even if cleanup fails - the new
-// leader will discover existing versions and maintain monotonicity.
-//
-// Parameters:
-//   - ctx: Context for cancellation (recommend 5s timeout)
-//
-// Returns:
-//   - error: Nil on success, error on KV operation failure (non-fatal)
+// Call this on graceful Calculator shutdown to remove per-worker compat
+// aliases that would otherwise linger and confuse a downgraded peer.
 func (p *AssignmentPublisher) CleanupAllAssignments(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	p.logger.Info("cleaning up all assignments from KV")
+	p.logger.Info("cleaning up legacy assignment aliases (protocol keys preserved)")
 
-	// For full cleanup, we still need to list keys since we don't know who exists
 	keys, err := p.assignmentKV.Keys(ctx)
 	if err != nil {
+		if errors.Is(err, jetstream.ErrNoKeysFound) || types.IsNoKeysFoundError(err) {
+			return nil
+		}
+
 		return fmt.Errorf("failed to list keys for full cleanup: %w", err)
 	}
 
 	var workersToRemove []string
 	for _, key := range keys {
-		if after, ok := strings.CutPrefix(key, p.keyPrefix); ok {
-			workersToRemove = append(workersToRemove, after)
+		sub, ok := strings.CutPrefix(key, p.keyPrefix)
+		if !ok {
+			continue
 		}
+		if isProtocolSubcomponent(sub) {
+			continue
+		}
+		workersToRemove = append(workersToRemove, sub)
 	}
 
-	p.cleanupStaleAssignments(ctx, workersToRemove)
+	p.cleanupStaleAssignmentsLocked(ctx, workersToRemove)
 
 	return nil
 }
 
-// Publish publishes partition assignments to NATS KV.
+// CurrentVersion returns the highest assignment version this publisher has
+// observed (either via DiscoverHighestVersion or via a successful commit).
 //
-// This method increments the version number, serializes assignments to JSON,
-// and publishes them to the KV bucket with keys formatted as "prefix.workerID".
-//
-// Parameters:
-//   - ctx: Context for cancellation
-//   - workers: List of active worker IDs
-//   - assignments: Map of worker ID to partition assignments
-//   - workersToRemove: List of worker IDs that have left the cluster and need cleanup
-//   - lifecycle: Lifecycle phase ("cold_start", "planned_scale", "emergency", "restart")
-//   - leaderRevision: NATS KV revision of the leader key at publish time (0 if unknown)
-//
-// Returns:
-//   - error: Nil on success, error on marshaling or KV operation failure
-//
-// Example:
-//
-//	assignments := map[string][]types.Partition{
-//	    "worker-1": {{Keys: []string{"p1"}}, {Keys: []string{"p2"}}},
-//	    "worker-2": {{Keys: []string{"p3"}}, {Keys: []string{"p4"}}},
-//	}
-//	err := publisher.Publish(ctx, []string{"worker-1", "worker-2"}, assignments, nil, "planned_scale", 0)
-func (p *AssignmentPublisher) Publish(
-	ctx context.Context,
-	workers []string,
-	assignments map[string][]types.Partition,
-	workersToRemove []string,
-	lifecycle string,
-	leaderRevision uint64,
-) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	p.logger.Debug("publishing assignments", "lifecycle", lifecycle, "worker_count", len(workers))
-
-	if len(workers) == 0 {
-		p.logger.Info("no active workers for assignment")
-		return nil
-	}
-
-	// Increment version
-	p.currentVersion++
-
-	p.logger.Debug("publishing assignments to KV", "version", p.currentVersion, "worker_count", len(assignments))
-
-	// Delete assignments for workers that are no longer active
-	p.cleanupStaleAssignments(ctx, workersToRemove)
-
-	// Publish assignments in sorted worker order for deterministic write sequence.
-	// Note: NATS KV does not support multi-key atomic writes; a crash between
-	// individual puts may leave a partial batch in KV. The TotalWorkers field
-	// lets workers detect that some assignments may still be in flight.
-	totalWorkers := len(assignments)
-	sortedWorkers := make([]string, 0, totalWorkers)
-	for wid := range assignments {
-		sortedWorkers = append(sortedWorkers, wid)
-	}
-	slices.Sort(sortedWorkers)
-
-	for _, workerID := range sortedWorkers {
-		parts := assignments[workerID]
-		assignment := types.Assignment{
-			Version:        p.currentVersion,
-			Lifecycle:      lifecycle,
-			Partitions:     parts,
-			LeaderRevision: leaderRevision,
-			TotalWorkers:   totalWorkers,
-		}
-
-		key := p.keyPrefix + workerID
-		p.logger.Debug("publishing assignment", "key", key, "worker_id", workerID, "partitions", len(parts), "version", p.currentVersion)
-		if _, err := kvutil.PutJSON(ctx, p.assignmentKV, key, assignment); err != nil {
-			return fmt.Errorf("failed to publish assignment: %w", err)
-		}
-	}
-
-	p.logger.Debug("all assignments published successfully", "version", p.currentVersion, "workers", len(assignments))
-
-	// Diagnostic summary: per-worker partition counts for visibility during investigations.
-	if len(assignments) > 0 {
-		counts := make([]any, 0, len(assignments)*2)
-		for wid, parts := range assignments {
-			counts = append(counts, wid, len(parts))
-		}
-
-		logArgs := append([]any{"version", p.currentVersion, "lifecycle", lifecycle}, counts...)
-		if len(assignments) <= 5 {
-			p.logger.Info("assignment distribution", logArgs...)
-		} else {
-			p.logger.Debug("assignment distribution (suppressed)", append(logArgs, "worker_count", len(assignments))...)
-		}
-	}
-
-	// Update last rebalance time
-	p.lastRebalance = time.Now()
-
-	// Record metrics
-	for _, parts := range assignments {
-		p.metrics.RecordAssignmentChange(len(parts), 0, p.currentVersion)
-	}
-
-	p.logger.Info("assignments published",
-		"version", p.currentVersion,
-		"workers", len(workers),
-		"lifecycle", lifecycle)
-
-	return nil
-}
-
-// CurrentVersion returns the current assignment version.
-//
-// This method is thread-safe and can be called concurrently.
-//
-// Returns:
-//   - int64: Current version number (0 if no assignments published yet)
+// This method is safe to call concurrently.
 func (p *AssignmentPublisher) CurrentVersion() int64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-
 	return p.currentVersion
 }
 
-// LastRebalanceTime returns the time of the last successful rebalance.
+// LastCommitRev returns the KV revision of the most recently CAS-written
+// assignment._commit. Used by the GC loop to identify the live commit.
 //
-// This is used by the calculator to enforce rebalance cooldown periods.
+// This method is safe to call concurrently.
+func (p *AssignmentPublisher) LastCommitRev() uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lastCommitRev
+}
+
+// LastRebalanceTime returns the time of the last successful commit.
 //
-// Returns:
-//   - time.Time: Time of last rebalance (zero time if never rebalanced)
+// This method is safe to call concurrently.
 func (p *AssignmentPublisher) LastRebalanceTime() time.Time {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-
 	return p.lastRebalance
+}
+
+// AssignmentKV returns the KV bucket the publisher writes into. Exposed so the
+// GC loop and tests can list and inspect protocol keys without re-opening the
+// bucket.
+func (p *AssignmentPublisher) AssignmentKV() jetstream.KeyValue {
+	return p.assignmentKV
+}
+
+// LiveRefs returns a snapshot of the payload keys this publisher has selected
+// for an in-progress publish (after step 4 verify-back, before step 9 commit
+// CAS returns). The GC consults this set to avoid deleting a payload that an
+// in-flight commit is about to reference (§3.9 / P0-2).
+//
+// The returned slice is a point-in-time copy: callers may iterate without
+// holding any lock. An empty slice is a normal steady-state value when no
+// publish is in flight.
+//
+// This method is safe to call concurrently with Publish.
+func (p *AssignmentPublisher) LiveRefs() []string {
+	out := make([]string, 0)
+	p.inflightRefs.Range(func(key, _ any) bool {
+		k, ok := key.(string)
+		if ok {
+			out = append(out, k)
+		}
+		return true
+	})
+
+	return out
+}
+
+// Prefix returns the assignment key prefix. Exposed for the GC loop.
+func (p *AssignmentPublisher) Prefix() string {
+	return p.prefix
+}
+
+// ----- helpers (unexported) -----
+
+// isProtocolSubcomponent returns true if a sub-component (the part after the
+// "<prefix>." delimiter) belongs to the refs-always protocol namespace and
+// must NOT be interpreted as a worker ID.
+func isProtocolSubcomponent(sub string) bool {
+	return strings.HasPrefix(sub, protocolKeyMarker)
+}
+
+// canonicalIDSet returns a sorted, deduplicated slice of CanonicalIDs.
+func canonicalIDSet(parts []types.Partition) []string {
+	if len(parts) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(parts))
+	for _, p := range parts {
+		ids = append(ids, p.CanonicalID())
+	}
+	slices.Sort(ids)
+	ids = slices.Compact(ids)
+
+	return ids
+}
+
+// unionPartitions returns the concatenation of all assignment slices. The
+// caller is expected to canonicalize via canonicalIDSet, which sorts and
+// dedupes — so a duplicate across two workers will collapse and be detected
+// by set-equality against the source.
+func unionPartitions(assignments map[string][]types.Partition) []types.Partition {
+	total := 0
+	for _, parts := range assignments {
+		total += len(parts)
+	}
+	out := make([]types.Partition, 0, total)
+	for _, parts := range assignments {
+		out = append(out, parts...)
+	}
+
+	return out
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+
+	return true
+}
+
+// computeSetDigest computes xxh3 over the sorted CanonicalIDs of the given
+// partitions joined with '\n'. Used as the SetDigest in AssignmentPayloadRef
+// (audit/metrics only, never for content identity).
+func computeSetDigest(parts []types.Partition) uint64 {
+	ids := canonicalIDSet(parts)
+	if len(ids) == 0 {
+		return 0
+	}
+	var h xxh3.Hasher
+	for i, id := range ids {
+		if i > 0 {
+			_, _ = h.WriteString("\n")
+		}
+		_, _ = h.WriteString(id)
+	}
+
+	return h.Sum64()
+}
+
+// computeBatchDigest is identical in structure to computeSetDigest but
+// operates on the full batch (publisher-side coverage proof). Kept as a
+// distinct function for readability at call sites.
+func computeBatchDigest(parts []types.Partition) uint64 {
+	return computeSetDigest(parts)
+}
+
+// gzipCompress compresses bytes with gzip.BestCompression. Determinism of the
+// gzip header is NOT required for correctness — the verify-back path
+// decompresses and re-hashes the inner canonical bytes — so we don't go out of
+// our way to normalize the header.
+func gzipCompress(in []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	w, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := w.Write(in); err != nil {
+		_ = w.Close()
+		return nil, err
+	}
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
+}
+
+// gzipDecompress decompresses gzip-encoded bytes. Returns an error if the
+// input is not valid gzip.
+func gzipDecompress(in []byte) ([]byte, error) {
+	r, err := gzip.NewReader(bytes.NewReader(in))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = r.Close() }()
+	var out bytes.Buffer
+	if _, err := out.ReadFrom(r); err != nil {
+		return nil, err
+	}
+
+	return out.Bytes(), nil
+}
+
+// jitterDuration returns a random duration in [0, max). Uses crypto/rand for
+// jitter so chaotic test environments don't get correlated retries.
+func jitterDuration(maxJitter time.Duration) time.Duration {
+	if maxJitter <= 0 {
+		return 0
+	}
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return 0
+	}
+	n := binary.LittleEndian.Uint64(b[:])
+	// maxJitter is a positive int64 (time.Duration) by the guard above; the
+	// uint64 conversion is safe and the modulo result is < uint64(maxJitter)
+	// which fits comfortably in int64. gosec G115 only warns on the cast back
+	// to int64 — bound it explicitly first.
+	bounded := n % uint64(maxJitter)
+
+	return time.Duration(bounded) //nolint:gosec // G115: bounded < uint64(maxJitter), and maxJitter is int64 by type.
+}
+
+// buildLegacyAlias constructs the wire-compatible types.Assignment that gets
+// written to "<prefix>.<W>" for legacy (and compat-noise) aliases.
+//
+// The legacy format mirrors what pre-refs-always workers expect: a single
+// JSON envelope carrying the partition list plus version/leader/source
+// metadata. New workers under §3.6 may also read this alias as a fallback
+// when no commit exists at a higher LeaderRevision (Phase 4).
+// SourceRevision intentionally unused on the legacy envelope: it is not part
+// of the pre-refs-always wire contract. New workers reading the alias under
+// §3.6 fall back to commit.SourceRevision when they later observe a commit
+// with a fresher LeaderRevision.
+func buildLegacyAlias(
+	payload types.AssignmentPayload,
+	version int64,
+	leaderRevision uint64,
+	_ /* sourceRevision */ uint64,
+	lifecycle string,
+	totalWorkers int,
+) types.Assignment {
+	return types.Assignment{
+		Version:        version,
+		Lifecycle:      lifecycle,
+		Partitions:     payload.Partitions,
+		LeaderRevision: leaderRevision,
+		TotalWorkers:   totalWorkers,
+	}
 }

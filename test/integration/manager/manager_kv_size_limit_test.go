@@ -178,15 +178,20 @@ func TestKVSizeLimit_LeaderReleasesLeadershipOnFailure(t *testing.T) {
 	cluster.StartWorkers(ctx)
 	cluster.WaitForStableState(15 * time.Second)
 
-	// Now shrink MaxValueSize so any post-takeover rebalance — which gives
-	// each of the remaining 2 workers ~30 partitions (~4.2 KiB) — will fail.
+	// Now shrink MaxValueSize so any post-takeover rebalance fails. Phase 3
+	// of the assignment protocol switched to refs-always commits where each
+	// per-worker payload key is its own (small) KV entry, so the per-worker
+	// 4 KiB limit no longer suffices — but a tight 128-byte limit still
+	// causes both the payload writes AND the commit CAS to fail, which is
+	// what this test cares about (any publish failure must surrender
+	// leadership).
 	_, err = js.UpdateKeyValue(ctx, jetstream.KeyValueConfig{
 		Bucket:       "parti-assignment",
 		History:      1,
-		MaxValueSize: 4 * 1024,
+		MaxValueSize: 128,
 	})
 	require.NoError(t, err)
-	t.Log("shrunk MaxValueSize to 4 KiB; takeover publish will fail")
+	t.Log("shrunk MaxValueSize to 128 bytes; takeover publish will fail at the payload write step")
 	originalLeader := cluster.VerifyExactlyOneLeader()
 	t.Logf("initial leader: %s", originalLeader.WorkerID())
 

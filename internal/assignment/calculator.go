@@ -33,6 +33,7 @@ type Calculator struct {
 	monitor           *WorkerMonitor
 	stateMach         *StateMachine
 	publisher         *AssignmentPublisher
+	gc                *CommitGC          // best-effort payload reaper (§3.5 step 12)
 	emergencyDetector *EmergencyDetector // Hysteresis-based emergency detection
 
 	// Cached string patterns (for performance)
@@ -122,13 +123,30 @@ func NewCalculator(cfg *Config) (*Calculator, error) {
 	// Initialize emergency detector with configured grace period
 	c.emergencyDetector = NewEmergencyDetector(cfg.EmergencyGracePeriod)
 
-	// Initialize components
-	c.publisher = NewAssignmentPublisher(
-		cfg.AssignmentKV,
-		cfg.AssignmentPrefix,
-		cfg.Logger,
-		cfg.Metrics,
-	)
+	// Initialize components.
+	//
+	// The GC is constructed first (without a publisher) only conceptually:
+	// in practice we construct the publisher first, then the GC, then wire
+	// the publisher's GCTriggerFn to the GC's Trigger method. This avoids a
+	// chicken-and-egg dependency.
+	c.publisher = NewAssignmentPublisher(PublisherConfig{
+		AssignmentKV:    cfg.AssignmentKV,
+		HeartbeatKV:     cfg.HeartbeatKV,
+		Prefix:          cfg.AssignmentPrefix,
+		HeartbeatPrefix: cfg.HeartbeatPrefix,
+		LeaderCheckFn:   cfg.LeaderCheck,
+		Logger:          cfg.Logger,
+		Metrics:         cfg.Metrics,
+	})
+
+	c.gc = NewCommitGC(CommitGCConfig{
+		Publisher: c.publisher,
+		Logger:    cfg.Logger,
+		Metrics:   cfg.Metrics,
+	})
+	if c.gc != nil {
+		c.publisher.gcTriggerFn = c.gc.Trigger
+	}
 
 	c.stateMach = NewStateMachine(
 		cfg.Logger,
@@ -242,6 +260,15 @@ func (c *Calculator) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to start worker monitor: %w", err)
 	}
 
+	// Start the best-effort payload GC loop (§3.5 step 12 / §3.9). Failures
+	// here are non-fatal: GC is conservative and never participates in
+	// correctness, so a missing background sweep only delays orphan reaping.
+	if c.gc != nil {
+		if err := c.gc.Start(ctx); err != nil {
+			c.Logger.Warn("commit GC start failed (non-fatal)", "error", err)
+		}
+	}
+
 	// Start partition monitoring if supported
 	if watchable, ok := c.Source.(types.WatchablePartitionSource); ok {
 		c.Logger.Info("starting partition monitor")
@@ -300,6 +327,11 @@ func (c *Calculator) Stop(ctx context.Context) error {
 	// 2. Stop worker monitor (stops watcher and monitoring goroutines)
 	if err := c.monitor.Stop(); err != nil {
 		c.Logger.Error("failed to stop worker monitor", "error", err)
+	}
+
+	// Stop the GC loop (drains any in-flight sweep). Best-effort.
+	if c.gc != nil {
+		c.gc.Stop()
 	}
 
 	// 3. Wait for state machine shutdown
@@ -853,6 +885,21 @@ func (c *Calculator) handleRebalance(ctx context.Context, reason string) error {
 	return nil
 }
 
+// snapshotSource picks the best partition snapshot path for the source. If
+// the source implements RevisionedPartitionSource, it carries the source
+// revision into the commit so the audit (Phase 4) can apply strict
+// source-revision checks. Otherwise it falls back to List with srcRev=0
+// and srcKnown=false.
+func snapshotSource(ctx context.Context, src types.PartitionSource) ([]types.Partition, uint64, bool, error) { //nolint:revive // function-result-limit: mirrors RevisionedPartitionSource.Snapshot signature
+	if rs, ok := src.(types.RevisionedPartitionSource); ok {
+		parts, rev, known, err := rs.Snapshot(ctx)
+		return parts, rev, known, err
+	}
+	parts, err := src.List(ctx)
+
+	return parts, 0, false, err
+}
+
 // rebalance calculates and publishes new assignments.
 func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 	// Serialize rebalance operations to prevent race conditions
@@ -886,10 +933,10 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 		}
 	}
 
-	partitions, err := c.Source.List(ctx)
-	if err != nil {
+	partitions, srcRev, srcKnown, snapErr := snapshotSource(ctx, c.Source)
+	if snapErr != nil {
 		c.Metrics.RecordRebalanceAttempt(lifecycle, false)
-		return fmt.Errorf("failed to list partitions: %w", err)
+		return fmt.Errorf("failed to snapshot partitions: %w", snapErr)
 	}
 
 	c.Logger.Debug("partitions retrieved", "partition_count", len(partitions))
@@ -912,19 +959,16 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 		return fmt.Errorf("assignment calculation failed: %w", err)
 	}
 
-	// Check for orphaned partitions
+	// Coverage is enforced strictly inside the publisher via set-equality of
+	// partition CanonicalIDs (§3.8 of the assignment robustness plan). We
+	// keep the orphaned-partition gauge for ops visibility but rely on the
+	// publisher to abort the batch on mismatch with ErrCoverageMismatch.
 	assignedCount := 0
 	for _, parts := range assignments {
 		assignedCount += len(parts)
 	}
-
 	if assignedCount != len(partitions) {
-		orphaned := len(partitions) - assignedCount
-		c.Logger.Error("orphaned partitions detected",
-			"total", len(partitions),
-			"assigned", assignedCount,
-			"orphaned", orphaned)
-		c.Metrics.RecordOrphanedPartitions(orphaned)
+		c.Metrics.RecordOrphanedPartitions(len(partitions) - assignedCount)
 	} else {
 		c.Metrics.RecordOrphanedPartitions(0)
 	}
@@ -980,8 +1024,17 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 		leaderRevision = c.LeaderRevision()
 	}
 
-	// Publish assignments via publisher component
-	if err := c.publisher.Publish(ctx, workers, assignments, workersToRemove, lifecycle, leaderRevision); err != nil {
+	// Publish assignments via the refs-always commit flow (§3.5).
+	if err := c.publisher.Publish(ctx, PublishInput{
+		Workers:             workers,
+		Assignments:         assignments,
+		SourcePartitions:    partitions,
+		SourceRevision:      srcRev,
+		SourceRevisionKnown: srcKnown,
+		LeaderRevision:      leaderRevision,
+		Lifecycle:           lifecycle,
+		WorkersToRemove:     workersToRemove,
+	}); err != nil {
 		c.Metrics.RecordRebalanceAttempt(lifecycle, false)
 		return fmt.Errorf("failed to publish assignments: %w", err)
 	}

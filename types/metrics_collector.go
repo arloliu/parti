@@ -11,6 +11,8 @@ type MetricsCollector interface {
 	CalculatorMetrics
 	WorkerMetrics
 	AssignmentMetrics
+	PublisherMetrics
+	GCMetrics
 	WorkerConsumerMetrics
 }
 
@@ -141,6 +143,66 @@ type WorkerMetrics interface {
 type AssignmentMetrics interface {
 	// RecordAssignmentChange records partition assignment changes.
 	RecordAssignmentChange(added, removed int, version int64)
+}
+
+// PublisherMetrics defines metrics for the refs-always assignment publisher.
+//
+// All counters are increment-only; histograms accept observations in the
+// natural unit named by the method (bytes for *_bytes_written, etc.).
+//
+// Implementations must be safe to call concurrently. Methods must not block.
+type PublisherMetrics interface {
+	// IncrementPayloadsCreated increments the counter of new content-addressable
+	// payload keys written via kv.Create. Excludes reused keys.
+	IncrementPayloadsCreated()
+
+	// IncrementPayloadsReused increments the counter of payload keys whose
+	// content already existed (kv.Create returned ErrKeyExists and the
+	// stored bytes verified against the computed PayloadHash).
+	IncrementPayloadsReused()
+
+	// ObservePayloadBytesWritten observes the size in bytes of a payload
+	// blob written via kv.Create. Recorded only on the create path; reused
+	// payloads do not contribute.
+	ObservePayloadBytesWritten(bytes int)
+
+	// ObserveCommitBytesWritten observes the size in bytes of an
+	// AssignmentCommit blob successfully written via the CAS commit point.
+	ObserveCommitBytesWritten(bytes int)
+
+	// IncrementBatchAborted increments the publisher batch abort counter
+	// labeled by reason. Reasons:
+	//   - "coverage_mismatch"
+	//   - "leadership_lost_pre_alias"
+	//   - "leadership_lost_post_alias"
+	//   - "alias_barrier_failed"
+	//   - "commit_cas_failed"
+	IncrementBatchAborted(reason string)
+
+	// IncrementAliasBarrierFailed increments the counter of legacy-alias-barrier
+	// failures (bounded retry + jitter exhausted). Each call corresponds to a
+	// single batch abort.
+	IncrementAliasBarrierFailed()
+
+	// IncrementAliasVisibleUncommitted increments the documented mixed-version
+	// exposure counter: legacy aliases were written for the batch but the
+	// commit CAS was either skipped (post-alias leadership recheck failed) or
+	// failed.
+	IncrementAliasVisibleUncommitted()
+
+	// IncrementCommitAborts increments the counter of commit-CAS attempt
+	// failures. This counter does NOT increment on pre-CAS aborts (coverage,
+	// leadership-loss, alias-barrier) — only when kv.Update against
+	// assignment._commit was actually issued and lost.
+	IncrementCommitAborts()
+}
+
+// GCMetrics defines metrics for the assignment payload garbage collector.
+type GCMetrics interface {
+	// IncrementPayloadDeleteErrors increments the counter of payload-key
+	// delete failures during a GC pass. GC failures are non-fatal; they are
+	// surfaced via this metric so operators can detect KV degradation.
+	IncrementPayloadDeleteErrors()
 }
 
 // WorkerConsumerMetrics defines metrics for the single durable consumer helper.

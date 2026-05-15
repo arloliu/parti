@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	pmetrics "github.com/arloliu/parti/v2/internal/metrics"
 	"github.com/arloliu/parti/v2/partitest"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/stretchr/testify/require"
@@ -425,6 +426,7 @@ func TestCalculator_InitialAssignment_Metrics(t *testing.T) {
 
 	// Use mock metrics collector
 	metrics := &mockMetricsCollector{
+		NopMetrics:        pmetrics.NewNop(),
 		rebalanceAttempts: make(map[string]int),
 	}
 
@@ -476,8 +478,10 @@ func TestCalculator_InitialAssignment_Metrics(t *testing.T) {
 		metrics.GetRebalanceAttempt("cold_start"))
 }
 
-// mockMetricsCollector for testing
+// mockMetricsCollector for testing. Embeds NopMetrics so it picks up future
+// MetricsCollector methods automatically.
 type mockMetricsCollector struct {
+	*pmetrics.NopMetrics
 	mu                sync.RWMutex
 	rebalanceAttempts map[string]int
 }

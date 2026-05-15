@@ -220,6 +220,15 @@ type leaderReviser interface {
 	Revision() uint64
 }
 
+// leaderChecker is satisfied by election implementations that can perform a
+// LIVE verification of the leader-key revision (e.g. NATSElection). The
+// publisher uses this for its pre-alias and post-alias leadership rechecks
+// (publish steps 5 and 7) — a cached revision is not sufficient because a
+// former leader's local state may not yet reflect a takeover.
+type leaderChecker interface {
+	CheckLeadership(ctx context.Context, claimed uint64) error
+}
+
 // electionRevision returns the current leader KV revision, or 0 if the election
 // implementation does not expose one. Used to populate Assignment.LeaderRevision.
 func (m *Manager) electionRevision() uint64 {
@@ -227,6 +236,32 @@ func (m *Manager) electionRevision() uint64 {
 		return r.Revision()
 	}
 	return 0
+}
+
+// checkElectionLeadership performs a LIVE verification of the leader-key
+// revision against the claimed value. Used by the assignment publisher's
+// pre-alias and post-alias leadership fences.
+//
+// Behavior:
+//   - When the election agent implements leaderChecker (production: NATSElection),
+//     this calls into it; the agent performs a kv.Get on the leader key and
+//     compares revisions, returning a typed sentinel on mismatch.
+//   - When the agent does NOT implement leaderChecker (Nop / custom mocks),
+//     the check is a no-op (returns nil).
+//
+// Parameters:
+//   - ctx: Context for the underlying KV read.
+//   - claimed: The leader-key revision the publisher asserts it holds.
+//
+// Returns:
+//   - nil if the live revision matches (or the agent has no live check).
+//   - a wrapped types.ErrLeadershipRevisionMismatch on a real mismatch.
+//   - any other error from the underlying KV read.
+func (m *Manager) checkElectionLeadership(ctx context.Context, claimed uint64) error {
+	if c, ok := m.election.(leaderChecker); ok {
+		return c.CheckLeadership(ctx, claimed)
+	}
+	return nil
 }
 
 // startHeartbeat starts publishing heartbeats.

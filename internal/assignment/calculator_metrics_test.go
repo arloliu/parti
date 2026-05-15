@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	pmetrics "github.com/arloliu/parti/v2/internal/metrics"
 	"github.com/arloliu/parti/v2/partitest"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/stretchr/testify/require"
@@ -19,8 +20,8 @@ type WorkerChange struct {
 
 // MockMetricsCollector captures metric calls for verification.
 type MockMetricsCollector struct {
-	CalculatorAndAssignmentMetrics // Embed combined interface (panics on unimplemented methods)
-	mu                             sync.Mutex
+	*pmetrics.NopMetrics // Pick up future MetricsCollector methods automatically.
+	mu                   sync.Mutex
 
 	// Captured data
 	workerChanges []WorkerChange
@@ -73,7 +74,7 @@ func TestCalculator_EmergencyMetrics(t *testing.T) {
 		partitions: []types.Partition{{Keys: []string{"p1"}}},
 	}
 	strategy := &mockStrategy{}
-	metrics := &MockMetricsCollector{}
+	metrics := &MockMetricsCollector{NopMetrics: pmetrics.NewNop()}
 
 	calc, err := NewCalculator(&Config{
 		AssignmentKV:         assignmentKV,

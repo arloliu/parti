@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -296,6 +297,79 @@ func (e *NATSElection) Revision() uint64 {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.termRevision
+}
+
+// CheckLeadership verifies that this election agent still holds the live
+// leadership term claimed by the caller.
+//
+// Unlike Revision (which returns a cached value updated only on
+// takeover/clear), CheckLeadership performs a live kv.Get on the election
+// leader key and verifies BOTH:
+//
+//   - the live key's value still names this agent's worker ID (i.e. another
+//     worker has not taken over after a TTL expiry / overwrite), AND
+//   - the live key's revision is >= the claimed term-epoch revision (renewals
+//     monotonically advance the KV revision, but they do not start a new
+//     term, so a higher live revision is consistent with the same term).
+//
+// This is the live fence the assignment publisher uses for its pre-alias and
+// post-alias leadership rechecks (publish steps 5 and 7 of §3.5). A former
+// leader whose cached termRevision has not yet been cleared cannot pass this
+// check after another worker has taken over: the live key's value will name
+// the new worker, or the key may be absent during the takeover window.
+//
+// Returns:
+//   - nil if the live leader key exists, its value names this agent's worker,
+//     and its revision is >= claimed.
+//   - types.ErrLeadershipRevisionMismatch (wrapped with detail) if the leader
+//     key is absent, names a different worker, or has a revision below
+//     claimed.
+//   - any other error if the KV read itself fails (transient — caller may
+//     treat as abort).
+//
+// Parameters:
+//   - ctx: Context for the kv.Get call.
+//   - claimed: The term-epoch revision the caller asserts they hold (i.e.
+//     the value previously returned by Revision()).
+func (e *NATSElection) CheckLeadership(ctx context.Context, claimed uint64) error {
+	if claimed == 0 {
+		return fmt.Errorf("%w: claimed revision is zero", types.ErrLeadershipRevisionMismatch)
+	}
+	e.mu.RLock()
+	myWorker := e.workerID
+	myTerm := e.termRevision
+	e.mu.RUnlock()
+	if myWorker == "" || myTerm == 0 {
+		return fmt.Errorf("%w: agent does not currently hold leadership", types.ErrLeadershipRevisionMismatch)
+	}
+	if claimed != myTerm {
+		// The claim does not match this agent's current term — either the
+		// caller is stale (we took over again at a fresh term) or the claim
+		// is from a different agent entirely.
+		return fmt.Errorf("%w: claimed=%d local_term=%d", types.ErrLeadershipRevisionMismatch, claimed, myTerm)
+	}
+	entry, err := e.kv.Get(ctx, e.key)
+	if err != nil {
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			return fmt.Errorf("%w: leader key absent (claimed=%d)", types.ErrLeadershipRevisionMismatch, claimed)
+		}
+		return fmt.Errorf("election kv.Get(%s): %w", e.key, err)
+	}
+	// Renewals advance the live KV revision while termRevision stays put, so
+	// require live >= claimed (not equal).
+	if entry.Revision() < claimed {
+		return fmt.Errorf("%w: claimed=%d live=%d (live revision below claimed term)",
+			types.ErrLeadershipRevisionMismatch, claimed, entry.Revision())
+	}
+	// Verify the live value still names this worker. Leader values have the
+	// form "<workerID>:<unix-timestamp>" (see RequestLeadership/RenewLeadership).
+	val := string(entry.Value())
+	prefix := myWorker + ":"
+	if !strings.HasPrefix(val, prefix) {
+		return fmt.Errorf("%w: live leader is %q, not %q", types.ErrLeadershipRevisionMismatch, val, myWorker)
+	}
+
+	return nil
 }
 
 // getLeaderState returns the current leadership state (thread-safe).
