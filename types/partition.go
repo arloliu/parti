@@ -78,6 +78,40 @@ func (p Partition) ID() string {
 	return strings.Join(p.Keys, "-")
 }
 
+// CanonicalID returns a length-prefixed, collision-safe encoding of the
+// partition's key tuple, suitable for set-equality and digest logic.
+//
+// The encoding is fully length-driven, so any character (including '/', '-',
+// ':') may appear in keys without ambiguity. The parser reads the integer
+// prefix to know exactly how many bytes belong to each key, so separator
+// characters inside keys are never confused with the joiner.
+//
+// Format: per key, "<len>:<key bytes>", joined by '/'.
+//
+// Example:
+//
+//	Partition{Keys: []string{"a-b", "c"}}.CanonicalID()  // "3:a-b/1:c"
+//	Partition{Keys: []string{"a", "b-c"}}.CanonicalID()  // "1:a/3:b-c"
+//	Partition{}.CanonicalID()                             // ""
+//
+// Returns:
+//   - string: Length-prefixed encoding ("" if no keys)
+func (p Partition) CanonicalID() string {
+	if len(p.Keys) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	for i, k := range p.Keys {
+		if i > 0 {
+			b.WriteByte('/')
+		}
+		fmt.Fprintf(&b, "%d:%s", len(k), k)
+	}
+
+	return b.String()
+}
+
 // HashID returns a stable 64-bit hash of the partition's key sequence using chained XXH3 hashing.
 //
 // This method computes the hash without allocating by folding each key into the hash of the

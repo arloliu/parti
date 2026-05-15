@@ -2,6 +2,37 @@ package types
 
 import "context"
 
+// RevisionedPartitionSource is an optional extension interface for sources that
+// track a revision number. Sources that maintain revision history (e.g., NatsKV)
+// implement this interface; sources that do not (e.g., Static) do not.
+//
+// The calculator type-asserts for this interface and falls back to List() with
+// SourceRevisionKnown=false when the assertion fails. Downstream audit logic uses
+// SourceRevisionKnown to determine whether strict source-revision checks apply.
+//
+// The known return value distinguishes two distinct states:
+//   - known=false: The source has never been written (ErrKeyNotFound at Start).
+//   - known=true: The source is revisioned; partitions may be empty if the key was deleted.
+type RevisionedPartitionSource interface {
+	PartitionSource
+
+	// Snapshot returns the current partition list with the associated KV revision.
+	//
+	// The revision and known fields allow callers to distinguish a never-written
+	// source (known=false, revision=0) from a written-then-deleted source
+	// (known=true, revision=deleteRev, empty partitions).
+	//
+	// Parameters:
+	//   - ctx: Context for cancellation and timeout
+	//
+	// Returns:
+	//   - partitions: Current partition list (nil or empty if key was deleted)
+	//   - revision: Last observed KV revision (0 if known=false)
+	//   - known: True once any KV event has been observed (including delete/purge)
+	//   - error: Error if the snapshot could not be returned
+	Snapshot(ctx context.Context) (partitions []Partition, revision uint64, known bool, err error)
+}
+
 // PartitionSource discovers and provides the list of available partitions.
 //
 // Implementations can query various backends:
