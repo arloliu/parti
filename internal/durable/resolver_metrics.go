@@ -24,4 +24,9 @@ type ResolverMetrics interface {
 	// IncBatchFlush increments a counter for batch flush events by reason
 	// (e.g., "timer", "maxitems").
 	IncBatchFlush(reason string)
+
+	// IncWatcherRestart increments a counter when the resolver's KV watcher
+	// is re-established after closure or establishment failure.
+	// Reasons: "channel_closed", "establish_failed".
+	IncWatcherRestart(reason string)
 }

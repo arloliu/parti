@@ -18,26 +18,82 @@ type batchMetric struct {
 }
 
 // metricsSpy implements ResolverMetrics for unit tests.
+// It is safe for concurrent use; the resolver invokes metrics from both
+// the watcher and reconcile goroutines.
 type metricsSpy struct {
-	visLagCount  int
-	lastVisLag   time.Duration
-	cacheSizes   []int
-	updates      map[string]int
-	batches      []batchMetric
-	flushReasons map[string]int
+	mu              sync.Mutex
+	visLagCount     int
+	lastVisLag      time.Duration
+	cacheSizes      []int
+	updates         map[string]int
+	batches         []batchMetric
+	flushReasons    map[string]int
+	watcherRestarts map[string]int
 }
 
 func newMetricsSpy() *metricsSpy {
-	return &metricsSpy{updates: make(map[string]int), flushReasons: make(map[string]int)}
+	return &metricsSpy{
+		updates:         make(map[string]int),
+		flushReasons:    make(map[string]int),
+		watcherRestarts: make(map[string]int),
+	}
 }
 
-func (m *metricsSpy) ObserveVisibilityLag(d time.Duration) { m.visLagCount++; m.lastVisLag = d }
-func (m *metricsSpy) SetCacheSize(n int)                   { m.cacheSizes = append(m.cacheSizes, n) }
-func (m *metricsSpy) IncUpdate(op string)                  { m.updates[op]++ }
+func (m *metricsSpy) ObserveVisibilityLag(d time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.visLagCount++
+	m.lastVisLag = d
+}
+
+func (m *metricsSpy) SetCacheSize(n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cacheSizes = append(m.cacheSizes, n)
+}
+
+func (m *metricsSpy) IncUpdate(op string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.updates[op]++
+}
+
 func (m *metricsSpy) ObserveBatch(size int, dur time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.batches = append(m.batches, batchMetric{size, dur})
 }
-func (m *metricsSpy) IncBatchFlush(reason string) { m.flushReasons[reason]++ }
+
+func (m *metricsSpy) IncBatchFlush(reason string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.flushReasons[reason]++
+}
+
+func (m *metricsSpy) IncWatcherRestart(reason string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.watcherRestarts[reason]++
+}
+
+// snapshot helpers for concurrent-safe reads in tests.
+func (m *metricsSpy) watcherRestartCount(reason string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.watcherRestarts[reason]
+}
+
+func (m *metricsSpy) flushReasonCount(reason string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.flushReasons[reason]
+}
+
+func (m *metricsSpy) updateCount(op string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.updates[op]
+}
 
 func marshalClaim(t *testing.T, c handoff.Claim) []byte {
 	t.Helper()

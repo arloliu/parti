@@ -71,6 +71,8 @@ type Collector struct {
 	resolverBatchSize     prometheus.Histogram
 	resolverBatchFlushes  *prometheus.CounterVec
 
+	resolverWatcherRestarts *prometheus.CounterVec
+
 	// Coordinator gauges
 	coordinatorInFlight     prometheus.Gauge
 	coordinatorPendingHoles prometheus.Gauge
@@ -312,6 +314,13 @@ func NewCollectorWithRegistry(reg prometheus.Registerer) *Collector {
 			prometheus.CounterOpts{
 				Name: "simulation_resolver_batch_flush_total",
 				Help: "Number of resolver batch flushes by reason",
+			},
+			[]string{"reason"},
+		),
+		resolverWatcherRestarts: factory.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "simulation_resolver_watcher_restart_total",
+				Help: "Number of resolver KV watcher restarts by reason",
 			},
 			[]string{"reason"},
 		),
@@ -949,6 +958,10 @@ func (a resolverMetricsAdapter) ObserveBatch(size int, applyDuration time.Durati
 
 func (a resolverMetricsAdapter) IncBatchFlush(reason string) {
 	a.c.resolverBatchFlushes.WithLabelValues(reason).Inc()
+}
+
+func (a resolverMetricsAdapter) IncWatcherRestart(reason string) {
+	a.c.resolverWatcherRestarts.WithLabelValues(reason).Inc()
 }
 
 // SetWorkersActive sets the number of active workers.
