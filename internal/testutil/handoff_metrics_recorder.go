@@ -12,14 +12,15 @@ import (
 // was never recorded. Durations are stored as raw time.Duration values for
 // precise comparisons without float conversion loss.
 type HandoffMetricsRecorder struct {
-	mu               sync.RWMutex
-	totalSuccess     int
-	totalFailure     int
-	handoffDurations []time.Duration
-	phaseDurations   map[string][]time.Duration
-	casConflicts     int
-	claimStoreSizes  []int
-	staleClaims      int
+	mu                 sync.RWMutex
+	totalSuccess       int
+	totalFailure       int
+	handoffDurations   []time.Duration
+	phaseDurations     map[string][]time.Duration
+	casConflicts       int
+	claimStoreSizes    []int
+	staleClaims        int
+	staleHandoffResets int
 }
 
 // NewHandoffMetricsRecorder constructs a new recorder instance.
@@ -74,18 +75,27 @@ func (r *HandoffMetricsRecorder) IncClaimStoreStale() {
 	r.mu.Unlock()
 }
 
+// IncClaimStaleHandoffReset increments the counter for stuck-prepare claims
+// that preparePhase reset to clean stable on re-acquire by the existing owner.
+func (r *HandoffMetricsRecorder) IncClaimStaleHandoffReset() {
+	r.mu.Lock()
+	r.staleHandoffResets++
+	r.mu.Unlock()
+}
+
 // Snapshot returns an immutable copy of the current metrics for assertions.
 func (r *HandoffMetricsRecorder) Snapshot() HandoffMetricsSnapshot {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	snap := HandoffMetricsSnapshot{
-		TotalSuccess:     r.totalSuccess,
-		TotalFailure:     r.totalFailure,
-		HandoffDurations: append([]time.Duration(nil), r.handoffDurations...),
-		PhaseDurations:   make(map[string][]time.Duration, len(r.phaseDurations)),
-		CASConflicts:     r.casConflicts,
-		ClaimStoreSizes:  append([]int(nil), r.claimStoreSizes...),
-		StaleClaims:      r.staleClaims,
+		TotalSuccess:       r.totalSuccess,
+		TotalFailure:       r.totalFailure,
+		HandoffDurations:   append([]time.Duration(nil), r.handoffDurations...),
+		PhaseDurations:     make(map[string][]time.Duration, len(r.phaseDurations)),
+		CASConflicts:       r.casConflicts,
+		ClaimStoreSizes:    append([]int(nil), r.claimStoreSizes...),
+		StaleClaims:        r.staleClaims,
+		StaleHandoffResets: r.staleHandoffResets,
 	}
 	for k, v := range r.phaseDurations {
 		snap.PhaseDurations[k] = append([]time.Duration(nil), v...)
@@ -96,11 +106,12 @@ func (r *HandoffMetricsRecorder) Snapshot() HandoffMetricsSnapshot {
 
 // HandoffMetricsSnapshot is an immutable view of recorded metrics for test assertions.
 type HandoffMetricsSnapshot struct {
-	TotalSuccess     int
-	TotalFailure     int
-	HandoffDurations []time.Duration
-	PhaseDurations   map[string][]time.Duration
-	CASConflicts     int
-	ClaimStoreSizes  []int
-	StaleClaims      int
+	TotalSuccess       int
+	TotalFailure       int
+	HandoffDurations   []time.Duration
+	PhaseDurations     map[string][]time.Duration
+	CASConflicts       int
+	ClaimStoreSizes    []int
+	StaleClaims        int
+	StaleHandoffResets int
 }

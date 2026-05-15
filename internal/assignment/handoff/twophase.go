@@ -237,9 +237,17 @@ func (t *twoPhaseCoordinator) preparePhase(ctx context.Context, workerID string,
 
 	for _, p := range toPrepare {
 		g.Go(func() error {
-			// Create or transition claim for new partition
+			// Create or transition claim for new partition.
 			pid := p.ID()
-			return t.updateClaim(gCtx, pid, func(cur *Claim) (*Claim, error) {
+			// didReset is captured by the transform closure so we can emit
+			// the IncClaimStaleHandoffReset metric exactly once, AFTER
+			// updateClaim's CAS succeeds. The transform may be invoked
+			// multiple times when CAS conflicts force a retry; resetting
+			// the flag at the top of each invocation keeps it accurate
+			// for whichever invocation produced the durable write.
+			var didReset bool
+			err := t.updateClaim(gCtx, pid, func(cur *Claim) (*Claim, error) {
+				didReset = false
 				if cur == nil { // create initial claim
 					init := NewInitialClaim(pid, workerID, now, t.cfg.TTL)
 					if t.cfg.Logger != nil {
@@ -273,8 +281,45 @@ func (t *twoPhaseCoordinator) preparePhase(ctx context.Context, workerID string,
 					return &prepared, nil
 				}
 
+				// cur.Owner == workerID. The partition is being re-acquired by
+				// its existing owner. If a stale in-flight handoff to another
+				// worker is still recorded on the claim (state != stable or
+				// pendingOwner != ""), reset it back to clean stable. This
+				// handles the A->B->A revert race where B's commitPhase never
+				// completed: without this reset, the claim stays at
+				// state=prepare forever and the processing gate suppresses
+				// pulls with state_not_allowed(prepare).
+				if cur.State != ClaimStateStable || cur.PendingOwner != "" {
+					cleaned := *cur
+					cleaned.PendingOwner = ""
+					cleaned.State = ClaimStateStable
+					cleaned.Epoch++
+					cleaned.LastUpdated = now.UTC()
+					if t.cfg.Logger != nil {
+						t.cfg.Logger.Info("handoff_prepare_reset_stale",
+							"partition_id", pid,
+							"worker_id", workerID,
+							"prev_state", string(cur.State),
+							"prev_pending", cur.PendingOwner,
+							"epoch", cleaned.Epoch,
+						)
+					}
+					didReset = true
+
+					return &cleaned, nil
+				}
+
+				//nolint:nilnil // (nil, nil) is the documented no-update signal for updateClaim's transform.
 				return nil, nil
 			})
+			if err != nil {
+				return err
+			}
+			if didReset && t.cfg.Metrics != nil {
+				t.cfg.Metrics.IncClaimStaleHandoffReset()
+			}
+
+			return nil
 		})
 	}
 

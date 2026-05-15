@@ -42,6 +42,12 @@ type HandoffMetricsRecorder interface {
 
 	// IncClaimStoreStale increments the stale claim counter.
 	IncClaimStoreStale()
+
+	// IncClaimStaleHandoffReset increments the counter for stuck-prepare claims
+	// that preparePhase reset back to clean stable on re-acquire by the existing
+	// owner. Emitted when an A->B->A revert race leaves an in-flight handoff
+	// recorded on a claim that the new (same as old) owner is re-acquiring.
+	IncClaimStaleHandoffReset()
 }
 
 // NopHandoffMetricsRecorder is a no-op implementation of [HandoffMetricsRecorder].
@@ -53,3 +59,4 @@ func (NopHandoffMetricsRecorder) ObservePhaseDuration(string, time.Duration) {}
 func (NopHandoffMetricsRecorder) IncCASConflicts()                           {}
 func (NopHandoffMetricsRecorder) SetClaimStoreSize(int)                      {}
 func (NopHandoffMetricsRecorder) IncClaimStoreStale()                        {}
+func (NopHandoffMetricsRecorder) IncClaimStaleHandoffReset()                 {}

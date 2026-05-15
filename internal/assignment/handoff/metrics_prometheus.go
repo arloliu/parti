@@ -25,6 +25,7 @@ import (
 //   - cas_conflicts_total
 //   - claim_store_size
 //   - claim_store_stale_total
+//   - claim_stale_handoff_reset_total
 //
 // These cover end-to-end outcomes, latency, and basic KV conflict/health.
 type PrometheusRecorder struct {
@@ -33,12 +34,13 @@ type PrometheusRecorder struct {
 
 	once sync.Once
 
-	handoffTotal    *prometheus.CounterVec
-	handoffDuration prometheus.Histogram
-	phaseDuration   *prometheus.HistogramVec
-	casConflicts    prometheus.Counter
-	claimStoreSize  prometheus.Gauge
-	claimStoreStale prometheus.Counter
+	handoffTotal           *prometheus.CounterVec
+	handoffDuration        prometheus.Histogram
+	phaseDuration          *prometheus.HistogramVec
+	casConflicts           prometheus.Counter
+	claimStoreSize         prometheus.Gauge
+	claimStoreStale        prometheus.Counter
+	claimStaleHandoffReset prometheus.Counter
 }
 
 // NewPrometheusRecorder creates a new recorder.
@@ -92,6 +94,12 @@ func (p *PrometheusRecorder) ensure() {
 			Name:      "claim_store_stale_total",
 			Help:      "Total number of stale claim records detected.",
 		})
+		p.claimStaleHandoffReset = prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: p.namespace,
+			Subsystem: "handoff",
+			Name:      "claim_stale_handoff_reset_total",
+			Help:      "Total number of stuck-prepare claims reset to stable on re-acquire by the existing owner.",
+		})
 
 		p.reg.MustRegister(
 			p.handoffTotal,
@@ -100,6 +108,7 @@ func (p *PrometheusRecorder) ensure() {
 			p.casConflicts,
 			p.claimStoreSize,
 			p.claimStoreStale,
+			p.claimStaleHandoffReset,
 		)
 	})
 }
@@ -132,4 +141,9 @@ func (p *PrometheusRecorder) SetClaimStoreSize(n int) {
 func (p *PrometheusRecorder) IncClaimStoreStale() {
 	p.ensure()
 	p.claimStoreStale.Inc()
+}
+
+func (p *PrometheusRecorder) IncClaimStaleHandoffReset() {
+	p.ensure()
+	p.claimStaleHandoffReset.Inc()
 }
