@@ -22,6 +22,7 @@ type CalculatorAndAssignmentMetrics interface {
 	types.AssignmentMetrics
 	types.PublisherMetrics
 	types.GCMetrics
+	types.AuditMetrics
 }
 
 // Config holds calculator configuration.
@@ -49,6 +50,24 @@ type Config struct {
 	RestartRatio         float64       // Cold start detection ratio (default: 0.5)
 	ColdStartWindow      time.Duration // Stabilization window for cold start (default: 30s)
 	PlannedScaleWindow   time.Duration // Stabilization window for planned scale (default: 10s)
+
+	// ApplyGracePeriod is the time after commit.PublishedAt before the audit
+	// loop emits retry-pressure metrics for behind workers. Default: 2 ×
+	// HeartbeatTTL.
+	ApplyGracePeriod time.Duration
+
+	// ExtendedApplyGracePeriod is the time after commit.PublishedAt before
+	// the audit may escalate via two-phase handoff. Default: 5 × HeartbeatTTL.
+	ExtendedApplyGracePeriod time.Duration
+
+	// AuditInterval is the period between audit passes. Default: HeartbeatTTL.
+	AuditInterval time.Duration
+
+	// EnableTwoPhaseHandoff mirrors the manager's flag so the audit can skip
+	// escalation when two-phase mode is off. The audit only escalates when
+	// this flag is true AND the full safety chain is present on both the
+	// behind worker and at least one target.
+	EnableTwoPhaseHandoff bool
 
 	// Optional dependencies
 	Metrics       CalculatorAndAssignmentMetrics // Metrics collector (default: no-op)
@@ -122,6 +141,15 @@ func (c *Config) SetDefaults() {
 	}
 	if c.PlannedScaleWindow == 0 {
 		c.PlannedScaleWindow = 10 * time.Second
+	}
+	if c.ApplyGracePeriod == 0 {
+		c.ApplyGracePeriod = 2 * c.HeartbeatTTL
+	}
+	if c.ExtendedApplyGracePeriod == 0 {
+		c.ExtendedApplyGracePeriod = 5 * c.HeartbeatTTL
+	}
+	if c.AuditInterval == 0 {
+		c.AuditInterval = c.HeartbeatTTL
 	}
 	if c.Metrics == nil {
 		c.Metrics = metrics.NewNop()

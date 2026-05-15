@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/arloliu/parti/v2/internal/assignment"
+	"github.com/arloliu/parti/v2/internal/heartbeat"
 	"github.com/arloliu/parti/v2/internal/natsutil"
 	"github.com/arloliu/parti/v2/kvutil"
 	"github.com/arloliu/parti/v2/types"
@@ -19,7 +20,19 @@ const (
 	watcherBaseBackoff = 2 * time.Second
 	watcherMaxBackoff  = 30 * time.Second
 	watcherJitter      = 0.3 // ±30% jitter
+
+	// commitKeyName mirrors the publisher's "_commit" sub-component constant.
+	commitKeyName = "_commit"
 )
+
+// commitReconcileInterval is the period between idempotent KV re-reads of
+// the commit key. Recovers from missed watcher events (channel close
+// gaps, NATS reconnects) without depending on the watcher's resync.
+//
+// Declared as a package-level var (not a const) so reconcile-timing tests
+// can override it via export_test.go without depending on a 30s wall-clock
+// timer. Production callers MUST NOT mutate this value.
+var commitReconcileInterval = 30 * time.Second
 
 // RefreshPartitions triggers partition discovery refresh.
 //
@@ -87,23 +100,24 @@ func (m *Manager) startCalculator(assignmentKV, heartbeatKV jetstream.KeyValue) 
 	}
 
 	calc, err := assignment.NewCalculator(&assignment.Config{
-		AssignmentKV:         assignmentKV,
-		HeartbeatKV:          heartbeatKV,
-		Source:               m.source,
-		Strategy:             m.strategy,
-		AssignmentPrefix:     "assignment",
-		HeartbeatPrefix:      "heartbeat",
-		HeartbeatTTL:         m.cfg.HeartbeatTTL,
-		EmergencyGracePeriod: m.cfg.EmergencyGracePeriod,
-		Cooldown:             m.cfg.RebalanceCooldown,
-		RestartRatio:         m.cfg.RestartDetectionRatio,
-		ColdStartWindow:      m.cfg.ColdStartWindow,
-		PlannedScaleWindow:   m.cfg.PlannedScaleWindow,
-		Metrics:              m.metrics,
-		Logger:               m.logger,
-		StateProvider:        m, // Pass manager as state provider for degraded mode checks
-		LeaderRevision:       m.electionRevision,
-		LeaderCheck:          m.checkElectionLeadership,
+		AssignmentKV:          assignmentKV,
+		HeartbeatKV:           heartbeatKV,
+		Source:                m.source,
+		Strategy:              m.strategy,
+		AssignmentPrefix:      "assignment",
+		HeartbeatPrefix:       "heartbeat",
+		HeartbeatTTL:          m.cfg.HeartbeatTTL,
+		EmergencyGracePeriod:  m.cfg.EmergencyGracePeriod,
+		Cooldown:              m.cfg.RebalanceCooldown,
+		RestartRatio:          m.cfg.RestartDetectionRatio,
+		ColdStartWindow:       m.cfg.ColdStartWindow,
+		PlannedScaleWindow:    m.cfg.PlannedScaleWindow,
+		EnableTwoPhaseHandoff: m.cfg.EnableTwoPhaseHandoff,
+		Metrics:               m.metrics,
+		Logger:                m.logger,
+		StateProvider:         m, // Pass manager as state provider for degraded mode checks
+		LeaderRevision:        m.electionRevision,
+		LeaderCheck:           m.checkElectionLeadership,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create calculator: %w", err)
@@ -345,12 +359,313 @@ func (m *Manager) handleAssignmentEntry(workerID string, entry jetstream.KeyValu
 		return
 	}
 
+	// §4.5 stale-leader fence: reject any alias whose LeaderRevision is
+	// older than what we have already observed and accepted.
+	lastSeen := m.lastSeenLeaderRevision.Load()
+	if newAssignment.LeaderRevision != 0 && newAssignment.LeaderRevision < lastSeen {
+		m.metrics.RecordStaleLeaderRejected()
+		return
+	}
+
 	oldAssignment := m.CurrentAssignment()
 	if oldAssignment.Version >= newAssignment.Version {
 		return
 	}
 
-	m.applyAssignmentUpdate(workerID, oldAssignment, newAssignment)
+	// Record this as the most-recent legacy alias observation so the
+	// dual-read selector on the commit path can consult it.
+	aliasCopy := newAssignment
+	m.lastSeenAlias.Store(&aliasCopy)
+
+	// Dual-read source-of-truth rule (§3.6). When the commit path has a
+	// fresher view (case 1), drop this alias; the commit watcher will
+	// drive the apply via handleCommitValue.
+	commit := m.lastObservedCommit.Load()
+	choice := selectAuthority(commit, &newAssignment, lastSeen)
+	if choice != AuthorityLegacyAlias {
+		return
+	}
+
+	// Legacy alias wins (case 2). Apply through the unified pipeline. The
+	// legacy envelope carries zero SourceRevision/SourceRevisionKnown by
+	// design — encoded as "unknown" downstream.
+	//
+	// LSR is advanced inside applyAssignmentWithPrev on success (single
+	// source of truth — see comment at the top of applyAssignmentWithPrev).
+	// On failure, the stale-leader fence intentionally does not accept this
+	// leader revision (the worker has not committed to this leader's term).
+	_ = m.applyAssignment(newAssignment)
+	_ = workerID // workerID is retained for log/metric symmetry with the legacy signature
+}
+
+// monitorCommitChanges watches the singleton "assignment._commit" key. On
+// channel close the watcher restarts with exponential backoff (closes A2 /
+// §4.3); a periodic reconcile every commitReconcileInterval re-fetches the
+// commit and routes idempotently through handleCommitValue so missed
+// updates eventually converge.
+func (m *Manager) monitorCommitChanges(ctx context.Context, kv jetstream.KeyValue) {
+	backoff := watcherBaseBackoff
+	reconcileTicker := time.NewTicker(commitReconcileInterval)
+	defer reconcileTicker.Stop()
+	for {
+		err := m.watchCommit(ctx, kv, reconcileTicker.C)
+		if err == nil || ctx.Err() != nil {
+			return
+		}
+		m.logError("commit watcher failed, retrying", "error", err, "backoff", backoff)
+		m.recordKVError(err)
+
+		//nolint:gosec // jitter does not require crypto-secure random
+		f := rand.Float64()
+		low := 1 - watcherJitter
+		high := 1 + watcherJitter
+		delay := time.Duration(float64(backoff) * (low + f*(high-low)))
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+
+		backoff = min(backoff*2, watcherMaxBackoff)
+	}
+}
+
+// watchCommit runs one watch session on the commit key. Channel closure is
+// returned as an error so monitorCommitChanges can restart with backoff;
+// context cancellation returns nil for clean exit.
+func (m *Manager) watchCommit(ctx context.Context, kv jetstream.KeyValue, reconcileTickC <-chan time.Time) error {
+	key := "assignment." + commitKeyName
+	watcher, err := kv.Watch(ctx, key)
+	if err != nil {
+		return fmt.Errorf("failed to watch commit: %w", err)
+	}
+	defer func() {
+		if serr := watcher.Stop(); serr != nil && !natsutil.IsConsumerNotFound(serr) {
+			m.logError("failed to stop commit watcher", "error", serr)
+		}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case entry, ok := <-watcher.Updates():
+			if !ok {
+				return errors.New("commit watcher channel closed")
+			}
+			if entry == nil {
+				// End of initial replay; keep watching.
+				continue
+			}
+			m.handleCommitEntry(entry)
+		case <-reconcileTickC:
+			current, _, gerr := kvutil.GetJSON[types.AssignmentCommit](ctx, kv, key)
+			if gerr != nil || current == nil {
+				continue
+			}
+			m.handleCommitValue(current)
+		}
+	}
+}
+
+// handleCommitEntry decodes a watcher entry and routes through
+// handleCommitValue. Deletion events are ignored; a deleted commit is
+// treated as "no commit", which the dual-read selector handles correctly
+// (the legacy alias may still drive).
+func (m *Manager) handleCommitEntry(entry jetstream.KeyValueEntry) {
+	if entry.Operation() == jetstream.KeyValueDelete {
+		return
+	}
+	var commit types.AssignmentCommit
+	if err := json.Unmarshal(entry.Value(), &commit); err != nil {
+		m.logError("failed to unmarshal commit", "error", err)
+		return
+	}
+	m.handleCommitValue(&commit)
+}
+
+// handleCommitValue implements §3.6 case 1 (commit-path state machine).
+//
+// State table (LSR = lastSeenLeaderRevision, cur = CurrentAssignment):
+//
+//	(a) commit.Version <= cur.Version          → no-op, LSR = max(LSR, commit.LR)
+//	(b) commit.LR < LSR                        → drop, LSR unchanged, RecordStaleLeaderRejected
+//	(c) worker in Workers, payload checks pass → applyAssignment, LSR = max(LSR, commit.LR)
+//	(c) payload check fails                    → drop, LSR + pending unchanged, stage-specific metric
+//	(d) worker NOT in Workers                  → applyAssignment(empty), LSR = max(LSR, commit.LR)
+//	(e) pendingApplyInFlight                   → stash highest-version target, return
+func (m *Manager) handleCommitValue(commit *types.AssignmentCommit) {
+	// Iterate so case (e) drain runs without recursion while we still hold
+	// pendingApplyInFlight. Recursing would re-enter the case (e) CAS check
+	// and stash the drained commit back instead of applying it.
+	for commit != nil {
+		next := m.handleCommitValueOnce(commit)
+		commit = next
+	}
+}
+
+// handleCommitValueOnce processes one commit through the state machine and
+// returns the next commit to process (drained from stashedCommit) or nil
+// when no further work is pending. The caller (handleCommitValue) loops on
+// the result so case (e) drain happens iteratively.
+func (m *Manager) handleCommitValueOnce(commit *types.AssignmentCommit) *types.AssignmentCommit {
+	if commit == nil {
+		return nil
+	}
+	workerID := m.WorkerID()
+	cur := m.CurrentAssignment()
+
+	// Case (a): no-op, but still update lastSeen so the next handler
+	// observes the latest leader revision. We also publish to
+	// lastObservedCommit so the alias-side dual-read selector sees the
+	// freshest commit — case (a) is a legitimate observation, not a reject.
+	if commit.Version <= cur.Version {
+		commitCopy := *commit
+		m.lastObservedCommit.Store(&commitCopy)
+		m.updateLastSeenLeaderRevision(commit.LeaderRevision)
+		return nil
+	}
+
+	// Case (b): stale-leader fence. Do NOT publish to lastObservedCommit —
+	// surfacing a rejected commit to the alias-side selector would let it
+	// over-rule a legitimate alias arrival (advisor bug #3).
+	lastSeen := m.lastSeenLeaderRevision.Load()
+	if commit.LeaderRevision < lastSeen {
+		m.metrics.RecordStaleLeaderRejected()
+		return nil
+	}
+
+	// Publish the freshest commit observation now that we know it is not
+	// rejected; the alias-side dual-read selector consults this.
+	commitCopy := *commit
+	m.lastObservedCommit.Store(&commitCopy)
+
+	// Dual-read source-of-truth check (§3.6). If the legacy alias is
+	// strictly fresher (case 2), drop this commit until the alias path
+	// matches or a fresher commit arrives.
+	legacy := m.lastSeenAlias.Load()
+	if selectAuthority(commit, legacy, lastSeen) != AuthorityCommit {
+		return nil
+	}
+
+	// Case (e): coalesce when an apply is already in flight.
+	if !m.pendingApplyInFlight.CompareAndSwap(false, true) {
+		for {
+			prev := m.stashedCommit.Load()
+			if prev != nil && prev.Version >= commit.Version {
+				return nil
+			}
+			candidate := *commit
+			if m.stashedCommit.CompareAndSwap(prev, &candidate) {
+				return nil
+			}
+		}
+	}
+
+	newAssignment, ok := m.buildAssignmentFromCommit(commit, workerID)
+	if !ok {
+		// Payload verification failure: case (c) drop; lastSeen and stash
+		// unchanged. Clear pending-flag explicitly (no defer here so the
+		// drain check below sees a consistent flag state) and return.
+		m.pendingApplyInFlight.Store(false)
+		return nil
+	}
+
+	// LSR is advanced inside applyAssignmentWithPrev on success (single
+	// source of truth — see comment at the top of applyAssignmentWithPrev).
+	// On failure, the stale-leader fence intentionally does not accept this
+	// leader revision; the scheduleApplyRetry coalescing path (invoked from
+	// applyAssignmentWithPrev on failure) will re-attempt and advance LSR on
+	// its own success.
+	_ = m.applyAssignment(newAssignment)
+
+	// Clear pendingApplyInFlight BEFORE returning the stashed drain target.
+	// The outer loop in handleCommitValue then re-enters handleCommitValueOnce
+	// with the drained commit; that call will CAS the flag back to true if
+	// it needs to apply, so the case (e) interlock remains correct.
+	//
+	// Run the drain regardless of apply outcome — on apply failure the
+	// stashedApplyRetry mechanism owns retry of newAssignment, but a strictly
+	// higher-version commit that arrived during the failed apply still
+	// deserves a fresh attempt rather than being orphaned.
+	m.pendingApplyInFlight.Store(false)
+
+	if pending := m.stashedCommit.Swap(nil); pending != nil && pending.Version > newAssignment.Version {
+		return pending
+	}
+
+	return nil
+}
+
+// buildAssignmentFromCommit constructs the Assignment this worker must
+// apply for the given commit. Returns ok=false on payload-verification
+// failure (case (c) drop) — caller leaves lastSeen unchanged so the next
+// tick retries.
+//
+// Case (c) ok: worker in Workers AND payload checks pass → return a fully
+// populated Assignment.
+// Case (c) malformed: worker in Workers but Payloads[w] is missing →
+// RecordCommitPayloadMissing, return false.
+// Case (d): worker NOT in Workers → return an empty Assignment carrying
+// the commit's metadata (signals implicit revoke).
+func (m *Manager) buildAssignmentFromCommit(commit *types.AssignmentCommit, workerID string) (Assignment, bool) {
+	inWorkers := false
+	for _, w := range commit.Workers {
+		if w == workerID {
+			inWorkers = true
+			break
+		}
+	}
+
+	if !inWorkers {
+		// Case (d): synthesize empty assignment.
+		return Assignment{
+			Version:             commit.Version,
+			Lifecycle:           commit.Lifecycle,
+			Partitions:          nil,
+			LeaderRevision:      commit.LeaderRevision,
+			SourceRevision:      commit.SourceRevision,
+			SourceRevisionKnown: commit.SourceRevisionKnown,
+			TotalWorkers:        len(commit.Workers),
+		}, true
+	}
+
+	ref, hasRef := commit.Payloads[workerID]
+	if !hasRef {
+		// Case (c) malformed.
+		m.metrics.RecordCommitPayloadMissing()
+		return Assignment{}, false
+	}
+
+	payload, err := assignment.FetchAndVerifyCommitPayload(m.ctx, m.assignmentKV, ref)
+	if err != nil {
+		switch {
+		case errors.Is(err, assignment.ErrCommitPayloadFetch):
+			m.metrics.RecordPayloadFetchError()
+		case errors.Is(err, assignment.ErrCommitPayloadDecompress):
+			m.metrics.RecordPayloadDecompressError()
+		case errors.Is(err, assignment.ErrCommitPayloadHashMismatch):
+			m.metrics.RecordPayloadHashMismatch()
+		case errors.Is(err, assignment.ErrCommitPayloadDecode):
+			m.metrics.RecordPayloadDecodeError()
+		case errors.Is(err, assignment.ErrCommitPayloadDigestMismatch):
+			m.metrics.RecordSetDigestMismatch()
+		}
+		m.logger.Debug("commit payload verification failed", "error", err, "worker_id", workerID, "version", commit.Version)
+
+		return Assignment{}, false
+	}
+
+	return Assignment{
+		Version:             commit.Version,
+		Lifecycle:           commit.Lifecycle,
+		Partitions:          payload.Partitions,
+		LeaderRevision:      commit.LeaderRevision,
+		SourceRevision:      commit.SourceRevision,
+		SourceRevisionKnown: commit.SourceRevisionKnown,
+		TotalWorkers:        len(commit.Workers),
+	}, true
 }
 
 func (m *Manager) decodeAssignmentEntry(entry jetstream.KeyValueEntry) (Assignment, bool) {
@@ -363,10 +678,107 @@ func (m *Manager) decodeAssignmentEntry(entry jetstream.KeyValueEntry) (Assignme
 	return newAssignment, true
 }
 
-func (m *Manager) applyAssignmentUpdate(workerID string, oldAssignment, newAssignment Assignment) {
-	m.assignment.Store(newAssignment)
+// applyAssignment is the single apply-then-advance-LSR-then-store-then-ack
+// pipeline (§4.4).
+//
+// Ordering invariant: Apply → LSR → Store → Ack → Hooks. On Apply failure,
+// neither LSR nor Store nor Ack run, the manager enters degraded mode, and
+// a bounded exponential-backoff retry is scheduled. The publisher's
+// monotonicity guarantee (SetAppliedAssignment never regresses
+// AppliedVersion) means a retry after a higher commit lands cannot ack a
+// stale lower version.
+//
+// LSR invariant (single source of truth): on success this method advances
+// lastSeenLeaderRevision = max(LSR, newAssignment.LeaderRevision) BEFORE
+// storing the new snapshot. Commit, legacy-alias, initial-bootstrap, and
+// scheduleApplyRetry callers therefore do NOT need to advance LSR
+// themselves — the per-caller "advance LSR after successful apply" pattern
+// is dangerous because the retry goroutine cannot easily reconstruct the
+// failure-case bookkeeping. Centralizing LSR advancement here closes the
+// v2-review P0 retry-success regression.
+//
+// LSR-before-Store ordering (v3 review P0): advancing LSR before
+// m.assignment.Store eliminates the dangerous "new snapshot, old LSR"
+// interleaving that a concurrent handleCommitValueOnce reader could
+// otherwise observe — under which a stale higher-Version commit
+// (commit.LR < newAssignment.LR) would bypass case (b)'s stale-leader
+// fence after case (a)'s "Version <= cur.Version" no-op gate already
+// advanced past it. The plan's invariant ("LSR is advanced only after a
+// successful state-machine action") permits advancing LSR at this point
+// because Apply has returned nil.
+//
+// Monotonicity gate: a retry that fires after a newer version has already
+// applied (e.g. retry of V=10 after V=11 succeeded) is a no-op so the
+// in-memory snapshot cannot regress. The carve-out for newAssignment.Version
+// == 0 lets the initial-bootstrap path apply over a zero-value Assignment.
+//
+// Parameters:
+//   - newAssignment: The assignment to apply.
+//
+// Returns:
+//   - error: Non-nil only when Apply fails; Store/Ack failures are logged
+//     but non-fatal (the next heartbeat tick picks up the snapshot).
+func (m *Manager) applyAssignment(newAssignment Assignment) error {
+	return m.applyAssignmentWithPrev(m.CurrentAssignment(), newAssignment)
+}
 
-	m.logger.Info("assignment updated",
+// applyAssignmentWithPrev runs the apply-then-store-then-ack pipeline with an
+// explicit previous-assignment argument. The default applyAssignment path
+// reads m.CurrentAssignment() for prev; the initial-bootstrap path
+// (applyInitialAssignment) passes an explicit Assignment{} so the handoff
+// coordinator's prepare phase sees the full new partition set as "newly
+// acquired" without touching the snapshot.
+//
+// See applyAssignment for the centralized LSR advancement contract.
+func (m *Manager) applyAssignmentWithPrev(oldAssignment, newAssignment Assignment) error {
+	workerID := m.WorkerID()
+	curAssignment := m.CurrentAssignment()
+
+	// Monotonicity gate: do not regress the snapshot when a stale retry
+	// fires after a higher-version apply already succeeded. Compare against
+	// the live in-memory snapshot, not the caller-supplied oldAssignment —
+	// the initial-bootstrap path passes Assignment{} as oldAssignment to
+	// force prepare phase to treat partitions as newly acquired, but the
+	// snapshot is already at the to-be-applied version (waitForAssignment
+	// stored it). Use strict less-than so the initial-bootstrap apply for
+	// the SAME version proceeds (re-applying is idempotent for the
+	// handoff coordinator).
+	if newAssignment.Version != 0 && newAssignment.Version < curAssignment.Version {
+		return nil
+	}
+
+	// 1) Apply via handoff coordinator. Must succeed before we touch the
+	//    in-memory snapshot or publish the ack.
+	if err := m.handoffCoordinator.Apply(m.ctx, workerID, oldAssignment, newAssignment); err != nil {
+		m.logError("handoff apply failed", "error", err)
+		m.scheduleApplyRetry(newAssignment)
+		return err
+	}
+
+	// 2) Advance lastSeenLeaderRevision (stale-leader fence) — single
+	//    source of truth for LSR. See applyAssignment Godoc. LSR MUST
+	//    advance BEFORE the snapshot Store, otherwise a concurrent
+	//    handleCommitValueOnce reader could observe (new snapshot, old
+	//    LSR) — the v3-review P0 dangerous interleaving where a stale
+	//    higher-Version commit (with commit.LR < newAssignment.LR)
+	//    bypasses case (b)'s stale-leader fence on a snapshot that has
+	//    already advanced past it via case (a)'s no-op gate. By
+	//    advancing LSR first, the only interleavings a concurrent
+	//    reader can observe are (old snap, old LSR), (old snap, new
+	//    LSR), and (new snap, new LSR) — all safe. The fence may briefly
+	//    reject commits with LR < newAssignment.LR against the old
+	//    snapshot, but that is correct: LSR has actually advanced.
+	m.updateLastSeenLeaderRevision(newAssignment.LeaderRevision)
+
+	// 3) Store the now-applied assignment in the manager snapshot. After
+	//    this point, (snapshot, LSR) pairs visible to concurrent readers
+	//    are safely ordered.
+	m.assignment.Store(newAssignment)
+	if hook := m.testHookAfterApplyStore; hook != nil {
+		hook(newAssignment)
+	}
+
+	m.logger.Info("assignment applied",
 		"worker_id", workerID,
 		"old_version", oldAssignment.Version,
 		"new_version", newAssignment.Version,
@@ -374,30 +786,40 @@ func (m *Manager) applyAssignmentUpdate(workerID string, oldAssignment, newAssig
 		"new_partitions", len(newAssignment.Partitions),
 	)
 
-	m.applyHandoffAndHooks(workerID, oldAssignment, newAssignment)
-	m.recordAssignmentMetrics(oldAssignment, newAssignment)
-}
-
-func (m *Manager) applyHandoffAndHooks(workerID string, oldAssignment, newAssignment Assignment) {
-	// 1) Apply consumer update SYNCHRONOUSLY before invoking user hooks.
-	// This ensures the NATS consumer filter subjects are updated before
-	// application code in OnAssignmentChanged runs, preventing a race
-	// condition where the app expects to receive messages for new partitions
-	// but the subscription isn't active yet.
-	if err := m.handoffCoordinator.Apply(m.ctx, workerID, oldAssignment, newAssignment); err != nil {
-		m.logError("handoff apply failed", "error", err)
-		// Continue to invoke user hooks even on failure - the assignment
-		// is already stored, and hooks may need to react to it.
+	// 4) Ack via heartbeat publisher (Phase 2/4 receipt). Failures here are
+	//    non-fatal — the next tick will publish a snapshot containing the
+	//    same AppliedVersion (monotone).
+	appliedDigest := types.PartitionSetDigest(newAssignment.Partitions)
+	m.heartbeat.SetAppliedAssignment(heartbeat.AppliedAssignment{
+		LeaderRevision:        newAssignment.LeaderRevision,
+		AppliedVersion:        newAssignment.Version,
+		AppliedDigest:         appliedDigest,
+		AppliedSourceRevision: newAssignment.SourceRevision,
+		AppliedSourceRevKnown: newAssignment.SourceRevisionKnown,
+		AppliedAt:             time.Now(),
+	})
+	if err := m.heartbeat.PublishNow(m.ctx); err != nil {
+		m.logError("heartbeat publish-now after apply failed", "error", err)
 	}
 
-	// 2) Invoke OnAssignmentChanged hook (async to avoid blocking monitor)
+	// 5) Metrics + hooks.
+	m.recordAssignmentMetrics(oldAssignment, newAssignment)
+	m.invokeAssignmentChangedHooks(workerID, oldAssignment, newAssignment)
+
+	return nil
+}
+
+// invokeAssignmentChangedHooks dispatches OnAssignmentChanged and the
+// convenience Assigned/Revoked hooks. Both run asynchronously off the
+// invokeHook helper; the WaitGroup tracks them so Stop() waits for hook
+// completion.
+func (m *Manager) invokeAssignmentChangedHooks(_ /* workerID */ string, oldAssignment, newAssignment Assignment) {
 	if m.hooks.OnAssignmentChanged != nil {
 		m.invokeHook("assignment change", func() error {
 			return m.hooks.OnAssignmentChanged(m.ctx, oldAssignment.Partitions, newAssignment.Partitions)
 		})
 	}
 
-	// 3) Invoke convenience hooks (Assigned/Revoked)
 	if m.hooks.OnPartitionsAssigned != nil || m.hooks.OnPartitionsRevoked != nil {
 		m.invokeHook("partition hooks", func() error {
 			added, removed := diffPartitions(oldAssignment.Partitions, newAssignment.Partitions)
@@ -417,6 +839,68 @@ func (m *Manager) applyHandoffAndHooks(workerID string, oldAssignment, newAssign
 			return nil
 		})
 	}
+}
+
+// scheduleApplyRetry stages a failed assignment for a bounded
+// exponential-backoff retry. Multiple failures coalesce to the
+// highest-Version target via stashedApplyRetry. Only one retry goroutine
+// is active at a time; subsequent calls update the stash and return.
+//
+// The retry initial backoff is 1s, doubling up to 30s with ±20% jitter.
+// On retry success the goroutine self-terminates.
+func (m *Manager) scheduleApplyRetry(newAssignment Assignment) {
+	// Coalesce: keep the highest-Version pending.
+	for {
+		cur := m.stashedApplyRetry.Load()
+		if cur != nil && cur.Version >= newAssignment.Version {
+			break
+		}
+		candidate := newAssignment
+		if m.stashedApplyRetry.CompareAndSwap(cur, &candidate) {
+			break
+		}
+	}
+
+	// Only one retry loop at a time.
+	if !m.applyRetryActive.CompareAndSwap(false, true) {
+		return
+	}
+
+	m.wg.Go(func() {
+		defer m.applyRetryActive.Store(false)
+		backoff := time.Second
+		const maxBackoff = 30 * time.Second
+		for {
+			// Wait with jitter ±20%.
+			//nolint:gosec // jitter does not require crypto-secure random
+			jitter := time.Duration(float64(backoff) * 0.2 * (2*rand.Float64() - 1))
+			select {
+			case <-m.ctx.Done():
+				return
+			case <-time.After(backoff + jitter):
+			}
+
+			pending := m.stashedApplyRetry.Swap(nil)
+			if pending == nil {
+				return
+			}
+			if err := m.applyAssignment(*pending); err != nil {
+				// applyAssignment already re-stashed the failure; keep going.
+				if backoff < maxBackoff {
+					backoff *= 2
+					if backoff > maxBackoff {
+						backoff = maxBackoff
+					}
+				}
+				continue
+			}
+			// Success — drain any newer stash that arrived during the apply.
+			if again := m.stashedApplyRetry.Load(); again == nil {
+				return
+			}
+			backoff = time.Second // reset for the next attempt
+		}
+	})
 }
 
 func (m *Manager) recordAssignmentMetrics(oldAssignment, newAssignment Assignment) {
@@ -469,6 +953,24 @@ func (m *Manager) clonePartitions(partitions []Partition) []Partition {
 	}
 
 	return cloned
+}
+
+// updateLastSeenLeaderRevision sets m.lastSeenLeaderRevision to
+// max(current, rev) using a CAS loop so concurrent watchers cannot regress
+// the value.
+//
+// Parameters:
+//   - rev: Candidate revision; ignored if not greater than the current value.
+func (m *Manager) updateLastSeenLeaderRevision(rev uint64) {
+	for {
+		cur := m.lastSeenLeaderRevision.Load()
+		if rev <= cur {
+			return
+		}
+		if m.lastSeenLeaderRevision.CompareAndSwap(cur, rev) {
+			return
+		}
+	}
 }
 
 // diffPartitions calculates added and removed partitions between two sets.

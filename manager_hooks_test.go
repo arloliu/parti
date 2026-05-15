@@ -274,25 +274,42 @@ func TestManager_HandoffCompletesBeforeHooks(t *testing.T) {
 		return s == parti.StateStable || s == parti.StateWaitingAssignment
 	}, 5*time.Second, 100*time.Millisecond)
 
-	// Update source with partitions to trigger an assignment change
+	// Capture the consumer-seq baseline AFTER startup has fully settled. The
+	// Phase 4 initial-bootstrap apply (synchronous-before-StateStable) plus
+	// any early stabilization-window rebalance may both fire before we get
+	// here, so we wait for the snapshot to quiesce before driving the next
+	// change.
+	require.Eventually(t, func() bool {
+		// Quiesce: consumer-seq stops changing.
+		s1 := updateSeq.Load()
+		time.Sleep(150 * time.Millisecond)
+		s2 := updateSeq.Load()
+		return s1 == s2
+	}, 5*time.Second, 100*time.Millisecond, "expected initial bootstrap applies to settle before test churn")
+	baselineConsumerSeq := updateSeq.Load()
+	baselineHookSeq := hookSeq.Load()
+
+	// Update source with partitions to trigger an assignment change.
 	src.partitions = []types.Partition{
 		{Keys: []string{"p1"}},
 		{Keys: []string{"p2"}},
 	}
 
-	// Trigger refresh
+	// Trigger refresh.
 	err = mgr.RefreshPartitions(context.Background())
 	require.NoError(t, err)
 
-	// Wait for hook to be called
+	// Wait for the SUBSEQUENT consumer + hook chain to complete.
 	require.Eventually(t, func() bool {
-		return hookSeq.Load() > 0
-	}, 5*time.Second, 100*time.Millisecond)
+		return updateSeq.Load() > baselineConsumerSeq && hookSeq.Load() > baselineHookSeq
+	}, 5*time.Second, 100*time.Millisecond, "expected RefreshPartitions-driven apply + hook to fire")
 
-	// Verify ordering: UpdateWorkerConsumer must complete BEFORE OnAssignmentChanged
+	// Verify ordering on the post-RefreshPartitions apply: the latest
+	// consumer-seq is for the just-fired UpdateWorkerConsumer; the latest
+	// hook-seq must be greater (the hook fires AFTER the consumer call
+	// completes per the §4.4 ordering invariant).
 	consumerSeq := updateSeq.Load()
 	changeHookSeq := hookSeq.Load()
-
 	t.Logf("UpdateWorkerConsumer completed at seq %d, OnAssignmentChanged called at seq %d", consumerSeq, changeHookSeq)
 	require.Greater(t, changeHookSeq, consumerSeq,
 		"OnAssignmentChanged (seq %d) should be called AFTER UpdateWorkerConsumer completes (seq %d)",

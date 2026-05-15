@@ -175,6 +175,51 @@ func (m *WorkerMonitor) GetActiveWorkers(ctx context.Context) ([]string, error) 
 	return workers, nil
 }
 
+// GetHeartbeats returns the decoded heartbeats for every worker with an
+// active heartbeat key. The map is keyed by worker ID.
+//
+// Decoding accepts both v1 JSON heartbeats (new workers) and legacy
+// RFC3339 timestamp strings (pre-v1 workers); see types.DecodeHeartbeat.
+// Workers whose payload fails to decode are silently omitted — a malformed
+// heartbeat is logged at debug level but does not fail the entire scan.
+//
+// Returns:
+//   - map[string]types.Heartbeat: Decoded heartbeats, keyed by worker ID
+//   - error: Non-nil only on KV access failure that prevents listing keys
+func (m *WorkerMonitor) GetHeartbeats(ctx context.Context) (map[string]types.Heartbeat, error) {
+	keys, err := m.heartbeatKV.Keys(ctx)
+	if err != nil {
+		if types.IsNoKeysFoundError(err) {
+			return map[string]types.Heartbeat{}, nil
+		}
+
+		return nil, fmt.Errorf("failed to list heartbeat keys: %w", err)
+	}
+
+	out := make(map[string]types.Heartbeat, len(keys))
+	for _, key := range keys {
+		// Use the same prefix-strip rule as GetActiveWorkers.
+		if len(key) <= len(m.hbPrefix)+1 || key[:len(m.hbPrefix)] != m.hbPrefix {
+			continue
+		}
+		workerID := key[len(m.hbPrefix)+1:]
+
+		entry, gerr := m.heartbeatKV.Get(ctx, key)
+		if gerr != nil {
+			m.logger.Debug("heartbeat get failed during scan", "key", key, "error", gerr)
+			continue
+		}
+		hb, derr := types.DecodeHeartbeat(entry.Value())
+		if derr != nil {
+			m.logger.Debug("heartbeat decode failed during scan", "key", key, "error", derr)
+			continue
+		}
+		out[workerID] = hb
+	}
+
+	return out, nil
+}
+
 // monitorWorkers runs the hybrid monitoring loop.
 //
 // This is the main goroutine that coordinates watcher and polling.

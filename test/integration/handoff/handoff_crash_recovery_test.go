@@ -90,22 +90,18 @@ func TestHandoffCrashRecovery_PrepareInFlight(t *testing.T) {
 	require.NoError(t, mgr.Start(ctx))
 	t.Cleanup(func() { _ = mgr.Stop(context.Background()) })
 
-	// Wait for commit state (epoch should be seedEpoch+2: one increment from prepare re-write, one from commit).
-	commitCtx, cancelCommit := context.WithTimeout(ctx, 3*time.Second)
-	defer cancelCommit()
-	commitClaim, ok := waitForPartitionClaim(commitCtx, js, bucket, pid, func(c parti.HandoffClaim) bool { return c.State == parti.HandoffClaimCommit })
-	require.True(t, ok, "commit state not observed")
-	require.Equal(t, seedEpoch+2, commitClaim.Epoch, "epoch must reflect prepare+commit increments")
-	require.Equal(t, mgr.WorkerID(), commitClaim.Owner, "owner should switch at commit phase")
-	require.Empty(t, commitClaim.PendingOwner)
-
-	// Wait for stable state (epoch should be seedEpoch+3: prepare+commit+stable).
+	// Phase 4 makes the initial-bootstrap apply synchronous-before-StateStable
+	// so the whole prepare→commit→stable sequence is already complete by
+	// the time Start returns. We can no longer reliably poll for the
+	// intermediate commit state; instead, verify the final stable state
+	// reflects the full prepare+commit+stable epoch increment chain.
 	stableCtx, cancelStable := context.WithTimeout(ctx, 4*time.Second)
 	defer cancelStable()
 	finalClaim, ok := waitForPartitionClaim(stableCtx, js, bucket, pid, func(c parti.HandoffClaim) bool { return c.State == parti.HandoffClaimStable })
 	require.True(t, ok, "stable state not observed")
-	require.Equal(t, seedEpoch+3, finalClaim.Epoch, "epoch must increment again on stabilization")
+	require.Equal(t, seedEpoch+3, finalClaim.Epoch, "epoch must reflect prepare+commit+stable increments")
 	require.Equal(t, mgr.WorkerID(), finalClaim.Owner)
+	require.Empty(t, finalClaim.PendingOwner)
 }
 
 // TestHandoffCrashRecovery_CommitInFlight simulates a crash after commit but before stabilization.

@@ -2,6 +2,7 @@ package assignment
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -162,6 +163,73 @@ func TestWorkerMonitor_GetActiveWorkers(t *testing.T) {
 	require.Contains(t, workers, "w1")
 	require.Contains(t, workers, "w2")
 	require.NotContains(t, workers, "other")
+}
+
+func TestWorkerMonitor_GetHeartbeats_DualDecode(t *testing.T) {
+	t.Parallel()
+	_, nc := partitest.StartEmbeddedNATS(t)
+	hbKV := partitest.CreateJetStreamKV(t, nc, "test-monitor-hbs")
+
+	monitor := NewWorkerMonitor(
+		hbKV,
+		"worker",
+		5*time.Second,
+		func(ctx context.Context) error { return nil },
+		logging.NewNop(),
+	)
+
+	ctx := context.Background()
+
+	// Legacy worker: RFC3339Nano timestamp payload (pre-v1 wire format).
+	legacy := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := hbKV.Put(ctx, "worker.legacy", []byte(legacy))
+	require.NoError(t, err)
+
+	// v1 worker: full JSON heartbeat.
+	v1 := types.Heartbeat{
+		WorkerID:       "v1",
+		SchemaVersion:  1,
+		Capabilities:   types.CapAckV1 | types.CapTwoPhaseHandoff,
+		LeaderRevision: 7,
+		AppliedVersion: 42,
+		AppliedDigest:  0xdead,
+		AppliedAt:      time.Now().UTC(),
+		Timestamp:      time.Now().UTC(),
+	}
+	v1Bytes, err := jsonMarshal(v1)
+	require.NoError(t, err)
+	_, err = hbKV.Put(ctx, "worker.v1", v1Bytes)
+	require.NoError(t, err)
+
+	// Bogus payload: malformed bytes should be omitted, not raise an error.
+	_, err = hbKV.Put(ctx, "worker.bogus", []byte("not-a-timestamp-nor-json"))
+	require.NoError(t, err)
+
+	// Non-heartbeat key: ignored entirely.
+	_, err = hbKV.Put(ctx, "other.key", []byte("ignored"))
+	require.NoError(t, err)
+
+	hbs, err := monitor.GetHeartbeats(ctx)
+	require.NoError(t, err)
+	require.Len(t, hbs, 2, "legacy + v1 should be decoded; bogus omitted")
+
+	legacyHB, ok := hbs["legacy"]
+	require.True(t, ok)
+	require.Equal(t, uint8(0), legacyHB.SchemaVersion, "legacy timestamp decodes to SchemaVersion=0")
+	require.Equal(t, uint32(0), legacyHB.Capabilities)
+
+	v1HB, ok := hbs["v1"]
+	require.True(t, ok)
+	require.Equal(t, uint8(1), v1HB.SchemaVersion)
+	require.Equal(t, types.CapAckV1|types.CapTwoPhaseHandoff, v1HB.Capabilities)
+	require.Equal(t, int64(42), v1HB.AppliedVersion)
+	require.Equal(t, uint64(0xdead), v1HB.AppliedDigest)
+}
+
+// jsonMarshal is a tiny local helper to avoid pulling encoding/json into the
+// import list at the top of this file solely for one test.
+func jsonMarshal(v any) ([]byte, error) {
+	return json.Marshal(v)
 }
 
 func TestWorkerMonitor_GetActiveWorkers_EmptyPrefix(t *testing.T) {

@@ -76,21 +76,14 @@ func TestHandoffIntermediateStates_DelaysExposePrepareCommit(t *testing.T) {
 	require.NoError(t, mgr.Start(ctx))
 	t.Cleanup(func() { _ = mgr.Stop(context.Background()) })
 
-	// Prepare should become visible quickly after Apply starts.
-	prepCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	// Phase 4 made the initial-bootstrap apply synchronous-before-StateStable,
+	// so the whole prepare → commit → stable sequence is complete by the
+	// time Start returns. The DelayAfterPrepare / DelayBeforeStable still
+	// run, they just run inside Start's call stack. We can no longer
+	// reliably poll for the intermediate states from a test running after
+	// Start returns; verify the terminal stable state and ownership swap.
+	stableCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	_, ok := waitForClaimState(prepCtx, js, bucket, partition.ID(), parti.HandoffClaimPrepare)
-	require.True(t, ok, "expected prepare state to become visible")
-
-	// After delay, commit should be visible.
-	commitCtx, cancel2 := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel2()
-	_, ok = waitForClaimState(commitCtx, js, bucket, partition.ID(), parti.HandoffClaimCommit)
-	require.True(t, ok, "expected commit state to become visible")
-
-	// After second delay, stable should return.
-	stableCtx, cancel3 := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel3()
 	c, ok := waitForClaimState(stableCtx, js, bucket, partition.ID(), parti.HandoffClaimStable)
 	require.True(t, ok, "expected stable state to become visible")
 	require.Equal(t, mgr.WorkerID(), c.Owner, "ownership should switch to our worker")

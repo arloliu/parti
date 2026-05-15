@@ -19,7 +19,6 @@ import (
 	"github.com/arloliu/parti/v2/kvutil"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/zeebo/xxh3"
 )
 
 // Protocol-key suffixes for the refs-always commit model. All protocol keys
@@ -99,7 +98,8 @@ type AssignmentPublisher struct {
 
 	mu             sync.Mutex
 	currentVersion int64
-	lastCommitRev  uint64 // KV revision of "<prefix>._commit" at last successful commit
+	lastCommitRev  uint64                  // KV revision of "<prefix>._commit" at last successful commit
+	lastCommit     *types.AssignmentCommit // deep copy of the most recently observed commit; nil until first CAS or bootstrap
 	lastRebalance  time.Time
 
 	// inflightRefs records the payload keys this publisher has selected for an
@@ -386,6 +386,10 @@ func (p *AssignmentPublisher) Publish(ctx context.Context, in PublishInput) erro
 	// COMMIT POINT: from here on, this batch is the cluster's authoritative view.
 	p.lastCommitRev = newCommitRev
 	p.currentVersion = proposedVersion
+	// Cache a deep copy of the freshly-written commit so the leader-side audit
+	// (Phase 4 §4.2) can read it without re-fetching the KV entry on every tick.
+	commitCopy := cloneAssignmentCommit(&commit)
+	p.lastCommit = &commitCopy
 	p.metrics.ObserveCommitBytesWritten(len(commitBytes))
 
 	// --- step 10 of §3.5: best-effort commit log ---
@@ -903,6 +907,75 @@ func (p *AssignmentPublisher) LastCommitRev() uint64 {
 	return p.lastCommitRev
 }
 
+// LastCommit returns a defensive copy of the most recently observed
+// AssignmentCommit, populated either by a successful CAS or by
+// BootstrapLastCommit.
+//
+// Returns nil when no commit has been observed yet (pre-first-commit
+// bootstrap path against an empty assignment bucket).
+//
+// The returned struct is a deep copy: callers may iterate or mutate Workers
+// and Payloads without affecting publisher state.
+//
+// Safe to call concurrently with Publish.
+//
+// Returns:
+//   - *types.AssignmentCommit: Defensive copy, or nil if no commit observed.
+func (p *AssignmentPublisher) LastCommit() *types.AssignmentCommit {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.lastCommit == nil {
+		return nil
+	}
+	out := cloneAssignmentCommit(p.lastCommit)
+	return &out
+}
+
+// BootstrapLastCommit seeds the publisher's in-memory lastCommit cache from
+// the live "<prefix>._commit" KV entry, if one exists. Called once at
+// calculator startup so the audit loop can run from t=0 without waiting for
+// the publisher to issue its own commit.
+//
+// Best-effort: KV access failures, missing entries, and unmarshal errors all
+// leave lastCommit nil and return nil. Errors are logged for ops visibility
+// but do not propagate.
+//
+// Parameters:
+//   - ctx: Context for the KV Get operation.
+//
+// Returns:
+//   - error: Always nil; the bootstrap path is intentionally non-fatal.
+func (p *AssignmentPublisher) BootstrapLastCommit(ctx context.Context) error {
+	commitKey := p.keyPrefix + commitKeyName
+	entry, err := p.assignmentKV.Get(ctx, commitKey)
+	if err != nil {
+		p.logger.Debug("bootstrap lastCommit: no commit entry yet", "key", commitKey, "error", err)
+		return nil
+	}
+	var commit types.AssignmentCommit
+	if jerr := json.Unmarshal(entry.Value(), &commit); jerr != nil {
+		p.logger.Warn("bootstrap lastCommit: unmarshal failed", "key", commitKey, "error", jerr)
+		return nil
+	}
+	p.mu.Lock()
+	commitCopy := cloneAssignmentCommit(&commit)
+	p.lastCommit = &commitCopy
+	if entry.Revision() > p.lastCommitRev {
+		p.lastCommitRev = entry.Revision()
+	}
+	if commit.Version > p.currentVersion {
+		p.currentVersion = commit.Version
+	}
+	p.mu.Unlock()
+	p.logger.Debug("bootstrap lastCommit seeded",
+		"version", commit.Version,
+		"leader_revision", commit.LeaderRevision,
+		"workers", len(commit.Workers),
+	)
+
+	return nil
+}
+
 // LastRebalanceTime returns the time of the last successful commit.
 //
 // This method is safe to call concurrently.
@@ -1001,23 +1074,31 @@ func equalStringSlices(a, b []string) bool {
 	return true
 }
 
-// computeSetDigest computes xxh3 over the sorted CanonicalIDs of the given
-// partitions joined with '\n'. Used as the SetDigest in AssignmentPayloadRef
-// (audit/metrics only, never for content identity).
+// computeSetDigest delegates to types.PartitionSetDigest so the publisher and
+// the manager-side apply ack share a single source of truth for the
+// SetDigest / AppliedDigest values. Kept as a thin local alias for readability
+// at call sites.
 func computeSetDigest(parts []types.Partition) uint64 {
-	ids := canonicalIDSet(parts)
-	if len(ids) == 0 {
-		return 0
+	return types.PartitionSetDigest(parts)
+}
+
+// cloneAssignmentCommit returns a deep copy of the given commit. The
+// Workers slice and Payloads map are independently allocated so callers can
+// iterate / mutate the returned struct without affecting the source.
+func cloneAssignmentCommit(c *types.AssignmentCommit) types.AssignmentCommit {
+	out := *c
+	if c.Workers != nil {
+		out.Workers = make([]string, len(c.Workers))
+		copy(out.Workers, c.Workers)
 	}
-	var h xxh3.Hasher
-	for i, id := range ids {
-		if i > 0 {
-			_, _ = h.WriteString("\n")
+	if c.Payloads != nil {
+		out.Payloads = make(map[string]types.AssignmentPayloadRef, len(c.Payloads))
+		for k, v := range c.Payloads {
+			out.Payloads[k] = v
 		}
-		_, _ = h.WriteString(id)
 	}
 
-	return h.Sum64()
+	return out
 }
 
 // computeBatchDigest is identical in structure to computeSetDigest but

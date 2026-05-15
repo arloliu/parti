@@ -61,6 +61,11 @@ type Calculator struct {
 	stopCh chan struct{}
 	doneCh chan struct{}
 	wg     sync.WaitGroup // Tracks background goroutines (e.g., monitorPartitions)
+
+	// auditDoneCh is closed by auditLoop on return. Tests can poll it to
+	// confirm the audit goroutine has exited. wg.Wait() already covers the
+	// shutdown sequence; this channel is purely an observation hook.
+	auditDoneCh chan struct{}
 }
 
 // cachedWorkerList bundles worker data with its timestamp for atomic operations.
@@ -259,6 +264,20 @@ func (c *Calculator) Start(ctx context.Context) error {
 		c.started.Store(false)
 		return fmt.Errorf("failed to start worker monitor: %w", err)
 	}
+
+	// Bootstrap the publisher's LastCommit cache so the leader-side audit can
+	// run from t=0 against the incumbent commit (rolling-upgrade / takeover
+	// path). Best-effort — failures leave LastCommit nil and the audit
+	// becomes a no-op until the first locally-written commit lands.
+	if err := c.publisher.BootstrapLastCommit(ctx); err != nil {
+		c.Logger.Debug("bootstrap last commit failed (non-fatal)", "error", err)
+	}
+
+	// Start the leader-side apply audit loop (§4.2). Runs at AuditInterval
+	// ticks, gated by the publisher's LastCommit cache. wg.Wait in Stop()
+	// covers shutdown.
+	c.auditDoneCh = make(chan struct{})
+	c.wg.Go(func() { c.auditLoop(ctx) })
 
 	// Start the best-effort payload GC loop (§3.5 step 12 / §3.9). Failures
 	// here are non-fatal: GC is conservative and never participates in
@@ -577,6 +596,13 @@ func (c *Calculator) monitorPartitions(ctx context.Context, source types.Watchab
 			if !ok {
 				return // Channel closed
 			}
+			// Partition change is the rebalance-eligible signal for
+			// "currentSourceRevision > commit.SourceRevision" (§4.2 final
+			// paragraph). The leader-side apply audit deliberately does
+			// NOT compare source revisions against a fresh snapshot —
+			// that drift is detected here and triggers a rebalance via
+			// the publisher's normal path (the next commit will carry
+			// the fresh SourceRevision).
 			c.Logger.Info("partition change detected")
 
 			// Check if shutdown is in progress before triggering rebalance

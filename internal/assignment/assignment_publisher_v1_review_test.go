@@ -419,3 +419,94 @@ func TestPublisher_AliasBarrier_CASFailure_LegacyHeartbeatHasNoAppliedVersion(t 
 	require.NotEqual(t, proposedV, hb.AppliedVersion,
 		"legacy heartbeat must NOT carry AppliedVersion=V — the publisher does not rely on legacy ack drift")
 }
+
+// ============================================================================
+// Phase 4 step 4: LastCommit + BootstrapLastCommit accessors
+// ============================================================================
+
+// TestPublisher_LastCommit_PopulatedAfterSuccessfulCAS verifies that
+// LastCommit returns a defensive copy of the most recently CAS-written
+// AssignmentCommit and that mutating the returned struct does not affect
+// publisher state.
+func TestPublisher_LastCommit_PopulatedAfterSuccessfulCAS(t *testing.T) {
+	t.Parallel()
+	f := newPublisherFixture(t, "last-commit-after-cas")
+	ctx := t.Context()
+	const w = "w1"
+	f.putV1Heartbeat(t, ctx, w)
+
+	// Pre-condition: no commit observed yet.
+	require.Nil(t, f.pub.LastCommit())
+
+	require.NoError(t, f.pub.Publish(ctx, PublishInput{
+		Workers:          []string{w},
+		Assignments:      map[string][]types.Partition{w: {ps("p1")}},
+		SourcePartitions: []types.Partition{ps("p1")},
+		LeaderRevision:   1,
+		Lifecycle:        "cold_start",
+	}))
+
+	got := f.pub.LastCommit()
+	require.NotNil(t, got)
+	require.Equal(t, int64(1), got.Version)
+	require.Equal(t, uint64(1), got.LeaderRevision)
+	require.Equal(t, []string{w}, got.Workers)
+	require.Contains(t, got.Payloads, w)
+
+	// Defensive-copy invariant: mutating Workers + Payloads must not affect
+	// the publisher's cached commit.
+	got.Workers[0] = "tampered"
+	got.Payloads["x"] = types.AssignmentPayloadRef{Key: "tampered"}
+	again := f.pub.LastCommit()
+	require.Equal(t, []string{w}, again.Workers, "publisher cache must be insulated from caller mutation")
+	require.NotContains(t, again.Payloads, "x")
+}
+
+// TestPublisher_BootstrapLastCommit_SeedsFromKV verifies that
+// BootstrapLastCommit reads the live "<prefix>._commit" key once and seeds
+// the in-memory cache so subsequent LastCommit calls return the bootstrap
+// value (used at calculator start before this publisher writes its own
+// commit).
+func TestPublisher_BootstrapLastCommit_SeedsFromKV(t *testing.T) {
+	t.Parallel()
+	f := newPublisherFixture(t, "bootstrap-last-commit")
+	ctx := t.Context()
+
+	// Plant a pre-existing commit (as a prior leader would have left).
+	pre := types.AssignmentCommit{
+		Version:        7,
+		LeaderRevision: 20,
+		PublishedAt:    time.Now().UTC(),
+		Workers:        []string{"a", "b"},
+		Payloads: map[string]types.AssignmentPayloadRef{
+			"a": {Key: "assignment._payload.deadbeef", PayloadHash: "deadbeef", SetDigest: 1, Revision: 1},
+			"b": {Key: "assignment._payload.cafef00d", PayloadHash: "cafef00d", SetDigest: 2, Revision: 2},
+		},
+	}
+	preBytes, jerr := json.Marshal(pre)
+	require.NoError(t, jerr)
+	_, err := f.assignmentKV.Create(ctx, "assignment._commit", preBytes)
+	require.NoError(t, err)
+
+	// Fresh publisher (newPublisherFixture builds one, but the cache is empty).
+	require.Nil(t, f.pub.LastCommit(), "fresh publisher must report no commit")
+	require.NoError(t, f.pub.BootstrapLastCommit(ctx))
+
+	got := f.pub.LastCommit()
+	require.NotNil(t, got, "bootstrap must seed the cache")
+	require.Equal(t, int64(7), got.Version)
+	require.Equal(t, uint64(20), got.LeaderRevision)
+	require.ElementsMatch(t, []string{"a", "b"}, got.Workers)
+	require.Equal(t, "deadbeef", got.Payloads["a"].PayloadHash)
+}
+
+// TestPublisher_BootstrapLastCommit_AbsentKey_NoError verifies that the
+// bootstrap path is non-fatal when no commit exists in KV (cold-start path
+// against an empty assignment bucket).
+func TestPublisher_BootstrapLastCommit_AbsentKey_NoError(t *testing.T) {
+	t.Parallel()
+	f := newPublisherFixture(t, "bootstrap-absent")
+	ctx := t.Context()
+	require.NoError(t, f.pub.BootstrapLastCommit(ctx))
+	require.Nil(t, f.pub.LastCommit())
+}

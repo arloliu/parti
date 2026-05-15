@@ -158,17 +158,24 @@ func TestHandoffConflictStress(t *testing.T) {
 	snap := mr.Snapshot()
 	t.Logf("CAS conflicts observed: %d", snap.CASConflicts)
 
-	// Additionally, assert that at least one partition observed both prepare and commit
-	// and ended stable (order-independent sequence presence).
-	var checked bool
-	for pid := range curSet {
-		if collector.WaitForStates(ctx, pid, []parti.HandoffClaimState{parti.HandoffClaimPrepare, parti.HandoffClaimCommit}, 2*time.Second) {
-			// Confirm final stabilization for that partition as well
-			if cl, ok := collector.Latest(pid); ok && cl.State == parti.HandoffClaimStable && cl.PendingOwner == "" {
-				checked = true
-				break
-			}
-		}
+	// Phase 4 makes the initial-bootstrap apply synchronous-before-StateStable,
+	// so the initial prepare → commit transitions complete before the
+	// collector (started after Start returns) can observe them, and any
+	// partition that doesn't migrate during churn remains invisible to
+	// the collector. The convergence assertion now uses InspectHandoffClaims
+	// (KV query, sees all current state) rather than the collector's
+	// updates-only feed. The intermediate-state observability invariant
+	// is covered by unit tests against handleCommitValue's case-(c) path.
+	finalClaims, err := parti.InspectHandoffClaims(ctx, js, bucket)
+	require.NoError(t, err)
+	claimsByPID := make(map[string]parti.HandoffClaim, len(finalClaims))
+	for _, c := range finalClaims {
+		claimsByPID[c.PartitionID] = c
 	}
-	require.True(t, checked, "expected at least one partition to traverse prepare+commit and end stable")
+	for pid := range curSet {
+		cl, ok := claimsByPID[pid]
+		require.True(t, ok, "partition %s must have a claim", pid)
+		require.Equal(t, parti.HandoffClaimStable, cl.State, "partition %s must terminate in Stable", pid)
+		require.Empty(t, cl.PendingOwner, "partition %s must not have a pending owner", pid)
+	}
 }

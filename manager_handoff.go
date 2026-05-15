@@ -45,40 +45,22 @@ type HandoffClaim struct {
 	ConflictCount int64             `json:"conflict_count,omitempty"`
 }
 
-// emitInitialAssignmentEvents records metrics and invokes the OnAssignmentChanged hook
-// to emit an initial change event from empty -> current.
-func (m *Manager) emitInitialAssignmentEvents() {
-	initial := m.CurrentAssignment()
-	if len(initial.Partitions) == 0 {
+// runInitialHandoffResumeIfPending kicks the resume pass when the manager
+// detected in-flight handoff claims at startup. Called from
+// applyInitialAssignment after the unified apply pipeline succeeds.
+//
+// The pre-Phase-4 emitInitialAssignmentEvents + applyInitialHandoffAsync
+// helpers were folded into applyAssignment (Apply → Store → Ack → Hooks);
+// only the resume kick remains as separate startup-only logic.
+func (m *Manager) runInitialHandoffResumeIfPending() {
+	if !m.pendingHandoffResume.Load() {
 		return
 	}
-
-	m.metrics.RecordAssignmentChange(len(initial.Partitions), 0, initial.Version)
-	if m.hooks.OnAssignmentChanged != nil {
-		m.wg.Go(func() {
-			old := []types.Partition{}
-			if err := m.hooks.OnAssignmentChanged(m.ctx, old, initial.Partitions); err != nil {
-				m.logError("initial assignment hook error", "error", err)
-			}
-		})
-	}
-}
-
-// applyInitialHandoffAsync applies the initial assignment via the handoff coordinator
-// and optionally runs a resume pass.
-func (m *Manager) applyInitialHandoffAsync() {
-	initial := m.CurrentAssignment()
-	if len(initial.Partitions) == 0 {
+	if !m.cfg.EnableTwoPhaseHandoff {
 		return
 	}
-	wid := m.WorkerID()
 	m.wg.Go(func() {
-		if err := m.handoffCoordinator.Apply(m.ctx, wid, Assignment{}, initial); err != nil {
-			m.logError("initial consumer update error", "error", err)
-		}
-		if m.pendingHandoffResume.Load() && m.cfg.EnableTwoPhaseHandoff {
-			m.runHandoffResume(m.ctx)
-		}
+		m.runHandoffResume(m.ctx)
 	})
 }
 

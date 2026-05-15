@@ -13,6 +13,7 @@ type MetricsCollector interface {
 	AssignmentMetrics
 	PublisherMetrics
 	GCMetrics
+	AuditMetrics
 	WorkerConsumerMetrics
 }
 
@@ -53,6 +54,71 @@ type ManagerMetrics interface {
 	// Parameters:
 	//   - level: Alert level name ("info", "warn", "error", "critical")
 	IncrementAlertEmitted(level string)
+}
+
+// AuditMetrics defines metrics for the leader-side apply audit (§4.2) and the
+// worker-side commit-path state machine (§3.6 / §4.4).
+//
+// Audit metrics are emitted by the calculator's audit loop; commit-path
+// metrics are emitted by the manager when applying or rejecting a commit.
+// All methods must be safe to call concurrently.
+type AuditMetrics interface {
+	// RecordAuditCounts records the classification counts (fully applied,
+	// behind, unverifiable) for one audit pass as gauges.
+	//
+	// Parameters:
+	//   - fullyApplied: Workers whose receipts match the live commit exactly.
+	//   - behind: Workers whose receipts disagree on version, digest,
+	//     source revision, or are missing payload refs.
+	//   - unverifiable: Workers without CapAckV1 or whose heartbeat is missing.
+	RecordAuditCounts(fullyApplied, behind, unverifiable int)
+
+	// RecordWorkerBehind records a single behind-classified worker
+	// observation during one audit pass.
+	//
+	// Parameters:
+	//   - workerID: The worker classified as behind.
+	//   - commitVersion: The commit.Version at the time of the audit.
+	RecordWorkerBehind(workerID string, commitVersion int64)
+
+	// RecordAuditEscalationSkipped records a skipped escalation with a reason
+	// label. Reasons:
+	//   - "cap_missing_behind": The behind worker lacks required capabilities.
+	//   - "cap_missing_targets": No fully-applied worker has the full safety chain.
+	//   - "direct_mode": cfg.EnableTwoPhaseHandoff is false.
+	//
+	// Parameters:
+	//   - reason: One of the literals above.
+	//   - workerID: The behind worker (may be "" for non-worker-scoped reasons).
+	RecordAuditEscalationSkipped(reason, workerID string)
+
+	// RecordStaleLeaderRejected counts assignments/commits rejected by the
+	// worker-side stale-leader fence (§4.5).
+	RecordStaleLeaderRejected()
+
+	// RecordCommitPayloadMissing counts case (c) commits where the worker
+	// appears in Workers but Payloads[worker] is missing.
+	RecordCommitPayloadMissing()
+
+	// RecordPayloadFetchError counts case (c) commits where the worker's
+	// payload key could not be fetched from KV.
+	RecordPayloadFetchError()
+
+	// RecordPayloadDecompressError counts case (c) commits whose payload bytes
+	// failed gzip decompression.
+	RecordPayloadDecompressError()
+
+	// RecordPayloadDecodeError counts case (c) commits whose decompressed
+	// payload failed JSON decoding.
+	RecordPayloadDecodeError()
+
+	// RecordPayloadHashMismatch counts case (c) commits whose payload bytes
+	// did not match the ref.PayloadHash sha256 digest.
+	RecordPayloadHashMismatch()
+
+	// RecordSetDigestMismatch counts case (c) commits whose decoded
+	// AssignmentPayload's set digest did not match ref.SetDigest.
+	RecordSetDigestMismatch()
 }
 
 // CalculatorMetrics defines metrics for calculator operations.

@@ -183,6 +183,58 @@ func (n *NopMetrics) IncrementPayloadDeleteErrors() {
 	// No-op
 }
 
+// AuditMetrics implementation
+
+// RecordAuditCounts discards the audit classification gauge.
+func (n *NopMetrics) RecordAuditCounts(_ /* fullyApplied */, _ /* behind */, _ /* unverifiable */ int) {
+	// No-op
+}
+
+// RecordWorkerBehind discards the behind-worker observation.
+func (n *NopMetrics) RecordWorkerBehind(_ /* workerID */ string, _ /* commitVersion */ int64) {
+	// No-op
+}
+
+// RecordAuditEscalationSkipped discards the escalation-skipped counter.
+func (n *NopMetrics) RecordAuditEscalationSkipped(_ /* reason */, _ /* workerID */ string) {
+	// No-op
+}
+
+// RecordStaleLeaderRejected discards the stale-leader rejection counter.
+func (n *NopMetrics) RecordStaleLeaderRejected() {
+	// No-op
+}
+
+// RecordCommitPayloadMissing discards the malformed-commit counter.
+func (n *NopMetrics) RecordCommitPayloadMissing() {
+	// No-op
+}
+
+// RecordPayloadFetchError discards the payload-fetch error counter.
+func (n *NopMetrics) RecordPayloadFetchError() {
+	// No-op
+}
+
+// RecordPayloadDecompressError discards the payload-decompress error counter.
+func (n *NopMetrics) RecordPayloadDecompressError() {
+	// No-op
+}
+
+// RecordPayloadDecodeError discards the payload-decode error counter.
+func (n *NopMetrics) RecordPayloadDecodeError() {
+	// No-op
+}
+
+// RecordPayloadHashMismatch discards the payload hash-mismatch counter.
+func (n *NopMetrics) RecordPayloadHashMismatch() {
+	// No-op
+}
+
+// RecordSetDigestMismatch discards the set-digest mismatch counter.
+func (n *NopMetrics) RecordSetDigestMismatch() {
+	// No-op
+}
+
 // WorkerConsumerMetrics implementation
 
 // IncrementWorkerConsumerControlRetry discards the control-plane retry counter.

@@ -3,6 +3,7 @@ package types
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/zeebo/xxh3"
@@ -233,6 +234,17 @@ type Assignment struct {
 	// Zero when leader revision tracking is not configured.
 	LeaderRevision uint64 `json:"leader_revision,omitempty"`
 
+	// SourceRevision mirrors AssignmentCommit.SourceRevision. Populated only by
+	// the commit-path state machine (§3.6 case 1) — the legacy alias path
+	// leaves this zero by design, encoded as "unknown" downstream.
+	SourceRevision uint64 `json:"source_revision,omitempty"`
+
+	// SourceRevisionKnown mirrors AssignmentCommit.SourceRevisionKnown. True
+	// only when this Assignment was derived from a commit whose source was a
+	// RevisionedPartitionSource. The legacy alias path always leaves this
+	// false.
+	SourceRevisionKnown bool `json:"source_revision_known,omitempty"`
+
 	// TotalWorkers is the number of active workers in the assignment batch.
 	// Workers can use this as a consistency hint: if TotalWorkers > number of
 	// assignment keys observed in KV, some assignments may still be in flight
@@ -240,4 +252,41 @@ type Assignment struct {
 	// This field is informational only — the manager does not enforce it internally.
 	// Zero when not set by the publisher.
 	TotalWorkers int `json:"total_workers,omitempty"`
+}
+
+// PartitionSetDigest returns the xxh3 hash of the sorted CanonicalIDs of the
+// given partitions, joined with '\n'. This is the canonical set-equality
+// digest used by both the assignment publisher's AssignmentPayloadRef.SetDigest
+// and the manager's apply ack (Heartbeat.AppliedDigest).
+//
+// Order independence: the digest depends only on the partition set, not on
+// the slice order — the function sorts CanonicalIDs internally before hashing.
+// An empty or nil slice returns 0.
+//
+// Parameters:
+//   - parts: Partition slice; order does not affect the result.
+//
+// Returns:
+//   - uint64: xxh3 of the joined sorted CanonicalIDs (0 for empty input)
+func PartitionSetDigest(parts []Partition) uint64 {
+	if len(parts) == 0 {
+		return 0
+	}
+	ids := make([]string, 0, len(parts))
+	for _, p := range parts {
+		ids = append(ids, p.CanonicalID())
+	}
+	// Sort and dedupe — identical CanonicalIDs collapse so the digest is
+	// truly a set hash, not a multiset hash.
+	slices.Sort(ids)
+	ids = slices.Compact(ids)
+	var h xxh3.Hasher
+	for i, id := range ids {
+		if i > 0 {
+			_, _ = h.WriteString("\n")
+		}
+		_, _ = h.WriteString(id)
+	}
+
+	return h.Sum64()
 }

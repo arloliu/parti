@@ -16,6 +16,7 @@ import (
 	"github.com/arloliu/parti/v2/internal/logging"
 	"github.com/arloliu/parti/v2/internal/metrics"
 	"github.com/arloliu/parti/v2/internal/stableid"
+	"github.com/arloliu/parti/v2/kvutil"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -87,6 +88,42 @@ type Manager struct {
 	assignment   atomic.Value  // Assignment
 	capabilities atomic.Uint32 // capability bitmask; see types.CapXxx constants
 
+	// Phase 4 commit-path state machine state. Read by both watchers and the
+	// dual-read selector. All four are atomic-only; no mutex needed.
+
+	// lastSeenLeaderRevision is the highest LeaderRevision this worker has
+	// observed and accepted from either the commit watcher (case (c)/(d)
+	// success) or the legacy alias path. Stale-leader fences read this;
+	// successful state-machine actions update it via
+	// updateLastSeenLeaderRevision (monotone, CAS-loop).
+	lastSeenLeaderRevision atomic.Uint64
+
+	// lastSeenAlias is the most-recent decoded legacy-alias Assignment
+	// observed by handleAssignmentEntry. Consulted by handleCommitValue's
+	// dual-read selector (§3.6 case 2 — legacy alias wins over commit when
+	// legacy.LeaderRevision > commit.LeaderRevision).
+	lastSeenAlias atomic.Pointer[Assignment]
+
+	// lastObservedCommit is the most-recent decoded AssignmentCommit
+	// observed by monitorCommitChanges. Consulted by handleAssignmentEntry's
+	// dual-read selector and by the initial-bootstrap path so the manager
+	// can re-route an initial assignment through the commit path when a
+	// commit is already visible.
+	lastObservedCommit atomic.Pointer[types.AssignmentCommit]
+
+	// pendingApplyInFlight + stashedCommit implement §3.6 case (e)
+	// coalescing. When a commit-path apply is in flight, additional commits
+	// stash the highest-Version target. After the apply completes, the
+	// stashed commit is re-routed through handleCommitValue.
+	pendingApplyInFlight atomic.Bool
+	stashedCommit        atomic.Pointer[types.AssignmentCommit]
+
+	// stashedApplyRetry holds the most recent failed-apply target for the
+	// scheduleApplyRetry coalescing path. Independent of stashedCommit so a
+	// failed apply does not contend with an arriving commit.
+	stashedApplyRetry atomic.Pointer[Assignment]
+	applyRetryActive  atomic.Bool
+
 	// Degraded mode tracking
 	degradedSince      atomic.Int64  // UnixNano when degraded mode entered; 0 = not degraded
 	lastAssignmentAt   atomic.Int64  // UnixNano of last successful assignment fetch; 0 = never
@@ -105,6 +142,13 @@ type Manager struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 	mu     sync.RWMutex
+
+	// testHookAfterApplyStore, when non-nil, is invoked synchronously after
+	// applyAssignmentWithPrev's m.assignment.Store(newAssignment) returns.
+	// Set ONLY by tests in this package to assert the LSR-before-Store
+	// ordering invariant (v3 review P0). Production code MUST NOT set this
+	// field; it is nil-default. See TestApplyAssignment_LSRAdvancesBeforeSnapshotStore.
+	testHookAfterApplyStore func(Assignment)
 }
 
 // assignmentCalculator defines the interface for partition assignment calculation.
@@ -117,10 +161,18 @@ type assignmentCalculator interface {
 }
 
 // heartbeatPublisher defines the interface for heartbeat publishing.
-// Implemented by internal/heartbeat.Publisher and NopPublisher.
+//
+// SetAppliedAssignment + PublishNow expose the Phase 2 / Phase 4 ack path:
+// the manager calls them after a successful applyAssignment so the leader
+// observes the new applied state within one heartbeat round-trip instead of
+// waiting up to HeartbeatInterval.
+//
+// Implemented by internal/heartbeat.Publisher and heartbeat.NopPublisher.
 type heartbeatPublisher interface {
 	Start(ctx context.Context) error
 	Stop() error
+	SetAppliedAssignment(snap heartbeat.AppliedAssignment)
+	PublishNow(ctx context.Context) error
 }
 
 // stableIDClaimer defines the interface for stable worker ID claiming.
@@ -376,7 +428,12 @@ func (m *Manager) Start(ctx context.Context) (startErr error) {
 		}
 	}
 
-	// Step 5: Wait for assignment
+	// Step 5: Wait for assignment.
+	//
+	// waitForAssignment stores a candidate Assignment into m.assignment via
+	// m.assignment.Store(*curAssignment). For Phase 4 we treat that store
+	// as observational only — the real Apply→Store→Ack pipeline runs in
+	// Step 5.5 below, gated on whether a commit is already visible.
 	m.transitionState(StateWaitingAssignment)
 	m.logger.Info("startup: waiting for assignment")
 	if err := m.waitForAssignment(startupCtx, assignmentKV, heartbeatKV); err != nil {
@@ -384,16 +441,117 @@ func (m *Manager) Start(ctx context.Context) (startErr error) {
 	}
 	m.logger.Info("startup: initial assignment received")
 
-	// Emit initial assignment events and apply handoff
-	m.emitInitialAssignmentEvents()
-	m.applyInitialHandoffAsync()
+	// Step 5.5: Apply the initial assignment via the unified pipeline (§4.4).
+	// Must complete (Apply → Store → Ack) BEFORE we transition to StateStable
+	// so the worker does not report AppliedVersion=0 while claiming stable.
+	//
+	// Prefer the commit-path route when a commit is already visible in KV:
+	// re-routing through handleCommitValue populates SourceRevision /
+	// SourceRevisionKnown correctly (the legacy alias envelope does not
+	// carry those). When no commit exists yet (cold-start path against an
+	// empty assignment bucket), apply what waitForAssignment stored —
+	// SourceRevisionKnown remains false, which is the documented "unknown"
+	// signal.
+	if err := m.applyInitialAssignment(startupCtx, assignmentKV); err != nil {
+		return fmt.Errorf("initial apply failed: %w", err)
+	}
 
-	// Step 6: Transition to stable state
+	// Step 6: Transition to stable state only after initial apply + ack.
 	m.transitionState(StateStable)
 
-	// Start background workers
+	// Start background workers.
+	// monitorCommitChanges is the primary path for CapAckV1 workers (§3.6
+	// case 1). monitorAssignmentChanges runs concurrently for rolling-upgrade
+	// compatibility (§3.6 case 2 — legacy alias path with leader fence).
+	// The dual-read selector in handleCommitValue / handleAssignmentEntry
+	// resolves which one's payload to apply on any given event.
+	m.wg.Go(func() { m.monitorCommitChanges(m.ctx, assignmentKV) })
 	m.wg.Go(func() { m.monitorAssignmentChanges(m.ctx, assignmentKV) })
 	m.monitorNATSConnection()
+
+	return nil
+}
+
+// applyInitialAssignment runs the apply-then-store-then-ack pipeline for the
+// initial assignment surfaced by waitForAssignment. It prefers the
+// commit-path route when "assignment._commit" already exists so
+// SourceRevision flows correctly. Otherwise it applies the
+// legacy-alias-derived assignment directly (which carries zero
+// SourceRevision/SourceRevisionKnown by design — the legacy envelope does
+// not encode them).
+//
+// Returns an error only on Apply failure; the caller's startup ctx
+// governs how long we wait for retries.
+func (m *Manager) applyInitialAssignment(ctx context.Context, assignmentKV jetstream.KeyValue) error {
+	initial := m.CurrentAssignment()
+
+	// Try to route through the commit path first. A successful
+	// handleCommitValue applies, stores, and acks via applyAssignmentWithPrev
+	// passing an explicit empty `previous` argument (set below via the
+	// initialBootstrap branch of buildAssignmentFromCommit-driven apply).
+	commit, _, gerr := kvutil.GetJSON[types.AssignmentCommit](ctx, assignmentKV, "assignment._commit")
+	if gerr == nil && commit != nil && commit.Version >= initial.Version {
+		// For the initial bootstrap, force previous=empty so the handoff
+		// coordinator's prepare phase treats every partition as newly
+		// acquired. We do this by re-using handleCommitValue's machinery
+		// but routing via applyAssignmentWithPrev directly afterwards.
+		newAsg, ok := m.buildAssignmentFromCommit(commit, m.WorkerID())
+		if ok {
+			// Commit-path success: run the apply with explicit empty previous
+			// FIRST. Only advance lastObservedCommit after the apply returns
+			// nil — on failure, the commit must not be surfaced to the
+			// dual-read selector as an authoritative observation. LSR is
+			// advanced by applyAssignmentWithPrev on success (single source
+			// of truth — see applyAssignment Godoc). The watcher will
+			// redeliver on the next tick if Apply failed.
+			if err := m.applyAssignmentWithPrev(Assignment{}, newAsg); err != nil {
+				return err
+			}
+			commitCopy := *commit
+			m.lastObservedCommit.Store(&commitCopy)
+			m.runInitialHandoffResumeIfPending()
+
+			return nil
+		}
+		// Payload-verify failure fell through; fall back to applying
+		// what waitForAssignment surfaced (legacy alias derived).
+	}
+
+	if initial.Version == 0 && len(initial.Partitions) == 0 {
+		// Cold-start path: waitForAssignment surfaced an empty assignment
+		// (no partitions yet and no commit). There is no Apply work to
+		// perform — but the worker MUST still publish an explicit
+		// applied-empty ack BEFORE transitioning to StateStable, otherwise
+		// it would advertise AppliedVersion=0 with no leader-observable
+		// receipt that the empty assignment was acknowledged (§4.4
+		// invariant: every StateStable transition is preceded by an ack).
+		//
+		// Bypass applyAssignmentWithPrev / handoffCoordinator.Apply here:
+		// the coordinator's Apply(empty, empty) would still invoke
+		// UpdateWorkerConsumer with nil partitions (and, in two-phase
+		// mode, emit phantom prepare/commit phase metrics for an
+		// empty→empty transition). Direct SetAppliedAssignment +
+		// PublishNow is faithful to the cold-empty intent.
+		empty := Assignment{}
+		m.assignment.Store(empty)
+		m.heartbeat.SetAppliedAssignment(heartbeat.AppliedAssignment{
+			LeaderRevision:        0,
+			AppliedVersion:        0,
+			AppliedDigest:         types.PartitionSetDigest(nil),
+			AppliedSourceRevision: 0,
+			AppliedSourceRevKnown: false,
+			AppliedAt:             time.Now(),
+		})
+		if err := m.heartbeat.PublishNow(m.ctx); err != nil {
+			m.logError("heartbeat publish-now after empty bootstrap failed", "error", err)
+		}
+
+		return nil
+	}
+	if err := m.applyAssignmentWithPrev(Assignment{}, initial); err != nil {
+		return err
+	}
+	m.runInitialHandoffResumeIfPending()
 
 	return nil
 }
