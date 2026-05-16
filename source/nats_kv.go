@@ -658,7 +658,26 @@ func (s *NatsKV) applyLocal(partitions []types.Partition, revision uint64, notif
 // It deep-copies and sorts the incoming partitions, diffs against current state,
 // and updates s.partitions/s.revision/s.known. Returns true if state changed.
 // Caller is responsible for acquiring and releasing s.mu.
+//
+// Stale events are ignored. A watcher event whose revision is older than the
+// last revision we already applied represents a delayed re-delivery from the
+// watcher's Updates() channel (the local apply ran first, then the watcher
+// goroutine drained the corresponding event later). Applying it would (a) regress
+// s.revision, and (b) spuriously fire a "change" signal because s.partitions
+// has already been advanced past this revision's content via the later local
+// apply or watcher event.
+//
+// revision == 0 is reserved for Start()'s never-written initial-seed path
+// (ErrKeyNotFound returns a zero revision). It always bypasses the gate so the
+// initial empty-state seed succeeds when s.revision is still its zero value.
+// All other callers (Update/Modify after CAS, watcher entry.Revision(),
+// refreshFromKV/reconcileOnce after kv.Get) MUST pass a positive revision —
+// passing 0 with content would let stale data clobber a known state.
 func (s *NatsKV) applyLocalLocked(partitions []types.Partition, revision uint64, known bool) bool {
+	if revision != 0 && revision < s.revision {
+		return false
+	}
+
 	sorted := deepCopyPartitions(partitions)
 	slices.SortFunc(sorted, func(a, b types.Partition) int {
 		return a.Compare(b)

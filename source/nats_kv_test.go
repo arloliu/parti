@@ -1288,3 +1288,23 @@ func (f *fakeKeyWatcher) Updates() <-chan jetstream.KeyValueEntry {
 func (f *fakeKeyWatcher) Stop() error {
 	return nil
 }
+
+// fakeKVEntry implements jetstream.KeyValueEntry for tests that need to
+// hand-craft watcher events (e.g., to simulate out-of-order or stale delivery).
+type fakeKVEntry struct {
+	bucket   string
+	key      string
+	value    []byte
+	revision uint64
+	op       jetstream.KeyValueOp
+	created  time.Time
+	delta    uint64
+}
+
+func (e *fakeKVEntry) Bucket() string                  { return e.bucket }
+func (e *fakeKVEntry) Key() string                     { return e.key }
+func (e *fakeKVEntry) Value() []byte                   { return e.value }
+func (e *fakeKVEntry) Revision() uint64                { return e.revision }
+func (e *fakeKVEntry) Created() time.Time              { return e.created }
+func (e *fakeKVEntry) Delta() uint64                   { return e.delta }
+func (e *fakeKVEntry) Operation() jetstream.KeyValueOp { return e.op }

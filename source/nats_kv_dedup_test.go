@@ -11,6 +11,93 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestNatsKV_Watch_StaleEventIgnored is a deterministic reproducer for the
+// CI flake in TestNatsKV_Watch_Deduplication: under load, a watcher event
+// for an earlier KV revision can drain from watcher.Updates() *after* a
+// later local Update has already advanced s.partitions. Without revision
+// gating, applyLocalLocked sees the stale event's content as a "change"
+// (since s.partitions has moved on) and fires a spurious signal — and
+// also regresses s.revision, which can cause the next CAS attempt to
+// see a stale revision.
+//
+// The reproducer uses a controllable fake watcher so we can deliver the
+// stale event at the exact moment the bug requires, rather than relying
+// on scheduler luck.
+func TestNatsKV_Watch_StaleEventIgnored(t *testing.T) {
+	_, nc := partitest.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "partitions_stale_watcher"})
+	require.NoError(t, err)
+
+	src := NewNatsKV(kv, "config", nil, WithReconcileInterval(0))
+
+	// Inject a controllable fake watcher: writes still go through the real
+	// kv, but the watchLoop only sees events we manually deliver via fakeUpdates.
+	fakeUpdates := make(chan jetstream.KeyValueEntry, 16)
+	src.watchFn = func(_ context.Context) (jetstream.KeyWatcher, error) {
+		return &fakeKeyWatcher{updates: fakeUpdates}, nil
+	}
+
+	err = src.Start(ctx)
+	require.NoError(t, err)
+	defer func() { _ = src.Stop(ctx) }()
+
+	ch := src.Watch(ctx)
+
+	// 1. Update writes p1; local apply advances s.partitions to [{p1}] at rev=1.
+	p1 := []types.Partition{{Keys: []string{"p1"}, Weight: 100}}
+	require.NoError(t, src.Update(ctx, p1))
+	select {
+	case <-ch:
+	case <-time.After(1 * time.Second):
+		t.Fatal("timeout waiting for p1 signal")
+	}
+
+	// 2. Update writes p2; local apply advances s.partitions to [{p2}] at rev=2.
+	p2 := []types.Partition{{Keys: []string{"p2"}, Weight: 100}}
+	require.NoError(t, src.Update(ctx, p2))
+	select {
+	case <-ch:
+	case <-time.After(1 * time.Second):
+		t.Fatal("timeout waiting for p2 signal")
+	}
+
+	// 3. Simulate a watcher event for the *earlier* revision arriving late.
+	//    Under the bug, watchLoop -> applyLocal -> applyLocalLocked sees
+	//    s.partitions=[{p2}] and incoming sorted=[{p1}] → changed=true → signal.
+	stalePayload, encErr := encodePartitions(p1)
+	require.NoError(t, encErr)
+	fakeUpdates <- &fakeKVEntry{
+		key:      "config",
+		value:    stalePayload,
+		revision: 1, // stale: current is 2
+		op:       jetstream.KeyValuePut,
+	}
+
+	select {
+	case <-ch:
+		t.Fatal("received spurious signal from stale watcher event (rev 1 < current 2)")
+	case <-time.After(500 * time.Millisecond):
+		// Expected: stale event is ignored.
+	}
+
+	// 4. Verify s.revision did NOT regress.
+	_, gotRev, gotKnown, err := src.Snapshot(ctx)
+	require.NoError(t, err)
+	require.True(t, gotKnown)
+	require.Equal(t, uint64(2), gotRev, "stale watcher event must not regress s.revision")
+
+	// 5. Verify s.partitions is still [{p2}] — the stale event must not have
+	//    replaced the current state with the older content.
+	got, err := src.List(ctx)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, "p2", got[0].Keys[0], "stale watcher event must not regress s.partitions")
+}
+
 // TestNatsKV_Watch_Deduplication asserts that only real changes trigger signals.
 func TestNatsKV_Watch_Deduplication(t *testing.T) {
 	_, nc := partitest.StartEmbeddedNATS(t)
