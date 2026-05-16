@@ -17,8 +17,9 @@
 //  1. Leader monitors worker heartbeats in NATS KV
 //  2. Leader detects worker join/leave by tracking heartbeat changes
 //  3. Leader calculates new assignments using AssignmentStrategy
-//  4. Leader publishes assignments to NATS KV (key: "assignment.{workerID}")
-//  5. Workers watch their assignment keys and react to changes
+//  4. Leader publishes assignments via the refs-always commit protocol (three
+//     protocol keys: _commit, _commit_log.<V>, _payload.<hex>)
+//  5. Workers watch assignment._commit and fetch their payload by key
 //
 // # Calculator Lifecycle
 //
@@ -70,21 +71,19 @@
 //
 // # Assignment Distribution
 //
-// Assignments are published to NATS KV with the following structure:
+// Assignments are published to NATS KV using a three-key commit-publisher
+// protocol (refs-always model):
 //
-//	Key: "{prefix}.{workerID}"  (e.g., "assignment.worker-1")
-//	Value: JSON-encoded Assignment struct
+//   - "{prefix}._commit" — current commit object mapping each worker ID to the
+//     content-addressable payload key that holds its assignment slice.
+//   - "{prefix}._commit_log.<V>" — append-only commit-log entry per assignment
+//     version V; used by the GC to determine which payload keys are live.
+//   - "{prefix}._payload.<hex(sha256)>" — content-addressable assignment blobs.
+//     Identical assignment slices for different workers share a single payload key.
 //
-// Assignment JSON structure:
-//
-//	{
-//	  "version": 42,
-//	  "lifecycle": "stable",
-//	  "partitions": [
-//	    {"keys": ["p1"], "weight": 100},
-//	    {"keys": ["p2"], "weight": 150}
-//	  ]
-//	}
+// Workers watch "{prefix}._commit" and fetch the payload keys referenced by
+// their entry. A background GC pass (CommitGC) reaps payload keys that are not
+// referenced by any recent commit-log entry.
 //
 // # Worker Health Monitoring
 //
@@ -124,6 +123,6 @@
 //  5. Worker loses election and steps down
 //  6. Manager stops Calculator
 //
-// Only the leader worker runs the Calculator. Follower workers simply watch
-// their assignment keys in NATS KV and react to changes.
+// Only the leader worker runs the Calculator. Follower workers watch
+// assignment._commit in NATS KV and fetch their payload by key on each update.
 package assignment

@@ -7,6 +7,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+This release delivers partition-assignment robustness across six phases of
+work: a content-addressable assignment publisher, a commit-driven worker state
+machine with leader-side audit/repair, a v1 heartbeat wire format with
+capability advertising, atomic partition-list mutation APIs, live consumer-side
+processing-gate wiring, and several targeted fixes for latent failure modes
+that became materially more likely once audit-repair could trigger escalation.
+
+### Added
+
+- **`source.NatsKV.Modify(ctx, fn)`** — CAS-retried transform for the partition
+  list. `fn` receives a fresh KV snapshot on every attempt (never the local
+  cache) and must be side-effect-free. Returns `source.ErrUpdateRetryExhausted`
+  if the retry budget is exhausted. All concurrent callers are safe.
+- **`source.NatsKV.AddPartitions(ctx, partitions...)`** — adds partitions
+  without disturbing concurrent mutations; duplicates (matched by `CanonicalID`)
+  are silently ignored.
+- **`source.NatsKV.RemovePartitions(ctx, partitions...)`** — removes partitions
+  by `CanonicalID`; missing partitions are silently ignored.
+- **`types.RevisionedPartitionSource`** optional interface — sources that track
+  a KV revision (e.g., `source.NatsKV`) implement `Snapshot(ctx) (partitions,
+  revision, known, error)`. The calculator uses this to include
+  `AppliedSourceRevision` in apply receipts; the leader audit uses `known` to
+  gate strict source-revision checks.
+- **`types.Partition.CanonicalID()`** — length-prefixed, collision-safe encoding
+  of the partition's key tuple (`"<len>:<key>/<len>:<key>/..."`). Suitable as a
+  stable map key or for set-equality checks without ambiguity on special chars.
+- **`types.Heartbeat` v1 wire format** — workers now publish JSON heartbeats with
+  `SchemaVersion`, `Capabilities`, `AppliedVersion`, `AppliedDigest`,
+  `AppliedSourceRevision`, and `AppliedSourceRevKnown` in addition to
+  `WorkerID` and `Timestamp`. Legacy RFC3339 timestamp strings are still decoded
+  as `SchemaVersion=0` with zero capabilities.
+- **`types.DecodeHeartbeat(b []byte)`** — decodes both v1 JSON and legacy
+  timestamp heartbeats. Malformed payloads return an error; silent degradation
+  to an empty struct is intentionally rejected.
+- **`types.CapAckV1 / CapTwoPhaseHandoff / CapProcessingGate`** capability bit
+  constants. A bit is set only when the corresponding mechanism is actually wired
+  at runtime, not merely configured. The leader's audit reads peer capability
+  bitmasks from heartbeats to decide whether `audit_repair` escalation is safe.
+- **`parti.CapabilityReporter` interface** — optional extension for
+  `WorkerConsumerUpdater` implementations. If the registered updater satisfies
+  this interface, the Manager ORs reported capability bits into its bitmask after
+  each handoff apply. Must be concurrent-safe, non-blocking, and monotonic for
+  runtime-wire-up bits.
+- **`Manager.SetCapability(capBit, active)`** and **`Manager.Capabilities()`** —
+  atomic capability bitmask accessors. `SetCapability` is OR-only for
+  reporter-sourced bits; the heartbeat publisher reads `Capabilities()` on every
+  publish to embed the live state.
+- **`consumer.ResolverConfig.ReconcileInterval`** — cadence at which the
+  auto-created claim-based resolver reconciles its cache against KV. Defaults to
+  30s; choose a value shorter than `5 × HeartbeatTTL`. Zero uses the default;
+  negative values are rejected at startup.
+- **One-shot `WARN` at `Manager.Start`** when `EnableTwoPhaseHandoff=true` and
+  `5 × HeartbeatTTL < 30s`, reminding operators to lower
+  `ResolverConfig.ReconcileInterval` proportionally so the resolver cannot stay
+  stale longer than the audit grace period.
+
+### Changed
+
+- **Refs-always commit publisher (Phase 3).** Assignments are now stored as
+  three protocol keys instead of one per-worker key:
+  - `assignment._commit` — the current commit object (worker→payload-key map)
+  - `assignment._commit_log.<V>` — an append-only commit-log entry per version
+  - `assignment._payload.<hex(sha256)>` — content-addressable payload blobs
+  Workers watch `assignment._commit` and fetch referenced payload keys.
+  Content-addressable payloads mean identical assignment slices share a single
+  KV entry; a GC pass (`CommitGC`) reaps orphan payload keys.
+- **Commit-driven worker state machine + leader audit (Phase 4).** The leader
+  now records the active fleet and commit version in `assignment._commit` and
+  re-reads it after every apply to verify symmetry between the committed worker
+  set and the live heartbeat fleet. Workers that fall behind (applied version
+  stale relative to the current commit) may be escalated to `audit_repair`
+  reassignment if they advertise `CapProcessingGate`.
+
+### Fixed
+
+- **Live consumer-side wiring of `CapProcessingGate`** (commit `47e7665`).
+  The `Dynamic` consumer now implements `CapabilityReporter`; it sets
+  `CapProcessingGate` after the first successful per-partition gate wrap. The
+  Manager samples this after every `Apply`. Before this fix, no production code
+  advertised `CapProcessingGate`, making the `audit_repair` escalation path
+  unreachable.
+- **Watcher drift detection and active recovery in claim resolver** (commits
+  `963afb6`, `5bc46cc`). Silent watcher stalls are now detected via a
+  `max(2 × ReconcileInterval, 60s)` deadline and recovered with a watcher
+  restart. Observable via `IncReconcileRescue` / `IncWatcherRestart("drift_detected")`
+  metrics.
+- **`twophase.preparePhase` recovery of stuck-prepare claims** (commit
+  `0bbd124`). A latent bug (present since v2.3.0) left claims in
+  `(owner=A, pending=B, state=prepare)` permanently when the new leader
+  re-acquired before the prepare phase completed. On re-acquire the prepare
+  phase now detects and recovers these claims.
+
+### Internal
+
+- Dead `reconcileIntervalSet` field removed from `internal/durable/`; `// P0
+  fix:` / `// P1 fix:` debt labels replaced with plain explanatory comments
+  (commit `a585801`).
+- `internal/assignment/doc.go` updated to reflect the three-key commit-publisher
+  model; references to the old single per-worker assignment key removed.
+
 ## [v2.3.0] - 2026-04-22
 
 This release closes a silent-drift failure mode around live NATS JetStream

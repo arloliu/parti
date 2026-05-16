@@ -1,7 +1,7 @@
 # Parti API Reference
 
 **Version**: 2.0.0
-**Last Updated**: 2026-04-09
+**Last Updated**: 2026-05-16
 **Library**: `github.com/arloliu/parti/v2`
 
 ---
@@ -266,6 +266,56 @@ if err := mgr.RefreshPartitions(ctx); err != nil {
 
 ---
 
+#### SetCapability
+
+Sets or clears a capability bit in the Manager's runtime capability bitmask.
+
+```go
+func (m *Manager) SetCapability(capBit uint32, active bool)
+```
+
+A bit should be set only when the corresponding safety mechanism is actually wired and active, not merely configured. The Manager uses OR-only semantics for reporter-sourced bits: `CapabilityReporter.Capabilities()` results are ORed in and never cleared by the reporter path. Other components (e.g., the heartbeat publisher) may call `SetCapability` to clear bits on teardown.
+
+**Parameters**:
+- `capBit`: Capability bit to set or clear (e.g., `types.CapAckV1`)
+- `active`: `true` to set the bit, `false` to clear it
+
+**Thread Safety**: Safe for concurrent use (atomic CAS operations).
+
+**Example**:
+```go
+// Manager sets CapAckV1 after the heartbeat publisher starts.
+// Application code rarely needs to call SetCapability directly.
+mgr.SetCapability(types.CapAckV1, true)
+```
+
+---
+
+#### Capabilities
+
+Returns the current capability bitmask as an atomic snapshot.
+
+```go
+func (m *Manager) Capabilities() uint32
+```
+
+The heartbeat publisher calls this on every heartbeat to embed the current runtime wire-up state. Do not cache the result — always call this method so the heartbeat reflects live state.
+
+**Returns**:
+- `uint32`: Current capability bitmask (OR of active `types.CapXxx` constants)
+
+**Thread Safety**: Safe for concurrent use (atomic load).
+
+**Example**:
+```go
+caps := mgr.Capabilities()
+if caps&types.CapTwoPhaseHandoff != 0 {
+    log.Println("two-phase handoff is active")
+}
+```
+
+---
+
 ## Stable ID Renewal Lifecycle
 
 Short version (5 bullets):
@@ -394,6 +444,38 @@ func (s *DBPartitionSource) List(ctx context.Context) ([]Partition, error) {
 
 ---
 
+### RevisionedPartitionSource
+
+Optional extension interface for partition sources that track a KV revision number.
+
+```go
+type RevisionedPartitionSource interface {
+    PartitionSource
+    Snapshot(ctx context.Context) (partitions []Partition, revision uint64, known bool, err error)
+}
+```
+
+Sources that maintain revision history (e.g., `source.NatsKV`) implement this interface. The calculator type-asserts for this interface and falls back to `List()` with `SourceRevisionKnown=false` when the assertion fails. The leader's audit uses `SourceRevisionKnown` to decide whether strict source-revision checks apply.
+
+**Methods**:
+
+#### Snapshot
+
+Returns the current partition list along with the associated KV revision.
+
+**Parameters**:
+- `ctx`: Context for cancellation and timeout
+
+**Returns**:
+- `partitions`: Current partition list (nil or empty if key was deleted)
+- `revision`: Last observed KV revision (0 if `known=false`)
+- `known`: `true` once any KV event has been observed, including delete/purge. `false` means the source has never been written.
+- `error`: Error if the snapshot could not be returned
+
+**Semantics**: The `known` flag distinguishes a never-written source (`known=false, revision=0`) from a written-then-deleted source (`known=true, revision=deleteRev, empty partitions`). Downstream audit logic uses this distinction to determine whether strict source-revision checks apply.
+
+---
+
 ### ElectionAgent
 
 Handles leader election (optional).
@@ -473,6 +555,42 @@ func (a *ConsulElectionAgent) RequestLeadership(
         Session: a.session,
     }, nil)
     return acquired, err
+}
+```
+
+---
+
+### CapabilityReporter
+
+Optional interface a `WorkerConsumerUpdater` MAY implement to report runtime capabilities back to the Manager.
+
+```go
+type CapabilityReporter interface {
+    Capabilities() uint32
+}
+```
+
+When the registered updater (or any child of a composite updater) satisfies this interface, the Manager queries `Capabilities()` after each handoff apply attempt and ORs the returned bits into its capability bitmask via `SetCapability`.
+
+**Contract for implementors**:
+- **Concurrent-safe**: `Capabilities()` may be called from the manager-apply goroutine concurrently with the updater's own `UpdateWorkerConsumer` calls.
+- **Non-blocking**: invoked on every apply attempt — must not perform I/O or acquire long-held locks. An atomic load is the expected implementation.
+- **Monotonic for runtime-wire-up bits**: once a capability has been successfully wired (e.g., a handler wrapped with the processing gate), the corresponding bit MUST remain set for the updater's lifetime, even if a subsequent per-subject create fails. The bit means "at least one wired component", not "all components currently wired".
+
+**Manager integration**: the reporter pathway is OR-only — `Capabilities()` results are ORed into the Manager bitmask and never cleared via this path. Returning `0` is always safe.
+
+**Example**:
+```go
+type MyConsumer struct {
+    gateWired atomic.Bool
+}
+
+// Implements CapabilityReporter.
+func (c *MyConsumer) Capabilities() uint32 {
+    if c.gateWired.Load() {
+        return types.CapProcessingGate
+    }
+    return 0
 }
 ```
 
@@ -1095,17 +1213,19 @@ p := Partition{
 **Helpers**:
 
 ```go
-func (p Partition) SubjectKey() string          // Keys joined with '.' (e.g., "orders.0")
-func (p Partition) ID() string                  // Keys joined with '-' (e.g., "orders-0")
-func (p Partition) HashID() uint64              // Stable 64-bit XXH3 hash of Keys (0 if empty)
+func (p Partition) SubjectKey() string            // Keys joined with '.' (e.g., "orders.0")
+func (p Partition) ID() string                    // Keys joined with '-' (e.g., "orders-0")
+func (p Partition) HashID() uint64                // Stable 64-bit XXH3 hash of Keys (0 if empty)
 func (p Partition) HashIDSeed(seed uint64) uint64 // HashID with an explicit seed (seed==0 → HashID)
-func (p Partition) Compare(q Partition) int     // Lexicographic key comparison: -1,0,+1
+func (p Partition) Compare(q Partition) int       // Lexicographic key comparison: -1,0,+1
+func (p Partition) CanonicalID() string           // Length-prefixed collision-safe key encoding
 ```
 
 Use `SubjectKey()` for JetStream subject templating and `FilterSubjects` construction.
 Use `ID()` for durable names (e.g., `<ConsumerPrefix>-<ID()>`).
 Use `HashID()` / `HashIDSeed()` in custom assignment strategies or caches that need a stable, allocation-free partition hash. Chained XXH3 hashing avoids key-boundary ambiguity without concatenation.
 Use `Compare()` as a stable, allocation-free tie-breaker (keys only, weight ignored) in ordering.
+Use `CanonicalID()` as a stable map key or for set-membership tests — it is fully length-driven so any character (including `'/'`, `'-'`, `':'`) may appear in keys without ambiguity. Format: `"<len>:<key>/<len>:<key>/..."` (empty string when `Keys` is empty). Example: `Partition{Keys: []string{"a-b", "c"}}.CanonicalID()` → `"3:a-b/1:c"`.
 
 ---
 
@@ -1154,6 +1274,89 @@ const (
     HandoffStatePrepare
     HandoffStateCommit
 )
+```
+
+---
+
+### Capabilities
+
+Bitmask constants advertising which safety mechanisms are active at runtime.
+
+```go
+const (
+    CapAckV1          uint32 = 1 << 0 // worker publishes apply receipts
+    CapTwoPhaseHandoff uint32 = 1 << 1 // manager runs two-phase handoff coordinator
+    CapProcessingGate  uint32 = 1 << 2 // consumer handlers wrapped with processing gate
+)
+```
+
+Defined in package `types` (`github.com/arloliu/parti/v2/types`). Reference these constants via the `types` import — they are not re-exported through `parti`.
+
+A bit is set **only when the mechanism is actually wired and active**, not merely configured:
+
+- `CapAckV1`: set by the heartbeat publisher after it successfully starts. Indicates the worker emits v1 JSON heartbeats with `AppliedVersion`, `AppliedDigest`, and `AppliedSourceRevision` fields.
+- `CapTwoPhaseHandoff`: set during `Manager.Start` when `Config.EnableTwoPhaseHandoff` is `true` and the handoff coordinator initialises successfully.
+- `CapProcessingGate`: set by the `Dynamic` consumer (via `CapabilityReporter`) after at least one partition handler has been wrapped with the processing gate. The leader's audit uses this bit to determine whether reassignment escalation via `audit_repair` is safe for that worker.
+
+The current bitmask is embedded in every v1 heartbeat. The leader reads peer bitmasks from heartbeats during assignment audits.
+
+**Example** — reading caps from a peer heartbeat:
+```go
+hb, err := types.DecodeHeartbeat(entry.Value())
+if err != nil { ... }
+if hb.Capabilities&types.CapProcessingGate != 0 {
+    // Safe to use audit_repair for this worker.
+}
+```
+
+---
+
+### Heartbeat
+
+v1 heartbeat payload published to NATS KV by every active worker.
+
+```go
+type Heartbeat struct {
+    WorkerID              string    `json:"worker_id"`
+    SchemaVersion         uint8     `json:"schema_version,omitempty"`
+    Capabilities          uint32    `json:"capabilities,omitempty"`
+    LeaderRevision        uint64    `json:"leader_revision,omitempty"`
+    AppliedVersion        int64     `json:"applied_version,omitempty"`
+    AppliedDigest         uint64    `json:"applied_digest,omitempty"`
+    AppliedSourceRevision uint64    `json:"applied_source_revision,omitempty"`
+    AppliedSourceRevKnown bool      `json:"applied_source_revision_known,omitempty"`
+    AppliedAt             time.Time `json:"applied_at"`
+    Timestamp             time.Time `json:"timestamp"`
+}
+```
+
+Defined in package `types`.
+
+**Wire format**:
+- **v1** (`SchemaVersion >= 1`): JSON object beginning with `'{'`. All fields may be present.
+- **Legacy** (`SchemaVersion == 0`): RFC3339 or RFC3339Nano timestamp string. Pre-v1 workers publish only a timestamp; all fields beyond `Timestamp` are zero. Callers must treat legacy workers as "alive but not ack-capable" — do not escalate reassignment via the audit path for them.
+
+**Key fields**:
+- `SchemaVersion`: `0` = legacy timestamp-only worker; `1` = v1 JSON worker with full capability advertising.
+- `Capabilities`: OR of `CapXxx` bits active at publish time (0 for legacy workers).
+- `AppliedVersion` / `AppliedDigest` / `AppliedSourceRevision`: Apply-receipt fields, populated when `CapAckV1` is set. Used by the leader audit to detect stuck workers.
+- `AppliedSourceRevKnown`: `false` when the source does not implement `RevisionedPartitionSource`.
+
+**Decoding**:
+
+```go
+func DecodeHeartbeat(b []byte) (Heartbeat, error)
+```
+
+Accepts both v1 JSON and legacy timestamp strings. The two formats are distinguished by the first byte (`'{'` = JSON). Malformed payloads return an error — silent degradation to an empty `Heartbeat` is intentionally rejected. Returns a zero-capability `Heartbeat` with `SchemaVersion=0` for valid legacy payloads.
+
+**Example**:
+```go
+entry, err := kv.Get(ctx, "worker-hb.worker-0")
+if err != nil { ... }
+hb, err := types.DecodeHeartbeat(entry.Value())
+if err != nil { ... }
+log.Printf("worker %s caps=0x%x appliedAt=%s", hb.WorkerID, hb.Capabilities, hb.AppliedAt)
 ```
 
 ---
@@ -1315,6 +1518,89 @@ src := source.NewNatsKV(kv, "config", logger)
 
 // Update partitions (automatically compressed if needed)
 err := src.Update(ctx, newPartitions)
+```
+
+---
+
+#### Modify
+
+Atomically transforms the partition list using a CAS-retry loop. Safe for concurrent callers.
+
+```go
+func (s *NatsKV) Modify(ctx context.Context, fn func([]types.Partition) []types.Partition) error
+```
+
+`fn` receives a fresh snapshot read directly from KV (never the local cache) on every attempt. Because of CAS retries `fn` may be called more than once — it must be deterministic and side-effect-free. On `ErrKeyNotFound` (key never written), `fn` receives an empty slice.
+
+**Parameters**:
+- `ctx`: Context for the operation
+- `fn`: Transform function (may be called multiple times; must be side-effect-free)
+
+**Returns**:
+- `error`: KV error, validation error from the transform result, or `source.ErrUpdateRetryExhausted` if all CAS attempts fail
+
+**Example**:
+```go
+// Double the weight of all partitions.
+err := src.Modify(ctx, func(current []types.Partition) []types.Partition {
+    for i := range current {
+        current[i].Weight *= 2
+    }
+    return current
+})
+```
+
+---
+
+#### AddPartitions
+
+Adds one or more partitions to the source without disturbing concurrent mutations.
+
+```go
+func (s *NatsKV) AddPartitions(ctx context.Context, partitions ...types.Partition) error
+```
+
+Duplicate partitions (matched by `CanonicalID()`) are silently ignored — calling `AddPartitions` twice with the same partition is a no-op. Internally implemented via `Modify`, so concurrent callers are safe.
+
+**Parameters**:
+- `ctx`: Context for the operation
+- `partitions`: Partitions to add (validated before any KV round-trip)
+
+**Returns**:
+- `error`: Validation error, or `source.ErrUpdateRetryExhausted` if the CAS budget is exhausted
+
+**Example**:
+```go
+err := src.AddPartitions(ctx,
+    types.Partition{Keys: []string{"topic", "3"}, Weight: 100},
+    types.Partition{Keys: []string{"topic", "4"}, Weight: 100},
+)
+```
+
+---
+
+#### RemovePartitions
+
+Removes one or more partitions from the source, matched by `CanonicalID()`.
+
+```go
+func (s *NatsKV) RemovePartitions(ctx context.Context, partitions ...types.Partition) error
+```
+
+Partitions not found in the current list are silently ignored. Concurrent mutations from other writers are preserved. Internally implemented via `Modify`.
+
+**Parameters**:
+- `ctx`: Context for the operation
+- `partitions`: Partitions to remove (validated before any KV round-trip)
+
+**Returns**:
+- `error`: Validation error, or `source.ErrUpdateRetryExhausted` if the CAS budget is exhausted
+
+**Example**:
+```go
+err := src.RemovePartitions(ctx,
+    types.Partition{Keys: []string{"topic", "3"}},
+)
 ```
 
 ---
@@ -1585,6 +1871,44 @@ c, _ := consumer.NewQueue(js, "stream", "consumer", "subject.>", handler,
 | `WithInstanceID(id)`                        | Broadcast      | Set unique instance identifier       |
 | `WithProcessingGate(cfg)`                   | Dynamic        | Enable processing gate               |
 | `WithDrainOnRemove(enabled, timeout)`       | Dynamic        | Drain messages on partition removal  |
+
+---
+
+### ResolverConfig
+
+Configures the ownership resolver used when `ProcessingGate` is enabled on a `Dynamic` consumer.
+
+```go
+type ResolverConfig struct {
+    OwnershipResolver   types.OwnershipResolver // Custom resolver (optional; overrides auto-creation)
+    HandoffBucketName   string                  // KV bucket for handoff claims (default: "parti-handoff")
+    HandoffClaimsPrefix string                  // Key prefix for claims (default: "claims/")
+    BatchWindow         time.Duration           // Coalescing window for claim updates (default: 5ms)
+    BatchMaxItems       int                     // Max updates per batch (default: 1024)
+    ReconcileInterval   time.Duration           // Periodic cache reconcile cadence (default: 30s)
+}
+```
+
+**Key field — ReconcileInterval**:
+
+The cadence at which the auto-created claim-based resolver re-lists the handoff bucket and reconciles its in-memory cache against KV. This is the recovery mechanism for silent watcher stalls: the NATS JetStream KV watcher does NOT surface a NATS server restart as a channel close — only an explicit stop, connection close, or subscription teardown does. After such a stall the cache stays stale for at most one reconcile period.
+
+Choose a value shorter than `5 × Config.HeartbeatTTL` (the leader's audit grace period). With the default `HeartbeatTTL=15s` the audit grace period is 75s and the default `ReconcileInterval=30s` is comfortably inside it. If you have tuned `HeartbeatTTL` below ~6s, set `ReconcileInterval` to `HeartbeatTTL` or `HeartbeatTTL/2`.
+
+Manager emits a one-shot `WARN` log at `Start` when `EnableTwoPhaseHandoff=true` and `5 × HeartbeatTTL < 30s`, reminding operators to lower `ReconcileInterval` accordingly.
+
+Zero uses the default (30s). Negative values are rejected at startup. The field is ignored when `OwnershipResolver` is non-nil.
+
+**Example**:
+```go
+cfg := consumer.DynamicConfig{
+    // ...
+    Resolver: consumer.ResolverConfig{
+        HandoffBucketName: "parti-handoff",
+        ReconcileInterval: 20 * time.Second, // < 5 × HeartbeatTTL when TTL is tuned low
+    },
+}
+```
 
 ---
 
