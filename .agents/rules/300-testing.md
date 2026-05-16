@@ -14,6 +14,7 @@
 - **Assertions:** Use `testify` (`require`, `assert`).
 - **Embedded NATS:** Use `partitest.StartEmbeddedNATS(t)` for integration tests.
 - **Cleanup:** Always use `defer` for resource cleanup.
+- **Test-helper package choice:** `partitest/` (public, leaf) for helpers that must be importable from `package parti` tests or from external `_test` packages; `internal/testutil/` (which imports parti) for anything else. Importing `internal/testutil` from a `package parti` test file causes an import cycle.
 
 ## Async Testing (CRITICAL)
 - ❌ **NEVER** use `time.Sleep()` to wait for state.
