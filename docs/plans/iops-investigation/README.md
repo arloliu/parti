@@ -128,11 +128,16 @@ under `docs/plans/`, and the runnable rig under `test/iops-investigation/`
 |---|---|
 | Hypothesis written down | Done (this README + `00-attribution-plan.md`) |
 | Plan reviewed | Done — 8 rounds of Copilot `gpt-5.5 xhigh` review + 1 Gemini 3.1 Pro pass. Consensus: ready for execution. See `tmp/00-attribution-plan_iops-investigation_review*.md`. |
-| Rig built | TODO |
-| Baseline measurement on v2.3.0 | TODO |
-| Knob-ablation matrix | TODO |
-| Mitigation verification | TODO |
+| Rig built | Done — Phases 1–4 implementation-complete; e2e smoke test (`TestE2E_HarnessToAggregatedCSV`) exercises the full harness → aggregate → CSV pipeline. See `test/iops-investigation/`. |
+| Phase 5 — Matrix execution | Pending operator. Follow `test/iops-investigation/RUNBOOK.md`: M4 calibration → M1.0 MDE gate → full 190-run campaign → Tukey outlier handling → M1.11 pin-swap. |
+| Phase 6 — Analysis & findings | Toolchain ready; findings TBD after Phase 5 data. `test/iops-investigation/scripts/analyze.py` produces `slope_table.csv` / `attribution_table.csv` / `mitigation_table.csv` / `mde.csv`. `findings.md` scaffold in place with `<TBD>` placeholders for every quantitative claim. See `RUNBOOK.md` §9. |
 | Findings written up | TODO |
+
+Phases 1–4 delivered: docker-compose rig, instrumented JetStream harness,
+cgroup/iostat/jsz/node\_exporter capture pipeline, and the `aggregate` command
+that reconciles all four sources into a per-run CSV. The rig is operator-ready;
+Phase 5 is a field execution campaign requiring a dedicated Linux host with
+cgroup v2, `sysstat`, and Docker.
 
 ## Decision log (append-only)
 

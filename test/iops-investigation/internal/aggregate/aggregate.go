@@ -81,13 +81,26 @@ func DivergenceCheck(cg []CgroupDelta, ios []IostatSample, warmupSec int) Diverg
 			continue
 		}
 		rep.ComparedSeconds++
-		// Use max(cg, ios) as the denominator so a tiny cgroup total
-		// doesn't blow the ratio to infinity when both are small noise.
-		denom := math.Max(cgV, iosV)
-		if denom < 1.0 {
+		// Topology invariant: cgroup container I/O is a strict subset
+		// of iostat host I/O. The guard's purpose is to catch capture
+		// bugs — primarily the impossible direction `cgroup > iostat`
+		// (containers reporting more I/O than the host they live on,
+		// which indicates wrong-device measurement or a cgroup-path
+		// mismatch). `iostat > cgroup` is always legitimate on a host
+		// with concurrent workloads (browser, IDE, system daemons),
+		// especially during a rig-idle window like M1.0.
+		//
+		// Therefore the percentage is computed as
+		//     pct = max(0, cgV - iosV) / cgV
+		// so iostat > cgroup contributes zero (no concern). Only
+		// cgroup > iostat moves the ratio up. The `cgV < 1.0` floor
+		// preserves the original "don't divide by zero noise" guard
+		// for genuinely idle seconds.
+		if cgV < 1.0 {
 			continue
 		}
-		pct := math.Abs(cgV-iosV) / denom
+		excess := math.Max(0, cgV-iosV)
+		pct := excess / cgV
 		if pct > rep.MaxPctOver {
 			rep.MaxPctOver = pct
 			rep.WorstTSec = t

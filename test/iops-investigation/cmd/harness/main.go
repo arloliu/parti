@@ -28,7 +28,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/arloliu/parti/v2"
@@ -154,7 +153,7 @@ func Run(ctx context.Context, o Options, errLog io.Writer) error {
 	// Step 1: setup NATS + wrapper. The setup wrapper is intentionally
 	// disjoint from per-worker wrappers — its counters reflect
 	// pre-population traffic, not workload, and we discard them.
-	setupConn, err := nats.Connect(o.NATSURLs)
+	setupConn, err := ConnectNATS(o.NATSURLs)
 	if err != nil {
 		return fmt.Errorf("setup connect: %w", err)
 	}
@@ -164,6 +163,14 @@ func Run(ctx context.Context, o Options, errLog io.Writer) error {
 		return fmt.Errorf("setup jetstream.New: %w", err)
 	}
 	setupIJS := instrumentedjs.New(setupJS)
+
+	// Wait for the JetStream meta-cluster to elect a leader. A fresh
+	// rig accepts client connections in ~1s but takes ~5-10s to elect
+	// a meta-leader; PreCreate would otherwise fail with "context
+	// deadline exceeded" with no useful diagnostic.
+	if err := WaitForJetStream(ctx, setupIJS, o.Replicas, 60*time.Second); err != nil {
+		return fmt.Errorf("wait for jetstream: %w", err)
+	}
 
 	// Steps 2 + 3: pre-create + seed.
 	srcKV, err := PreCreate(ctx, setupIJS, o, cfg)

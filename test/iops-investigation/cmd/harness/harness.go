@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -203,6 +204,90 @@ func kvStreamName(bucket string) string { return "KV_" + bucket }
 // it to source.NewNatsKV (per §R3 coverage caveat); writes into that
 // handle will be counted under PartitionSourceBucket on the SETUP
 // wrapper, which is what we want for visibility.
+// ConnectNATS opens a NATS connection with retry options tuned for a
+// freshly-started rig — the cluster's client port accepts connections
+// in <1s but can transiently drop them while the route mesh settles.
+// RetryOnFailedConnect + a short ReconnectWait makes the harness wait
+// out that window instead of bailing with "EOF".
+func ConnectNATS(urls string) (*nats.Conn, error) {
+	return nats.Connect(
+		urls,
+		nats.RetryOnFailedConnect(true),
+		nats.MaxReconnects(60),                 // 60 × 1 s = up to 60 s
+		nats.ReconnectWait(1*time.Second),
+		nats.Timeout(5*time.Second),            // per-connect attempt timeout
+	)
+}
+
+// WaitForJetStream waits until the JetStream cluster can both elect a
+// meta-leader AND place a stream with the requested replication
+// factor. A freshly-started NATS cluster passes through three
+// readiness stages on bring-up:
+//
+//   1. Client port accepts connections (~1s).
+//   2. JetStream meta-leader elected — AccountInfo returns (~5-10s).
+//   3. All `replicas` peers visible to the meta-cluster — R=replicas
+//      stream placement succeeds (~10-15s).
+//
+// Probing AccountInfo (stage 2) alone is not enough on a fresh rig:
+// PreCreate then fails with "no suitable peers for placement, peer
+// offline" because R=3 placement requires all 3 peers to be reachable
+// even though the meta-leader has already elected. We probe stage 3
+// by creating + deleting a synthetic R=`replicas` stream as a placement
+// canary, retrying on the placement-class errors NATS emits during
+// peer-discovery: "no suitable peers", "peer offline", "insufficient
+// resources".
+func WaitForJetStream(ctx context.Context, setup *instrumentedjs.InstrumentedJS, replicas int, timeout time.Duration) error {
+	const canaryStream = "__iops_rig_canary__"
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		// Stage 2: meta-leader.
+		probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		_, err := setup.AccountInfo(probeCtx)
+		cancel()
+		if err != nil {
+			lastErr = err
+			if err := sleepCtx(ctx, 500*time.Millisecond); err != nil {
+				return err
+			}
+			continue
+		}
+		// Stage 3: peer placement at the requested replicas.
+		probeCtx, cancel = context.WithTimeout(ctx, 3*time.Second)
+		_, err = setup.CreateStream(probeCtx, jetstream.StreamConfig{
+			Name:     canaryStream,
+			Subjects: []string{canaryStream + ".x"},
+			Storage:  jetstream.MemoryStorage,
+			Replicas: replicas,
+		})
+		cancel()
+		if err == nil {
+			// Placement works — delete and proceed.
+			delCtx, delCancel := context.WithTimeout(ctx, 2*time.Second)
+			_ = setup.DeleteStream(delCtx, canaryStream)
+			delCancel()
+			return nil
+		}
+		lastErr = err
+		// Retry on transient placement errors; everything else is fatal.
+		msg := err.Error()
+		transient := strings.Contains(msg, "no suitable peers") ||
+			strings.Contains(msg, "peer offline") ||
+			strings.Contains(msg, "insufficient resources") ||
+			strings.Contains(msg, "deadline exceeded") ||
+			strings.Contains(msg, "no responders")
+		if !transient {
+			return fmt.Errorf("JetStream canary placement (R=%d) failed: %w", replicas, err)
+		}
+		if err := sleepCtx(ctx, 500*time.Millisecond); err != nil {
+			return err
+		}
+	}
+	return fmt.Errorf("JetStream not ready for R=%d placement after %s: %w", replicas, timeout, lastErr)
+}
+
+
 func PreCreate(
 	ctx context.Context,
 	setup *instrumentedjs.InstrumentedJS,
@@ -325,7 +410,7 @@ func StartWorker(
 	o Options,
 	cfg parti.Config,
 ) (*WorkerHandle, error) {
-	nc, err := nats.Connect(o.NATSURLs)
+	nc, err := ConnectNATS(o.NATSURLs)
 	if err != nil {
 		return nil, fmt.Errorf("worker %d: connect: %w", idx, err)
 	}

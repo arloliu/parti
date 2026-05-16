@@ -86,8 +86,10 @@ while [[ $(date +%s) -lt $end ]]; do
                 exit 1
             }
             # Build JSON envelope via jq to safely embed the body.
+            # -c (compact) produces one line per envelope (ndjson); the
+            # aggregator parser expects exactly one JSON object per line.
             printf '%s\n' "$body" | \
-                jq --arg node "$node" \
+                jq -c --arg node "$node" \
                    --arg ep   "$endpoint" \
                    --argjson t "$ts_ns" \
                    '{t_unix_ns: $t, node: $node, endpoint: $ep, body: .}' \

@@ -5,7 +5,8 @@
 # cell-to-flag matrix and §R5 for the pre-registered randomised schedule.
 #
 # Usage:
-#   run-matrix.sh [--seed N] [--cells M1.0,M1.1,...] [--reps 5] \
+#   run-matrix.sh [--seed N] [--cells M1.0,M1.1,...] [--n-values 1000,3000] \
+#                 [--reps 5] [--warmup-secs 300] [--capture-secs 600] \
 #                 [--results-dir results/] [--dry-run]
 #
 # REQUIRED: --seed N  (recorded in every per-run run-meta.yaml sidecar)
@@ -27,7 +28,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RIG_DIR="$(dirname "$SCRIPT_DIR")"
 
 HARNESS_BIN="${RIG_DIR}/cmd/harness/harness"
-AGGREGATE_BIN="aggregate"   # assumed on PATH or built by caller
+# Prefer the locally-built binary at ${RIG_DIR}/cmd/aggregate/aggregate;
+# fall back to whatever 'aggregate' is on PATH if the local build is
+# absent (e.g. operator installed it system-wide).
+if [[ -x "${RIG_DIR}/cmd/aggregate/aggregate" ]]; then
+    AGGREGATE_BIN="${RIG_DIR}/cmd/aggregate/aggregate"
+else
+    AGGREGATE_BIN="aggregate"
+fi
 
 # Container names for capture-cgroup-io.sh, indexed by replicas.
 CONTAINERS_R3="iops-nats-1,iops-nats-2,iops-nats-3"
@@ -121,6 +129,16 @@ Options:
   --cells CELLS       Comma-separated cell list (default: all M1.0–M1.11).
                       Example: --cells M1.1,M1.2,M1.8
   --reps N            Replicates per (cell, N) combination (default: 5).
+  --n-values LIST     Comma-separated N override filter (default: each cell's
+                      full N list from §M1). Only cell-N pairs whose N appears
+                      in this list are scheduled. Example: --n-values 1000,3000
+                      keeps only the 1000 and 3000 N runs per cell, dropping
+                      500 and 2000. Useful for tiered campaigns (see RUNBOOK §3).
+  --warmup-secs N     Per-run warmup window in seconds (default: 300 = 5 min).
+                      Tier 0 sanity / quick-scan campaigns use 30-60 s; full
+                      §M1 matrix uses 300 s (the default).
+  --capture-secs N    Per-run capture window in seconds (default: 600 = 10 min).
+                      Tier 0 typically uses 60-120 s.
   --results-dir PATH  Parent directory for per-run subdirs (default: results/).
   --dry-run           Print the full randomised schedule and exit without
                       running the rig.
@@ -143,6 +161,7 @@ EOF
 # ---------------------------------------------------------------------------
 SEED=""
 CELLS_ARG=""
+N_VALUES_ARG=""
 REPS=5
 RESULTS_DIR="${RIG_DIR}/results"
 DRY_RUN=false
@@ -151,6 +170,9 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --seed)        SEED="$2";        shift 2 ;;
         --cells)       CELLS_ARG="$2";   shift 2 ;;
+        --n-values)    N_VALUES_ARG="$2"; shift 2 ;;
+        --warmup-secs) WARMUP_SECS="$2"; shift 2 ;;
+        --capture-secs) CAPTURE_SECS="$2"; shift 2 ;;
         --reps)        REPS="$2";        shift 2 ;;
         --results-dir) RESULTS_DIR="$2"; shift 2 ;;
         --dry-run)     DRY_RUN=true;     shift ;;
@@ -168,6 +190,16 @@ if ! [[ "$REPS" =~ ^[0-9]+$ ]] || [[ "$REPS" -lt 1 ]]; then
     echo "run-matrix.sh: --reps must be a positive integer, got: $REPS" >&2
     exit 1
 fi
+if ! [[ "$WARMUP_SECS" =~ ^[0-9]+$ ]] || [[ "$WARMUP_SECS" -lt 5 ]]; then
+    echo "run-matrix.sh: --warmup-secs must be an integer >= 5, got: $WARMUP_SECS" >&2
+    exit 1
+fi
+if ! [[ "$CAPTURE_SECS" =~ ^[0-9]+$ ]] || [[ "$CAPTURE_SECS" -lt 10 ]]; then
+    echo "run-matrix.sh: --capture-secs must be an integer >= 10, got: $CAPTURE_SECS" >&2
+    exit 1
+fi
+# Recompute total now that user overrides have landed.
+CAPTURE_TOTAL=$(( WARMUP_SECS + CAPTURE_SECS ))
 
 # Build active cell list.
 if [[ -n "$CELLS_ARG" ]]; then
@@ -258,16 +290,36 @@ fi
 # M1.11 entries are included so they appear in the schedule (and fail fast
 # at run time); M1.0 control entries are flagged in CELL_CONTROL.
 # ---------------------------------------------------------------------------
+declare -A N_FILTER=()
+if [[ -n "$N_VALUES_ARG" ]]; then
+    IFS=',' read -ra _n_filter_arr <<< "$N_VALUES_ARG"
+    for n in "${_n_filter_arr[@]}"; do
+        if ! [[ "$n" =~ ^[0-9]+$ ]]; then
+            echo "run-matrix.sh: --n-values entries must be positive integers, got: $n" >&2
+            exit 1
+        fi
+        N_FILTER["$n"]=1
+    done
+fi
+
 UNSHUFFLED=()
 for cell in "${ACTIVE_CELLS[@]}"; do
     n_values_str="${CELL_N_VALUES[$cell]}"
     read -ra n_values <<< "$n_values_str"
     for n in "${n_values[@]}"; do
+        if [[ ${#N_FILTER[@]} -gt 0 && -z "${N_FILTER[$n]+set}" ]]; then
+            continue
+        fi
         for (( r=1; r<=REPS; r++ )); do
             UNSHUFFLED+=("${cell} ${n} ${r}")
         done
     done
 done
+
+if [[ ${#UNSHUFFLED[@]} -eq 0 ]]; then
+    echo "run-matrix.sh: empty schedule — the --cells / --n-values combination produced no runs" >&2
+    exit 1
+fi
 
 TOTAL_RUNS="${#UNSHUFFLED[@]}"
 

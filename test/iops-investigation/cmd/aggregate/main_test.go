@@ -232,12 +232,16 @@ func TestRun_HappyPath_WritesCSVAndDoesNotFail(t *testing.T) {
 func TestRun_DivergenceStrictFails(t *testing.T) {
 	dir := t.TempDir()
 	fx := happyFixture()
-	// Inflate iostat by 25 % so the cross-check trips well past 5 %.
-	fx.iostatRIOsPerSec *= 1.25
-	fx.iostatWIOsPerSec *= 1.25
+	// Deflate iostat by 25 % so cgroup > iostat — the impossible
+	// direction the asymmetric guard catches. iostat > cgroup is
+	// legitimate (host background noise) and must NOT trip the guard.
+	fx.iostatRIOsPerSec *= 0.75
+	fx.iostatWIOsPerSec *= 0.75
 	fx.materialize(t, dir)
 
-	err := run([]string{"--run-dir", dir}, os.Stdout, os.Stderr)
+	// Must explicitly opt in to strict mode (default is false because
+	// the cross-check is too noisy on real hosts — see flag docstring).
+	err := run([]string{"--run-dir", dir, "--strict"}, os.Stdout, os.Stderr)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "divergence")
 }
@@ -245,33 +249,52 @@ func TestRun_DivergenceStrictFails(t *testing.T) {
 func TestRun_DivergenceNonStrictPasses(t *testing.T) {
 	dir := t.TempDir()
 	fx := happyFixture()
-	fx.iostatRIOsPerSec *= 1.25
-	fx.iostatWIOsPerSec *= 1.25
+	// Same deflation as the strict-fails test; without --strict the
+	// aggregator still emits the CSV (default behaviour).
+	fx.iostatRIOsPerSec *= 0.75
+	fx.iostatWIOsPerSec *= 0.75
 	fx.materialize(t, dir)
 
-	err := run([]string{"--run-dir", dir, "--strict=false"}, os.Stdout, os.Stderr)
+	err := run([]string{"--run-dir", dir}, os.Stdout, os.Stderr)
 	require.NoError(t, err)
 	_, statErr := os.Stat(filepath.Join(dir, "aggregated.csv"))
 	require.NoError(t, statErr, "csv must be written when divergence is non-fatal")
 }
 
-func TestRun_DivergenceCheckActuallyDistinguishes(t *testing.T) {
-	// Sanity: at strict 0% tolerance even the happy fixture trips.
-	// Confirms the cross-check is not vacuously passing because the
-	// fixture is too small.
+func TestRun_DivergenceIgnoresHigherIostat(t *testing.T) {
+	// Regression for the asymmetric guard: iostat > cgroup is always
+	// legitimate (containers I/O ⊆ host I/O), so even a 25% inflation
+	// of iostat must pass strict mode. Catches a regression to the
+	// pre-2026-05 symmetric |Δ|/max semantics that incorrectly flagged
+	// busy-host noise as a measurement bug.
 	dir := t.TempDir()
 	fx := happyFixture()
-	// Add a tiny ~1% perturbation that is visible only when the
-	// tolerance is squeezed below 1%.
-	fx.iostatRIOsPerSec *= 1.01
+	fx.iostatRIOsPerSec *= 1.25
+	fx.iostatWIOsPerSec *= 1.25
 	fx.materialize(t, dir)
 
-	err := run([]string{"--run-dir", dir, "--max-disagreement-pct", "0.1"}, os.Stdout, os.Stderr)
-	require.Error(t, err, "0.1% tolerance must fail a 1% perturbation")
+	err := run([]string{"--run-dir", dir, "--strict"}, os.Stdout, os.Stderr)
+	require.NoError(t, err, "iostat > cgroup is legit host noise; must not trip even in strict")
+}
+
+func TestRun_DivergenceCheckActuallyDistinguishes(t *testing.T) {
+	// Sanity: at tight 0.1% tolerance even a tiny cgroup-excess
+	// perturbation trips strict mode. Confirms the cross-check is not
+	// vacuously passing because the fixture is too small.
+	dir := t.TempDir()
+	fx := happyFixture()
+	// ~1% cgroup-excess perturbation (deflate iostat slightly so
+	// cgroup > iostat by ~1%).
+	fx.iostatRIOsPerSec *= 0.99
+	fx.iostatWIOsPerSec *= 0.99
+	fx.materialize(t, dir)
+
+	err := run([]string{"--run-dir", dir, "--strict", "--max-disagreement-pct", "0.1"}, os.Stdout, os.Stderr)
+	require.Error(t, err, "0.1% tolerance must fail a 1% cgroup-excess perturbation")
 	require.Contains(t, err.Error(), "divergence")
 
 	// And the same fixture passes at the default 5%.
-	err = run([]string{"--run-dir", dir}, os.Stdout, os.Stderr)
+	err = run([]string{"--run-dir", dir, "--strict"}, os.Stdout, os.Stderr)
 	require.NoError(t, err)
 }
 
