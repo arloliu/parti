@@ -138,7 +138,7 @@ func TestSubscriptionHelper_UpdateOnRebalance(t *testing.T) {
 		for i, manager := range managers {
 			if manager != nil {
 				stopCtx, stopCancel := context.WithTimeout(t.Context(), 5*time.Second)
-				defer stopCancel() //nolint:revive
+				defer stopCancel() //nolint:revive // defer-in-loop: intentional; each iteration owns its own context
 				if err := manager.Stop(stopCtx); err != nil {
 					t.Logf("Failed to stop manager %d: %v", i, err)
 				}

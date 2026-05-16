@@ -870,7 +870,7 @@ func (p *AssignmentPublisher) CleanupAllAssignments(ctx context.Context) error {
 		return fmt.Errorf("failed to list keys for full cleanup: %w", err)
 	}
 
-	var workersToRemove []string
+	workersToRemove := make([]string, 0, len(keys))
 	for _, key := range keys {
 		sub, ok := strings.CutPrefix(key, p.keyPrefix)
 		if !ok {
