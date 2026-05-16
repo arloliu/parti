@@ -744,10 +744,20 @@ func (m *Manager) applyAssignmentWithPrev(oldAssignment, newAssignment Assignmen
 
 	// 1) Apply via handoff coordinator. Must succeed before we touch the
 	//    in-memory snapshot or publish the ack.
-	if err := m.handoffCoordinator.Apply(m.ctx, workerID, oldAssignment, newAssignment); err != nil {
-		m.logError("handoff apply failed", "error", err)
+	applyErr := m.handoffCoordinator.Apply(m.ctx, workerID, oldAssignment, newAssignment)
+
+	// Sample consumer-updater runtime capabilities unconditionally: the
+	// updater may have wired a capability (e.g. CapProcessingGate via
+	// handler wrap) even if a later phase of Apply failed. Runs BEFORE
+	// the error return and BEFORE the success-path SetAppliedAssignment +
+	// PublishNow, so the immediate post-apply heartbeat carries any
+	// newly-wired bit on the first successful apply.
+	m.reportConsumerCapabilities()
+
+	if applyErr != nil {
+		m.logError("handoff apply failed", "error", applyErr)
 		m.scheduleApplyRetry(newAssignment)
-		return err
+		return applyErr
 	}
 
 	// 2) Advance lastSeenLeaderRevision (stale-leader fence) — single

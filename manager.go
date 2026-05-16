@@ -61,6 +61,10 @@ type Manager struct {
 	logger        Logger
 	// Optional worker consumer updater
 	consumerUpdater WorkerConsumerUpdater
+	// Cached CapabilityReporter view of consumerUpdater. Set once at
+	// construction; nil if consumerUpdater is nil or doesn't implement
+	// the interface. Avoids a per-Apply type assertion.
+	capReporter CapabilityReporter
 
 	// Handoff coordinator (feature-flagged); abstracts assignment application.
 	handoffCoordinator handoff.Coordinator
@@ -279,6 +283,7 @@ func NewManager(cfg *Config, js jetstream.JetStream, source PartitionSource, str
 		metrics:         metricsCollector,
 		logger:          logger,
 		consumerUpdater: options.consumerUpdater,
+		capReporter:     asCapabilityReporter(options.consumerUpdater),
 		connMonitorStop: make(chan struct{}),
 		kvErrorWindow:   make([]time.Time, 0, cfg.DegradedBehavior.KVErrorThreshold),
 		// Initialize internal components with Nop implementations
@@ -729,8 +734,12 @@ func (m *Manager) State() State {
 // mechanism — not by config-reading code. Examples:
 //   - The two-phase handoff coordinator calls SetCapability(types.CapTwoPhaseHandoff, true)
 //     after successfully starting, and (…, false) on Stop.
-//   - The consumer/updater calls SetCapability(types.CapProcessingGate, true)
-//     when it wraps handlers with the processing gate.
+//   - The consumer/updater reports CapProcessingGate via the optional
+//     [CapabilityReporter] interface; Manager samples it through
+//     reportConsumerCapabilities after every handoffCoordinator.Apply
+//     attempt and ORs the bit in here. The reporter pathway never
+//     clears bits; only other components may call SetCapability with
+//     active=false to clear.
 //   - The heartbeat publisher's CapAckV1 bit is set by startHeartbeat after
 //     the publisher starts successfully.
 //
@@ -755,6 +764,40 @@ func (m *Manager) SetCapability(capBit uint32, active bool) {
 //   - uint32: Current capability bitmask (OR of active types.CapXxx constants)
 func (m *Manager) Capabilities() uint32 {
 	return m.capabilities.Load()
+}
+
+// reportableCapBits is the set of capability bits that may be sampled
+// from a CapabilityReporter and ORed into Manager.capabilities. Add new
+// runtime-wireup bits here explicitly.
+const reportableCapBits = types.CapProcessingGate
+
+// asCapabilityReporter returns u as a CapabilityReporter when it implements
+// the interface; otherwise nil. Called once at construction so the apply
+// hot path doesn't repeat the type assertion.
+func asCapabilityReporter(u WorkerConsumerUpdater) CapabilityReporter {
+	cr, _ := u.(CapabilityReporter)
+	return cr
+}
+
+// reportConsumerCapabilities samples the cached CapabilityReporter (if any)
+// and ORs reported runtime-wireup bits into the Manager's capability bitmask.
+//
+// Called after every handoffCoordinator.Apply attempt — even on error —
+// because the updater (which actually wraps handlers with the gate) may
+// have succeeded before the apply pipeline failed in a later phase.
+// Short-circuits once all reportable bits are already set.
+func (m *Manager) reportConsumerCapabilities() {
+	if m.capReporter == nil {
+		return
+	}
+	missing := reportableCapBits &^ m.capabilities.Load()
+	if missing == 0 {
+		return
+	}
+	newBits := m.capReporter.Capabilities() & missing
+	if newBits != 0 {
+		m.capabilities.Or(newBits)
+	}
 }
 
 // invokeHook executes a hook function asynchronously with error logging.

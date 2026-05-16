@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"text/template"
 	"time"
 
@@ -64,6 +65,11 @@ type WorkerConsumer struct {
 	// reverse subject template components for partitionID extraction (prefix/suffix around {{.PartitionID}})
 	partitionPrefix string
 	partitionSuffix string
+
+	// gateWired is flipped to true after the first successful processing-gate
+	// handler wrap in addSubjectLoop. Monotonic: never cleared once set. Read
+	// by Capabilities() to report types.CapProcessingGate.
+	gateWired atomic.Bool
 }
 
 // NewWorkerConsumer creates a new per-subject durable consumer helper.
@@ -385,6 +391,11 @@ func (wc *WorkerConsumer) addSubjectLoop(ctx context.Context, workerID string, s
 			return fmt.Errorf("create processing gate: %w", err)
 		}
 		effectiveHandler = g.Wrap(wc.handler)
+		// Monotonic: once any subject has been wrapped with the gate, the
+		// bit stays set even if a later per-subject create fails. Reported
+		// out via Capabilities() so the Manager can advertise
+		// types.CapProcessingGate to the leader.
+		wc.gateWired.Store(true)
 	}
 
 	partitionID := wc.extractPartitionID(subject)
@@ -673,6 +684,27 @@ func (wc *WorkerConsumer) SetResolverMetrics(m ResolverMetrics) {
 	if r, ok := wc.gateResolver.(*ClaimBasedResolver); ok {
 		r.SetMetrics(m)
 	}
+}
+
+// Capabilities reports the runtime capability bits this consumer has
+// successfully wired. Currently:
+//   - types.CapProcessingGate: set after the first successful handler
+//     wrap via newProcessingGate(...) + g.Wrap in addSubjectLoop.
+//
+// Safe for concurrent use; non-blocking (atomic load); monotonic — once
+// a bit has been set it remains set for the lifetime of this
+// WorkerConsumer, even if a later per-subject create fails. The bit
+// reflects "this consumer has at least one wired component", not "all
+// components are currently wired".
+//
+// Returns:
+//   - uint32: OR of capability bits successfully wired; 0 if none.
+func (wc *WorkerConsumer) Capabilities() uint32 {
+	var bits uint32
+	if wc.gateWired.Load() {
+		bits |= types.CapProcessingGate
+	}
+	return bits
 }
 
 // extractPartitionID returns the partition id parsed from subject using the configured

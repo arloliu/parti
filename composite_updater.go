@@ -85,3 +85,28 @@ func (c *CompositeConsumerUpdater) Add(updaters ...WorkerConsumerUpdater) {
 func (c *CompositeConsumerUpdater) Len() int {
 	return len(c.updaters)
 }
+
+// Capabilities implements [CapabilityReporter] by ORing the runtime
+// capability bits reported by each child updater that implements
+// [CapabilityReporter]. Children that do not implement the interface
+// contribute zero bits.
+//
+// Composition rule: OR. A capability is considered wired for the
+// composite if any child updater has wired it.
+//
+// Returns:
+//   - uint32: OR of all child-reported capability bits, or 0 if no
+//     child implements CapabilityReporter or none has wired any bits.
+func (c *CompositeConsumerUpdater) Capabilities() uint32 {
+	var bits uint32
+	for _, u := range c.updaters {
+		if cr, ok := u.(CapabilityReporter); ok {
+			bits |= cr.Capabilities()
+		}
+	}
+	return bits
+}
+
+// Compile-time assertion: CompositeConsumerUpdater satisfies
+// CapabilityReporter so the Manager's type-assertion picks it up.
+var _ CapabilityReporter = (*CompositeConsumerUpdater)(nil)

@@ -143,6 +143,51 @@ func TestCompositeConsumerUpdater_MultipleCalls(t *testing.T) {
 	require.Equal(t, parts2, u1.calls[1].partitions)
 }
 
+// reportingUpdater is a mockUpdater that additionally implements
+// CapabilityReporter, used to verify composite OR semantics.
+type reportingUpdater struct {
+	mockUpdater
+	bits uint32
+}
+
+func (r *reportingUpdater) Capabilities() uint32 { return r.bits }
+
+// TestCompositeConsumerUpdater_CapabilitiesORs verifies that
+// CompositeConsumerUpdater.Capabilities() ORs across only the children
+// that implement CapabilityReporter; non-reporting children contribute 0.
+func TestCompositeConsumerUpdater_CapabilitiesORs(t *testing.T) {
+	const syntheticBit uint32 = 1 << 31
+
+	t.Run("no children report", func(t *testing.T) {
+		u1 := &mockUpdater{}
+		u2 := &mockUpdater{}
+		composite := NewCompositeConsumerUpdater(u1, u2)
+
+		require.Equal(t, uint32(0), composite.Capabilities(),
+			"composite must return 0 when no child implements CapabilityReporter")
+	})
+
+	t.Run("one child reports CapProcessingGate", func(t *testing.T) {
+		u1 := &mockUpdater{} // not a reporter
+		u2 := &reportingUpdater{bits: types.CapProcessingGate}
+		composite := NewCompositeConsumerUpdater(u1, u2)
+
+		require.Equal(t, types.CapProcessingGate, composite.Capabilities(),
+			"composite must report the bit set by its only reporting child")
+	})
+
+	t.Run("multiple reporters ORed", func(t *testing.T) {
+		u1 := &mockUpdater{} // not a reporter — contributes 0
+		u2 := &reportingUpdater{bits: types.CapProcessingGate}
+		u3 := &reportingUpdater{bits: syntheticBit}
+		composite := NewCompositeConsumerUpdater(u1, u2, u3)
+
+		got := composite.Capabilities()
+		require.Equal(t, types.CapProcessingGate|syntheticBit, got,
+			"composite must OR bits across all reporting children")
+	})
+}
+
 func TestCompositeConsumerUpdater_PartialFailure(t *testing.T) {
 	errFail := errors.New("second updater failed")
 

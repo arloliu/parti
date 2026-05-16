@@ -321,6 +321,13 @@ func (d *Dynamic) UpdateWorkerConsumer(ctx context.Context, workerID string, par
 	return d.inner.UpdateWorkerConsumer(ctx, workerID, partitions)
 }
 
+// Capabilities forwards to the inner [durable.WorkerConsumer]; implements
+// the [parti.CapabilityReporter] interface so the Manager's type-assertion
+// on the registered *Dynamic updater succeeds.
+func (d *Dynamic) Capabilities() uint32 {
+	return d.inner.Capabilities()
+}
+
 // Close stops all partition consumers.
 //
 // Stop gracefully stops all partition consumers.
