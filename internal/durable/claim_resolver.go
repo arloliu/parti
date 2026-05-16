@@ -57,7 +57,6 @@ type ResolverOption func(*ClaimBasedResolver)
 func WithReconcileInterval(d time.Duration) ResolverOption {
 	return func(r *ClaimBasedResolver) {
 		r.reconcileInterval = d
-		r.reconcileIntervalSet = true
 	}
 }
 
@@ -143,8 +142,7 @@ type ClaimBasedResolver struct {
 	refreshCooldown time.Duration
 
 	// Reconcile configuration.
-	reconcileInterval    time.Duration
-	reconcileIntervalSet bool
+	reconcileInterval time.Duration
 
 	// Drift-driven watcher restart configuration. The reconciler signals
 	// the supervisor to tear down the current watcher when drift is
@@ -174,7 +172,7 @@ type ClaimBasedResolver struct {
 	// supervisor and reconciler goroutines have exited (or inline by Start
 	// on early-exit error paths so Stop never hangs).
 	//
-	// Lifecycle invariants (P1 fix):
+	// Lifecycle invariants:
 	//   - stopCh and doneCh are allocated in NewClaimBasedResolver, so Stop
 	//     is safe to call before Start.
 	//   - started records whether Start successfully spawned goroutines;
@@ -235,7 +233,6 @@ func NewClaimBasedResolver(
 		refreshCooldown:   1 * time.Second,
 		reconcileInterval: defaultReconcileInterval,
 		// Allocate lifecycle channels eagerly so Stop is safe before Start.
-		// See P1 fix in Stop/Start.
 		stopCh: make(chan struct{}),
 		doneCh: make(chan struct{}),
 	}
@@ -287,8 +284,8 @@ func (r *ClaimBasedResolver) SetBatching(window time.Duration, maxItems int) {
 // re-launching goroutines. If Stop has already been called before Start,
 // Start refuses to spawn goroutines and returns nil immediately.
 func (r *ClaimBasedResolver) Start(ctx context.Context) error {
-	// P1 fix: refuse double-start and stop-before-start. Atomic CAS makes
-	// the lifecycle transition observable to a concurrent Stop without a
+	// Refuse double-start and stop-before-start. Atomic CAS makes the
+	// lifecycle transition observable to a concurrent Stop without a
 	// dedicated mutex.
 	if !r.started.CompareAndSwap(false, true) {
 		return nil
@@ -784,7 +781,7 @@ func (r *ClaimBasedResolver) reconcileLoop(ctx context.Context) {
 // This is the same revision-aware tombstone shape used by the watcher
 // at applyPendingBatch.
 func (r *ClaimBasedResolver) reconcileOnce(ctx context.Context) {
-	// P0 fix: snapshot the cache BEFORE walking KV Keys(). Any cache entry
+	// Snapshot the cache BEFORE walking KV Keys(). Any cache entry
 	// added by the watcher concurrently with Keys()/Get() will not appear in
 	// `snap` and therefore cannot be synthesized into a tombstone by the
 	// loop below. The shared apply path's revision short-circuit
@@ -846,7 +843,7 @@ func (r *ClaimBasedResolver) reconcileOnce(ctx context.Context) {
 		pendingByPID[pid] = pending{op: "upsert", data: entry.Value(), revision: entry.Revision()}
 	}
 
-	// P0 fix: iterate over the pre-Keys snapshot, NOT the live cache. Any
+	// Iterate over the pre-Keys snapshot, NOT the live cache. Any
 	// entry the watcher added after `snap` was taken is invisible here, so
 	// the tombstone pass cannot synthesize a delete for it.
 	for pid, e := range snap {
