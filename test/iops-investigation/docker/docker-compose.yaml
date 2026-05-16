@@ -1,0 +1,101 @@
+# NATS JetStream cluster for the IOPS investigation rig.
+#
+# Environment variables (set in the shell or in a .env file):
+#   IOPS_RIG_NATS_IMAGE   — full image reference (default: nats:2.12.6)
+#   IOPS_RIG_NATS_REPLICAS — not directly consumed here; use profiles instead.
+#
+# Profiles:
+#   r3  — bring up nats-1, nats-2, nats-3 (3-node cluster, the default)
+#   r5  — bring up all five nodes (5-node cluster, used for M1.10)
+#
+# Usage:
+#   docker compose --profile r3 up -d   # 3-node cluster
+#   docker compose --profile r5 up -d   # 5-node cluster
+#
+# Only nats-1 exposes host ports (4222 client, 8222 monitoring) so the
+# harness can connect via a single URL (nats://localhost:4222).
+
+services:
+  nats-1:
+    image: ${IOPS_RIG_NATS_IMAGE:-nats:2.12.6}
+    container_name: iops-nats-1
+    profiles: [r3, r5]
+    command: ["-c", "/etc/nats/nats-server.conf"]
+    environment:
+      - SERVER_NAME=nats-1
+    ports:
+      - "4222:4222"   # client port — only nats-1 is exposed to the host
+      - "8222:8222"   # monitoring port
+    volumes:
+      - ./nats-server.conf:/etc/nats/nats-server.conf:ro
+      - nats-1-data:/data
+    networks:
+      - iops-net
+    restart: unless-stopped
+
+  nats-2:
+    image: ${IOPS_RIG_NATS_IMAGE:-nats:2.12.6}
+    container_name: iops-nats-2
+    profiles: [r3, r5]
+    command: ["-c", "/etc/nats/nats-server.conf"]
+    environment:
+      - SERVER_NAME=nats-2
+    volumes:
+      - ./nats-server.conf:/etc/nats/nats-server.conf:ro
+      - nats-2-data:/data
+    networks:
+      - iops-net
+    restart: unless-stopped
+
+  nats-3:
+    image: ${IOPS_RIG_NATS_IMAGE:-nats:2.12.6}
+    container_name: iops-nats-3
+    profiles: [r3, r5]
+    command: ["-c", "/etc/nats/nats-server.conf"]
+    environment:
+      - SERVER_NAME=nats-3
+    volumes:
+      - ./nats-server.conf:/etc/nats/nats-server.conf:ro
+      - nats-3-data:/data
+    networks:
+      - iops-net
+    restart: unless-stopped
+
+  nats-4:
+    image: ${IOPS_RIG_NATS_IMAGE:-nats:2.12.6}
+    container_name: iops-nats-4
+    profiles: [r5]
+    command: ["-c", "/etc/nats/nats-server.conf"]
+    environment:
+      - SERVER_NAME=nats-4
+    volumes:
+      - ./nats-server.conf:/etc/nats/nats-server.conf:ro
+      - nats-4-data:/data
+    networks:
+      - iops-net
+    restart: unless-stopped
+
+  nats-5:
+    image: ${IOPS_RIG_NATS_IMAGE:-nats:2.12.6}
+    container_name: iops-nats-5
+    profiles: [r5]
+    command: ["-c", "/etc/nats/nats-server.conf"]
+    environment:
+      - SERVER_NAME=nats-5
+    volumes:
+      - ./nats-server.conf:/etc/nats/nats-server.conf:ro
+      - nats-5-data:/data
+    networks:
+      - iops-net
+    restart: unless-stopped
+
+networks:
+  iops-net:
+    driver: bridge
+
+volumes:
+  nats-1-data:
+  nats-2-data:
+  nats-3-data:
+  nats-4-data:
+  nats-5-data:

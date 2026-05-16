@@ -1,0 +1,30 @@
+# prometheus-node-exporter.yaml — docker compose override for Phase 3d.
+#
+# Drop-in compose service that exports host-level disk metrics via
+# node_exporter. Bring up alongside the main cluster:
+#
+#   docker compose \
+#     -f docker/docker-compose.yaml \
+#     -f scripts/prometheus-node-exporter.yaml \
+#     up -d
+#
+# Scrape metrics from http://localhost:9100/metrics.
+# Use capture-node-exporter.sh to record a time-series from this endpoint.
+services:
+  node-exporter:
+    image: quay.io/prometheus/node-exporter:v1.8.2
+    container_name: iops-node-exporter
+    command:
+      - "--path.procfs=/host/proc"
+      - "--path.sysfs=/host/sys"
+      - "--path.rootfs=/rootfs"
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+    ports:
+      - "9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    restart: unless-stopped
+    networks:
+      - iops-net
