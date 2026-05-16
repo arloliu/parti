@@ -71,7 +71,8 @@ type Collector struct {
 	resolverBatchSize     prometheus.Histogram
 	resolverBatchFlushes  *prometheus.CounterVec
 
-	resolverWatcherRestarts *prometheus.CounterVec
+	resolverWatcherRestarts  *prometheus.CounterVec
+	resolverReconcileRescues prometheus.Counter
 
 	// Coordinator gauges
 	coordinatorInFlight     prometheus.Gauge
@@ -323,6 +324,12 @@ func NewCollectorWithRegistry(reg prometheus.Registerer) *Collector {
 				Help: "Number of resolver KV watcher restarts by reason",
 			},
 			[]string{"reason"},
+		),
+		resolverReconcileRescues: factory.NewCounter(
+			prometheus.CounterOpts{
+				Name: "simulation_resolver_reconcile_rescue_total",
+				Help: "Number of reconcile passes that applied drift recovery to the resolver cache",
+			},
 		),
 
 		// Coordinator gauges
@@ -962,6 +969,10 @@ func (a resolverMetricsAdapter) IncBatchFlush(reason string) {
 
 func (a resolverMetricsAdapter) IncWatcherRestart(reason string) {
 	a.c.resolverWatcherRestarts.WithLabelValues(reason).Inc()
+}
+
+func (a resolverMetricsAdapter) IncReconcileRescue() {
+	a.c.resolverReconcileRescues.Inc()
 }
 
 // SetWorkersActive sets the number of active workers.

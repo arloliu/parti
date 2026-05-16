@@ -30,6 +30,14 @@ const (
 // Updates() channel closed and a new watcher must be established.
 var errWatcherClosed = errors.New("claim resolver: watcher channel closed")
 
+// Watcher-restart reason labels emitted via ResolverMetrics.IncWatcherRestart.
+// Defined as constants so emit sites and tests share a single source of truth.
+const (
+	watcherRestartReasonChannelClosed   = "channel_closed"
+	watcherRestartReasonEstablishFailed = "establish_failed"
+	watcherRestartReasonDriftDetected   = "drift_detected"
+)
+
 // ResolverOption configures a ClaimBasedResolver.
 type ResolverOption func(*ClaimBasedResolver)
 
@@ -50,6 +58,30 @@ func WithReconcileInterval(d time.Duration) ResolverOption {
 	return func(r *ClaimBasedResolver) {
 		r.reconcileInterval = d
 		r.reconcileIntervalSet = true
+	}
+}
+
+// WithDriftRestartCooldown sets the minimum interval between
+// reconciler-triggered watcher restarts. When reconcileOnce observes drift
+// between KV and the in-memory cache, it asks the supervisor to tear down
+// and re-establish the watcher; this signal is rate-limited so that a
+// persistently unreachable NATS server cannot trigger a restart storm.
+//
+// A value of 0 disables drift-driven restarts entirely: reconcileOnce will
+// still observe drift and rescue the cache (emitting IncReconcileRescue),
+// but the watcher is NOT torn down. The default is 2 × reconcileInterval,
+// floored at 60s. If reconcileInterval is 0 (reconciler disabled), drift
+// restart is inert because the trigger never fires.
+//
+// Parameters:
+//   - d: Minimum interval between drift-driven watcher restarts; 0 disables.
+//
+// Returns:
+//   - ResolverOption: Option function
+func WithDriftRestartCooldown(d time.Duration) ResolverOption {
+	return func(r *ClaimBasedResolver) {
+		r.driftRestartCooldown = d
+		r.driftRestartCooldownSet = true
 	}
 }
 
@@ -113,6 +145,30 @@ type ClaimBasedResolver struct {
 	// Reconcile configuration.
 	reconcileInterval    time.Duration
 	reconcileIntervalSet bool
+
+	// Drift-driven watcher restart configuration. The reconciler signals
+	// the supervisor to tear down the current watcher when drift is
+	// observed; the supervisor's existing restart path then re-establishes
+	// the watcher and emits IncWatcherRestart("drift_detected"). The
+	// cooldown rate-limits these restarts to avoid storms when NATS is
+	// persistently unreachable.
+	driftRestartCooldown    time.Duration
+	driftRestartCooldownSet bool
+
+	// driftRestartPending signals to supervise that the most recent
+	// watcher close was triggered by the reconciler observing drift, so
+	// the restart should be classified as "drift_detected" rather than
+	// "channel_closed". Set by requestWatcherRestartFromReconcile;
+	// consumed by supervise via CompareAndSwap(true, false).
+	driftRestartPending atomic.Bool
+
+	// lastDriftRestartNano records the time (UnixNano) of the most recent
+	// reconciler-triggered watcher restart. Used to rate-limit drift
+	// restarts to no more than one per driftRestartCooldown. A zero value
+	// means "no drift restart has been triggered yet". Mutated only from
+	// the single reconciler goroutine; the atomic load is needed for
+	// publication, not for cross-goroutine writers.
+	lastDriftRestartNano atomic.Int64
 
 	// Lifecycle. stopCh is closed by Stop; doneCh is closed once both
 	// supervisor and reconciler goroutines have exited (or inline by Start
@@ -186,6 +242,15 @@ func NewClaimBasedResolver(
 
 	for _, opt := range opts {
 		opt(r)
+	}
+
+	// Default drift-restart cooldown: 2 × reconcileInterval, floored at
+	// 60s. If reconcileInterval is 0 the reconciler is disabled, so the
+	// drift trigger never fires and the cooldown value is moot. If the
+	// caller explicitly set the cooldown (including to 0 to disable
+	// drift-driven restarts), respect that.
+	if !r.driftRestartCooldownSet && r.reconcileInterval > 0 {
+		r.driftRestartCooldown = max(2*r.reconcileInterval, 60*time.Second)
 	}
 
 	// Initialize empty cache
@@ -496,7 +561,7 @@ func (r *ClaimBasedResolver) supervise(ctx context.Context, initial jetstream.Ke
 		nextWatcher, restartErr := r.runWatcher(ctx)
 		if restartErr != nil {
 			if r.metrics != nil {
-				r.metrics.IncWatcherRestart("establish_failed")
+				r.metrics.IncWatcherRestart(watcherRestartReasonEstablishFailed)
 			}
 			if r.logger != nil {
 				r.logger.Warn("claim resolver watcher restart failed, retrying",
@@ -508,8 +573,20 @@ func (r *ClaimBasedResolver) supervise(ctx context.Context, initial jetstream.Ke
 			continue
 		}
 
+		// Classify the restart reason: a pending drift signal from the
+		// reconciler takes precedence over the default channel_closed.
+		// CompareAndSwap consumes the flag atomically so subsequent
+		// restarts default back to channel_closed until the reconciler
+		// signals again. If runWatcher had failed repeatedly above
+		// (emitting establish_failed), the flag stays set until this
+		// successful restart, at which point it correctly classifies as
+		// drift_detected — the original cause of the close was drift.
+		reason := watcherRestartReasonChannelClosed
+		if r.driftRestartPending.CompareAndSwap(true, false) {
+			reason = watcherRestartReasonDriftDetected
+		}
 		if r.metrics != nil {
-			r.metrics.IncWatcherRestart("channel_closed")
+			r.metrics.IncWatcherRestart(reason)
 		}
 		watcher = nextWatcher
 		backoff = watcherBaseBackoff
@@ -792,7 +869,78 @@ func (r *ClaimBasedResolver) reconcileOnce(ctx context.Context) {
 	if len(pendingByPID) == 0 {
 		return
 	}
+	// Emit the rescue metric BEFORE applying so the event is observable
+	// even if applyPendingBatch were ever to panic.
+	if r.metrics != nil {
+		r.metrics.IncReconcileRescue()
+	}
 	r.applyPendingBatch(pendingByPID, "reconcile")
+
+	// Drift observed: the watcher missed events, almost certainly because
+	// its Updates() channel is silently stalled (the nats.go KV watcher
+	// does not surface NATS server restarts as channel close). Ask the
+	// supervisor to tear down the current watcher; its existing restart
+	// path will re-establish via WatchAll and re-deliver historical state
+	// through the initial replay. Rate-limited by driftRestartCooldown.
+	r.requestWatcherRestartFromReconcile()
+}
+
+// requestWatcherRestartFromReconcile is called by reconcileOnce when it has
+// applied any change to the cache. The reconciler engaging means the watcher
+// missed events — likely a silent stall (the nats.go KV watcher does not
+// surface server restarts as Updates() channel close). The supervisor's
+// restart path then re-establishes the watcher and re-delivers historical
+// state via WatchAll's initial replay.
+//
+// Rate-limited to one drift-driven restart per driftRestartCooldown (default
+// 2 × reconcileInterval, minimum 60s). The reconciler will still rescue
+// subsequent drifts at its normal cadence; rate-limiting prevents restart
+// storms when the watcher cannot successfully re-establish (e.g., persistent
+// NATS unreachable). A cooldown of 0 disables drift-driven restart entirely.
+//
+// Invariant: called only from the single reconciler goroutine. The
+// load-then-store on lastDriftRestartNano is therefore not racy with itself;
+// the atomic operations are for publication to readers (e.g., metrics or
+// future tests) rather than concurrent writers.
+func (r *ClaimBasedResolver) requestWatcherRestartFromReconcile() {
+	cooldown := r.driftRestartCooldown
+	if cooldown <= 0 {
+		return // drift-driven restart disabled
+	}
+
+	if last := r.lastDriftRestartNano.Load(); last != 0 {
+		if time.Since(time.Unix(0, last)) < cooldown {
+			return
+		}
+	}
+	r.lastDriftRestartNano.Store(time.Now().UnixNano())
+
+	// Mark the next channel-close as drift-triggered for the supervise
+	// reason emission. Note: a NATS-level (non-drift) close may race with
+	// this Store and be misclassified as drift_detected, or a real drift
+	// close may race the supervisor's CAS and be classified as
+	// channel_closed. Either misclassification is benign — operators see
+	// roughly the right reason in aggregate, and the recovery path is
+	// identical in both cases.
+	r.driftRestartPending.Store(true)
+
+	// Stop the current watcher under watcherMu. Closing the Updates()
+	// channel makes processWatcher return errWatcherClosed, which lets
+	// supervise re-establish via runWatcher. The Stop call is offloaded
+	// to its own goroutine because nats.go's KeyWatcher.Stop drains the
+	// underlying JetStream subscription, which is a synchronous NATS
+	// round-trip that can block on slow or degraded connections —
+	// precisely the conditions under which drift restarts fire. Stopping
+	// here in line would stall the reconciler goroutine and delay the
+	// next reconcile tick.
+	r.watcherMu.Lock()
+	w := r.currentWatcher
+	r.watcherMu.Unlock()
+	if w != nil {
+		// w may already be replaced or stopped by the supervisor by the
+		// time this goroutine runs; KeyWatcher.Stop is idempotent.
+		go func() { _ = w.Stop() }()
+	}
 }
 
 // sleepWithStop blocks for d or until stopCh/ctx cancellation. Returns false

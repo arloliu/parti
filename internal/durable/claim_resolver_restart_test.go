@@ -70,7 +70,7 @@ func TestClaimResolver_WatcherRestartOnChannelClose(t *testing.T) {
 	}, 10*time.Second, 25*time.Millisecond, "cache should converge after watcher restart")
 
 	require.Eventually(t, func() bool {
-		return ms.watcherRestartCount("channel_closed") >= 1
+		return ms.watcherRestartCount(watcherRestartReasonChannelClosed) >= 1
 	}, 5*time.Second, 25*time.Millisecond, "IncWatcherRestart(channel_closed) was not emitted")
 }
 
@@ -299,7 +299,7 @@ func TestClaimResolver_StopWithRestartingWatcher(t *testing.T) {
 	// re-establish (failing because NATS is down). This is an event-driven
 	// signal that the supervisor is in its backoff sleep.
 	require.Eventually(t, func() bool {
-		return ms.watcherRestartCount("establish_failed") >= 1
+		return ms.watcherRestartCount(watcherRestartReasonEstablishFailed) >= 1
 	}, 3*time.Second, 25*time.Millisecond,
 		"supervisor should attempt to re-establish the watcher and fail")
 
@@ -386,9 +386,9 @@ func TestClaimResolver_TombstoneSurvivesReconcile(t *testing.T) {
 
 	// 7. Watcher must not have restarted during this test — the failure
 	// mode is a confused tombstone, not a watcher death.
-	require.Zero(t, ms.watcherRestartCount("channel_closed"),
+	require.Zero(t, ms.watcherRestartCount(watcherRestartReasonChannelClosed),
 		"watcher must not have died during this test")
-	require.Zero(t, ms.watcherRestartCount("establish_failed"),
+	require.Zero(t, ms.watcherRestartCount(watcherRestartReasonEstablishFailed),
 		"watcher must not have failed to establish during this test")
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +30,7 @@ type metricsSpy struct {
 	batches         []batchMetric
 	flushReasons    map[string]int
 	watcherRestarts map[string]int
+	rescueCount     atomic.Int64
 }
 
 func newMetricsSpy() *metricsSpy {
@@ -76,11 +78,19 @@ func (m *metricsSpy) IncWatcherRestart(reason string) {
 	m.watcherRestarts[reason]++
 }
 
+func (m *metricsSpy) IncReconcileRescue() {
+	m.rescueCount.Add(1)
+}
+
 // snapshot helpers for concurrent-safe reads in tests.
 func (m *metricsSpy) watcherRestartCount(reason string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.watcherRestarts[reason]
+}
+
+func (m *metricsSpy) reconcileRescueCount() int {
+	return int(m.rescueCount.Load())
 }
 
 func (m *metricsSpy) flushReasonCount(reason string) int {

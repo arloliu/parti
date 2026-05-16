@@ -39,6 +39,17 @@ type ResolverMetrics interface {
 
 	// IncWatcherRestart increments a counter when the resolver's KV watcher
 	// is re-established after closure or establishment failure.
-	// Reasons: "channel_closed", "establish_failed".
+	// Reasons: "channel_closed", "drift_detected", "establish_failed".
 	IncWatcherRestart(reason string)
+
+	// IncReconcileRescue increments when reconcileOnce applies any
+	// change to the cache — i.e., the reconciler observed drift between
+	// KV and the in-memory cache and rescued the cache. Persistent
+	// non-zero values are strong evidence the KV watcher is silently
+	// stalled (the nats.go KV watcher does not surface NATS server
+	// restarts as Updates() channel close, so the supervisor's
+	// channel_closed restart path will not fire for that trigger).
+	// Operators should alert on this metric being non-zero across
+	// multiple consecutive reconcile cycles.
+	IncReconcileRescue()
 }
