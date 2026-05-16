@@ -289,27 +289,69 @@ investigation is done — recommend `Handoff.SweepInterval = 5 min` and
 ship `findings.md`. Most of the user's reported per-partition cost is a
 30 s ticker.
 
-### Tier 2 — H2 attribution (~7 h on top of Tier 1)
+### Tier 2 — H2 attribution (~3.5 h with focused shape)
 
 Goal: if Tier 1 leaves a residual slope (or H1.A is unverified),
 attribute the remainder to per-partition pull-consumer state churn.
 
+**Shape recommendation (post-Tier-1 / M1.9 learning):** drop N=500
+from Tier 2. The Tier 1 + M1.9 data shows that what we care about
+is the *slope difference* between cells, and a 2-point fit at
+N∈{1000, 3000} is enough to detect a ≥10 % slope change between
+ablations. N=500 was useful in Tier 1 to anchor the intercept; in
+Tier 2 we are comparing *slope deltas*, not absolute intercepts.
+
 | Cell | N values | Reps | Runs |
 |---|---|---:|---:|
-| M1.5 (H2.A — fetch=30s) | 500, 1000, 3000 | 3 | 9 |
-| M1.6 (H2.B — queue consumer) | 500, 1000, 3000 | 3 | 9 |
-| M1.7 (H2.C — data-storage=memory) | 500, 1000, 3000 | 3 | 9 |
+| M1.5 (H2.A — fetch=30s) | 1000, 3000 | 3 | 6 |
+| M1.6 (H2.B — queue consumer) | 1000, 3000 | 3 | 6 |
+| M1.7 (H2.C — data-storage=memory) | 1000, 3000 | 3 | 6 |
 
-Total: **27 runs ≈ 7.6 h**.
+Total: **18 runs ≈ 2.3 h compressed** (or ~4.5 h full-cadence).
 
 ```bash
 bash scripts/run-matrix.sh \
   --seed 42 \
   --cells M1.5,M1.6,M1.7 \
   --reps 3 \
-  --n-values 500,1000,3000 \
+  --n-values 1000,3000 \
+  --warmup-secs 120 \
+  --capture-secs 120 \
   --results-dir results/tier2-$(date +%Y%m%d)/
 ```
+
+#### Why not compress the per-run cadence further?
+
+Tier 0 showed CV = 0.6 % at 60 s capture, so on its face shorter
+capture looks safe. Tier 1's time-series tells a different story:
+
+- The IOPS time series at **N=3000** shows a deterministic
+  ~10× spike at **t ≈ 200–220 s** of harness lifetime. The spike
+  fires at the same wall-clock offset across reps, scales with N,
+  and is *not* removed by memory KV (M1.9). It is something
+  NATS-server-internal — likely a periodic stream / consumer
+  snapshot or page-cache writeback.
+- With capture = 120 s, the spike lands inside or outside the
+  capture window depending on phase alignment of *when* the
+  harness started. That introduces a ~5 % per-run variance that
+  shorter capture would amplify, not reduce.
+
+Bigger wins than compressing capture:
+
+1. **Fewer N values per cell.** Cutting from {500, 1000, 3000}
+   to {1000, 3000} drops each cell from 9 runs to 6 — 33 %
+   wall-clock cut, zero loss of slope-test signal.
+2. **Steady-window analysis, not steady-window capture.** Capture
+   long enough to include the spike; then filter `t ∈ [warmup+20,
+   warmup+capture-40]` post-hoc in analyze.py so the mean reflects
+   the inter-spike steady state. Capture stays robust; the
+   reported figure is honest.
+3. **Capture-window-only mean** is the honest figure for
+   per-cell comparison; analyze.py currently averages across the
+   whole run (warmup + capture), which dilutes high-N means by
+   the ramp-up phase. When comparing two cells, prefer
+   `awk`-computed capture-window-only means until analyze.py is
+   patched.
 
 ### Tier 3 — full matrix (~70 h)
 

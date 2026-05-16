@@ -11,7 +11,7 @@ COVERAGE_HTML   := $(COVERAGE_DIR)/coverage.html
 
 # Source files
 ALL_GO_FILES    := $(shell find . -name "*.go" -not -path "./vendor/*")
-TEST_DIRS       := $(sort $(dir $(shell find . -name "*_test.go" -not -path "./vendor/*" -not -path "./test/integration/*" -not -path "./test/stress/*")))
+TEST_DIRS       := $(sort $(dir $(shell find . -name "*_test.go" -not -path "./vendor/*" -not -path "./test/integration/*" -not -path "./test/stress/*" -not -path "./test/iops-investigation/*")))
 INTEGRATION_DIR := ./test/integration/...
 STRESS_DIR      := ./test/stress/...
 LATEST_GIT_TAG  := $(shell git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
