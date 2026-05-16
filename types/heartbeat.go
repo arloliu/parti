@@ -28,7 +28,7 @@ type Heartbeat struct {
 	AppliedDigest         uint64    `json:"applied_digest,omitempty"`
 	AppliedSourceRevision uint64    `json:"applied_source_revision,omitempty"`
 	AppliedSourceRevKnown bool      `json:"applied_source_revision_known,omitempty"`
-	AppliedAt             time.Time `json:"applied_at,omitempty"`
+	AppliedAt             time.Time `json:"applied_at"`
 	Timestamp             time.Time `json:"timestamp"`
 }
 
