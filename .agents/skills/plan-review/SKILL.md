@@ -7,8 +7,6 @@ description: Dispatch GitHub Copilot CLI (gpt-5.5 at xhigh effort) to perform a 
 
 This skill automates **architectural plan review** by handing the plan to a stronger reviewer model running outside this conversation (GitHub Copilot CLI with `gpt-5.5` at `xhigh` reasoning effort). Use it when the plan you're working with has materially changed and you need a recurring/full pass — not a precision sweep (use `final-plan-review` for that) and not a code-level audit (use `post-impl-review`).
 
-This is the automated equivalent of "Prompt 1 — Initial / Recurring Architectural Review" in `tmp/partition_assignment_reviewer_prompts.md`.
-
 ## When to invoke
 
 - The plan was just rewritten or had a new pillar / phase added.
@@ -23,7 +21,7 @@ Do **not** use this skill for:
 ## Arguments
 
 Caller provides:
-- **Plan path**: the authoritative spec file (e.g., `tmp/partition_assignment_robustness_plan.md`).
+- **Plan path**: the authoritative spec file (any markdown file with the design / implementation plan).
 - **Short name**: a brief identifier for this round (e.g., `refactored_plan`, `followup_plan`, `pre_implementation`). The report is written to `tmp/<plan-stem>_<short-name>_review.md` (or `tmp/<short-name>_review.md` if the plan stem would be redundant).
 - **Optional**: companion docs to read (strategy, prior reviews, code references the plan cites). Default to reading the most recent prior review(s) in the same `tmp/` neighborhood plus any strategy or feedback files the plan itself references.
 

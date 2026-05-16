@@ -7,8 +7,6 @@ description: Dispatch GitHub Copilot CLI (gpt-5.5 at xhigh effort) to perform a 
 
 This skill automates the **last review pass before implementation starts**. The plan has already been through one or more rounds of architectural review (`plan-review`); the goal here is to catch the precision issues that would cause an implementing agent to either ship a bug or waste cycles asking clarifying questions.
 
-This is the automated equivalent of "Prompt 2 — Precision Pass / Pre-Implementation Sanity Check" in `tmp/partition_assignment_reviewer_prompts.md`.
-
 ## When to invoke
 
 - Architecture is settled across prior `plan-review` rounds.

@@ -7,8 +7,6 @@ description: Dispatch GitHub Copilot CLI (gpt-5.5 at xhigh effort) to perform a 
 
 This skill automates **code-against-plan review** after an implementing agent (or human) has delivered an implementation phase. The reviewer (Copilot CLI, `gpt-5.5` at `xhigh`) reads the spec, the delivered code, and project conventions, then writes a structured report with `file:line` evidence and a merge-readiness verdict.
 
-This is the automated equivalent of "Prompt 3 — Implementation-Phase Plan Review" in `tmp/partition_assignment_reviewer_prompts.md`, adapted for **post-implementation** (the original was pre-implementation).
-
 ## When to invoke
 
 - An implementing agent has just delivered a phase or self-contained chunk of work and you want an independent pass.
