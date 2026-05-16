@@ -34,10 +34,7 @@ func TestConcurrentKVBucketCreation(t *testing.T) {
 
 		// Start 5 goroutines all trying to create the same bucket
 		for i := range numWorkers {
-			wg.Add(1) //nolint:revive // Standard pattern for concurrent operations
-			go func(idx int) {
-				defer wg.Done()
-
+			wg.Go(func() {
 				// Simulate what ensureKVBucket does
 				cfg := jetstream.KeyValueConfig{
 					Bucket:  bucketName,
@@ -58,8 +55,8 @@ func TestConcurrentKVBucketCreation(t *testing.T) {
 					return
 				}
 
-				kvs[idx] = kv
-			}(i)
+				kvs[i] = kv
+			})
 		}
 
 		wg.Wait()
@@ -89,10 +86,7 @@ func TestConcurrentKVBucketCreation(t *testing.T) {
 		successCount := make(chan int, numWorkers)
 
 		for i := range numWorkers {
-			wg.Add(1) //nolint:revive // Standard pattern for concurrent operations
-			go func(idx int) {
-				defer wg.Done()
-
+			wg.Go(func() {
 				// Retry logic
 				var err error
 				maxRetries := 5
@@ -107,7 +101,7 @@ func TestConcurrentKVBucketCreation(t *testing.T) {
 					kv, err := js.CreateKeyValue(ctx, cfg)
 					if err == nil {
 						_ = kv // Use the kv to avoid unused warning
-						successCount <- idx
+						successCount <- i
 						return
 					}
 
@@ -116,7 +110,7 @@ func TestConcurrentKVBucketCreation(t *testing.T) {
 						kv, err = js.KeyValue(ctx, bucketName)
 						if err == nil {
 							_ = kv
-							successCount <- idx
+							successCount <- i
 							return
 						}
 					}
@@ -127,8 +121,8 @@ func TestConcurrentKVBucketCreation(t *testing.T) {
 					}
 				}
 
-				t.Logf("Worker %d failed after %d retries: %v", idx, maxRetries, err)
-			}(i)
+				t.Logf("Worker %d failed after %d retries: %v", i, maxRetries, err)
+			})
 		}
 
 		wg.Wait()
@@ -247,18 +241,15 @@ func TestEnsureKVBucketWithRetry(t *testing.T) {
 		}
 
 		for i := range numWorkers {
-			wg.Add(1) //nolint:revive // Standard pattern for concurrent operations
-			go func(idx int) {
-				defer wg.Done()
-
+			wg.Go(func() {
 				kv, err := EnsureKVBucketWithRetry(ctx, js, cfg, 5)
 				if err != nil {
 					errors <- err
 					return
 				}
 
-				kvs[idx] = kv
-			}(i)
+				kvs[i] = kv
+			})
 		}
 
 		wg.Wait()

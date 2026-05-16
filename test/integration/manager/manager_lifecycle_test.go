@@ -123,14 +123,12 @@ func TestManager_MultipleWorkers(t *testing.T) {
 	var wg sync.WaitGroup
 	startErrors := make([]error, len(workers))
 	for i, mgr := range workers {
-		wg.Add(1) //nolint:revive // Explicit error handling requires this pattern
-		go func(idx int, m *parti.Manager) {
-			defer wg.Done()
-			if err := m.Start(startCtx); err != nil {
-				startErrors[idx] = err
+		wg.Go(func() {
+			if err := mgr.Start(startCtx); err != nil {
+				startErrors[i] = err
 			}
-			t.Logf("Worker %d started with ID: %s", idx, m.WorkerID())
-		}(i, mgr)
+			t.Logf("Worker %d started with ID: %s", i, mgr.WorkerID())
+		})
 	}
 	wg.Wait()
 
