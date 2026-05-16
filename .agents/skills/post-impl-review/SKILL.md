@@ -1,11 +1,13 @@
 ---
 name: post-impl-review
-description: Dispatch GitHub Copilot CLI (gpt-5.5 at xhigh effort) to perform a post-implementation review of delivered code against a plan / phase spec. Verifies the implementation faithfully realizes the spec, surfaces latent bugs, audits test coverage, and runs lint/build/test validation. Writes a versioned review report under tmp/. Designed for iterative fix-review loops until merge-clean.
+description: Dispatch an external reviewer (Codex plugin preferred, GitHub Copilot CLI fallback) to perform a post-implementation review of delivered code against a plan / phase spec. Verifies the implementation faithfully realizes the spec, surfaces latent bugs, audits test coverage, and runs lint/build/test validation. Writes a versioned review report under tmp/. Designed for iterative fix-review loops until merge-clean.
 ---
 
 # Post-Implementation Review Skill
 
-This skill automates **code-against-plan review** after an implementing agent (or human) has delivered an implementation phase. The reviewer (Copilot CLI, `gpt-5.5` at `xhigh`) reads the spec, the delivered code, and project conventions, then writes a structured report with `file:line` evidence and a merge-readiness verdict.
+This skill automates **code-against-plan review** after an implementing agent (or human) has delivered an implementation phase. The reviewer reads the spec, the delivered code, and project conventions, then writes a structured report with `file:line` evidence and a merge-readiness verdict.
+
+The reviewer is routed through the **Codex plugin** (`/codex:rescue` → `codex:codex-rescue` subagent → Codex CLI) when available, with **GitHub Copilot CLI** (`gpt-5.5` at `xhigh`) as a fallback. See "Quick-review alternatives" under Invocation for when to use `/codex:review` or `/codex:adversarial-review` directly instead of running this skill.
 
 ## When to invoke
 
@@ -29,6 +31,34 @@ The report is written to `tmp/<plan-stem>_<phase>_post_implementation_review_<vN
 
 ## Invocation
 
+Reviewer routing: **Codex plugin first, Copilot CLI as fallback.**
+
+### Reviewer detection
+
+The Codex plugin is available when this file exists:
+
+```bash
+test -f "$HOME/.claude/plugins/marketplaces/openai-codex/plugins/codex/scripts/codex-companion.mjs"
+```
+
+If present, use the Codex path. If absent (plugin uninstalled) or the codex run fails (errors, timeout, refusal), fall back to Copilot CLI.
+
+### Primary: Codex plugin
+
+Dispatch via the `Agent` tool using the codex rescue subagent. Pass `--wait`, `--effort xhigh`, and `--write` as routing flags in the prompt prefix. `--write` must be explicit — the rescue subagent's default is read-only for "review" tasks, but this skill needs Codex to write the versioned report file.
+
+```
+Agent({
+  subagent_type: "codex:codex-rescue",
+  description: "Post-impl review <phase> v<VERSION>",
+  prompt: "--wait --effort xhigh --write\n\n<full structured prompt from template below>"
+})
+```
+
+The structured prompt directs Codex to write the report to `<REPORT_PATH>`; the subagent returns Codex's stdout verbatim.
+
+### Fallback: Copilot CLI
+
 ```bash
 copilot \
   --model gpt-5.5 \
@@ -39,7 +69,16 @@ copilot \
   -p "$(cat /tmp/claude/<prompt-file>.md)"
 ```
 
-Write the prompt to a temp file under `/tmp/claude/` (or `$TMPDIR/`) first. Use a per-invocation filename (e.g., `copilot_<phase>_review_<vN>_prompt.md`) so iterations don't clobber each other and can be inspected after the fact.
+Write the prompt to a temp file under `/tmp/claude/` (or `$TMPDIR/`) first. Use a per-invocation filename (e.g., `copilot_<phase>_review_<vN>_prompt.md`) so iterations don't clobber each other and can be inspected after the fact. Both reviewers receive the same structured prompt below.
+
+### Quick-review alternatives
+
+When you do **not** need the full structured spec-compliance audit, prior-finding audit, or a versioned report on disk — just a fresh outside-model pass over the working-tree diff — use one of the codex commands directly instead of this skill:
+
+- `/codex:review --wait` — fixed-prompt review of working-tree (or `--base <ref>` for a branch diff). Output returned verbatim; no report file written. Good for lightweight sanity passes.
+- `/codex:adversarial-review --wait [focus text]` — same target selection as `/codex:review` but with adversarial framing that challenges design choices and assumptions. Accepts trailing focus text. Good for v1 rounds when you want the reviewer to question approach rather than just hunt for defects.
+
+These are not substitutes for `post-impl-review` when the spec-vs-impl audit and versioned report are needed — that's what justifies routing through `/codex:rescue` with this skill's structured prompt.
 
 ## Prompt template
 
@@ -201,6 +240,8 @@ Stop the loop when the reviewer's verdict is **merge** with zero P0 and zero P1 
 
 When dispatching v2+, include the prior review file in the "Read in this order" section so the reviewer audits the resolution of prior findings explicitly.
 
+**Effort step-down for v3+ rounds.** v1 and v2 default to `xhigh` — first-pass bug hunting and fix verification are where deep reasoning earns its cost. By v3+, the prior findings were narrow scope, the search surface has shrunk, and the audit is mostly "did these specific fixes land cleanly." Step down to `--effort high` for v3+ rounds; stay at `xhigh` only if a v2+ round introduced material new code (e.g., a refactor in response to a prior P0) that hasn't been reviewed at depth yet.
+
 ## Cost notes
 
-Same as the other review skills: non-trivial Copilot run. Plan for ~2–5 minutes per pass. Don't dispatch v2 until fixes for v1 are actually applied — running back-to-back without changes wastes tokens.
+Non-trivial external reviewer run. v1/v2 dispatch at Codex effort `xhigh` (or Copilot `gpt-5.5 xhigh` on fallback); v3+ rounds drop to `high` per the step-down note above. Plan for ~2–5 minutes per pass at `xhigh`, ~2–4 minutes at `high`. Don't dispatch v2 until fixes for v1 are actually applied — running back-to-back without changes wastes tokens.

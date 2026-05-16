@@ -1,11 +1,11 @@
 ---
 name: plan-review
-description: Dispatch GitHub Copilot CLI (gpt-5.5 at xhigh effort) to perform a full architectural / recurring review of a design or implementation plan. Use when a plan has changed substantially since the last review (new pillar, new design direction, new scope) and you want a fresh outside-model pass against the invariants and failure modes. Writes a structured review report under tmp/.
+description: Dispatch an external reviewer (Codex plugin preferred, GitHub Copilot CLI fallback) to perform a full architectural / recurring review of a design or implementation plan. Use when a plan has changed substantially since the last review (new pillar, new design direction, new scope) and you want a fresh outside-model pass against the invariants and failure modes. Writes a structured review report under tmp/.
 ---
 
 # Plan Review Skill
 
-This skill automates **architectural plan review** by handing the plan to a stronger reviewer model running outside this conversation (GitHub Copilot CLI with `gpt-5.5` at `xhigh` reasoning effort). Use it when the plan you're working with has materially changed and you need a recurring/full pass — not a precision sweep (use `final-plan-review` for that) and not a code-level audit (use `post-impl-review`).
+This skill automates **architectural plan review** by handing the plan to a stronger reviewer model running outside this conversation. The reviewer is routed through the **Codex plugin** (`/codex:rescue` → `codex:codex-rescue` subagent → Codex CLI) when available, with **GitHub Copilot CLI** (`gpt-5.5` at `xhigh`) as a fallback. Use it when the plan you're working with has materially changed and you need a recurring/full pass — not a precision sweep (use `final-plan-review` for that) and not a code-level audit (use `post-impl-review`).
 
 ## When to invoke
 
@@ -29,7 +29,33 @@ If the caller did not supply the short name, derive one from the call context (e
 
 ## Invocation
 
-Run from the repo root via:
+Reviewer routing: **Codex plugin first, Copilot CLI as fallback.**
+
+### Reviewer detection
+
+The Codex plugin is available when this file exists:
+
+```bash
+test -f "$HOME/.claude/plugins/marketplaces/openai-codex/plugins/codex/scripts/codex-companion.mjs"
+```
+
+If present, use the Codex path. If absent (plugin uninstalled) or the codex run fails (errors, timeout, refusal), fall back to Copilot CLI.
+
+### Primary: Codex plugin
+
+Dispatch via the `Agent` tool using the codex rescue subagent. The subagent is a thin forwarder that runs the Codex CLI with your prompt; pass `--wait`, `--effort xhigh`, and `--write` as routing flags in the prompt prefix. `--write` must be explicit — the rescue subagent's default is read-only for "review" tasks, but this skill needs Codex to write the report file.
+
+```
+Agent({
+  subagent_type: "codex:codex-rescue",
+  description: "Plan review: <short-name>",
+  prompt: "--wait --effort xhigh --write\n\n<full structured prompt from template below>"
+})
+```
+
+The subagent returns Codex's stdout verbatim; the structured prompt instructs Codex to write the report directly to `<REPORT_PATH>`.
+
+### Fallback: Copilot CLI
 
 ```bash
 copilot \
@@ -43,7 +69,7 @@ copilot \
 
 Write the prompt to a temp file under `/tmp/claude/` (or `$TMPDIR/`) first — this avoids shell escaping and keeps the prompt inspectable.
 
-The prompt instructs Copilot to read the plan, companion docs, and any cited source files; evaluate against the bar below; and write the report directly to disk at the agreed path.
+Both reviewers receive the same structured prompt below; only the dispatch wrapper differs.
 
 ## Prompt template
 
@@ -147,4 +173,4 @@ If the caller asks to "loop until clean":
 
 ## Cost notes
 
-This dispatches a non-trivial Copilot run (`gpt-5.5` at `xhigh`). Each invocation costs real tokens and ~2–5 minutes of wall time. Don't dispatch speculatively. Confirm the plan path and short name before invoking.
+This dispatches a non-trivial external reviewer run — Codex CLI (effort `xhigh`) by default, or Copilot `gpt-5.5 xhigh` on fallback. Each invocation costs real tokens and ~2–5 minutes of wall time. Don't dispatch speculatively. Confirm the plan path and short name before invoking.

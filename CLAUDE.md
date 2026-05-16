@@ -48,10 +48,10 @@ To run a skill, ask Claude to use it by name:
 - `/go-api-review [package]` — Review exported API and README for DX, discoverability, and clarity. Does not read internal source.
 - `/qa-review [package]` — Review for correctness, fault tolerance, error propagation, and concurrency safety from a user perspective.
 - `/doc-sync [scope]` — Audit and fix `docs/` files and Godoc to match the current API: corrects stale signatures, removes phantom symbols, adds missing entries.
-- `/plan-review <plan-path> <short-name>` — Dispatches Copilot CLI (gpt-5.5 xhigh) for full architectural review of a design plan. Writes a versioned report under `tmp/`. Use after material plan rewrites.
-- `/final-plan-review <plan-path>` — Dispatches Copilot CLI for a precision pass / pre-implementation sanity check on an architecturally-settled plan. Catches stale text, ambiguous pseudocode, numbering drift — does not redesign.
-- `/post-impl-review <phase> <plan-path> <vN>` — Dispatches Copilot CLI to review delivered code against a spec; runs lint/build/test validation. Designed for iterative fix-review loops until merge-clean.
+- `/plan-review <plan-path> <short-name>` — Full architectural review of a design plan. Writes a versioned report under `tmp/`. Use after material plan rewrites.
+- `/final-plan-review <plan-path>` — Precision pass / pre-implementation sanity check on an architecturally-settled plan. Catches stale text, ambiguous pseudocode, numbering drift — does not redesign.
+- `/post-impl-review <phase> <plan-path> <vN>` — Review delivered code against a spec; runs lint/build/test validation. Designed for iterative fix-review loops until merge-clean. For lightweight passes without spec-compliance audit, use `/codex:review` or `/codex:adversarial-review` directly instead.
 
 All skills scope to Parti's public packages by default; you can specify a subset (e.g., `consumer/`, `docs/CONSUMERS.md`).
 
-The three Copilot-dispatching skills (`plan-review`, `final-plan-review`, `post-impl-review`) run an external `gpt-5.5 xhigh` pass that costs real tokens and ~2–8 min wall time per invocation. Don't dispatch speculatively.
+The three external-reviewer skills (`plan-review`, `final-plan-review`, `post-impl-review`) dispatch a Codex CLI run via the codex plugin's `codex:codex-rescue` subagent, with Copilot `gpt-5.5` as a fallback. Effort defaults vary by task: `plan-review` and `post-impl-review` (v1/v2) at `xhigh`; `final-plan-review` and `post-impl-review` v3+ at `high` — the latter are pattern-matching / narrow-scope audits that don't earn the deeper reasoning. Each invocation costs real tokens and ~2–8 min wall time. Don't dispatch speculatively.

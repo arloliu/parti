@@ -1,11 +1,13 @@
 ---
 name: final-plan-review
-description: Dispatch GitHub Copilot CLI (gpt-5.5 at xhigh effort) to perform a precision pass / pre-implementation sanity check on a plan that has already cleared multiple rounds of architectural review. Catches residual stale text, internal contradictions, ambiguous pseudocode, and numbering drift — does not redesign. Writes a structured review report under tmp/.
+description: Dispatch an external reviewer (Codex plugin preferred, GitHub Copilot CLI fallback) to perform a precision pass / pre-implementation sanity check on a plan that has already cleared multiple rounds of architectural review. Catches residual stale text, internal contradictions, ambiguous pseudocode, and numbering drift — does not redesign. Writes a structured review report under tmp/.
 ---
 
 # Final Plan Review Skill
 
-This skill automates the **last review pass before implementation starts**. The plan has already been through one or more rounds of architectural review (`plan-review`); the goal here is to catch the precision issues that would cause an implementing agent to either ship a bug or waste cycles asking clarifying questions.
+This skill automates the **last review pass before implementation starts**. The plan has already been through one or more rounds of architectural review (`plan-review`); the goal here is to catch the precision issues that would cause an implementing agent to either ship a bug or waste cycles asking clarifying questions. The reviewer is routed through the **Codex plugin** (`/codex:rescue` → `codex:codex-rescue` subagent → Codex CLI) when available, with **GitHub Copilot CLI** (`gpt-5.5` at `high`) as a fallback.
+
+**Effort level: `high`** (not `xhigh`). The task is a precision sweep over already-settled architecture — pattern-matching for stale text, contradictions, ambiguous pseudocode, numbering drift, and wire-format mismatches against current code. These are mostly mechanical findings; the deeper chain-of-thought that `xhigh` provides isn't earned here. Bump to `xhigh` only if you suspect residual architectural ambiguity (in which case you should probably reopen `plan-review` instead).
 
 ## When to invoke
 
@@ -27,17 +29,43 @@ The report is written to `tmp/<plan-stem>_precision_pass_review.md` (or `tmp/<pl
 
 ## Invocation
 
+Reviewer routing: **Codex plugin first, Copilot CLI as fallback.**
+
+### Reviewer detection
+
+The Codex plugin is available when this file exists:
+
+```bash
+test -f "$HOME/.claude/plugins/marketplaces/openai-codex/plugins/codex/scripts/codex-companion.mjs"
+```
+
+If present, use the Codex path. If absent (plugin uninstalled) or the codex run fails (errors, timeout, refusal), fall back to Copilot CLI.
+
+### Primary: Codex plugin
+
+Dispatch via the `Agent` tool using the codex rescue subagent. Pass `--wait`, `--effort high`, and `--write` as routing flags in the prompt prefix. `--write` must be explicit — the rescue subagent's default is read-only for "review" tasks, but this skill needs Codex to write the report file.
+
+```
+Agent({
+  subagent_type: "codex:codex-rescue",
+  description: "Final plan review",
+  prompt: "--wait --effort high --write\n\n<full structured prompt from template below>"
+})
+```
+
+### Fallback: Copilot CLI
+
 ```bash
 copilot \
   --model gpt-5.5 \
-  --effort xhigh \
+  --effort high \
   --allow-all-tools \
   --add-dir <REPO_ROOT> \
   --add-dir /tmp/claude \
   -p "$(cat /tmp/claude/<prompt-file>.md)"
 ```
 
-Write the prompt to a temp file under `/tmp/claude/` (or `$TMPDIR/`) before invoking.
+Write the prompt to a temp file under `/tmp/claude/` (or `$TMPDIR/`) before invoking. Both reviewers receive the same structured prompt below.
 
 ## Prompt template
 
@@ -111,4 +139,4 @@ Typically one pass of `final-plan-review` is enough. If the plan still has open 
 
 ## Cost notes
 
-Same as `plan-review`: non-trivial Copilot run. ~2–5 minutes wall time. Single-shot, not parallel.
+Non-trivial external reviewer run (Codex effort `high`, or Copilot `gpt-5.5 high` on fallback) — a step down from `plan-review`'s `xhigh` since this is a precision sweep, not an architectural depth pass. ~2–4 minutes wall time. Single-shot, not parallel.
