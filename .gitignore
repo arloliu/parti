@@ -1,5 +1,11 @@
 /tmp/
 
+# Claude Code local state — agent worktrees, lock files, and per-user
+# settings overrides should never be committed.
+.claude/worktrees/
+.claude/scheduled_tasks.lock
+.claude/settings.local.json
+
 .vscode/settings.json
 .vscode
 *.code-workspace
