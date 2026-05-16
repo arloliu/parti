@@ -437,12 +437,12 @@ func TestPublisher_InlineSizeRegression_DoesNotApply(t *testing.T) {
 	workers := make([]string, n)
 	assignments := make(map[string][]types.Partition, n)
 	srcParts := make([]types.Partition, 0, n*5)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		w := fmt.Sprintf("w%02d", i)
 		workers[i] = w
 		f.putV1Heartbeat(t, ctx, w)
-		var slice []types.Partition
-		for j := 0; j < 5; j++ {
+		slice := make([]types.Partition, 0, 5)
+		for j := range 5 {
 			p := ps(fmt.Sprintf("p-%d-%d", i, j))
 			slice = append(slice, p)
 			srcParts = append(srcParts, p)

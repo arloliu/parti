@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -686,7 +687,7 @@ func (p *AssignmentPublisher) writeLegacyAliasWithRetry(
 	legacy types.Assignment,
 ) error {
 	var lastErr error
-	for attempt := 0; attempt < aliasBarrierMaxAttempts; attempt++ {
+	for attempt := range aliasBarrierMaxAttempts {
 		// Re-check ctx between retries so a cancelled batch aborts promptly.
 		if err := ctx.Err(); err != nil {
 			return err
@@ -1093,9 +1094,7 @@ func cloneAssignmentCommit(c *types.AssignmentCommit) types.AssignmentCommit {
 	}
 	if c.Payloads != nil {
 		out.Payloads = make(map[string]types.AssignmentPayloadRef, len(c.Payloads))
-		for k, v := range c.Payloads {
-			out.Payloads[k] = v
-		}
+		maps.Copy(out.Payloads, c.Payloads)
 	}
 
 	return out

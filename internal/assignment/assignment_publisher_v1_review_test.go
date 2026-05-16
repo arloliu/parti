@@ -216,7 +216,7 @@ func TestCommitGC_LifecycleStartStop(t *testing.T) {
 	require.NotNil(t, gc)
 	require.NoError(t, gc.Start(ctx))
 	// Trigger several times — non-blocking, should coalesce, no panic.
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		gc.Trigger()
 	}
 	// Allow at least one sweep to run.

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -299,13 +300,7 @@ func (g *CommitGC) RunOnce(ctx context.Context) error {
 		// where step 4's verify-back happens between our snapshot and our
 		// delete.
 		if g.liveRefs != nil {
-			stillLive := false
-			for _, k2 := range g.liveRefs.LiveRefs() {
-				if k2 == k {
-					stillLive = true
-					break
-				}
-			}
+			stillLive := slices.Contains(g.liveRefs.LiveRefs(), k)
 			if stillLive {
 				continue
 			}
