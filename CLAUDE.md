@@ -25,6 +25,14 @@ Internal packages under `internal/` are private implementation details — do no
 
 **Never add `Co-Authored-By` or any other attribution trailers to git commit messages.**
 
+## Quick Commands
+
+- `make test` — unit tests (race + CGO disabled)
+- `make lint` — golangci-lint (pinned 2.11.4)
+- `make clean-linter-cache` — clear golangci-lint cache when stale results produce false `nolintlint` reports
+- `make test-integration` / `test-all` / `test-stress` — broader test scopes
+- `make ci` — full CI gate (lint + test + coverage)
+
 ## How to Work in This Codebase
 
 All coding rules, testing conventions, documentation standards, workflow steps, and performance/security guidelines are in numbered rule files. **Read them before making changes.**
@@ -40,5 +48,10 @@ To run a skill, ask Claude to use it by name:
 - `/go-api-review [package]` — Review exported API and README for DX, discoverability, and clarity. Does not read internal source.
 - `/qa-review [package]` — Review for correctness, fault tolerance, error propagation, and concurrency safety from a user perspective.
 - `/doc-sync [scope]` — Audit and fix `docs/` files and Godoc to match the current API: corrects stale signatures, removes phantom symbols, adds missing entries.
+- `/plan-review <plan-path> <short-name>` — Dispatches Copilot CLI (gpt-5.5 xhigh) for full architectural review of a design plan. Writes a versioned report under `tmp/`. Use after material plan rewrites.
+- `/final-plan-review <plan-path>` — Dispatches Copilot CLI for a precision pass / pre-implementation sanity check on an architecturally-settled plan. Catches stale text, ambiguous pseudocode, numbering drift — does not redesign.
+- `/post-impl-review <phase> <plan-path> <vN>` — Dispatches Copilot CLI to review delivered code against a spec; runs lint/build/test validation. Designed for iterative fix-review loops until merge-clean.
 
 All skills scope to Parti's public packages by default; you can specify a subset (e.g., `consumer/`, `docs/CONSUMERS.md`).
+
+The three Copilot-dispatching skills (`plan-review`, `final-plan-review`, `post-impl-review`) run an external `gpt-5.5 xhigh` pass that costs real tokens and ~2–8 min wall time per invocation. Don't dispatch speculatively.
