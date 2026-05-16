@@ -103,7 +103,7 @@ clean-test-results:
 
 ##@ Code Quality
 
-.PHONY: linter-update linter-version
+.PHONY: linter-update linter-version clean-linter-cache
 linter-update:
 	@echo "Install/update linter tool..."
 	@go get -tool $(LINTER_GOMOD) github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v$(GOLANGCI_LINT_VERSION)
@@ -111,6 +111,11 @@ linter-update:
 
 linter-version:
 	@go tool $(LINTER_GOMOD) golangci-lint --version
+
+## clean-linter-cache: Clear golangci-lint's on-disk cache
+clean-linter-cache:
+	@echo "Cleaning golangci-lint cache..."
+	@go tool $(LINTER_GOMOD) golangci-lint cache clean
 
 ## lint: Run linters
 lint:
