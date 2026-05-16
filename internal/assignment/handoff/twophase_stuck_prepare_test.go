@@ -453,8 +453,8 @@ func (s *casConflictOnceStore) ListKeys(ctx context.Context) ([]string, error) {
 	return s.inner.ListKeys(ctx)
 }
 
-// TestTwoPhase_StaleHandoffResetMetric_NoOvercountOnCASRetry guards Finding
-// P1 from tmp/partition_assignment_phase4_followup_gap3_post_implementation_review_v1.md:
+// TestTwoPhase_StaleHandoffResetMetric_NoOvercountOnCASRetry guards the
+// post-impl-review finding that
 // when preparePhase resets a stuck handoff and the underlying CAS conflicts
 // once before succeeding, IncClaimStaleHandoffReset must be emitted exactly
 // once for the single durable reset — not once per transform invocation.
