@@ -525,7 +525,7 @@ func TestClaimResolver_StopRacingStart(t *testing.T) {
 	require.NoError(t, err)
 
 	const iters = 100
-	for i := 0; i < iters; i++ { //nolint:intrange // explicit counter for readability
+	for i := range iters { //nolint:intrange // explicit counter for readability
 		r := NewClaimBasedResolver(kv, "claims/", nil, WithReconcileInterval(0))
 
 		done := make(chan struct{}, 2)
@@ -538,7 +538,7 @@ func TestClaimResolver_StopRacingStart(t *testing.T) {
 			done <- struct{}{}
 		}()
 		// Bound each iteration to keep the test fast and detect deadlocks.
-		for j := 0; j < 2; j++ { //nolint:intrange // counter
+		for range 2 { //nolint:intrange // counter
 			select {
 			case <-done:
 			case <-time.After(3 * time.Second):

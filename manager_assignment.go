@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	rand "math/rand/v2"
+	"slices"
 	"time"
 
 	"github.com/arloliu/parti/v2/internal/assignment"
@@ -610,13 +611,7 @@ func (m *Manager) handleCommitValueOnce(commit *types.AssignmentCommit) *types.A
 // Case (d): worker NOT in Workers → return an empty Assignment carrying
 // the commit's metadata (signals implicit revoke).
 func (m *Manager) buildAssignmentFromCommit(commit *types.AssignmentCommit, workerID string) (Assignment, bool) {
-	inWorkers := false
-	for _, w := range commit.Workers {
-		if w == workerID {
-			inWorkers = true
-			break
-		}
-	}
+	inWorkers := slices.Contains(commit.Workers, workerID)
 
 	if !inWorkers {
 		// Case (d): synthesize empty assignment.

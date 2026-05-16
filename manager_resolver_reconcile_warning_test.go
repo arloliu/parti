@@ -89,14 +89,8 @@ func startManagerWithSpy(t *testing.T, heartbeatTTL time.Duration, twoPhase bool
 	cfg.WorkerIDTTL = 2 * heartbeatTTL
 	cfg.HeartbeatTTL = heartbeatTTL
 	// HeartbeatInterval must be < HeartbeatTTL per Validate().
-	cfg.HeartbeatInterval = heartbeatTTL / 4
-	if cfg.HeartbeatInterval < 100*time.Millisecond {
-		cfg.HeartbeatInterval = 100 * time.Millisecond
-	}
-	cfg.EmergencyGracePeriod = heartbeatTTL / 2
-	if cfg.EmergencyGracePeriod < 250*time.Millisecond {
-		cfg.EmergencyGracePeriod = 250 * time.Millisecond
-	}
+	cfg.HeartbeatInterval = max(heartbeatTTL/4, 100*time.Millisecond)
+	cfg.EmergencyGracePeriod = max(heartbeatTTL/2, 250*time.Millisecond)
 	cfg.EnableTwoPhaseHandoff = twoPhase
 
 	// Use unique bucket names per test to avoid cross-pollution on a

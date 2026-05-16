@@ -862,9 +862,7 @@ func TestApplyAssignment_LSRAdvancesBeforeSnapshotStore(t *testing.T) {
 			badObs     atomic.Int64
 			ready      = make(chan struct{})
 		)
-		readerWG.Add(1)
-		go func() {
-			defer readerWG.Done()
+		readerWG.Go(func() {
 			close(ready)
 			for !readerStop.Load() {
 				lsr := m.lastSeenLeaderRevision.Load()
@@ -873,13 +871,13 @@ func TestApplyAssignment_LSRAdvancesBeforeSnapshotStore(t *testing.T) {
 					badObs.Add(1)
 				}
 			}
-		}()
+		})
 		<-ready
 
 		// Repeated applies of monotonically increasing versions widen the
 		// window the reader has to catch a violation; each apply pair
 		// exercises the Store/LSR pair once.
-		for i := 0; i < 50; i++ {
+		for range 50 {
 			require.NoError(t, m.applyAssignment(newAsgn))
 			// Reset for the next iteration: bump LSR/version slightly
 			// would require new assignments. Simpler — apply the SAME

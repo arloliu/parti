@@ -1571,7 +1571,7 @@ func handleScaleDownEvent(count int, processMgr *coordinator.ProcessManager, met
 	// Stop up to 'count' workers
 	stopCount := min(count, len(workers))
 
-	for i := 0; i < stopCount; i++ {
+	for i := range stopCount {
 		if err := processMgr.StopProcess(workers[i].ID, 10*time.Second); err != nil {
 			log.Printf("[Chaos] Failed to stop worker %s: %v", workers[i].ID, err)
 		}

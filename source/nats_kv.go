@@ -765,8 +765,7 @@ func (s *NatsKV) restartWatcher(ctx context.Context) {
 			s.mu.Lock()
 			s.watcher = watcher
 			s.mu.Unlock()
-			s.wg.Add(1)
-			go func() { defer s.wg.Done(); s.watchLoop(ctx, watcher) }()
+			s.wg.Go(func() { s.watchLoop(ctx, watcher) })
 
 			return
 		}
