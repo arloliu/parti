@@ -49,7 +49,7 @@ func TestWorker_GoroutineLeak(t *testing.T) {
 	require.NoError(t, err)
 
 	// Baseline goroutine count
-	runtime.GC() //nolint:revive // explicit GC to trigger finalizers in leak detection
+	runtime.GC()
 	time.Sleep(100 * time.Millisecond)
 	baseline := countGoroutines()
 	t.Logf("Baseline goroutines: %d", baseline)
@@ -87,7 +87,7 @@ func TestWorker_GoroutineLeak(t *testing.T) {
 
 	// Wait for 2x fetch timeout (~350ms) plus slack for iterator expiry & internal timers.
 	time.Sleep(900 * time.Millisecond)
-	runtime.GC() //nolint:revive // explicit GC to trigger finalizers in leak detection
+	runtime.GC()
 	time.Sleep(120 * time.Millisecond)
 
 	// Check goroutine count
@@ -121,7 +121,7 @@ func TestWorker_MultipleStarts(t *testing.T) {
 	require.NoError(t, err)
 
 	// Baseline goroutine count
-	runtime.GC() //nolint:revive // explicit GC to trigger finalizers in leak detection
+	runtime.GC()
 	time.Sleep(100 * time.Millisecond)
 	baseline := countGoroutines()
 	t.Logf("Baseline goroutines: %d", baseline)
@@ -162,7 +162,7 @@ func TestWorker_MultipleStarts(t *testing.T) {
 
 	// Wait for cleanup (2x fetch timeout + slack)
 	time.Sleep(900 * time.Millisecond)
-	runtime.GC() //nolint:revive // explicit GC to trigger finalizers in leak detection
+	runtime.GC()
 	time.Sleep(120 * time.Millisecond)
 
 	afterStop := countGoroutines()
