@@ -99,6 +99,43 @@ that became materially more likely once audit-repair could trigger escalation.
   re-acquired before the prepare phase completed. On re-acquire the prepare
   phase now detects and recovers these claims.
 
+### Rolling upgrade from v2.3.0
+
+A rolling upgrade from v2.3.0 to this release is supported — no flag-day
+restart is required. The new publisher continues to write the legacy
+`assignment.<W>` aliases alongside the new three-key commit format, and the
+new worker runs a dual-read source-of-truth selector (`selectAuthority` in
+`manager_select_authority.go`) that picks between commit and legacy alias by
+`LeaderRevision`. In a mixed-version cluster:
+
+- A v2.3.0 worker reads the legacy alias and ignores the new commit keys.
+- A new-version worker reads whichever channel carries the higher
+  `LeaderRevision`, so it converges with the v2.3.0 leader during the
+  rollout window.
+
+**Operational notes for the upgrade:**
+
+- **Configure JetStream retention on the assignment bucket** before
+  upgrading. The new publisher writes one `assignment._commit_log.<V>`
+  entry per commit. Without a stream retention policy this grows
+  unboundedly; the GC pass reaps payload keys but does not prune the
+  commit log.
+- **Downgrade is not supported.** Rolling back from this release to v2.3.0
+  is untested; an old leader cannot read `assignment._commit` and the
+  cluster would fall back to legacy aliases. If you must downgrade, do a
+  flag-day restart.
+
+### Deprecated
+
+- **Legacy `assignment.<W>` alias write + dual-read path.** Retained for
+  the entire v2.x line to keep v2.3.0 → v2.x rolling upgrades safe.
+  Scheduled for removal in v3.0, at which point the publisher will stop
+  writing legacy aliases and the dual-read selector
+  (`manager_select_authority.go`) and alias barrier
+  (`internal/assignment/assignment_publisher.go` step 6 of §3.5) will be
+  deleted. Operators must complete the v2.3.0 → v2.x rollout before
+  upgrading to v3.0.
+
 ### Internal
 
 - Dead `reconcileIntervalSet` field removed from `internal/durable/`; `// P0

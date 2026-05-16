@@ -23,6 +23,13 @@ const (
 	AuthorityLegacyAlias
 )
 
+// Deprecated: scheduled for removal in v3.0 together with the legacy
+// `assignment.<W>` alias write path in
+// `internal/assignment/assignment_publisher.go` (step 6 of §3.5). Both exist
+// only to keep v2.3.0 → v2.x rolling upgrades safe; once v3.0 drops v2.3.0
+// compatibility, callers will read `assignment._commit` exclusively and this
+// selector collapses to "use the commit."
+//
 // selectAuthority implements §3.6 source-of-truth selection. The rule:
 //
 //	Case 1: commit wins when commit exists AND (no legacy OR
