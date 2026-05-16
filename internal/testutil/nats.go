@@ -170,12 +170,10 @@ type WorkerCluster struct {
 	mu                 sync.RWMutex // Protects Workers and trackers
 }
 
-// NewWorkerCluster creates a new worker cluster for testing.
-func NewWorkerCluster(t *testing.T, nc *nats.Conn, numPartitions int) *WorkerCluster {
-	cfg := IntegrationTestConfig()
-	partitions := CreateTestPartitions(numPartitions)
-	src := source.NewStatic(partitions)
-	assignmentStrategy := strategy.NewConsistentHash()
+// buildWorkerCluster is the shared constructor body for all public
+// NewWorkerCluster* factories. It opens a jetstream context on nc and
+// returns a WorkerCluster ready for AddWorker calls.
+func buildWorkerCluster(t *testing.T, nc *nats.Conn, cfg parti.Config, src types.PartitionSource) *WorkerCluster {
 	js, err := jetstream.New(nc)
 	require.NoError(t, err, "failed to init jetstream context")
 
@@ -186,53 +184,55 @@ func NewWorkerCluster(t *testing.T, nc *nats.Conn, numPartitions int) *WorkerClu
 		LeadershipTrackers: make([]*LeadershipTracker, 0),
 		Config:             cfg,
 		Source:             src,
-		Strategy:           assignmentStrategy,
+		Strategy:           strategy.NewConsistentHash(),
 		NC:                 nc,
 		JS:                 js,
 		T:                  t,
 	}
+}
+
+// NewWorkerCluster creates a new worker cluster for testing.
+func NewWorkerCluster(t *testing.T, nc *nats.Conn, numPartitions int) *WorkerCluster {
+	return buildWorkerCluster(t, nc, IntegrationTestConfig(), source.NewStatic(CreateTestPartitions(numPartitions)))
 }
 
 // NewFastWorkerCluster creates a worker cluster with aggressive timeouts for fast leader election tests.
 // Use this for tests that focus on leader election failover and don't need long stabilization windows.
 func NewFastWorkerCluster(t *testing.T, nc *nats.Conn, numPartitions int) *WorkerCluster {
-	cfg := FastTestConfig()
-	partitions := CreateTestPartitions(numPartitions)
-	src := source.NewStatic(partitions)
-	assignmentStrategy := strategy.NewConsistentHash()
-	js, err := jetstream.New(nc)
-	require.NoError(t, err, "failed to init jetstream context")
-
-	return &WorkerCluster{
-		Workers:            make([]*parti.Manager, 0),
-		StateTrackers:      make([]*StateTracker, 0),
-		AssignmentTrackers: make([]*AssignmentTracker, 0),
-		LeadershipTrackers: make([]*LeadershipTracker, 0),
-		Config:             cfg,
-		Source:             src,
-		Strategy:           assignmentStrategy,
-		NC:                 nc,
-		JS:                 js,
-		T:                  t,
-	}
+	return buildWorkerCluster(t, nc, FastTestConfig(), source.NewStatic(CreateTestPartitions(numPartitions)))
 }
 
-// AddWorker adds a worker to the cluster with state tracking.
+// NewWorkerClusterWithSource creates a worker cluster backed by a caller-provided
+// PartitionSource and Config. Useful for end-to-end tests that need a non-default
+// source (e.g. source.NatsKV) or capability/handoff flags set on the shared Config.
 //
-// Optional logger can be passed to enable debug logging for troubleshooting:
-//
-//	debugLogger := logger.NewTest(t)
-//	cluster.AddWorker(ctx, debugLogger)
-//
-// Without a logger, the worker will use the default NopLogger (no output).
+// Unlike NewWorkerCluster, this constructor does NOT seed the source with a
+// preset list of partitions; callers are responsible for populating the source
+// before (or while) workers run.
 //
 // Parameters:
-//   - ctx: Context for the worker lifecycle
-//   - opts: Optional logger for debug output
+//   - t: Test context
+//   - nc: NATS connection
+//   - src: Partition source shared by all workers in the cluster
+//   - cfg: Manager configuration shared by all workers (e.g. testutil.IntegrationTestConfig())
+//
+// Returns:
+//   - *WorkerCluster: Cluster ready to AddWorker / StartWorkers
+func NewWorkerClusterWithSource(t *testing.T, nc *nats.Conn, src types.PartitionSource, cfg parti.Config) *WorkerCluster {
+	return buildWorkerCluster(t, nc, cfg, src)
+}
+
+// AddWorkerWithOptions adds a worker to the cluster with arbitrary manager
+// options layered on top of the cluster's standard tracking hooks. Used when
+// a per-worker option (e.g. WithWorkerConsumerUpdater) is required.
+//
+// Parameters:
+//   - ctx: Unused; retained for symmetry with AddWorker
+//   - extraOpts: Additional manager options appended to the cluster defaults
 //
 // Returns:
 //   - *parti.Manager: The created worker manager
-func (wc *WorkerCluster) AddWorker(ctx context.Context, opts ...types.Logger) *parti.Manager {
+func (wc *WorkerCluster) AddWorkerWithOptions(_ context.Context, extraOpts ...parti.Option) *parti.Manager {
 	wc.mu.Lock()
 	defer wc.mu.Unlock()
 
@@ -255,23 +255,38 @@ func (wc *WorkerCluster) AddWorker(ctx context.Context, opts ...types.Logger) *p
 		OnLeadershipChanged: leadershipTracker.Hook(),
 	}
 
-	// Build manager options
-	managerOpts := []parti.Option{parti.WithHooks(hooks)}
+	managerOpts := append([]parti.Option{parti.WithHooks(hooks)}, extraOpts...)
 
-	// Add logger if provided
-	if len(opts) > 0 && opts[0] != nil {
-		managerOpts = append(managerOpts, parti.WithLogger(opts[0]))
-	}
-
-	mgr, err := parti.NewManager(
-		&wc.Config, wc.JS, wc.Source, wc.Strategy,
-		managerOpts...,
-	)
+	mgr, err := parti.NewManager(&wc.Config, wc.JS, wc.Source, wc.Strategy, managerOpts...)
 	require.NoError(wc.T, err, "failed to create worker %d", workerIdx)
 
 	wc.Workers = append(wc.Workers, mgr)
 
 	return mgr
+}
+
+// AddWorker adds a worker to the cluster with state tracking.
+//
+// Optional logger can be passed to enable debug logging for troubleshooting:
+//
+//	debugLogger := logger.NewTest(t)
+//	cluster.AddWorker(ctx, debugLogger)
+//
+// Without a logger, the worker will use the default NopLogger (no output).
+//
+// Parameters:
+//   - ctx: Context for the worker lifecycle
+//   - opts: Optional logger for debug output
+//
+// Returns:
+//   - *parti.Manager: The created worker manager
+func (wc *WorkerCluster) AddWorker(ctx context.Context, opts ...types.Logger) *parti.Manager {
+	var extra []parti.Option
+	if len(opts) > 0 && opts[0] != nil {
+		extra = append(extra, parti.WithLogger(opts[0]))
+	}
+
+	return wc.AddWorkerWithOptions(ctx, extra...)
 }
 
 // AddWorkerWithoutTracking adds a worker without state tracking.
