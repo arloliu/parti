@@ -42,7 +42,7 @@ import (
 //	    // Use nc for your tests
 //	    // Server and connection are automatically cleaned up
 //	}
-func StartEmbeddedNATS(t *testing.T) (*server.Server, *nats.Conn) {
+func StartEmbeddedNATS(t testing.TB) (*server.Server, *nats.Conn) {
 	t.Helper()
 
 	// Create server with random port and JetStream enabled
@@ -321,7 +321,7 @@ func shutdownServers(servers []*server.Server) {
 //	    kv := testutil.CreateJetStreamKV(t, nc, "worker-ids")
 //	    // Use kv for testing
 //	}
-func CreateJetStreamKV(t *testing.T, nc *nats.Conn, bucketName string) jetstream.KeyValue {
+func CreateJetStreamKV(t testing.TB, nc *nats.Conn, bucketName string) jetstream.KeyValue {
 	t.Helper()
 
 	js, err := jetstream.New(nc)

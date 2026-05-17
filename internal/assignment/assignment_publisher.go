@@ -852,6 +852,7 @@ func (p *AssignmentPublisher) DiscoverHighestVersion(ctx context.Context) ([]str
 	// First, seed lastCommitRev from the commit key if it exists. This handles
 	// the case where a prior leader already committed; takeover should
 	// continue the CAS chain instead of attempting Create and losing.
+	commitSeeded := false
 	commitKey := p.keyPrefix + commitKeyName
 	if entry, gerr := p.assignmentKV.Get(ctx, commitKey); gerr == nil {
 		var commit types.AssignmentCommit
@@ -862,6 +863,7 @@ func (p *AssignmentPublisher) DiscoverHighestVersion(ctx context.Context) ([]str
 				p.currentVersion = commit.Version
 			}
 			p.mu.Unlock()
+			commitSeeded = true
 		}
 	}
 
@@ -870,6 +872,15 @@ func (p *AssignmentPublisher) DiscoverHighestVersion(ctx context.Context) ([]str
 	for _, key := range keys {
 		sub := strings.TrimPrefix(key, p.keyPrefix)
 		if isProtocolSubcomponent(sub) {
+			continue
+		}
+		if commitSeeded {
+			// currentVersion is already pinned by the commit (commit.Version
+			// is monotonically ≥ any legacy alias version, since every
+			// post-commit assignment lands via Publish→commit). Skip the
+			// per-key Get; we only need the worker-ID set for callers
+			// driving legacy cleanup.
+			workerIDs = append(workerIDs, sub)
 			continue
 		}
 		asgn, _, err := kvutil.GetJSON[types.Assignment](ctx, p.assignmentKV, key)
@@ -899,15 +910,26 @@ func (p *AssignmentPublisher) DiscoverHighestVersion(ctx context.Context) ([]str
 	return workerIDs, nil
 }
 
-// CleanupAllAssignments removes all LEGACY assignment aliases from KV.
+// CleanupAllAssignments removes ALL legacy per-worker assignment aliases
+// from KV, including aliases for workers that may still be active in the
+// cluster.
 //
 // Protocol keys (assignment._commit, assignment._commit_log.*,
 // assignment._payload.*) are NEVER deleted by this method — they are the
 // authoritative cluster state, and a successor leader needs them to continue
 // the CAS chain and to GC payloads safely.
 //
-// Call this on graceful Calculator shutdown to remove per-worker compat
-// aliases that would otherwise linger and confuse a downgraded peer.
+// Intended use: admin tooling / whole-cluster teardown where every parti
+// instance is being decommissioned together. NOT safe to call on
+// leader-step-down or single-node shutdown: it will yank aliases for
+// workers that are still serving traffic on peer leaders, which would
+// then have to wait for the next rebalance to be re-published. There is
+// currently no production caller; the method exists for tests and
+// operator scripts.
+//
+// A leader-step-down-safe variant would need a separate
+// CleanupInactiveAssignments(activeWorkers []string) method that
+// preserves aliases of currently-live workers — out of scope here.
 func (p *AssignmentPublisher) CleanupAllAssignments(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()

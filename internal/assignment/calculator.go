@@ -830,8 +830,9 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 			"reason", reason,
 			"workers", len(workers))
 
-		// Trigger immediate emergency rebalance
-		// This will force-transition the state machine even if Scaling/Rebalancing
+		// Trigger immediate emergency rebalance from Idle/Scaling. If a
+		// rebalance is already in flight (Rebalancing/Emergency),
+		// EnterEmergency defers — the next poll will catch the topology change.
 		c.enterEmergencyState(ctx)
 
 		return nil

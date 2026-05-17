@@ -47,7 +47,7 @@ func liveRevCheck(rev *atomic.Uint64) LeaderCheckFunc {
 	}
 }
 
-func newPublisherFixture(t *testing.T, name string) *publisherFixture {
+func newPublisherFixture(t testing.TB, name string) *publisherFixture {
 	t.Helper()
 	_, nc := partitest.StartEmbeddedNATS(t)
 	akv := partitest.CreateJetStreamKV(t, nc, "asgn-"+name)
@@ -1009,4 +1009,38 @@ func mustMarshalCanonicalPayload(t *testing.T, p types.AssignmentPayload) []byte
 	require.NoError(t, err)
 
 	return b
+}
+
+// BenchmarkDiscoverHighestVersion_WithCommit measures the cold-start
+// startup cost of DiscoverHighestVersion when a _commit key already pins
+// currentVersion. Pre-fix: O(K) serial Gets across legacy alias keys.
+// Post-fix: ListKeys + 1 Get on _commit, independent of K. K=200 keeps
+// the benchmark tractable in CI; the asymptote extrapolates to K=1000.
+func BenchmarkDiscoverHighestVersion_WithCommit(b *testing.B) {
+	const numAliases = 200
+	f := newPublisherFixture(b, "bench-discover")
+	ctx := context.Background()
+
+	// Seed _commit so the commit-pin branch is taken.
+	commit := types.AssignmentCommit{Version: int64(numAliases + 1), PublishedAt: time.Now().UTC()}
+	commitBytes, err := json.Marshal(commit)
+	require.NoError(b, err)
+	_, err = f.assignmentKV.Put(ctx, "assignment._commit", commitBytes)
+	require.NoError(b, err)
+
+	// Seed K legacy alias keys.
+	for i := 0; i < numAliases; i++ {
+		asgn := types.Assignment{Version: int64(i + 1), Partitions: []types.Partition{ps(fmt.Sprintf("p%d", i))}}
+		data, merr := json.Marshal(asgn)
+		require.NoError(b, merr)
+		_, perr := f.assignmentKV.Put(ctx, fmt.Sprintf("assignment.w%d", i), data)
+		require.NoError(b, perr)
+	}
+
+	b.ResetTimer()
+	for b.Loop() {
+		if _, err := f.pub.DiscoverHighestVersion(ctx); err != nil {
+			b.Fatal(err)
+		}
+	}
 }
