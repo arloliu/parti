@@ -16,6 +16,15 @@ that became materially more likely once audit-repair could trigger escalation.
 
 ### Added
 
+- **`consumer.WithConsumerMemoryStorage(bool)`** and
+  **`consumer.WithConsumerReplicas(int)`** — universal options that forward to
+  `jetstream.ConsumerConfig.MemoryStorage` and `.Replicas`. Combined
+  (`MemoryStorage=true`, `Replicas=1`) they reduce per-partition
+  `block_write_iops` by ~99% on the IOPS-investigation rig; defaults preserve
+  existing behavior. Validation is pass-through (NATS rejects invalid replica
+  counts at consumer create time). See
+  `docs/plans/iops-investigation/findings.md` §2 for the recommendation and §4
+  for the operator decision tree.
 - **`source.NatsKV.Modify(ctx, fn)`** — CAS-retried transform for the partition
   list. `fn` receives a fresh KV snapshot on every attempt (never the local
   cache) and must be side-effect-free. Returns `source.ErrUpdateRetryExhausted`
