@@ -62,6 +62,12 @@ type Calculator struct {
 	doneCh chan struct{}
 	wg     sync.WaitGroup // Tracks background goroutines (e.g., monitorPartitions)
 
+	// pendingPartitionUpdate records that a partition-source change was
+	// observed by monitorPartitions but skipped because the leader was in
+	// recovery grace. The drain ticker in monitorPartitions retries when
+	// grace lifts (see §3.3 of docs/plans/assignment-correctness-fixes/01-pr1-spec.md).
+	pendingPartitionUpdate atomic.Bool
+
 	// auditDoneCh is closed by auditLoop on return. Tests can poll it to
 	// confirm the audit goroutine has exited. wg.Wait() already covers the
 	// shutdown sequence; this channel is purely an observation hook.
@@ -142,6 +148,7 @@ func NewCalculator(cfg *Config) (*Calculator, error) {
 		LeaderCheckFn:   cfg.LeaderCheck,
 		Logger:          cfg.Logger,
 		Metrics:         cfg.Metrics,
+		IsShuttingDown:  c.isStopping,
 	})
 
 	c.gc = NewCommitGC(CommitGCConfig{
@@ -584,14 +591,147 @@ func (c *Calculator) pollForChanges(ctx context.Context) error {
 	return c.checkForChanges(ctx, currentWorkers)
 }
 
+// Partition-lifecycle constants. monitorPartitions threads these through
+// rebalance so the in-rebalance recovery-grace guard can short-circuit
+// only partition-triggered calls (worker-change, audit, emergency paths
+// retain their own grace handling).
+const (
+	lifecyclePartitionUpdate         = "partition_update"
+	lifecyclePartitionUpdateDeferred = "partition_update_deferred"
+)
+
+func isPartitionLifecycle(lc string) bool {
+	return lc == lifecyclePartitionUpdate || lc == lifecyclePartitionUpdateDeferred
+}
+
+// isStopping reports whether Stop has been called. Used as the
+// Publisher's IsShuttingDown gate.
+func (c *Calculator) isStopping() bool {
+	select {
+	case <-c.stopCh:
+		return true
+	default:
+		return false
+	}
+}
+
+// inRecoveryGrace is a nil-safe accessor for the state provider's grace flag.
+func (c *Calculator) inRecoveryGrace() bool {
+	return c.stateProvider != nil && c.stateProvider.IsInRecoveryGrace()
+}
+
+// shouldDeferForRecoveryGrace reports whether a rebalance with the given
+// lifecycle should bail because the leader entered recovery grace between
+// the caller's check and rebalanceMu acquisition. Only partition-triggered
+// rebalances honor this re-check; worker-change / audit / emergency paths
+// have their own grace handling (checkForChanges, emergency bypass).
+func (c *Calculator) shouldDeferForRecoveryGrace(lifecycle string) bool {
+	if !isPartitionLifecycle(lifecycle) {
+		return false
+	}
+
+	return c.inRecoveryGrace()
+}
+
+// ctxFromStopCh returns a derived context that is cancelled when EITHER
+// the parent context is cancelled OR stopCh is closed. The caller MUST
+// invoke the returned CancelFunc to release the watcher goroutine.
+// timeout == 0 means no timeout — only parent + stopCh cancellation.
+func ctxFromStopCh(parent context.Context, stopCh <-chan struct{}, timeout time.Duration) (context.Context, context.CancelFunc) {
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(parent, timeout)
+	} else {
+		ctx, cancel = context.WithCancel(parent)
+	}
+	go func() {
+		select {
+		case <-stopCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	return ctx, cancel
+}
+
+// wrapPublishErr lets errShuttingDown pass through unchanged so handleRebalance
+// can suppress it, while reclassifying other publish errors through wrapStopErr.
+func (c *Calculator) wrapPublishErr(err error) error {
+	if errors.Is(err, errShuttingDown) {
+		return err
+	}
+
+	return c.wrapStopErr(fmt.Errorf("failed to publish assignments: %w", err))
+}
+
+// wrapStopErr reclassifies an error as errShuttingDown when stopCh is
+// closed. This preserves the existing handleRebalance contract: state-machine
+// callers and monitorPartitions log non-errShuttingDown errors at error
+// level, but a normal shutdown should not surface as a hard failure.
+func (c *Calculator) wrapStopErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	select {
+	case <-c.stopCh:
+		return errShuttingDown
+	default:
+		return err
+	}
+}
+
+// triggerPartitionRebalance runs a partition-lifecycle rebalance and
+// returns the result so the caller can restore pendingPartitionUpdate
+// on a grace bail. Logs only non-errShuttingDown failures.
+func (c *Calculator) triggerPartitionRebalance(lifecycle string) error {
+	reqCtx, cancel := ctxFromStopCh(context.Background(), c.stopCh, 30*time.Second)
+	defer cancel()
+	err := c.rebalance(reqCtx, lifecycle)
+	if err != nil && !errors.Is(err, errShuttingDown) {
+		c.Logger.Error("failed to rebalance after partition update", "error", err, "lifecycle", lifecycle)
+	}
+	return err
+}
+
+// restorePendingOnGraceBail restores pendingPartitionUpdate=true when
+// the rebalance returned errShuttingDown but stopCh is still open. That
+// indicates the bail came from the in-rebalance recovery-grace re-check
+// (grace flapped to true between drain decision and rebalance entry),
+// NOT from a real shutdown — so the deferred update should be retried.
+func (c *Calculator) restorePendingOnGraceBail(err error) {
+	if !errors.Is(err, errShuttingDown) {
+		return
+	}
+	select {
+	case <-c.stopCh:
+		// Real shutdown; nothing to restore.
+	default:
+		c.pendingPartitionUpdate.Store(true)
+	}
+}
+
 func (c *Calculator) monitorPartitions(ctx context.Context, source types.WatchablePartitionSource) {
 	ch := source.Watch(ctx)
+	drainTick := time.NewTicker(c.RebalanceGraceDrainInterval)
+	defer drainTick.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-c.stopCh:
 			return
+		case <-drainTick.C:
+			if !c.pendingPartitionUpdate.CompareAndSwap(true, false) {
+				continue
+			}
+			if c.inRecoveryGrace() {
+				c.pendingPartitionUpdate.Store(true) // restore; retry next tick
+				continue
+			}
+			err := c.triggerPartitionRebalance(lifecyclePartitionUpdateDeferred)
+			c.restorePendingOnGraceBail(err)
 		case _, ok := <-ch:
 			if !ok {
 				return // Channel closed
@@ -605,7 +745,6 @@ func (c *Calculator) monitorPartitions(ctx context.Context, source types.Watchab
 			// the fresh SourceRevision).
 			c.Logger.Info("partition change detected")
 
-			// Check if shutdown is in progress before triggering rebalance
 			select {
 			case <-c.stopCh:
 				c.Logger.Info("skipping partition rebalance: shutdown in progress")
@@ -613,14 +752,17 @@ func (c *Calculator) monitorPartitions(ctx context.Context, source types.Watchab
 			default:
 			}
 
-			// Trigger rebalance with timeout
-			// We use a detached context with timeout because the rebalance
-			// should complete even if the watcher loop is busy, but shouldn't hang forever.
-			reqCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			if err := c.rebalance(reqCtx, "partition_update"); err != nil {
-				c.Logger.Error("failed to rebalance after partition update", "error", err)
+			if c.inRecoveryGrace() {
+				c.pendingPartitionUpdate.Store(true)
+				c.Logger.Info("deferring partition rebalance: leader is in recovery grace period")
+				continue
 			}
-			cancel()
+
+			// Immediate trigger supersedes any pending deferred update; both
+			// would publish the same fresh source snapshot.
+			c.pendingPartitionUpdate.Store(false)
+			err := c.triggerPartitionRebalance(lifecyclePartitionUpdate)
+			c.restorePendingOnGraceBail(err)
 		}
 	}
 }
@@ -932,6 +1074,21 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 	c.rebalanceMu.Lock()
 	defer c.rebalanceMu.Unlock()
 
+	// Partition-lifecycle grace re-check (PR-1 / ISSUE-005 P0-A): the
+	// drain ticker / immediate watch arm already check IsInRecoveryGrace
+	// before calling here, but grace can flip to true between that check
+	// and rebalanceMu acquisition. Atomic under rebalanceMu.
+	if c.shouldDeferForRecoveryGrace(lifecycle) {
+		return errShuttingDown
+	}
+
+	// Stop-aware ctx (PR-1 / ISSUE-002 + ISSUE-003 Layer 1): downstream
+	// ctx-aware operations (getActiveWorkersFiltered, snapshotSource,
+	// publisher.Publish) short-circuit on Stop instead of running to
+	// completion against the detached background timeout.
+	ctx, cancel := ctxFromStopCh(ctx, c.stopCh, 0)
+	defer cancel()
+
 	start := time.Now()
 
 	c.mu.Lock()
@@ -943,7 +1100,7 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 	workers, err := c.getActiveWorkersFiltered(ctx, disappearedWorkers)
 	if err != nil {
 		c.Metrics.RecordRebalanceAttempt(lifecycle, false)
-		return fmt.Errorf("failed to get active workers: %w", err)
+		return c.wrapStopErr(fmt.Errorf("failed to get active workers: %w", err))
 	}
 
 	c.Logger.Debug("rebalance started", "lifecycle", lifecycle, "worker_count", len(workers), "workers", workers)
@@ -962,7 +1119,7 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 	partitions, srcRev, srcKnown, snapErr := snapshotSource(ctx, c.Source)
 	if snapErr != nil {
 		c.Metrics.RecordRebalanceAttempt(lifecycle, false)
-		return fmt.Errorf("failed to snapshot partitions: %w", snapErr)
+		return c.wrapStopErr(fmt.Errorf("failed to snapshot partitions: %w", snapErr))
 	}
 
 	c.Logger.Debug("partitions retrieved", "partition_count", len(partitions))
@@ -982,7 +1139,7 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 	assignments, err := c.Strategy.Assign(workers, partitions)
 	if err != nil {
 		c.Metrics.RecordRebalanceAttempt(lifecycle, false)
-		return fmt.Errorf("assignment calculation failed: %w", err)
+		return c.wrapStopErr(fmt.Errorf("assignment calculation failed: %w", err))
 	}
 
 	// Coverage is enforced strictly inside the publisher via set-equality of
@@ -1062,7 +1219,7 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 		WorkersToRemove:     workersToRemove,
 	}); err != nil {
 		c.Metrics.RecordRebalanceAttempt(lifecycle, false)
-		return fmt.Errorf("failed to publish assignments: %w", err)
+		return c.wrapPublishErr(err)
 	}
 
 	// Record successful rebalance

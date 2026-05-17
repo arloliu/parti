@@ -97,6 +97,11 @@ type AssignmentPublisher struct {
 	// next tick (publish step 12 of §3.5). Safe to leave nil.
 	gcTriggerFn func()
 
+	// isShuttingDown, when non-nil, gates the commit-CAS site so a leader
+	// whose stopCh has been closed cannot land a stale commit. See
+	// PublisherConfig.IsShuttingDown.
+	isShuttingDown func() bool
+
 	mu             sync.Mutex
 	currentVersion int64
 	lastCommitRev  uint64                  // KV revision of "<prefix>._commit" at last successful commit
@@ -142,6 +147,29 @@ type PublisherConfig struct {
 	GCTriggerFn     func()
 	Logger          types.Logger
 	Metrics         PublisherDependentMetrics
+
+	// IsShuttingDown, when non-nil, is consulted immediately before the
+	// commit CAS (step 9 of §3.5). If it returns true, Publish aborts with
+	// errShuttingDown and no `_commit` write is attempted. Calculator wires
+	// this to detect that its stopCh has been closed. nil means no gate
+	// (test-only).
+	IsShuttingDown func() bool
+}
+
+// abortIfShuttingDown returns errShuttingDown when isShuttingDown signals
+// stopCh has closed. Records the batch-abort metric (and the visible-uncommitted
+// alias counter when applicable) without touching IncrementCommitAborts —
+// no CAS is issued (see types/metrics_collector.go contract).
+func (p *AssignmentPublisher) abortIfShuttingDown(aliasWritten bool) error {
+	if p.isShuttingDown == nil || !p.isShuttingDown() {
+		return nil
+	}
+	p.metrics.IncrementBatchAborted("shutdown")
+	if aliasWritten {
+		p.metrics.IncrementAliasVisibleUncommitted()
+	}
+
+	return errShuttingDown
 }
 
 // NewAssignmentPublisher creates a publisher wired to the assignment KV bucket.
@@ -171,16 +199,17 @@ func NewAssignmentPublisher(cfg PublisherConfig) *AssignmentPublisher {
 	}
 
 	return &AssignmentPublisher{
-		assignmentKV:  cfg.AssignmentKV,
-		heartbeatKV:   cfg.HeartbeatKV,
-		prefix:        cfg.Prefix,
-		keyPrefix:     cfg.Prefix + ".",
-		heartbeatPref: hbPrefix,
-		hbKeyPrefix:   hbPrefix + ".",
-		leaderCheckFn: cfg.LeaderCheckFn,
-		gcTriggerFn:   cfg.GCTriggerFn,
-		logger:        logger,
-		metrics:       metrics,
+		assignmentKV:   cfg.AssignmentKV,
+		heartbeatKV:    cfg.HeartbeatKV,
+		prefix:         cfg.Prefix,
+		keyPrefix:      cfg.Prefix + ".",
+		heartbeatPref:  hbPrefix,
+		hbKeyPrefix:    hbPrefix + ".",
+		leaderCheckFn:  cfg.LeaderCheckFn,
+		gcTriggerFn:    cfg.GCTriggerFn,
+		isShuttingDown: cfg.IsShuttingDown,
+		logger:         logger,
+		metrics:        metrics,
 	}
 }
 
@@ -364,6 +393,12 @@ func (p *AssignmentPublisher) Publish(ctx context.Context, in PublishInput) erro
 	}
 
 	// --- step 9 of §3.5: CAS-write assignment._commit ---
+	// Shutdown gate (PR-1 / ISSUE-003 Layer 2): defense-in-depth against
+	// a leader whose stopCh has closed between rebalance start and this
+	// commit point. See abortIfShuttingDown.
+	if err := p.abortIfShuttingDown(aliasWritten); err != nil {
+		return err
+	}
 	commitKey := p.keyPrefix + commitKeyName
 	var newCommitRev uint64
 	if p.lastCommitRev == 0 {

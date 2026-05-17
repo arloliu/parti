@@ -51,6 +51,13 @@ type Config struct {
 	ColdStartWindow      time.Duration // Stabilization window for cold start (default: 30s)
 	PlannedScaleWindow   time.Duration // Stabilization window for planned scale (default: 10s)
 
+	// RebalanceGraceDrainInterval is the period at which monitorPartitions
+	// checks for a partition-source update that was deferred because the
+	// leader was in recovery grace. When grace lifts, the deferred update
+	// is drained on the next tick. Default: min(Cooldown, 30s), capped
+	// below at 1s.
+	RebalanceGraceDrainInterval time.Duration
+
 	// ApplyGracePeriod is the time after commit.PublishedAt before the audit
 	// loop emits retry-pressure metrics for behind workers. Default: 2 ×
 	// HeartbeatTTL.
@@ -141,6 +148,15 @@ func (c *Config) SetDefaults() {
 	}
 	if c.PlannedScaleWindow == 0 {
 		c.PlannedScaleWindow = 10 * time.Second
+	}
+	if c.RebalanceGraceDrainInterval == 0 {
+		c.RebalanceGraceDrainInterval = c.Cooldown
+		if c.RebalanceGraceDrainInterval > 30*time.Second {
+			c.RebalanceGraceDrainInterval = 30 * time.Second
+		}
+		if c.RebalanceGraceDrainInterval < time.Second {
+			c.RebalanceGraceDrainInterval = time.Second
+		}
 	}
 	if c.ApplyGracePeriod == 0 {
 		c.ApplyGracePeriod = 2 * c.HeartbeatTTL

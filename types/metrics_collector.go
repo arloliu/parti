@@ -243,6 +243,7 @@ type PublisherMetrics interface {
 	//   - "leadership_lost_post_alias"
 	//   - "alias_barrier_failed"
 	//   - "commit_cas_failed"
+	//   - "shutdown" (leader stopCh closed between rebalance start and commit CAS)
 	IncrementBatchAborted(reason string)
 
 	// IncrementAliasBarrierFailed increments the counter of legacy-alias-barrier
