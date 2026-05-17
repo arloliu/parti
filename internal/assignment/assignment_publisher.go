@@ -428,6 +428,10 @@ func (p *AssignmentPublisher) Publish(ctx context.Context, in PublishInput) erro
 		if aliasWritten {
 			p.metrics.IncrementAliasVisibleUncommitted()
 		}
+		// ISSUE-001: when the failure is a true CAS conflict, refresh
+		// lastCommitRev from the live _commit so the next Publish can
+		// re-CAS. Transient KV errors short-circuit inside the helper.
+		p.refreshLastCommitRevAfterCASFailureLocked(ctx, err)
 
 		return fmt.Errorf("%w: %w", types.ErrCommitCASFailed, err)
 	}
@@ -1071,6 +1075,39 @@ func (p *AssignmentPublisher) BootstrapLastCommit(ctx context.Context) error {
 	)
 
 	return nil
+}
+
+// refreshLastCommitRevAfterCASFailureLocked re-reads the live _commit KV
+// revision and updates p.lastCommitRev so the next Publish can re-CAS.
+//
+// Gated on writeErr being jetstream.ErrKeyExists — the sentinel NATS
+// JetStream returns for both Create (key already exists) and Update
+// (revision mismatch). Both indicate another writer beat us; any other
+// error class is a transient KV failure whose recovery is the existing
+// retry-on-next-rebalance-event path, and refreshing on transient errors
+// would skew lastCommitRev independently of currentVersion / lastCommit.
+//
+// Called from Publish's commit-write error branch — Publish already holds
+// p.mu, so this method MUST NOT acquire it (BootstrapLastCommit cannot be
+// reused here because it would deadlock on the same mutex).
+//
+// Best-effort: KV errors and missing entries leave lastCommitRev unchanged.
+// The next CAS failure triggers another refresh attempt; a Calculator
+// restart is the ultimate recovery path.
+func (p *AssignmentPublisher) refreshLastCommitRevAfterCASFailureLocked(ctx context.Context, writeErr error) {
+	if !errors.Is(writeErr, jetstream.ErrKeyExists) {
+		return
+	}
+	commitKey := p.keyPrefix + commitKeyName
+	entry, err := p.assignmentKV.Get(ctx, commitKey)
+	if err != nil {
+		p.logger.Debug("post-CAS-failure refresh: could not read live _commit",
+			"key", commitKey, "error", err)
+		return
+	}
+	if entry.Revision() > p.lastCommitRev {
+		p.lastCommitRev = entry.Revision()
+	}
 }
 
 // LastRebalanceTime returns the time of the last successful commit.

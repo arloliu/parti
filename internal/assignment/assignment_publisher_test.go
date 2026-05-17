@@ -1011,6 +1011,105 @@ func mustMarshalCanonicalPayload(t *testing.T, p types.AssignmentPayload) []byte
 	return b
 }
 
+// TestPublisher_CASFailure_RefreshesLastCommitRev_AndRecovers (ISSUE-001).
+//
+// Scenario: a valid leader's lastCommitRev becomes stale because the live
+// _commit's KV revision advanced past it. In production the only source is
+// another leader's in-flight CAS landing during a leader handoff; the test
+// models this with a direct KV Put that advances the revision.
+//
+// Pre-fix: every subsequent Publish from this leader returned
+// ErrCommitCASFailed indefinitely — lastCommitRev never refreshed — and the
+// pre-alias LeaderCheck did NOT catch it because the publisher IS a valid
+// leader (the fence is about the election key, not the commit revision).
+//
+// Post-fix: the first Publish after the race fails CAS, refreshes
+// lastCommitRev from the live entry, and the next Publish succeeds.
+func TestPublisher_CASFailure_RefreshesLastCommitRev_AndRecovers(t *testing.T) {
+	f := newPublisherFixture(t, "cas-loss-refresh")
+	ctx := context.Background()
+	f.putV1Heartbeat(t, ctx, "w1")
+	srcParts := []types.Partition{ps("p1"), ps("p2")}
+	input := PublishInput{
+		Workers:          []string{"w1"},
+		Assignments:      map[string][]types.Partition{"w1": {ps("p1"), ps("p2")}},
+		SourcePartitions: srcParts,
+		LeaderRevision:   1,
+	}
+
+	// 1. Initial publish establishes a real commit chain.
+	require.NoError(t, f.pub.Publish(ctx, input))
+	initialRev := f.pub.LastCommitRev()
+	require.Greater(t, initialRev, uint64(0))
+
+	// 2. Model the cross-leader race: an external write advances the live
+	//    _commit revision past the publisher's cached lastCommitRev. The
+	//    payload bytes don't matter for the CAS check — only the revision.
+	currentCommit := f.readCommit(t, ctx)
+	require.NotNil(t, currentCommit)
+	forged := types.AssignmentCommit{
+		Version:        currentCommit.Version + 1,
+		LeaderRevision: currentCommit.LeaderRevision,
+		Workers:        currentCommit.Workers,
+		Payloads:       currentCommit.Payloads,
+	}
+	forgedBytes, merr := json.Marshal(forged)
+	require.NoError(t, merr)
+	_, perr := f.assignmentKV.Put(ctx, "assignment._commit", forgedBytes)
+	require.NoError(t, perr)
+	liveEntry, gerr := f.assignmentKV.Get(ctx, "assignment._commit")
+	require.NoError(t, gerr)
+	require.Greater(t, liveEntry.Revision(), initialRev,
+		"forged write must have advanced the live revision")
+
+	// 3. First Publish — CAS must fail (lastCommitRev is stale).
+	err := f.pub.Publish(ctx, input)
+	require.Error(t, err)
+	require.ErrorIs(t, err, types.ErrCommitCASFailed,
+		"first publish must fail CAS, not the election fence; got: %v", err)
+
+	// 4. Second Publish — post-fix, this MUST succeed because the
+	//    CAS-failure branch refreshed lastCommitRev from the live entry.
+	require.NoError(t, f.pub.Publish(ctx, input),
+		"second publish must recover after lastCommitRev refresh")
+
+	// And lastCommitRev now reflects the latest CAS write.
+	require.Greater(t, f.pub.LastCommitRev(), liveEntry.Revision(),
+		"lastCommitRev should have advanced past the forged revision")
+}
+
+// TestPublisher_NonCASFailures_DoNotRefreshLastCommitRev (ISSUE-001 negative).
+//
+// Confirms the refresh is gated on ErrCommitCASFailed — other Publish
+// failure modes (here: ErrLeadershipLostPreAlias driven by a leader-rev
+// mismatch) must not perturb lastCommitRev.
+func TestPublisher_NonCASFailures_DoNotRefreshLastCommitRev(t *testing.T) {
+	f := newPublisherFixture(t, "non-cas-no-refresh")
+	ctx := context.Background()
+	f.putV1Heartbeat(t, ctx, "w1")
+	srcParts := []types.Partition{ps("p1")}
+	input := PublishInput{
+		Workers:          []string{"w1"},
+		Assignments:      map[string][]types.Partition{"w1": {ps("p1")}},
+		SourcePartitions: srcParts,
+		LeaderRevision:   1,
+	}
+
+	require.NoError(t, f.pub.Publish(ctx, input))
+	revBefore := f.pub.LastCommitRev()
+	require.Greater(t, revBefore, uint64(0))
+
+	// Drive the pre-alias fence to fail by mismatching the claimed vs. live
+	// leader revision (mirrors TestPublisher_CommitCAS_AbortsOnLeadershipLost).
+	f.leaderRev.Store(99)
+	err := f.pub.Publish(ctx, input)
+	require.Error(t, err)
+	require.ErrorIs(t, err, types.ErrLeadershipLostPreAlias)
+
+	require.Equal(t, revBefore, f.pub.LastCommitRev(),
+		"non-CAS failures must not refresh lastCommitRev")
+}
+
 // BenchmarkDiscoverHighestVersion_WithCommit measures the cold-start
 // startup cost of DiscoverHighestVersion when a _commit key already pins
 // currentVersion. Pre-fix: O(K) serial Gets across legacy alias keys.
