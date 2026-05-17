@@ -156,6 +156,9 @@ func NewStatic(
 			MaxAckPending:     o.maxAckPending,
 			InactiveThreshold: o.inactiveThreshold,
 			AckPolicy:         o.ackPolicy,
+
+			ConsumerMemoryStorage: o.consumerMemoryStorage,
+			ConsumerReplicas:      o.consumerReplicas,
 		},
 		StreamName:       streamName,
 		ConsumerName:     consumerName,
@@ -197,6 +200,9 @@ func NewStatic(
 		Metrics:           o.metrics,
 		MaxWaiting:        cfg.MaxWaiting,
 		RecoveryStrategy:  cfg.RecoveryStrategy,
+
+		ConsumerMemoryStorage: cfg.ConsumerMemoryStorage,
+		ConsumerReplicas:      cfg.ConsumerReplicas,
 	}
 
 	inner, err := ipartition.NewJSConsumer(js, partitionCfg, handler.Handle)

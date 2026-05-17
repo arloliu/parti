@@ -131,6 +131,9 @@ func NewBroadcast(
 			MaxAckPending:     o.maxAckPending,
 			InactiveThreshold: o.inactiveThreshold,
 			AckPolicy:         o.ackPolicy,
+
+			ConsumerMemoryStorage: o.consumerMemoryStorage,
+			ConsumerReplicas:      o.consumerReplicas,
 		},
 		StreamName:       streamName,
 		ConsumerPrefix:   consumerPrefix,
@@ -164,6 +167,9 @@ func NewBroadcast(
 		AckPolicy:         cfg.AckPolicy,
 		RecoveryStrategy:  cfg.RecoveryStrategy,
 		IteratorFactory:   cfg.IteratorFactory,
+
+		ConsumerMemoryStorage: cfg.ConsumerMemoryStorage,
+		ConsumerReplicas:      cfg.ConsumerReplicas,
 		Retry: durable.RetryConfig{
 			Backoff:    cfg.Retry.Backoff,
 			Max:        cfg.Retry.Max,

@@ -274,6 +274,8 @@ func (bc *BroadcastConsumer) ensureConsumer(ctx context.Context, durable string)
 		InactiveThreshold: bc.config.InactiveThreshold,
 		MaxWaiting:        bc.config.MaxWaiting,
 		MaxAckPending:     bc.config.MaxAckPending,
+		MemoryStorage:     bc.config.ConsumerMemoryStorage,
+		Replicas:          bc.config.ConsumerReplicas,
 	}
 
 	cons, err := jsutil.EnsureConsumer(ctx, bc.js, bc.config.StreamName, cfg)

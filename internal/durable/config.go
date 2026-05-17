@@ -194,6 +194,20 @@ type WorkerConsumerConfig struct {
 	// ManualAck and background processing to cap concurrent in-flight work at the server layer.
 	MaxAckPending int `validate:"gte=0"`
 
+	// ConsumerMemoryStorage forwards to jetstream.ConsumerConfig.MemoryStorage
+	// on consumer create. When true, the consumer's delivery/ack state is
+	// kept in memory rather than inheriting the stream's storage type.
+	// See consumer.WithConsumerMemoryStorage for full semantics and the
+	// non-live-editable caveat.
+	ConsumerMemoryStorage bool
+
+	// ConsumerReplicas overrides jetstream.ConsumerConfig.Replicas on
+	// consumer create. 0 (default) inherits the parent stream's replica
+	// count; lower values reduce consumer-state raft replication.
+	// See consumer.WithConsumerReplicas for the validation rule (must be
+	// ≤ stream replicas, NATS error 10126 on violation).
+	ConsumerReplicas int
+
 	// MaxConcurrentSubjects caps the total number of per-subject consumers/loops.
 	// When exceeded, additional subjects are skipped with a warning and metric increment.
 	MaxConcurrentSubjects int `validate:"gte=0"`

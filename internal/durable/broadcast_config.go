@@ -101,6 +101,20 @@ type BroadcastConsumerConfig struct {
 	// will allow. If zero, the server default is used.
 	MaxAckPending int `validate:"gte=0"`
 
+	// ConsumerMemoryStorage forwards to jetstream.ConsumerConfig.MemoryStorage
+	// on consumer create. When true, the consumer's delivery/ack state is
+	// kept in memory rather than inheriting the stream's storage type.
+	// See consumer.WithConsumerMemoryStorage for full semantics and the
+	// non-live-editable caveat.
+	ConsumerMemoryStorage bool
+
+	// ConsumerReplicas overrides jetstream.ConsumerConfig.Replicas on
+	// consumer create. 0 (default) inherits the parent stream's replica
+	// count; lower values reduce consumer-state raft replication.
+	// See consumer.WithConsumerReplicas for the validation rule (must be
+	// ≤ stream replicas, NATS error 10126 on violation).
+	ConsumerReplicas int
+
 	// InactiveThreshold is how long an idle consumer is kept by the server before cleanup.
 	// Default: 24h.
 	InactiveThreshold time.Duration `default:"24h" validate:"gt=0"`

@@ -421,6 +421,8 @@ func (wc *WorkerConsumer) addSubjectLoop(ctx context.Context, workerID string, s
 		InactiveThreshold: wc.config.InactiveThreshold,
 		MaxWaiting:        wc.config.MaxWaiting,
 		MaxAckPending:     wc.config.MaxAckPending,
+		MemoryStorage:     wc.config.ConsumerMemoryStorage,
+		Replicas:          wc.config.ConsumerReplicas,
 	}
 
 	pc := newPartitionConsumer(
@@ -466,6 +468,8 @@ func (wc *WorkerConsumer) ensurePerSubjectConsumer(ctx context.Context, durable 
 		InactiveThreshold: wc.config.InactiveThreshold,
 		MaxWaiting:        wc.config.MaxWaiting,
 		MaxAckPending:     wc.config.MaxAckPending,
+		MemoryStorage:     wc.config.ConsumerMemoryStorage,
+		Replicas:          wc.config.ConsumerReplicas,
 	}
 
 	return jsutil.EnsureConsumer(ctx, wc.js, wc.config.StreamName, cfg)

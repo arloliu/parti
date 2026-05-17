@@ -204,6 +204,9 @@ func NewDynamic(
 			MaxAckPending:     o.maxAckPending,
 			InactiveThreshold: o.inactiveThreshold,
 			AckPolicy:         o.ackPolicy,
+
+			ConsumerMemoryStorage: o.consumerMemoryStorage,
+			ConsumerReplicas:      o.consumerReplicas,
 		},
 		StreamName:                  streamName,
 		ConsumerPrefix:              consumerPrefix,
@@ -243,6 +246,8 @@ func NewDynamic(
 		MaxAckPending:               cfg.MaxAckPending,
 		InactiveThreshold:           cfg.InactiveThreshold,
 		AckPolicy:                   cfg.AckPolicy,
+		ConsumerMemoryStorage:       cfg.ConsumerMemoryStorage,
+		ConsumerReplicas:            cfg.ConsumerReplicas,
 		ProcessingGate:              toSubscriptionGateConfig(cfg.ProcessingGate),
 		Resolver:                    toSubscriptionResolverConfig(cfg.Resolver),
 		PullGatingEnabled:           cfg.PullGatingEnabled,

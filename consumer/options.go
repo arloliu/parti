@@ -146,6 +146,9 @@ type options struct {
 	inactiveThreshold time.Duration
 	ackPolicy         jetstream.AckPolicy
 
+	consumerMemoryStorage bool
+	consumerReplicas      int
+
 	// Queue / Broadcast / Dynamic shared
 	retry           RetryConfig
 	iteratorFactory func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error)
@@ -429,6 +432,95 @@ func WithRetry(cfg RetryConfig) interface {
 } {
 	return iterOpt(func(o *options) {
 		o.retry = cfg
+	})
+}
+
+// WithConsumerMemoryStorage sets the underlying
+// jetstream.ConsumerConfig.MemoryStorage flag on consumer create.
+//
+// When true, the consumer's delivery and ack state lives in memory
+// rather than inheriting the stream's storage type. The published
+// message log is unaffected — it stays wherever the stream is
+// configured to live.
+//
+// Trade-off: consumer state is NOT durable across coordinated cluster
+// restart. With Replicas ≥ 2 (the default at stream R ≥ 2), single-
+// node failure is survivable via raft peers. With Replicas = 1, any
+// failure of the consumer-state holder triggers redelivery from
+// DeliverPolicy.
+//
+// IMPORTANT: this option is NOT live-editable on the NATS server.
+// Changing the value after the consumer exists requires delete +
+// recreate, which drops ack/delivery offsets. If parti starts with a
+// different value than the existing consumer was created with, the
+// underlying CreateOrUpdateConsumer call fails — NATS rejects the
+// storage-type change — and the error surfaces at Start (or Update,
+// for Dynamic). parti does NOT auto-delete; that would silently
+// drop ack state.
+//
+// Migration recipe (operator-driven, requires acknowledged
+// at-least-once redelivery from DeliverPolicy):
+//
+//  1. Stop the parti workers (or scale to zero).
+//  2. nats consumer rm <STREAM> <CONSUMER>  # drop old consumer
+//  3. Restart parti with WithConsumerMemoryStorage(true).
+//     The consumer is recreated with the new storage type.
+//
+// Step 2 wipes ack/delivery offsets; any in-flight messages will be
+// redelivered from DeliverPolicy. Only safe for at-least-once
+// pipelines with idempotent handlers.
+//
+// Measured impact: see docs/plans/iops-investigation/findings.md
+// §3 for the cost decomposition and §4 for the decision tree.
+//
+// Default: false (inherit stream storage type).
+func WithConsumerMemoryStorage(enabled bool) Option {
+	return universalOpt(func(o *options) {
+		o.consumerMemoryStorage = enabled
+	})
+}
+
+// WithConsumerReplicas overrides the underlying
+// jetstream.ConsumerConfig.Replicas value at consumer create time.
+//
+// 0 (the default) inherits the parent stream's replica count. 1
+// disables consumer-state raft replication (lowest IOPS, no
+// consumer-state HA). Values between 1 and the stream's Replicas
+// give intermediate IOPS/HA trade-offs.
+//
+// Constraints (validated server-side by NATS, surfaced verbatim
+// when the underlying JetStream consumer is created or updated —
+// parti does not pre-validate. The error surfaces at different
+// times per consumer type: Queue/Static/Broadcast at Start; Dynamic
+// at Update):
+//
+//   - On LimitsPolicy streams (parti's default): must be
+//     0 ≤ Replicas ≤ stream.Replicas. Values above stream.Replicas
+//     are rejected with NATS error code 10126 ("consumer config
+//     replica count exceeds parent stream").
+//   - On InterestPolicy and WorkQueuePolicy streams: nonzero
+//     Replicas must EQUAL stream.Replicas. So on a WorkQueuePolicy
+//     stream with stream.Replicas=3, only Replicas ∈ {0, 3} is
+//     accepted; Replicas=1 is rejected. This is a NATS-server-side
+//     rule, not a parti choice. Practically, ANY parti consumer
+//     used on an InterestPolicy or WorkQueuePolicy stream cannot
+//     use Replicas=1 — pair the consumer with
+//     WithConsumerMemoryStorage(true) alone for the durability-
+//     preserving IOPS reduction on those retention policies.
+//
+// Unlike WithConsumerMemoryStorage, this option IS live-editable on
+// the NATS server (`nats consumer edit --replicas=N`); the raft
+// group expands/shrinks in place and converges within seconds.
+//
+// Negative values are silently ignored (defensive guard; matches
+// existing With* style).
+//
+// Default: 0 (inherit stream replicas).
+func WithConsumerReplicas(n int) Option {
+	return universalOpt(func(o *options) {
+		if n >= 0 {
+			o.consumerReplicas = n
+		}
 	})
 }
 

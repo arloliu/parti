@@ -235,6 +235,8 @@ func (c *JSConsumer) ensureConsumer(ctx context.Context) (jetstream.Consumer, er
 		MaxAckPending:     c.config.MaxAckPending,
 		InactiveThreshold: c.config.InactiveThreshold,
 		MaxWaiting:        c.config.MaxWaiting,
+		MemoryStorage:     c.config.ConsumerMemoryStorage,
+		Replicas:          c.config.ConsumerReplicas,
 	}
 
 	c.consumerMu.Lock()

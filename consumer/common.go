@@ -98,6 +98,50 @@ type CommonConfig struct {
 	// Typically set to AckExplicitPolicy for reliable processing.
 	// Defaults to AckExplicitPolicy if usually not set manually.
 	AckPolicy jetstream.AckPolicy
+
+	// ConsumerMemoryStorage, when true, sets the underlying
+	// jetstream.ConsumerConfig.MemoryStorage flag on consumer create,
+	// keeping the consumer's delivery/ack state in memory rather than
+	// inheriting the stream's storage type.
+	//
+	// Default: false (inherit stream storage).
+	//
+	// Trade-off: the consumer's delivery/ack offsets are NOT durable
+	// across coordinated cluster restart. With ConsumerReplicas ≥ 2,
+	// single-node failure is still survivable via raft peers. With
+	// ConsumerReplicas = 1, any failure of the consumer-state holder
+	// loses ack state and triggers redelivery from DeliverPolicy.
+	//
+	// IMPORTANT: this field is NOT live-editable on the NATS server.
+	// Changing it after the consumer exists requires delete + recreate,
+	// which drops ack/delivery offsets. Pick the value at construction
+	// time.
+	//
+	// For at-least-once work-queue patterns with idempotent handlers
+	// this is typically safe and yields a large IOPS reduction. See
+	// docs/plans/iops-investigation/findings.md §2 for measurements
+	// and §4 for the operator decision tree.
+	ConsumerMemoryStorage bool
+
+	// ConsumerReplicas overrides the underlying
+	// jetstream.ConsumerConfig.Replicas value at consumer create time.
+	//
+	// Default: 0 (inherit the stream's replica count). Set to 1 to
+	// disable consumer-state raft replication (lowest IOPS, no
+	// consumer-state HA). Values between 1 and the stream's replica
+	// count give intermediate IOPS/HA trade-offs.
+	//
+	// Constraint: must be ≤ the parent stream's Replicas. NATS rejects
+	// invalid values at consumer create with error code 10126
+	// ("consumer config replica count exceeds parent stream"). parti
+	// does not pre-validate; the JetStream error is surfaced verbatim
+	// when the underlying consumer is created or updated
+	// (Queue/Static/Broadcast at Start, Dynamic at Update).
+	//
+	// Unlike ConsumerMemoryStorage, this field IS live-editable on
+	// the NATS server via `nats consumer edit --replicas=N`; the raft
+	// group expands/shrinks in place.
+	ConsumerReplicas int `validate:"gte=0"`
 }
 
 // SetDefaults applies default values to the configuration.

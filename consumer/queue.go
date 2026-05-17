@@ -212,6 +212,9 @@ func NewQueue(
 			MaxAckPending:     o.maxAckPending,
 			InactiveThreshold: o.inactiveThreshold,
 			AckPolicy:         o.ackPolicy,
+
+			ConsumerMemoryStorage: o.consumerMemoryStorage,
+			ConsumerReplicas:      o.consumerReplicas,
 		},
 		StreamName:       streamName,
 		ConsumerName:     consumerName,
@@ -342,6 +345,8 @@ func (q *Queue) ensureConsumer(ctx context.Context) (jetstream.Consumer, error) 
 		MaxWaiting:        q.config.MaxWaiting,
 		MaxAckPending:     q.config.MaxAckPending,
 		InactiveThreshold: q.config.InactiveThreshold,
+		MemoryStorage:     q.config.ConsumerMemoryStorage,
+		Replicas:          q.config.ConsumerReplicas,
 	}
 
 	// Store base config once for recovery.
