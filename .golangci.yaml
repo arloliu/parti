@@ -41,7 +41,14 @@ linters:
     - misspell          # common misspellings
     - nakedret          # naked returns
     - nlreturn          # blank line before return
-    - nolintlint        # well-formed //nolint directives
+    # nolintlint disabled: its "unused directive" check races with the
+    # analyzers it depends on (revive in particular). Under CI concurrency
+    # it intermittently reports legitimately-used //nolint directives as
+    # unused, producing flaky lint failures. The other nolintlint checks
+    # (require-specific, require-explanation) provide marginal value and
+    # aren't worth the recurring CI noise. Re-evaluate after upstream
+    # golangci-lint fixes the race (tracked: golangci-lint v2.12.x still
+    # racy at concurrency=8; not fixed by upgrade as of v2.12.2).
     - nosprintfhostport # host:port via Sprintf
     - predeclared       # shadowing predeclared identifiers
     - unconvert         # redundant type conversions
@@ -130,10 +137,6 @@ linters:
 
     nlreturn:
       block-size: 7
-
-    nolintlint:
-      require-explanation: false
-      require-specific: true
 
     revive:
       enable-all-rules: true
@@ -272,6 +275,12 @@ linters:
           - gosec
           - noctx
           - wrapcheck
+        path: _test\.go
+      # Allow runtime.GC() in tests: required by leak-detection tests to
+      # trigger finalizers; the call is intentional, not a code smell.
+      - linters:
+          - revive
+        text: call-to-gc
         path: _test\.go
     paths: &excluded-paths
       - vendor

@@ -263,18 +263,12 @@ func TestClaimBasedResolver_Concurrency_ForceRefreshAndWatcher(t *testing.T) {
 		}
 
 		var wg sync.WaitGroup
-		wg.Add(2) //nolint:revive // sync.WaitGroup does not have Go method
-
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_ = r.ForceRefreshPartition(context.Background(), "p1")
-		}()
-
-		go func() {
-			defer wg.Done()
+		})
+		wg.Go(func() {
 			r.applyPendingBatch(batch, "test")
-		}()
-
+		})
 		wg.Wait()
 
 		// Verify both are present
