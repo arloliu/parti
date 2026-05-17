@@ -58,13 +58,17 @@ type Config struct {
 	// below at 1s.
 	RebalanceGraceDrainInterval time.Duration
 
-	// ApplyGracePeriod is the time after commit.PublishedAt before the audit
-	// loop emits retry-pressure metrics for behind workers. Default: 2 ×
-	// HeartbeatTTL.
+	// ApplyGracePeriod is the time after THIS leader observed the current
+	// commit (via successful CAS or BootstrapLastCommit) before the audit
+	// loop emits retry-pressure metrics for behind workers. Measured against
+	// a monotonic clock so cross-leader wall-clock skew does not influence
+	// the grace window. Default: 2 × HeartbeatTTL.
 	ApplyGracePeriod time.Duration
 
-	// ExtendedApplyGracePeriod is the time after commit.PublishedAt before
-	// the audit may escalate via two-phase handoff. Default: 5 × HeartbeatTTL.
+	// ExtendedApplyGracePeriod is the time after THIS leader observed the
+	// current commit before the audit may escalate via two-phase handoff
+	// (audit_repair rebalance). Measured against a monotonic clock; see
+	// ApplyGracePeriod. Default: 5 × HeartbeatTTL.
 	ExtendedApplyGracePeriod time.Duration
 
 	// AuditInterval is the period between audit passes. Default: HeartbeatTTL.

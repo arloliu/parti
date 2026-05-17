@@ -106,7 +106,19 @@ type AssignmentPublisher struct {
 	currentVersion int64
 	lastCommitRev  uint64                  // KV revision of "<prefix>._commit" at last successful commit
 	lastCommit     *types.AssignmentCommit // deep copy of the most recently observed commit; nil until first CAS or bootstrap
-	lastRebalance  time.Time
+
+	// lastCommitObservedAtMono records the local monotonic-clock instant
+	// at which THIS publisher observed lastCommit — either via a
+	// successful CAS (Publish step 9) or via BootstrapLastCommit. The
+	// audit uses this instead of commit.PublishedAt for grace-window
+	// math so wall-clock skew across leader handoff cannot suppress or
+	// prematurely trigger audit_repair escalation (ISSUE-007 / PR-2).
+	//
+	// Zero value means "no commit observed yet" (lastCommit is also nil
+	// in that case). Set under p.mu.
+	lastCommitObservedAtMono time.Time
+
+	lastRebalance time.Time
 
 	// inflightRefs records the payload keys this publisher has selected for an
 	// in-progress publish (after step 4 verify-back, before step 9 commit
@@ -426,6 +438,11 @@ func (p *AssignmentPublisher) Publish(ctx context.Context, in PublishInput) erro
 	// (Phase 4 §4.2) can read it without re-fetching the KV entry on every tick.
 	commitCopy := cloneAssignmentCommit(&commit)
 	p.lastCommit = &commitCopy
+	// Capture the local monotonic-clock instant of this observation. The
+	// leader-side audit gates grace windows on this value rather than the
+	// wire-clock commit.PublishedAt, so cross-leader wall-clock skew cannot
+	// suppress or prematurely fire audit_repair escalation (ISSUE-007).
+	p.lastCommitObservedAtMono = time.Now()
 	p.metrics.ObserveCommitBytesWritten(len(commitBytes))
 
 	// --- step 10 of §3.5: best-effort commit log ---
@@ -964,7 +981,27 @@ func (p *AssignmentPublisher) LastCommit() *types.AssignmentCommit {
 		return nil
 	}
 	out := cloneAssignmentCommit(p.lastCommit)
+
 	return &out
+}
+
+// LastCommitObservedAt returns the local monotonic-clock instant at which
+// this publisher observed the current lastCommit. Returns the zero time
+// when lastCommit is nil.
+//
+// The leader-side audit uses this for grace-window math instead of the
+// wire-clock commit.PublishedAt so cross-leader wall-clock skew (e.g.,
+// after takeover or container suspend/resume) cannot suppress or
+// prematurely trigger audit_repair escalation.
+//
+// Callers use time.Since on the return value; subtracting wall-clock
+// times against this value is meaningless and will silently lose the
+// monotonic reading.
+func (p *AssignmentPublisher) LastCommitObservedAt() time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.lastCommitObservedAtMono
 }
 
 // BootstrapLastCommit seeds the publisher's in-memory lastCommit cache from
@@ -996,6 +1033,8 @@ func (p *AssignmentPublisher) BootstrapLastCommit(ctx context.Context) error {
 	p.mu.Lock()
 	commitCopy := cloneAssignmentCommit(&commit)
 	p.lastCommit = &commitCopy
+	// Local monotonic observation; see Publish step 9 for the rationale.
+	p.lastCommitObservedAtMono = time.Now()
 	if entry.Revision() > p.lastCommitRev {
 		p.lastCommitRev = entry.Revision()
 	}

@@ -128,7 +128,19 @@ func newAuditFixture(t *testing.T, commit *types.AssignmentCommit, hbs map[strin
 	}
 	// publisher holds the commit; monitor must implement GetHeartbeats. For
 	// audit tests we use a stub monitor that returns hbs directly.
-	calc.publisher = &AssignmentPublisher{lastCommit: commit, logger: logging.NewNop()}
+	//
+	// The audit's grace windows are now gated by lastCommitObservedAtMono
+	// (PR-2 / ISSUE-007). Existing tests express their grace-elapsed /
+	// grace-pending intent via commit.PublishedAt; mirror that onto the
+	// monotonic observation field so the prior verdicts are preserved.
+	publisher := &AssignmentPublisher{
+		lastCommit: commit,
+		logger:     logging.NewNop(),
+	}
+	if commit != nil {
+		publisher.lastCommitObservedAtMono = commit.PublishedAt
+	}
+	calc.publisher = publisher
 	calc.monitor = buildAuditMonitorFromKV(t, hbs)
 	// State machine present so escalation paths can call EnterScaling without
 	// nil deref. The mock rebalance callback is a no-op so the test does not
@@ -529,6 +541,52 @@ func TestCalculatorAudit_PreCommitBootstrap_NoOp(t *testing.T) {
 	f.calc.auditApplied(context.Background())
 
 	require.Nil(t, f.metrics.counts, "no metrics when publisher.LastCommit is nil")
+}
+
+// TestCalculatorAudit_GraceFromLocalObservedAt verifies ISSUE-007 (PR-2):
+// the audit's grace windows depend on THIS leader's monotonic observation
+// time, not on the wire-clock commit.PublishedAt. A stale PublishedAt
+// from a former leader (or a wall-clock-skewed peer) must NOT bypass
+// the grace windows when the current leader has only just observed the
+// commit.
+//
+// Pre-fix: time.Since(commit.PublishedAt) ≈ 1h on a 1h ApplyGracePeriod,
+// so the audit emits behind/escalation metrics for what looks like an
+// elapsed grace. Post-fix: lastCommitObservedAtMono = time.Now(), so
+// the grace is fresh and no metrics fire.
+func TestCalculatorAudit_GraceFromLocalObservedAt(t *testing.T) {
+	t.Parallel()
+	digestA := uint64(0xAA)
+	commit := &types.AssignmentCommit{
+		Version:        10,
+		LeaderRevision: 20,
+		// Wire timestamp is an hour old (simulates a former leader's clock
+		// being ahead of ours OR a stale persisted commit).
+		PublishedAt: time.Now().Add(-time.Hour),
+		Workers:     []string{"worker-A"},
+		Payloads: map[string]types.AssignmentPayloadRef{
+			"worker-A": auditPayloadRef("worker-A", digestA),
+		},
+	}
+	hbs := map[string]types.Heartbeat{
+		"worker-A": fullCapsAck(20, 9, 0, false, digestA), // behind by version
+	}
+	f := newAuditFixture(t, commit, hbs, true)
+
+	// Grace windows large enough that pre-fix code (which uses PublishedAt)
+	// would see them as elapsed only because PublishedAt is an hour ago;
+	// post-fix, we override the observation instant to "just now" so the
+	// monotonic-clock gate keeps both grace windows live.
+	f.calc.ApplyGracePeriod = time.Hour
+	f.calc.ExtendedApplyGracePeriod = time.Hour
+	f.calc.publisher.lastCommitObservedAtMono = time.Now()
+
+	f.calc.auditApplied(context.Background())
+
+	require.Empty(t, f.metrics.getBehindCalls(),
+		"RecordWorkerBehind must NOT fire while local-observed ApplyGracePeriod has not elapsed")
+	require.Empty(t, f.metrics.getEscalationSkipped(),
+		"escalation-skip metrics must NOT fire while local-observed ExtendedApplyGracePeriod has not elapsed")
 }
 
 // ============================================================================

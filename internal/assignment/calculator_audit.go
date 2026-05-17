@@ -65,9 +65,15 @@ func (c *Calculator) auditApplied(ctx context.Context) {
 	fullyApplied, behind, unverifiable := c.classifyAuditWorkers(commit, hbs)
 	c.Metrics.RecordAuditCounts(len(fullyApplied), len(behind), len(unverifiable))
 
+	// Grace windows are measured against THIS leader's local monotonic
+	// observation of the commit, NOT the wire-clock commit.PublishedAt
+	// (which is set by whatever leader issued the CAS and is therefore
+	// vulnerable to cross-leader wall-clock skew). See ISSUE-007 / PR-2.
+	observedAt := c.publisher.LastCommitObservedAt()
+
 	// Grace window 1: do not emit retry-pressure metrics for workers that have
 	// simply not had time to apply yet.
-	if time.Since(commit.PublishedAt) < c.ApplyGracePeriod {
+	if time.Since(observedAt) < c.ApplyGracePeriod {
 		return
 	}
 	for w := range behind {
@@ -77,7 +83,7 @@ func (c *Calculator) auditApplied(ctx context.Context) {
 	// Grace window 2: even past retry-pressure, do not escalate until
 	// ExtendedApplyGracePeriod. This avoids ping-ponging assignments while
 	// slow workers catch up.
-	if time.Since(commit.PublishedAt) < c.ExtendedApplyGracePeriod {
+	if time.Since(observedAt) < c.ExtendedApplyGracePeriod {
 		return
 	}
 
