@@ -54,8 +54,13 @@ import (
 // resolver itself, so we still exercise the same supervisor / reconciler code
 // path that production uses via ensureGateResolver.
 //
-// To make assertion (1) tractable inside the test's 10s convergence bound we
+// To make assertion (1) tractable inside the test's 20s convergence bound we
 // override the default 30s reconcile cadence to 1s via WithReconcileInterval.
+// The 20s bound (vs. the ~1-2s the reconciler typically needs to detect drift)
+// is headroom for post-restart JetStream client re-stabilization on slow CI
+// runners: the watcher used internally by KV.Keys() can take several seconds
+// to rebind after a server restart, and we want multiple reconcile attempts
+// to land inside the bound.
 // This option is part of the fix; the parent base 5a9102f does not have it
 // (and does not have either recovery path), so the test fails there.
 func TestClaimResolver_RecoversAfterNATSRestart(t *testing.T) {
@@ -303,7 +308,7 @@ func mutateClaimOwner(t *testing.T, ctx context.Context, kv jetstream.KeyValue, 
 }
 
 // waitForCacheConvergence asserts that every worker's resolver cache reports
-// expectedOwner for partitionID within 10s. preRestartSnapshot is included in
+// expectedOwner for partitionID within 20s. preRestartSnapshot is included in
 // the failure message for diagnostics.
 func waitForCacheConvergence(
 	t *testing.T,
@@ -313,7 +318,7 @@ func waitForCacheConvergence(
 	preRestartSnapshot map[string]map[string]string,
 ) {
 	t.Helper()
-	convergenceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	convergenceCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	require.Eventually(t, func() bool {
 		for _, s := range stacks {
@@ -364,7 +369,7 @@ func buildWorkerStack(t *testing.T, ctx context.Context, p workerStackParams, in
 	// The periodic reconcile is the half of the fix that catches a
 	// silently-broken watcher (the NATS client does not always surface a
 	// server restart as an Updates() channel close — see the test doc).
-	// With a 1s interval we converge inside the 10s bound. Production
+	// With a 1s interval we converge inside the 20s bound. Production
 	// default is 30s, which would not fit the test window but is otherwise
 	// the same code path.
 	s.resolver = durable.NewClaimBasedResolver(
