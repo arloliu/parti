@@ -1,9 +1,5 @@
 # NATS IOPS Investigation — Findings
 
-> **Status:** complete. Operator-facing summary. Measured on a local
-> 3-node R=3 NATS rig (`nats:2.12.6`, ext4 host). Raw data and
-> reproducibility scripts under `test/iops-investigation/results/`.
-
 **Problem.** An operator reported per-partition `block_write_iops`
 scaling with parti's partition count on a NATS JetStream cluster:
 ~278 IOPS cluster-summed at N=1000 partitions, ~440 at N=2000.
@@ -16,11 +12,21 @@ writes** (~80 % of the per-N cost) plus **raft replication of that
 state** to R=3 peers (~9–28 %, growing with N). Parti's own
 coordination protocol contributes ~1 %; the JetStream message log
 itself contributes essentially nothing for this idle-publish
-workload. The single most effective fix is setting
-`jetstream.ConsumerConfig.MemoryStorage = true` *and* `Replicas = 1`
-on parti-managed consumers (cell **M2.B**) — **99 % reduction** at
-both N=1000 and N=3000, with at-least-once consumer-state redelivery
-as the only tradeoff. The published message log stays durable.
+workload. Two ship-ready fixes, both setting
+`jetstream.ConsumerConfig.MemoryStorage = true` on parti-managed
+consumers:
+
+- **Balanced (cell M2.A) — `MemoryStorage = true`, `Replicas`
+  inherited (R=3):** 90 % reduction at N=1000, 72 % at N=3000.
+  Keeps consumer HA across single-node failure; redelivery only on
+  coordinated cluster restart.
+- **Cheapest (cell M2.B) — also set `Replicas = 1`:** 99 % reduction
+  at both N=1000 and N=3000; per-partition cost goes flat in N.
+  Adds redelivery on single-node failure of the consumer-state
+  holder.
+
+The published message log stays durable (R=3, file-backed) in both
+cases.
 
 **Caveat (read §1 first).** The absolute IOPS reported above are
 **not high** for typical cloud SSD PVCs (AWS gp3, GCP pd-balanced,
@@ -28,7 +34,7 @@ etc.). Most operators will find the default config is already well
 under their disk's sustained-IOPS floor. The mitigation matters
 only at very high N, on tightly-provisioned disks, or where the
 periodic kernel `pdflush` burst pattern (~1,500–1,800 IOPS for one
-second every ~5 s, see §3) is causing latency-tail issues.
+second every ~5 s, see §4) is causing latency-tail issues.
 
 ---
 
@@ -78,9 +84,77 @@ The rest of this document is for when one of them does.
 
 ---
 
-## 2. The recommended fix (when you need it)
+## 2. All measured cells at a glance
 
-Set both fields on every parti-managed JetStream consumer:
+Capture-window means (t ∈ [120, 240] s), 3 reps per cell × N.
+Stream is R=3 throughout. Each cell changes **exactly one knob**
+versus the M1.2 default; see §6 for the per-cell legend.
+
+| Cell | What's changed | N=1000 | N=3000 | Δ vs M1.2 |
+|---|---|---:|---:|---:|
+| M1.0 | parti not running (no-Parti control) | ~0 | ~0 | n/a (noise floor) |
+| M1.1 | `EnableTwoPhaseHandoff = false` | ≈ M1.2 | ≈ M1.2 | within MDE (H1 falsified) |
+| **M1.2** | **default config (baseline)** | **216 ± 4** | **450 ± 3** | — |
+| M1.3 | `Handoff.SweepInterval = 5 min` | ≈ M1.2 | ≈ M1.2 | within MDE (H1 falsified) |
+| M1.7 | data stream `Storage = memory` | 22 ± 0.2 | 128 ± 0.5 | −90 % / −72 % |
+| M1.9 | all parti KV buckets `Storage = memory` | 211 ± 2 | 446 ± 5 | −2 % / −1 % (noise) |
+| **M2.A** | consumer `MemoryStorage = true` (R=3) | **21.6** | **126** | **−90 % / −72 %** |
+| **M2.B** | consumer `MemoryStorage = true` AND `Replicas = 1` | **2.3** | **2.3** | **−99 % / −99 %** |
+| M2.C | `jetstream.sync_interval = "10m"` (server-config) | 168.9 | 399 | −22 % / −11 % (bad latency tail) |
+
+Reading this:
+
+- **M1.0–M1.3 cluster around 216 / 450** — parti-side knobs do not
+  move the per-partition cost. H1 falsified.
+- **M1.7 ≈ M2.A** — moving the *data-stream's* per-consumer
+  metadata to memory (M1.7) and moving the *consumer-object's* state
+  to memory (M2.A) produce the same win, because they target the
+  same physical artefact: the per-consumer state file. M2.A is the
+  cleaner knob (per-consumer, not whole-stream) and durability-wins
+  identically.
+- **M1.9 is noise** — parti's KV bookkeeping is not the cost source.
+- **M2.B = M2.A + `Replicas = 1`** — the last ~28 % (at N=3000) was
+  raft replication of consumer state to R=3 peers. Collapsing the
+  consumer raft group to a single member zeroes it.
+
+---
+
+## 3. The recommended fix (when you need it)
+
+Two ship-ready options. Both keep the **message log** durable at
+R=3 on disk; both only weaken the consumer's *ack-offset* durability,
+in different amounts.
+
+### 3a. Balanced — `MemoryStorage = true`, `Replicas = R` inherited (cell **M2.A**)
+
+```go
+jetstream.ConsumerConfig{
+    MemoryStorage: true,
+    // Replicas left default → inherits stream R (typically 3)
+    // ... existing fields
+}
+```
+
+| N | Before (M1.2) | After (M2.A) | Reduction |
+|---:|---:|---:|---:|
+| 1,000 | 216 IOPS | 21.6 IOPS | **−90 %** |
+| 3,000 | 450 IOPS | 126 IOPS | **−72 %** |
+
+**Trade-off (mild):** consumer ack state is held in memory on each
+R=3 peer.
+
+- **Single-node failure:** raft fails over to a peer that has the
+  in-memory state. No redelivery.
+- **Coordinated cluster restart:** all in-memory copies are lost
+  simultaneously → redelivery from `DeliverPolicy`.
+- **Message log:** stays on file-backed JetStream at R=3 — published
+  messages are still durable.
+
+**This is the recommended default fix.** It preserves the consumer's
+HA story under the common failure mode (single-node loss) while
+removing ~72–90 % of the per-partition IOPS cost.
+
+### 3b. Cheapest — also set `Replicas = 1` (cell **M2.B**)
 
 ```go
 jetstream.ConsumerConfig{
@@ -90,47 +164,47 @@ jetstream.ConsumerConfig{
 }
 ```
 
-Result on the test rig (cell **M2.B**):
-
 | N | Before (M1.2) | After (M2.B) | Reduction |
 |---:|---:|---:|---:|
 | 1,000 | 216 IOPS | 2.3 IOPS | **−99 %** |
 | 3,000 | 450 IOPS | 2.3 IOPS | **−99 %** |
 
 Per-partition slope collapses from **0.117 IOPS/partition** to
-**~0**. IOPS becomes flat in N. The remaining 2.3 IOPS is parti's
+**~0**. IOPS becomes flat in N. The residual 2.3 IOPS is parti's
 constant coordination floor (heartbeat / stable-ID / election KV
 puts on R=3) and does not scale.
 
-**Trade-off:** consumer delivery/ack offsets are no longer durable.
+**Trade-off (stronger):** consumer ack state lives on a single node
+chosen by JetStream.
 
-- `Replicas = 1` removes consumer-state HA → single-node failure of
-  the consumer-state holder triggers redelivery from `DeliverPolicy`.
-- `MemoryStorage = true` keeps the consumer state in memory →
-  coordinated cluster restart triggers the same redelivery.
-- **The message log stays on file-backed JetStream at R=3** —
-  published messages are still durable.
+- **Single-node failure** of that node also triggers redelivery —
+  no raft peer to fail over to.
+- **Coordinated cluster restart** triggers redelivery (same as M2.A).
+- **Message log:** still file-backed at R=3.
 
 For any work queue with idempotent handlers (the common parti
-pattern), at-least-once redelivery is the expected contract. This
-trade is correct.
+pattern), at-least-once redelivery on these events is the expected
+contract — this trade is correct, and the extra 9–28 % IOPS win is
+worth taking.
 
-**If even single-node consumer-state loss is unacceptable:** drop
-`Replicas = 1` and ship only `MemoryStorage = true` (cell **M2.A**).
-Reduction is 90 % at N=1000 and 72 % at N=3000. Single-node failure
-recovers via raft peers; only coordinated cluster restart triggers
-redelivery.
+### Choosing between them
+
+| You should pick | If |
+|---|---|
+| **M2.A (balanced)** | Single-node failure must preserve ack positions (HA matters more than IOPS). Default recommendation. |
+| **M2.B (cheapest)** | Handlers are idempotent and at-least-once on single-node failure is acceptable. Largest IOPS win, flat in N. |
 
 **Parti API status:** `MemoryStorage` and `Replicas` are not yet
 exposed on `consumer.Dynamic`. The IOPS investigation harness applies
 them by intercepting `CreateOrUpdateConsumer` in its NATS wrapper
 (see `test/iops-investigation/internal/instrumentedjs/`). Promoting
 the fields to public options on `consumer.Dynamic` is a small follow-up
-(~1–2 h) — recommended once an operator wants to deploy M2.B.
+(~1–2 h) — recommended once an operator wants to deploy either M2.A
+or M2.B.
 
 ---
 
-## 3. Where the IOPS actually come from
+## 4. Where the IOPS actually come from
 
 Per-N cost decomposition, attributed by ablation:
 
@@ -176,40 +250,42 @@ pages entirely; the bursts disappear.
 
 ---
 
-## 4. Decision tree
+## 5. Decision tree
 
 Pick the **first** matching branch.
 
 ```
-Q1. Can the workload tolerate at-least-once redelivery on
-    single-node failure or coordinated cluster restart?
-    (True for any work-queue with idempotent handlers.)
-    YES → MemoryStorage = true, Replicas = 1.  (cell M2.B)
-          99 % reduction. Per-partition cost collapses.
-    NO  → continue.
+Q1. Is the workload's actual disk-IOPS pressure measurably high
+    (e.g. N ≥ 10K per pod, or noisy-neighbour latency tail)?
+    NO  → stop. Default config is fine. (§1)
+    YES → continue.
 
 Q2. Can the workload tolerate redelivery ONLY on coordinated
     cluster-wide restart (single-node failure must still preserve
     ack position via raft peers)?
     YES → MemoryStorage = true, Replicas inherited (R≥3).  (M2.A)
           90 % at N=1000, 72 % at N=3000.
+          **Recommended default — keeps consumer HA.**
     NO  → continue.
 
-Q3. Is the workload's actual disk-IOPS pressure measurably high
-    (e.g. N ≥ 10K per pod, or noisy-neighbour latency tail)?
-    NO  → stop. Default config is fine.
-    YES → architectural change: collapse N pull-consumers into one
+Q3. Can the workload tolerate at-least-once redelivery on
+    single-node failure as well? (True for any work-queue with
+    idempotent handlers.)
+    YES → MemoryStorage = true, Replicas = 1.  (cell M2.B)
+          99 % reduction. Per-partition cost collapses; flat in N.
+    NO  → architectural change: collapse N pull-consumers into one
           consumer with subject filtering (the consumer.Queue
           pattern, only valid if any worker can ack any message).
-          Non-trivial scope; only worth it if M2.A is rejected
-          AND the IOPS pressure is real.
+          Non-trivial scope; only worth it if both M2.A and M2.B
+          are rejected AND the IOPS pressure is real.
 ```
 
-Most operators land at **Q1 → M2.B** or **Q3 NO → no action**.
+Most operators land at **Q1 NO → no action**, **Q2 YES → M2.A**,
+or **Q3 YES → M2.B**.
 
 ---
 
-## 5. Matrix legend
+## 6. Matrix legend
 
 Each cell is `M{phase}.{tag}` and tests parti at default config
 **plus exactly one knob changed**.
@@ -228,7 +304,7 @@ Each cell is `M{phase}.{tag}` and tests parti at default config
 
 ---
 
-## 6. Methodology
+## 7. Methodology
 
 - **Rig:** docker-compose, 3-node NATS R=3, `nats:2.12.6`, ext4 host.
 - **Capture window:** 120 s warmup + 120 s capture per run. Means
@@ -252,7 +328,7 @@ Full methodology and validation: `00-attribution-plan.md`,
 
 ---
 
-## 7. Raw data
+## 8. Raw data
 
 All under `test/iops-investigation/results/`. Campaign seed `42`,
 NATS image `nats:2.12.6`, R=3.
@@ -266,7 +342,7 @@ NATS image `nats:2.12.6`, R=3.
 
 ---
 
-## 8. Scope notes (and quick follow-up experiments)
+## 9. Scope notes (and quick follow-up experiments)
 
 ### Follow-up experiments — consumer Replicas semantics (2026-05-17)
 
@@ -325,7 +401,7 @@ Total rig time: ~5 min, no harness involved.
 
 ---
 
-## 9. Cross-checks against pre-registered predictions
+## 10. Cross-checks against pre-registered predictions
 
 Predictions were recorded in this section *before* the M2.x runs
 (see git history `89322e0`). Logged here so future-you can see what
