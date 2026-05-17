@@ -266,22 +266,62 @@ NATS image `nats:2.12.6`, R=3.
 
 ---
 
-## 8. What's not in scope
+## 8. Scope notes (and quick follow-up experiments)
 
-- `FetchTimeout` ablation (M1.5) and `consumer.Queue` ablation
-  (M1.6) — both relevant only if M2.A is rejected.
-- R=5 behaviour (M1.10) — less critical now because M2.B
-  (`Replicas = 1`) removes the R-sensitive term from the
-  per-partition cost.
-- N > 3000 — extrapolation in §1 is the 2-point linear fit; not
-  measured. M2.B is flat in N, so this matters only for the M1.2
-  baseline.
+### Follow-up experiments — consumer Replicas semantics (2026-05-17)
+
+Three quick `nats` CLI experiments against an R=3 docker rig
+resolved questions that the planned `WithConsumerMemoryStorage` /
+`WithConsumerReplicas` public-API addition needed answers for.
+Total rig time: ~5 min, no harness involved.
+
+- **Placement.** With stream R=3 and consumer `Replicas=1`,
+  JetStream places the consumer raft as a **single-member group**
+  on one node of its choosing — independent of the stream leader.
+  For `Replicas ≥ 2`, the raft group spans the chosen subset, again
+  independently of stream placement. Consumer leader election runs
+  separately from stream leader election; the two can land on
+  different nodes. Operators cannot easily predict which node will
+  hold a single-replica consumer without inspecting via
+  `nats consumer info`.
+
+- **Validation rule.** NATS rejects `consumer.Replicas > stream.Replicas`
+  at create time with **error code 10126** ("consumer config
+  replica count exceeds parent stream"). This is the *only*
+  constraint that fires in practice — the stream-replicas rule is
+  stricter than the cluster-size rule, so cluster-size never gets
+  a chance to apply. On stream R=3, `Replicas ∈ {0,1,2,3}` accepted;
+  `Replicas ∈ {4,5}` rejected with 10126.
+
+- **Live reconfiguration.**
+  - **`Replicas` is live-editable in both directions**
+    (`nats consumer edit … --replicas=N`). Tested 1 → 3 (group
+    expanded, all followers converged "current" within ~3 s; the
+    raft group name `C-R1F-ul8wBvXN` was preserved — true expand,
+    not recreate) and 3 → 1 (collapsed to single-member group).
+  - **`MemoryStorage` is NOT live-editable.** `nats consumer edit`
+    exposes no flag for it; changing it requires delete + recreate,
+    which drops the consumer's ack / delivery offsets. The parti
+    API docstring must call this out.
+
+### Still genuinely out of scope
+
+- Raft snapshot / compaction behaviour at `Replicas=1` over long
+  uptime with many state changes. Would require either a multi-hour
+  run with jsz-counter inspection or NATS source-code reading.
+  Not a blocker for the API plan.
 - Exact per-event micro-mechanism of the post-M2.A residual.
   Empirically attributed to consumer raft log activity; the
   specific NATS-internal event (raft heartbeat fsync vs delivery
   tracker tick vs periodic compaction) was not isolated.
-- Parti public API for `MemoryStorage` / `Replicas` — see §2 last
-  paragraph.
+- R=5 behaviour (M1.10) and R=5 × consumer-Replicas grid — less
+  critical now that M2.B removes the R-sensitive term from the
+  per-partition cost.
+- N > 3000 — extrapolation in §1 is the 2-point linear fit; not
+  measured. M2.B is flat in N, so this matters only for the M1.2
+  baseline.
+- `FetchTimeout` ablation (M1.5) and `consumer.Queue` ablation
+  (M1.6) — both relevant only if M2.A is rejected.
 
 ---
 
