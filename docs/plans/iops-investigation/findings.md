@@ -303,3 +303,29 @@ the work:
 - **R=5 behavior.** Some cost components scale linearly with R
   (raft log appends); others don't (meta-cluster bookkeeping).
   Untested.
+
+### Plan 02 §4 cell design — predictions (recorded 2026-05-17, before runs)
+
+Per `02-nats-tuning-plan.md` §4, the candidate cells from R1
+(`tmp/r1-nats-tuning-research.md`) and their pre-registered
+predictions for `block_write_iops` cluster-summed mean at N=1000
+(baseline M1.2 = 216 IOPS):
+
+- **M2.A** (`consumer.MemoryStorage = true`, NumReplicas inherits 3) —
+  predict 80–130 IOPS (40–63 % below baseline). Recovers most of
+  M1.7's 90 % win while keeping the message log durable. **Falsifies
+  R1's rank-1 hypothesis if N=1000 stays above 180 IOPS.**
+- **M2.B** (`MemoryStorage = true` AND `NumReplicas = 1`) —
+  predict 40–80 IOPS (63–82 % below baseline). Approaches M1.7's
+  22-IOPS floor with messages still durable on R=3 file storage.
+  **M2.A ≈ M2.B (within ±5 %) → consumer disk writes dominate;
+  large gap → raft replication is a real lever.**
+- **M2.C** (`jetstream.sync_interval = "10m"` raised from 2 m default) —
+  predict 170–210 IOPS (≤ 22 % below baseline). Win comes mostly
+  from eliminating the t ≈ 200–220 s spike, not from steady-state
+  reduction (kernel writeback runs regardless of fsync cadence).
+  **Falsifies the "raise sync_interval" mitigation if the spike
+  persists at the new cadence.**
+- **Smoke** (`sync_interval = "always"`, N=100, 1 rep, capture-chain
+  control) — predict ≥ 5× the M1.2 N=100 floor. If not, rig isn't
+  honoring `nats-server.conf` changes — fix before running M2.C.

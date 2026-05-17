@@ -63,10 +63,12 @@ type Options struct {
 	HeartbeatTTL       time.Duration
 	WorkerIDTTL        time.Duration
 	ElectionTimeout    time.Duration
-	KVStorage          jetstream.StorageType
-	DataStorage        jetstream.StorageType
-	DataStreamName     string
-	PartitionSourceKey string // KV key inside the partition-source bucket
+	KVStorage             jetstream.StorageType
+	DataStorage           jetstream.StorageType
+	DataStreamName        string
+	ConsumerMemoryStorage bool // when true, harness-side override forces parti's per-partition consumers to MemoryStorage=true (Plan 02 M2.A/M2.B)
+	ConsumerReplicas      int  // when > 0, harness-side override forces parti's per-partition consumers to Replicas=N (Plan 02 M2.B). 0 = inherit stream.
+	PartitionSourceKey    string // KV key inside the partition-source bucket
 	Warmup             time.Duration
 	CaptureWindow      time.Duration
 	RPCDumpInterval    time.Duration
@@ -420,6 +422,7 @@ func StartWorker(
 		return nil, fmt.Errorf("worker %d: jetstream.New: %w", idx, err)
 	}
 	ijs := instrumentedjs.New(js)
+	ijs.SetConsumerOverrides(o.ConsumerMemoryStorage, o.ConsumerReplicas)
 
 	// Source: each manager opens its own wrapped KV handle to the
 	// partition-source bucket so its watcher / reconcile traffic is
@@ -643,10 +646,12 @@ type ManifestOptions struct {
 	HeartbeatTTL      string `yaml:"heartbeatTtl"`
 	WorkerIDTTL       string `yaml:"workerIdTtl"`
 	ElectionTimeout   string `yaml:"electionTimeout"`
-	KVStorage         string `yaml:"kvStorage"`
-	DataStorage       string `yaml:"dataStorage"`
-	DataStreamName    string `yaml:"dataStreamName"`
-	Warmup            string `yaml:"warmup"`
+	KVStorage             string `yaml:"kvStorage"`
+	DataStorage           string `yaml:"dataStorage"`
+	DataStreamName        string `yaml:"dataStreamName"`
+	ConsumerMemoryStorage bool   `yaml:"consumerMemoryStorage"`
+	ConsumerReplicas      int    `yaml:"consumerReplicas"`
+	Warmup                string `yaml:"warmup"`
 	CaptureWindow     string `yaml:"captureWindow"`
 	RPCDumpInterval   string `yaml:"rpcDumpInterval"`
 	OutputDir         string `yaml:"outputDir"`
@@ -686,10 +691,12 @@ func buildManifestOptions(o Options) ManifestOptions {
 		HeartbeatTTL:      o.HeartbeatTTL.String(),
 		WorkerIDTTL:       o.WorkerIDTTL.String(),
 		ElectionTimeout:   o.ElectionTimeout.String(),
-		KVStorage:         storageTypeName(o.KVStorage),
-		DataStorage:       storageTypeName(o.DataStorage),
-		DataStreamName:    o.DataStreamName,
-		Warmup:            o.Warmup.String(),
+		KVStorage:             storageTypeName(o.KVStorage),
+		DataStorage:           storageTypeName(o.DataStorage),
+		DataStreamName:        o.DataStreamName,
+		ConsumerMemoryStorage: o.ConsumerMemoryStorage,
+		ConsumerReplicas:      o.ConsumerReplicas,
+		Warmup:                o.Warmup.String(),
 		CaptureWindow:     o.CaptureWindow.String(),
 		RPCDumpInterval:   o.RPCDumpInterval.String(),
 		OutputDir:         o.OutputDir,

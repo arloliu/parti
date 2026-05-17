@@ -70,6 +70,8 @@ func parseFlags(args []string) (Options, error) {
 		kvStorage       = fs.String("kv-storage", "file", "file | memory; applies to ALL parti KV buckets")
 		dataStorage     = fs.String("data-storage", "file", "file | memory; applies to the data stream")
 		dataStream      = fs.String("data-stream-name", "iops-rig-data", "data stream name")
+		consumerMemSt   = fs.Bool("consumer-memory-storage", false, "force jetstream.ConsumerConfig.MemoryStorage=true for all parti-created consumers (Plan 02 M2.A/M2.B)")
+		consumerReps    = fs.Int("consumer-replicas", 0, "override jetstream.ConsumerConfig.Replicas for all parti-created consumers; 0 = inherit stream (Plan 02 M2.B)")
 		warmup          = fs.Duration("warmup", 5*time.Minute, "warmup window before counter reset")
 		capture         = fs.Duration("capture-window", 10*time.Minute, "measurement window length")
 		dumpInterval    = fs.Duration("rpc-dump-interval", 1*time.Second, "counter CSV dump rate")
@@ -96,28 +98,30 @@ func parseFlags(args []string) (Options, error) {
 	}
 
 	return Options{
-		NATSURLs:           *natsURLs,
-		Workers:            *workers,
-		N:                  *n,
-		Replicas:           *replicas,
-		TwoPhase:           *twoPhase,
-		SweepInterval:      *sweepInterval,
-		FetchTimeout:       *fetchTimeout,
-		ConsumerMode:       mode,
-		HeartbeatInterval:  *hbInterval,
-		HeartbeatTTL:       *hbTTL,
-		WorkerIDTTL:        *widTTL,
-		ElectionTimeout:    *electionTimeout,
-		KVStorage:          kvSt,
-		DataStorage:        dataSt,
-		DataStreamName:     *dataStream,
-		PartitionSourceKey: DefaultPartitionSourceKey,
-		Warmup:             *warmup,
-		CaptureWindow:      *capture,
-		RPCDumpInterval:    *dumpInterval,
-		OutputDir:          *outputDir,
-		PartiVersion:       *partiVersion,
-		FastConfig:         *fastConfig,
+		NATSURLs:              *natsURLs,
+		Workers:               *workers,
+		N:                     *n,
+		Replicas:              *replicas,
+		TwoPhase:              *twoPhase,
+		SweepInterval:         *sweepInterval,
+		FetchTimeout:          *fetchTimeout,
+		ConsumerMode:          mode,
+		HeartbeatInterval:     *hbInterval,
+		HeartbeatTTL:          *hbTTL,
+		WorkerIDTTL:           *widTTL,
+		ElectionTimeout:       *electionTimeout,
+		KVStorage:             kvSt,
+		DataStorage:           dataSt,
+		DataStreamName:        *dataStream,
+		ConsumerMemoryStorage: *consumerMemSt,
+		ConsumerReplicas:      *consumerReps,
+		PartitionSourceKey:    DefaultPartitionSourceKey,
+		Warmup:                *warmup,
+		CaptureWindow:         *capture,
+		RPCDumpInterval:       *dumpInterval,
+		OutputDir:             *outputDir,
+		PartiVersion:          *partiVersion,
+		FastConfig:            *fastConfig,
 	}, nil
 }
 
@@ -163,6 +167,10 @@ func Run(ctx context.Context, o Options, errLog io.Writer) error {
 		return fmt.Errorf("setup jetstream.New: %w", err)
 	}
 	setupIJS := instrumentedjs.New(setupJS)
+	// Setup wrapper doesn't create parti consumers, but applying the
+	// overrides here keeps every InstrumentedJS in the harness uniform
+	// — important if a future change moves consumer creation earlier.
+	setupIJS.SetConsumerOverrides(o.ConsumerMemoryStorage, o.ConsumerReplicas)
 
 	// Wait for the JetStream meta-cluster to elect a leader. A fresh
 	// rig accepts client connections in ~1s but takes ~5-10s to elect

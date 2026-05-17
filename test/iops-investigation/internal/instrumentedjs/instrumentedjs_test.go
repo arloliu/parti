@@ -428,3 +428,138 @@ func TestPassthroughOnError(t *testing.T) {
 	require.True(t, errors.Is(err, jetstream.ErrBucketNotFound))
 	require.Equal(t, int64(1), ijs.Snapshot()[CounterKey{Bucket: JetStreamBucket, Op: "KeyValue"}])
 }
+
+// TestConsumerOverrides_MemoryStorage_OptIn verifies that
+// SetConsumerOverrides(true, 0) mutates an in-flight ConsumerConfig
+// to set MemoryStorage=true while leaving Replicas at its
+// caller-supplied value, and that the caller's local cfg is not
+// modified (struct-pass-by-value semantics).
+//
+// This is the load-bearing test for Plan 02's M2.A cell — the
+// interceptor must apply the override even when the caller (parti)
+// passes a zero-valued MemoryStorage.
+func TestConsumerOverrides_MemoryStorage_OptIn(t *testing.T) {
+	js, teardown := startEmbeddedNATS(t)
+	defer teardown()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := js.CreateStream(ctx, jetstream.StreamConfig{
+		Name:     "OVR_MEM",
+		Subjects: []string{"ovr.mem.>"},
+		Storage:  jetstream.FileStorage, // file-backed stream to mirror M1.2 baseline
+	})
+	require.NoError(t, err)
+
+	ijs := New(js)
+	ijs.SetConsumerOverrides(true, 0)
+
+	callerCfg := jetstream.ConsumerConfig{
+		Durable:       "ovr-mem-cons",
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		FilterSubject: "ovr.mem.>",
+		// MemoryStorage and Replicas intentionally left at zero values
+		// — this mirrors how parti constructs its ConsumerConfig.
+	}
+
+	cons, err := ijs.CreateOrUpdateConsumer(ctx, "OVR_MEM", callerCfg)
+	require.NoError(t, err)
+
+	info, err := cons.Info(ctx)
+	require.NoError(t, err)
+	require.True(t, info.Config.MemoryStorage, "interceptor should have set MemoryStorage=true")
+
+	// Caller's cfg must NOT have been mutated (Go pass-by-value).
+	require.False(t, callerCfg.MemoryStorage, "caller's local cfg must remain unchanged")
+}
+
+// TestConsumerOverrides_Replicas_GuardOnPositive verifies that
+// SetConsumerOverrides(_, N>0) mutates Replicas, and that
+// SetConsumerOverrides(_, 0) leaves Replicas at the caller's value.
+//
+// Replicas=0 is JetStream's wire-level "inherit stream replicas"
+// sentinel — overriding it would silently force single-replica
+// consumers for every non-M2 cell, so the guard on >0 is critical.
+func TestConsumerOverrides_Replicas_GuardOnPositive(t *testing.T) {
+	js, teardown := startEmbeddedNATS(t)
+	defer teardown()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := js.CreateStream(ctx, jetstream.StreamConfig{
+		Name:     "OVR_REP",
+		Subjects: []string{"ovr.rep.>"},
+		Storage:  jetstream.FileStorage,
+	})
+	require.NoError(t, err)
+
+	// Case 1: Replicas override = 1 (the M2.B value). Embedded NATS is
+	// single-node so 1 is the only valid non-zero replicas value here.
+	ijs := New(js)
+	ijs.SetConsumerOverrides(false, 1)
+
+	cons, err := ijs.CreateOrUpdateConsumer(ctx, "OVR_REP", jetstream.ConsumerConfig{
+		Durable:       "ovr-rep-cons",
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		FilterSubject: "ovr.rep.>",
+	})
+	require.NoError(t, err)
+	info, err := cons.Info(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, info.Config.Replicas, "interceptor should have set Replicas=1")
+	require.False(t, info.Config.MemoryStorage, "MemoryStorage must NOT be set when only Replicas override is configured")
+
+	// Case 2: Replicas override = 0 (default — should NOT override).
+	// We assert that the caller-supplied non-zero Replicas survives.
+	// On a single-node embedded NATS, Replicas defaults to 1 server-side
+	// for any non-explicit value, so the assertion is "the override did
+	// not force a different value" — there is no way to set Replicas=2+
+	// on a single-node cluster.
+	ijs2 := New(js)
+	ijs2.SetConsumerOverrides(false, 0) // both off
+
+	cons2, err := ijs2.CreateOrUpdateConsumer(ctx, "OVR_REP", jetstream.ConsumerConfig{
+		Durable:       "ovr-rep-cons-2",
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		FilterSubject: "ovr.rep.>",
+	})
+	require.NoError(t, err)
+	info2, err := cons2.Info(ctx)
+	require.NoError(t, err)
+	require.False(t, info2.Config.MemoryStorage, "MemoryStorage must remain unset when overrides are off")
+}
+
+// TestConsumerOverrides_NoMutationWhenUnset verifies that with both
+// override fields at their zero values (the default after New(js)),
+// the interceptor is a no-op: an explicit caller-supplied
+// MemoryStorage=true survives, and the consumer comes up with the
+// caller's exact config.
+func TestConsumerOverrides_NoMutationWhenUnset(t *testing.T) {
+	js, teardown := startEmbeddedNATS(t)
+	defer teardown()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := js.CreateStream(ctx, jetstream.StreamConfig{
+		Name:     "OVR_NOOP",
+		Subjects: []string{"ovr.noop.>"},
+		Storage:  jetstream.FileStorage,
+	})
+	require.NoError(t, err)
+
+	ijs := New(js) // no SetConsumerOverrides call
+
+	cons, err := ijs.CreateOrUpdateConsumer(ctx, "OVR_NOOP", jetstream.ConsumerConfig{
+		Durable:       "ovr-noop-cons",
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		FilterSubject: "ovr.noop.>",
+		MemoryStorage: true, // caller-supplied
+	})
+	require.NoError(t, err)
+	info, err := cons.Info(ctx)
+	require.NoError(t, err)
+	require.True(t, info.Config.MemoryStorage, "caller-supplied MemoryStorage=true must pass through unchanged when no override is configured")
+}

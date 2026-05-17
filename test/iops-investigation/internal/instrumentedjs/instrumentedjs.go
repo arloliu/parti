@@ -94,17 +94,59 @@ func (c *counters) reset() {
 // and KeyValue-level call parti issues is counted by (bucket, op).
 // Methods not explicitly overridden fall through to the embedded
 // interface unchanged.
+//
+// InstrumentedJS can also mutate the [jetstream.ConsumerConfig] of
+// in-flight CreateOrUpdateConsumer calls. This is used by the IOPS
+// investigation's Plan 02 M2.x cells to apply server-side tuning
+// (MemoryStorage / Replicas overrides) without touching parti's
+// public consumer API. See [InstrumentedJS.SetConsumerOverrides].
 type InstrumentedJS struct {
 	jetstream.JetStream
 	counters *counters
+
+	// consumerMemoryStorage, when true, sets cfg.MemoryStorage=true on
+	// every in-flight CreateOrUpdateConsumer call before forwarding.
+	// Zero value (false) preserves parti's current behavior — the
+	// override is opt-in.
+	consumerMemoryStorage bool
+
+	// consumerReplicas, when > 0, sets cfg.Replicas=consumerReplicas on
+	// every in-flight CreateOrUpdateConsumer call before forwarding.
+	// Zero is JetStream's wire-level "inherit stream replicas" sentinel
+	// and is preserved by leaving cfg.Replicas untouched.
+	consumerReplicas int
 }
 
 // New returns an [InstrumentedJS] that wraps js. All KeyValue handles
 // obtained via the wrapper's KeyValue / CreateKeyValue /
 // CreateOrUpdateKeyValue / UpdateKeyValue methods will share its
 // counter table.
+//
+// The returned wrapper has no consumer-config overrides; call
+// [InstrumentedJS.SetConsumerOverrides] to opt in.
 func New(js jetstream.JetStream) *InstrumentedJS {
 	return &InstrumentedJS{JetStream: js, counters: newCounters()}
+}
+
+// SetConsumerOverrides configures mutations that will be applied to
+// the [jetstream.ConsumerConfig] of every subsequent
+// CreateOrUpdateConsumer call before it is forwarded to the embedded
+// JetStream client.
+//
+// Parameters:
+//   - memoryStorage: when true, force cfg.MemoryStorage = true. When
+//     false, parti's value is preserved (default behavior).
+//   - replicas: when > 0, force cfg.Replicas = replicas. When 0,
+//     parti's value is preserved (which is itself typically 0, the
+//     wire-level "inherit stream replicas" sentinel).
+//
+// Used by the harness to apply Plan 02 M2.A / M2.B server-side
+// tuning (see docs/plans/iops-investigation/02-nats-tuning-plan.md).
+// Safe to call before any consumer is created; not safe to call
+// concurrently with CreateOrUpdateConsumer.
+func (i *InstrumentedJS) SetConsumerOverrides(memoryStorage bool, replicas int) {
+	i.consumerMemoryStorage = memoryStorage
+	i.consumerReplicas = replicas
 }
 
 // Snapshot returns a typed copy of every (bucket, op) counter. The
@@ -201,9 +243,20 @@ func (i *InstrumentedJS) PublishMsgAsync(msg *nats.Msg, opts ...jetstream.Publis
 
 // CreateOrUpdateConsumer overrides
 // [jetstream.JetStream.CreateOrUpdateConsumer] (used by
-// internal/durable/partition_consumer.go).
+// internal/durable/partition_consumer.go and jsutil.EnsureConsumer).
+//
+// If consumer overrides have been configured via
+// [InstrumentedJS.SetConsumerOverrides], the in-flight cfg is
+// mutated before being forwarded. The override is opt-in: with
+// both fields at their zero values the call is unchanged.
 func (i *InstrumentedJS) CreateOrUpdateConsumer(ctx context.Context, stream string, cfg jetstream.ConsumerConfig) (jetstream.Consumer, error) { //nolint:ireturn // matches JetStream interface
 	i.counters.inc(JetStreamBucket, "CreateOrUpdateConsumer")
+	if i.consumerMemoryStorage {
+		cfg.MemoryStorage = true
+	}
+	if i.consumerReplicas > 0 {
+		cfg.Replicas = i.consumerReplicas
+	}
 	return i.JetStream.CreateOrUpdateConsumer(ctx, stream, cfg)
 }
 

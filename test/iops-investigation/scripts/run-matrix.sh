@@ -61,18 +61,31 @@ CAPTURE_TOTAL=$(( WARMUP_SECS + CAPTURE_SECS ))
 # Format of CELL_N_VALUES[cell]: space-separated list of N values
 # Format of CELL_FLAGS[cell]:    harness flags (empty for control/HEAD)
 # ---------------------------------------------------------------------------
-declare -A CELL_REPLICAS CELL_N_VALUES CELL_FLAGS CELL_CONTROL CELL_HEAD
+declare -A CELL_REPLICAS CELL_N_VALUES CELL_FLAGS CELL_CONTROL CELL_HEAD CELL_NATS_CONFIG
 
 # Helper to register one cell.
+#
+# Positional args:
+#   1 cell        Cell name (e.g. "M1.2")
+#   2 replicas    NATS cluster size — 3 or 5 (selects compose profile)
+#   3 n_values    Space-separated N list (partition counts)
+#   4 flags       Harness flag string ("" for controls)
+#   5 is_control  Optional, "true" to skip the harness binary (M1.0)
+#   6 is_head     Optional, "true" to refuse the cell (M1.11 pin-swap)
+#   7 nats_config Optional, host-side path to a per-cell server.conf
+#                 (default: docker-compose's built-in default of
+#                 ./nats-server.conf). Used for Plan 02 §M2.C tuning.
 _def_cell() {
     local cell="$1" replicas="$2" n_values="$3" flags="$4"
     local is_control="${5:-false}"
     local is_head="${6:-false}"
+    local nats_config="${7:-}"
     CELL_REPLICAS["$cell"]="$replicas"
     CELL_N_VALUES["$cell"]="$n_values"
     CELL_FLAGS["$cell"]="$flags"
     CELL_CONTROL["$cell"]="$is_control"
     CELL_HEAD["$cell"]="$is_head"
+    CELL_NATS_CONFIG["$cell"]="$nats_config"
 }
 
 # M1.0  No-Parti control — NATS only, no harness. N swept to set MDE baseline.
@@ -111,8 +124,32 @@ _def_cell M1.10 5 "2000" "--two-phase=true --consumer-mode=dynamic --replicas=5"
 # M1.11 HEAD comparison — requires a manual go.mod pin swap; always refused.
 _def_cell M1.11 3 "2000" "" "false" "true"
 
+# ---------------------------------------------------------------------------
+# Plan 02 — NATS server-side tuning cells (M2.x).
+#
+# Source: docs/plans/iops-investigation/02-nats-tuning-plan.md +
+#         tmp/r1-nats-tuning-research.md §3 (cell list, predictions).
+# Baseline for comparison: M1.2 (file-storage, default config).
+# N values restricted to {1000, 3000} per Plan 02 §6 budget.
+# ---------------------------------------------------------------------------
+
+# M2.A  Consumer state in memory (parti messages remain durable on disk).
+#       Plan 02 R1 rank-1 candidate; durability-preserving analog of M1.7.
+_def_cell M2.A 3 "1000 3000" "--two-phase=true --consumer-mode=dynamic --consumer-memory-storage=true"
+
+# M2.B  Consumer state in memory AND Replicas=1 (no consumer-state raft).
+#       Plan 02 R1 rank-1+rank-2 stacked. M2.A vs M2.B attributes the
+#       raft-replication contribution to consumer-state IOPS.
+_def_cell M2.B 3 "1000 3000" "--two-phase=true --consumer-mode=dynamic --consumer-memory-storage=true --consumer-replicas=1"
+
+# M2.C  Server-side: jetstream.sync_interval raised from 2m default to 10m.
+#       Per-cell server.conf swap via IOPS_RIG_NATS_CONFIG (7th _def_cell arg).
+#       Plan 02 R1 rank-3 candidate. Modest win expected; mainly targets
+#       the t≈200s spike in findings.md §9 (open question).
+_def_cell M2.C 3 "1000 3000" "--two-phase=true --consumer-mode=dynamic" "false" "false" "./nats-server-M2C.conf"
+
 # Ordered default cell list.
-ALL_CELLS=(M1.0 M1.1 M1.2 M1.3 M1.4 M1.5 M1.6 M1.7 M1.8 M1.9 M1.10 M1.11)
+ALL_CELLS=(M1.0 M1.1 M1.2 M1.3 M1.4 M1.5 M1.6 M1.7 M1.8 M1.9 M1.10 M1.11 M2.A M2.B M2.C)
 
 # ---------------------------------------------------------------------------
 # Usage.
@@ -341,7 +378,7 @@ print("\n".join(lines))
 # ---------------------------------------------------------------------------
 # Write / print schedule.
 # ---------------------------------------------------------------------------
-SCHEDULE_HEADER="# position\tcell\tN\trep\tflags"
+SCHEDULE_HEADER="# position\tcell\tN\trep\tnats_config\tflags"
 
 build_schedule_body() {
     local pos=0
@@ -350,6 +387,7 @@ build_schedule_body() {
         local flags="${CELL_FLAGS[$cell]}"
         local is_control="${CELL_CONTROL[$cell]}"
         local is_head="${CELL_HEAD[$cell]}"
+        local nats_config="${CELL_NATS_CONFIG[$cell]:-default}"
         if [[ "$is_control" == "true" ]]; then
             flags="(control — no harness)"
         elif [[ "$is_head" == "true" ]]; then
@@ -358,7 +396,7 @@ build_schedule_body() {
             # Add the --n and --output-dir placeholders annotated in schedule.
             flags="--n=${n} ${flags}"
         fi
-        printf '%d\t%s\t%s\t%s\t%s\n' "$pos" "$cell" "$n" "$rep" "$flags"
+        printf '%d\t%s\t%s\t%s\t%s\t%s\n' "$pos" "$cell" "$n" "$rep" "$nats_config" "$flags"
     done <<< "$SHUFFLED"
 }
 
@@ -545,6 +583,7 @@ run_one() {
         echo "replicas: ${replicas}"
         echo "is_control: ${is_control}"
         echo "is_head: ${is_head}"
+        echo "nats_config: '${CELL_NATS_CONFIG[$cell]:-default}'"
         if [[ "$is_control" == "true" ]]; then
             echo "flags: '(control — no harness)'"
         elif [[ "$is_head" == "true" ]]; then
@@ -556,8 +595,15 @@ run_one() {
 
     # Reset the rig — always, before every run.
     # Pass IOPS_RIG_NATS_REPLICAS so the Makefile picks up the right profile.
-    echo "  resetting rig (replicas=${replicas})..."
-    if ! IOPS_RIG_NATS_REPLICAS="${replicas}" make -C "$RIG_DIR" reset; then
+    # Pass IOPS_RIG_NATS_CONFIG when the cell defines a per-cell server.conf
+    # (e.g. M2.C); docker-compose interpolates it into the bind-mount.
+    # Empty value falls back to docker-compose's built-in default
+    # (./nats-server.conf) — same as every M1.x cell.
+    local nats_config="${CELL_NATS_CONFIG[$cell]:-}"
+    echo "  resetting rig (replicas=${replicas}, nats_config=${nats_config:-default})..."
+    if ! IOPS_RIG_NATS_REPLICAS="${replicas}" \
+         IOPS_RIG_NATS_CONFIG="${nats_config}" \
+         make -C "$RIG_DIR" reset; then
         echo "  FAILED: make reset failed; aborting run" >&2
         echo "make reset failed" > "${run_dir}/failed.txt"
         return 1
