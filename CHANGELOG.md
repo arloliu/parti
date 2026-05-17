@@ -7,12 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v2.4.0] - 2026-05-18
+
 This release delivers partition-assignment robustness across six phases of
 work: a content-addressable assignment publisher, a commit-driven worker state
 machine with leader-side audit/repair, a v1 heartbeat wire format with
 capability advertising, atomic partition-list mutation APIs, live consumer-side
 processing-gate wiring, and several targeted fixes for latent failure modes
 that became materially more likely once audit-repair could trigger escalation.
+It also adds two opt-in consumer options that cut per-partition JetStream IOPS
+by ~99% on the IOPS-investigation rig, and ships a full investigation report
+documenting the storage/replication tradeoffs behind that recommendation.
 
 ### Added
 
@@ -74,7 +79,7 @@ that became materially more likely once audit-repair could trigger escalation.
 
 ### Changed
 
-- **Refs-always commit publisher (Phase 3).** Assignments are now stored as
+- **Refs-always commit publisher.** Assignments are now stored as
   three protocol keys instead of one per-worker key:
   - `assignment._commit` — the current commit object (worker→payload-key map)
   - `assignment._commit_log.<V>` — an append-only commit-log entry per version
@@ -82,7 +87,7 @@ that became materially more likely once audit-repair could trigger escalation.
   Workers watch `assignment._commit` and fetch referenced payload keys.
   Content-addressable payloads mean identical assignment slices share a single
   KV entry; a GC pass (`CommitGC`) reaps orphan payload keys.
-- **Commit-driven worker state machine + leader audit (Phase 4).** The leader
+- **Commit-driven worker state machine + leader audit.** The leader
   now records the active fleet and commit version in `assignment._commit` and
   re-reads it after every apply to verify symmetry between the committed worker
   set and the live heartbeat fleet. Workers that fall behind (applied version
@@ -152,6 +157,9 @@ new worker runs a dual-read source-of-truth selector (`selectAuthority` in
   (commit `a585801`).
 - `internal/assignment/doc.go` updated to reflect the three-key commit-publisher
   model; references to the old single per-worker assignment key removed.
+- `Makefile` `TEST_DIRS` / `ALL_GO_FILES` now exclude `./.claude/*` so agent
+  worktrees under `.claude/worktrees/` no longer get swept into the test set
+  (commit `f24ab2e`).
 
 ## [v2.3.0] - 2026-04-22
 
