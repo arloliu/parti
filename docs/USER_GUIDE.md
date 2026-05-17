@@ -40,7 +40,7 @@ This user guide provides an introduction to Parti. For detailed documentation, s
 
 ### What is Parti?
 
-Parti is a Go library for NATS-based work partitioning that provides dynamic partition assignment across worker instances with stable worker IDs and leader-based coordination.
+Parti is a Go library for building partitioned workloads on NATS. It provides a complete toolkit for sharding work across workers — **dynamic partitioning** with leader-coordinated rebalancing (stable worker IDs, two-phase handoff, cache-affinity rebalancing), **static partitioning** for fixed-topology deployments such as Kubernetes StatefulSets, and **resilient JetStream consumers** with auto-recovery from durable deletion. Its headline capability is solving the coordination gap NATS leaves open when both the worker fleet and the partition set change at runtime.
 
 ### Key Features
 
@@ -106,7 +106,7 @@ go get github.com/arloliu/parti/v2
 github.com/arloliu/parti/v2    # Root package `parti`: Manager, Config, hooks, errors
 ├── consumer                   # JetStream consumers: Queue, Static, Dynamic, Broadcast
 ├── partition                  # Static partition routing and publisher/subscriber helpers
-├── strategy                   # Assignment strategies: ConsistentHash, RoundRobin
+├── strategy                   # Assignment strategies: ConsistentHash, WeightedConsistentHash, RoundRobin
 ├── source                     # Partition sources: Static, NatsKV
 ├── types                      # Shared interfaces and metric contracts
 ├── jsutil                     # JetStream helper utilities

@@ -1,9 +1,13 @@
-// Package parti provides a Go library for NATS-based work partitioning with stable worker IDs
-// and leader-based coordination.
+// Package parti is a Go library for building partitioned workloads on NATS. It provides a
+// complete toolkit for sharding work across workers: dynamic partitioning with leader-coordinated
+// rebalancing, static partitioning for fixed-topology deployments (e.g. Kubernetes StatefulSets),
+// and resilient JetStream consumers with auto-recovery from durable deletion.
 //
-// Parti enables distributed systems to dynamically assign work partitions across worker instances
-// without requiring external coordination services. It provides stable worker identities,
-// cache-affinity-aware rebalancing, and adaptive stabilization for different scaling scenarios.
+// Its headline capability is solving the coordination gap NATS leaves open when both the worker
+// fleet and the partition set change at runtime — providing stable worker identities,
+// cache-affinity-aware rebalancing, and adaptive stabilization without external coordination
+// services. Static partitioning and consumer auto-recovery live in the partition and consumer
+// subpackages respectively.
 //
 // # Quick Start
 //
@@ -39,6 +43,8 @@
 //   - Adaptive Rebalancing: Different stabilization windows for cold start (30s) vs planned scale (10s)
 //   - Cache Affinity: Preserves >80% partition locality during rebalancing
 //   - Weighted Assignment: Supports partition weights for load balancing
+//   - Static Partitioning: Zero-coordination routing for StatefulSet-style deployments (partition subpackage)
+//   - Consumer Auto-Recovery: JetStream consumers detect and recreate deleted durables automatically (consumer subpackage)
 //
 // # Architecture
 //

@@ -4,9 +4,31 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/arloliu/parti/v2)](https://goreportcard.com/report/github.com/arloliu/parti/v2)
 [![License: Apache](https://img.shields.io/badge/License-Apache-blue.svg)](LICENSE)
 
-**Parti** is a Go library for NATS-based work partitioning that provides dynamic partition assignment across worker instances with stable worker IDs, leader-based coordination, and robust failure handling.
+**Parti** is a Go library for building partitioned workloads on NATS. It provides a complete toolkit for sharding work across workers — **dynamic partitioning** with leader-coordinated rebalancing, **static partitioning** for fixed-topology deployments (e.g. Kubernetes StatefulSets), and **resilient JetStream consumers** with auto-recovery from durable deletion.
 
-It is designed for building distributed systems where work needs to be sharded across a dynamic set of workers, such as stream processors, job queues, or sharded databases.
+| Its headline capability is solving the coordination gap NATS leaves open when workers and partitions change at runtime.
+
+## The Problem
+
+You want to shard work across a fleet of workers — each worker owns a subset of partitions (shards, tenants, key ranges). At runtime, two things change independently:
+
+- **The worker fleet** — pods scale up and down, deploys roll, instances crash and restart.
+- **The partition set** — tenants are added or removed, shards split or merge, keyspaces grow.
+
+NATS JetStream gives you durable consumers, but **no built-in way to rebalance partition ownership across a changing fleet**. Without a coordination layer, you end up with two workers consuming the same partition during a reassignment, partitions left unprocessed during a deploy, or assignments that churn every time a pod restarts.
+
+## What Parti Provides
+
+Parti is the coordination layer NATS doesn't ship with — it handles the seamless re-binding of partitions to workers when either side changes:
+
+- **Stable worker IDs** across restarts so rolling updates don't churn assignments.
+- **Leader-elected assignment** so every worker agrees on who owns what.
+- **Two-phase handoff (Prepare/Commit)** so no partition is processed by two workers during reassignment.
+- **Dynamic partition discovery** so you can add or remove partitions without restarting workers.
+- **Cache-affinity rebalancing** so >80% partition locality is preserved when the fleet size changes.
+- **Degraded-mode operation** so workers keep processing with cached assignments when NATS connectivity is lost.
+
+Use it for stream processors, job queues, sharded caches, or any system where a dynamic set of workers must own a dynamic set of partitions.
 
 ## Key Features
 
@@ -31,8 +53,6 @@ It is designed for building distributed systems where work needs to be sharded a
 See [Consumer Helpers](docs/CONSUMERS.md#auto-recovery) for the full strategy matrix and per-consumer support table.
 
 ### Static Partitioning (`partition` package)
-
-> Added in v1.5.0
 
 - **Deterministic Routing**: Messages are routed to fixed partitions using xxh3 hashing on partition keys.
 - **StatefulSet Integration**: Designed for Kubernetes StatefulSet deployments where each pod handles a fixed partition based on its ordinal.
