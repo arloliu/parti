@@ -2,6 +2,7 @@ package consumer_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,4 +64,61 @@ func TestDynamic_ImplementsCapabilityReporter(t *testing.T) {
 
 	require.NotZero(t, d.Capabilities()&types.CapProcessingGate,
 		"Dynamic.Capabilities() MUST forward CapProcessingGate from inner WorkerConsumer")
+}
+
+// TestDynamic_ConsumerOptions_AppliedToLiveConsumer verifies that
+// WithConsumerMemoryStorage and WithConsumerReplicas are forwarded
+// all the way to the JetStream consumer's live config.
+func TestDynamic_ConsumerOptions_AppliedToLiveConsumer(t *testing.T) {
+	_, nc := partitest.StartEmbeddedNATS(t)
+
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	streamName := "DYN_OPT"
+	_, err = js.CreateStream(ctx, jetstream.StreamConfig{
+		Name:     streamName,
+		Subjects: []string{"dynopt.>"},
+		Storage:  jetstream.FileStorage,
+		Replicas: 1,
+	})
+	require.NoError(t, err)
+
+	handler := consumer.MessageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error { return nil })
+
+	dyn, err := consumer.NewDynamic(
+		js,
+		streamName,
+		"dynopt_worker",
+		"dynopt.{{.PartitionID}}",
+		handler,
+		consumer.WithConsumerMemoryStorage(true),
+		consumer.WithConsumerReplicas(1),
+	)
+	require.NoError(t, err)
+	defer func() { _ = dyn.Stop(ctx) }()
+
+	err = dyn.Update(ctx, "worker-0", []types.Partition{{Keys: []string{"p0"}}})
+	require.NoError(t, err)
+
+	stream, err := js.Stream(ctx, streamName)
+	require.NoError(t, err)
+
+	lister := stream.ListConsumers(ctx)
+	var found bool
+	for ci := range lister.Info() {
+		if !strings.HasPrefix(ci.Name, "dynopt_worker_") {
+			continue
+		}
+		found = true
+		require.True(t, ci.Config.MemoryStorage,
+			"consumer %q: Config.MemoryStorage = false, want true", ci.Name)
+		require.Equal(t, 1, ci.Config.Replicas,
+			"consumer %q: Config.Replicas = %d, want 1", ci.Name, ci.Config.Replicas)
+	}
+	require.NoError(t, lister.Err(), "ListConsumers iteration failed")
+	require.True(t, found, "no per-partition consumer was created under the dynopt_worker prefix")
 }

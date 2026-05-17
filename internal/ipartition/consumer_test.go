@@ -231,3 +231,70 @@ func TestJSConsumer_StopIdempotent(t *testing.T) {
 	err = consumer.Stop(stopCtx)
 	require.NoError(t, err)
 }
+
+// TestJSConsumer_RecoverySnapshot_CarriesConsumerOptions verifies the
+// recovery snapshot for Static consumers carries the two new fields.
+// Single-node embedded NATS can't distinguish "explicit Replicas=1" from
+// default; this white-box test reads the cfg parti sent to NATS.
+func TestJSConsumer_RecoverySnapshot_CarriesConsumerOptions(t *testing.T) {
+	_, nc := partitesting.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err = js.CreateStream(ctx, jetstream.StreamConfig{
+		Name:     "ISNAP",
+		Subjects: []string{"isnap.>"},
+		Storage:  jetstream.FileStorage,
+		Replicas: 1,
+	})
+	require.NoError(t, err)
+
+	noopHandler := messageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error { return nil })
+
+	jcExplicit, err := NewJSConsumer(js, ConsumerConfig{
+		PartitionConfig: partition.PartitionConfig{
+			NumPartitions:  2,
+			SubjectPattern: "isnap.{{partition}}",
+		},
+		StreamName:            "ISNAP",
+		ConsumerName:          "isnap-explicit",
+		Partition:             0,
+		ConsumerMemoryStorage: true,
+		ConsumerReplicas:      1,
+	}, noopHandler)
+	require.NoError(t, err)
+	require.NoError(t, jcExplicit.Start(ctx))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = jcExplicit.Stop(ctx)
+	})
+
+	require.True(t, jcExplicit.consumerConfig.MemoryStorage,
+		"explicit: consumerConfig.MemoryStorage = false, want true")
+	require.Equal(t, 1, jcExplicit.consumerConfig.Replicas,
+		"explicit: consumerConfig.Replicas = %d, want 1", jcExplicit.consumerConfig.Replicas)
+
+	jcDefault, err := NewJSConsumer(js, ConsumerConfig{
+		PartitionConfig: partition.PartitionConfig{
+			NumPartitions:  2,
+			SubjectPattern: "isnap.{{partition}}",
+		},
+		StreamName:   "ISNAP",
+		ConsumerName: "isnap-default",
+		Partition:    1,
+	}, noopHandler)
+	require.NoError(t, err)
+	require.NoError(t, jcDefault.Start(ctx))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = jcDefault.Stop(ctx)
+	})
+
+	require.False(t, jcDefault.consumerConfig.MemoryStorage)
+	require.Equal(t, 0, jcDefault.consumerConfig.Replicas)
+}

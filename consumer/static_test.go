@@ -1,10 +1,15 @@
 package consumer
 
 import (
+	"context"
 	"os"
 	"testing"
+	"time"
 
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
+
+	"github.com/arloliu/parti/v2/partitest"
 )
 
 func TestParseStatefulSetOrdinal(t *testing.T) {
@@ -72,4 +77,53 @@ func TestGetPartitionFromEnv(t *testing.T) {
 		_, err := GetPartitionFromEnv()
 		require.Error(t, err)
 	})
+}
+
+// TestStatic_ConsumerOptions_AppliedToLiveConsumer verifies that
+// WithConsumerMemoryStorage and WithConsumerReplicas reach the live
+// Static consumer's Config.
+func TestStatic_ConsumerOptions_AppliedToLiveConsumer(t *testing.T) {
+	_, nc := partitest.StartEmbeddedNATS(t)
+
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	streamName := "STATIC_OPT"
+	_, err = js.CreateStream(ctx, jetstream.StreamConfig{
+		Name:     streamName,
+		Subjects: []string{"statopt.>"},
+		Storage:  jetstream.FileStorage,
+		Replicas: 1,
+	})
+	require.NoError(t, err)
+
+	handler := MessageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error { return nil })
+
+	s, err := NewStatic(
+		js,
+		streamName,
+		"statopt-p0",
+		"statopt.{{partition}}",
+		2,
+		0,
+		handler,
+		WithConsumerMemoryStorage(true),
+		WithConsumerReplicas(1),
+	)
+	require.NoError(t, err)
+	require.NoError(t, s.Start(ctx))
+	defer func() { _ = s.Stop(ctx) }()
+
+	stream, err := js.Stream(ctx, streamName)
+	require.NoError(t, err)
+	cons, err := stream.Consumer(ctx, "statopt-p0")
+	require.NoError(t, err)
+
+	consInfo, err := cons.Info(ctx)
+	require.NoError(t, err)
+	require.True(t, consInfo.Config.MemoryStorage)
+	require.Equal(t, 1, consInfo.Config.Replicas)
 }

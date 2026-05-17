@@ -761,3 +761,145 @@ func TestWorkerConsumer_Close_RespectsTimeout(t *testing.T) {
 	// Unblock handler to allow clean teardown
 	close(blockCh)
 }
+
+// TestWorkerConsumer_RecoverySnapshotMatchesCreateConfig verifies the
+// recovery snapshot built in addSubjectLoop (worker_consumer.go ~line 414)
+// carries ConsumerMemoryStorage and ConsumerReplicas. The Dynamic
+// integration test only inspects the live consumer's Info().Config (the
+// ensurePerSubjectConsumer literal at ~line 459); this test inspects the
+// SEPARATE literal at ~line 414 that's stored for recovery.
+func TestWorkerConsumer_RecoverySnapshotMatchesCreateConfig(t *testing.T) {
+	_, nc := partitesting.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err = js.CreateStream(ctx, jetstream.StreamConfig{
+		Name:     "WCSNAP",
+		Subjects: []string{"wcsnap.>"},
+		Storage:  jetstream.FileStorage,
+		Replicas: 1,
+	})
+	require.NoError(t, err)
+
+	cfg := WorkerConsumerConfig{
+		StreamName:            "WCSNAP",
+		ConsumerPrefix:        "wcsnap",
+		SubjectTemplate:       "wcsnap.{{.PartitionID}}",
+		BatchSize:             2,
+		ConsumerMemoryStorage: true,
+		ConsumerReplicas:      1,
+	}
+	require.NoError(t, cfg.SetDefaults())
+
+	tmpl, err := template.New("subject").Parse(cfg.SubjectTemplate)
+	require.NoError(t, err)
+
+	handler := messageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error { return nil })
+
+	wc := &WorkerConsumer{
+		js:              js,
+		config:          cfg,
+		logger:          cfg.Logger,
+		handler:         handler,
+		subjects:        make(map[string]*partitionConsumer),
+		iterFactory:     defaultIterFactory,
+		subjectTemplate: tmpl,
+	}
+
+	parts := []types.Partition{{Keys: []string{"p0"}}}
+	require.NoError(t, wc.UpdateWorkerConsumer(ctx, "wcsnap-worker", parts))
+	t.Cleanup(func() { _ = wc.Close(ctx) })
+
+	subject := "wcsnap.p0"
+	deadline := time.Now().Add(3 * time.Second)
+	var pc *partitionConsumer
+	for time.Now().Before(deadline) {
+		wc.mu.RLock()
+		pc = wc.subjects[subject]
+		wc.mu.RUnlock()
+		if pc != nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	require.NotNil(t, pc, "partition consumer for %s not registered after 3s", subject)
+
+	require.True(t, pc.consumerConfig.MemoryStorage,
+		"recovery snapshot: MemoryStorage = false, want true (likely worker_consumer.go:414 missed the field)")
+	require.Equal(t, 1, pc.consumerConfig.Replicas,
+		"recovery snapshot: Replicas = %d, want 1", pc.consumerConfig.Replicas)
+}
+
+// TestWorkerConsumer_RecoverySnapshotDefaults verifies the recovery
+// snapshot preserves zero-value defaults (MemoryStorage=false,
+// Replicas=0). Without this, a regression that hard-coded Replicas=1
+// in the recovery literal would still pass
+// TestWorkerConsumer_RecoverySnapshotMatchesCreateConfig and the
+// Dynamic live test (single-node embedded NATS reports server-inherited
+// Replicas=1 for both default and explicit Replicas=1).
+func TestWorkerConsumer_RecoverySnapshotDefaults(t *testing.T) {
+	_, nc := partitesting.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err = js.CreateStream(ctx, jetstream.StreamConfig{
+		Name:     "WCSNAPDEF",
+		Subjects: []string{"wcsnapdef.>"},
+		Storage:  jetstream.FileStorage,
+		Replicas: 1,
+	})
+	require.NoError(t, err)
+
+	cfg := WorkerConsumerConfig{
+		StreamName:      "WCSNAPDEF",
+		ConsumerPrefix:  "wcsnapdef",
+		SubjectTemplate: "wcsnapdef.{{.PartitionID}}",
+		BatchSize:       2,
+		// ConsumerMemoryStorage and ConsumerReplicas intentionally unset.
+	}
+	require.NoError(t, cfg.SetDefaults())
+
+	tmpl, err := template.New("subject").Parse(cfg.SubjectTemplate)
+	require.NoError(t, err)
+
+	handler := messageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error { return nil })
+
+	wc := &WorkerConsumer{
+		js:              js,
+		config:          cfg,
+		logger:          cfg.Logger,
+		handler:         handler,
+		subjects:        make(map[string]*partitionConsumer),
+		iterFactory:     defaultIterFactory,
+		subjectTemplate: tmpl,
+	}
+
+	parts := []types.Partition{{Keys: []string{"p0"}}}
+	require.NoError(t, wc.UpdateWorkerConsumer(ctx, "wcsnapdef-worker", parts))
+	t.Cleanup(func() { _ = wc.Close(ctx) })
+
+	subject := "wcsnapdef.p0"
+	deadline := time.Now().Add(3 * time.Second)
+	var pc *partitionConsumer
+	for time.Now().Before(deadline) {
+		wc.mu.RLock()
+		pc = wc.subjects[subject]
+		wc.mu.RUnlock()
+		if pc != nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	require.NotNil(t, pc, "partition consumer for %s not registered after 3s", subject)
+
+	require.False(t, pc.consumerConfig.MemoryStorage,
+		"recovery snapshot default: MemoryStorage = true, want false (the recovery literal in addSubjectLoop must not hardcode true)")
+	require.Equal(t, 0, pc.consumerConfig.Replicas,
+		"recovery snapshot default: Replicas = %d, want 0 (the recovery literal must not hardcode a positive value)", pc.consumerConfig.Replicas)
+}

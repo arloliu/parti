@@ -167,3 +167,44 @@ func convertToDynamicOpts(opts []Option) []DynamicOption {
 
 	return out
 }
+
+func TestWithConsumerMemoryStorage(t *testing.T) {
+	o := defaultOptions()
+	if o.consumerMemoryStorage {
+		t.Error("default consumerMemoryStorage = true, want false")
+	}
+
+	WithConsumerMemoryStorage(true).apply(&o)
+	if !o.consumerMemoryStorage {
+		t.Error("after WithConsumerMemoryStorage(true), got false")
+	}
+
+	WithConsumerMemoryStorage(false).apply(&o)
+	if o.consumerMemoryStorage {
+		t.Error("after WithConsumerMemoryStorage(false), got true")
+	}
+}
+
+func TestWithConsumerReplicas(t *testing.T) {
+	o := defaultOptions()
+	if o.consumerReplicas != 0 {
+		t.Errorf("default consumerReplicas = %d, want 0", o.consumerReplicas)
+	}
+
+	WithConsumerReplicas(3).apply(&o)
+	if o.consumerReplicas != 3 {
+		t.Errorf("after WithConsumerReplicas(3), got %d", o.consumerReplicas)
+	}
+
+	WithConsumerReplicas(1).apply(&o)
+	if o.consumerReplicas != 1 {
+		t.Errorf("after WithConsumerReplicas(1), got %d", o.consumerReplicas)
+	}
+
+	// Negative values are silently ignored (defensive guard).
+	o.consumerReplicas = 5
+	WithConsumerReplicas(-1).apply(&o)
+	if o.consumerReplicas != 5 {
+		t.Errorf("after WithConsumerReplicas(-1), got %d, want 5 (unchanged)", o.consumerReplicas)
+	}
+}

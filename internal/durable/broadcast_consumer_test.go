@@ -525,3 +525,72 @@ func TestBroadcastConsumer_ReceivesAllMessages(t *testing.T) {
 	}
 	require.GreaterOrEqual(t, atomic.LoadInt32(&totalHandled), int32(3))
 }
+
+// TestBroadcastConsumer_RecoverySnapshot_CarriesConsumerOptions verifies
+// the recovery snapshot for Broadcast carries both new fields. Reads
+// bc.consumerConfig under consumerMu (matching the canonical test
+// at line ~365).
+func TestBroadcastConsumer_RecoverySnapshot_CarriesConsumerOptions(t *testing.T) {
+	_, nc := partitesting.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err = js.CreateStream(ctx, jetstream.StreamConfig{
+		Name:     "BCSNAP",
+		Subjects: []string{"bcsnap.>"},
+		Storage:  jetstream.FileStorage,
+		Replicas: 1,
+	})
+	require.NoError(t, err)
+
+	noopHandler := func(_ context.Context, _ jetstream.Msg) error { return nil }
+
+	cfgExplicit := BroadcastConsumerConfig{
+		StreamName:            "BCSNAP",
+		ConsumerPrefix:        "bcsnap-explicit",
+		ConsumerID:            "snap-worker-1",
+		WildcardFilter:        "bcsnap.>",
+		ConsumerMemoryStorage: true,
+		ConsumerReplicas:      1,
+	}
+	require.NoError(t, cfgExplicit.SetDefaults())
+	bcExplicit, err := NewBroadcastConsumer(js, cfgExplicit, noopHandler)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = bcExplicit.Close(ctx)
+	})
+	require.NoError(t, bcExplicit.startConsumerLoop(ctx))
+
+	bcExplicit.consumerMu.RLock()
+	storedExplicit := bcExplicit.consumerConfig
+	bcExplicit.consumerMu.RUnlock()
+	require.True(t, storedExplicit.MemoryStorage)
+	require.Equal(t, 1, storedExplicit.Replicas)
+
+	cfgDefault := BroadcastConsumerConfig{
+		StreamName:     "BCSNAP",
+		ConsumerPrefix: "bcsnap-default",
+		ConsumerID:     "snap-worker-2",
+		WildcardFilter: "bcsnap.>",
+	}
+	require.NoError(t, cfgDefault.SetDefaults())
+	bcDefault, err := NewBroadcastConsumer(js, cfgDefault, noopHandler)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = bcDefault.Close(ctx)
+	})
+	require.NoError(t, bcDefault.startConsumerLoop(ctx))
+
+	bcDefault.consumerMu.RLock()
+	storedDefault := bcDefault.consumerConfig
+	bcDefault.consumerMu.RUnlock()
+	require.False(t, storedDefault.MemoryStorage)
+	require.Equal(t, 0, storedDefault.Replicas)
+}

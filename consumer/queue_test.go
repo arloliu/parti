@@ -466,3 +466,144 @@ func TestQueue_RunLoop_FailedRecoveryUsesBackoff(t *testing.T) {
 	require.NotEmpty(t, m.attemptReasons)
 	require.Equal(t, []string{"failure"}, m.results[:1])
 }
+
+// TestQueue_ConsumerOptions_AppliedToLiveConsumer verifies that
+// WithConsumerMemoryStorage and WithConsumerReplicas reach the live
+// Queue consumer's Config.
+func TestQueue_ConsumerOptions_AppliedToLiveConsumer(t *testing.T) {
+	_, nc := partitesting.StartEmbeddedNATS(t)
+
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	streamName := "Q_OPT"
+	_, err = js.CreateStream(ctx, jetstream.StreamConfig{
+		Name:     streamName,
+		Subjects: []string{"qopt.>"},
+		Storage:  jetstream.FileStorage,
+		Replicas: 1,
+	})
+	require.NoError(t, err)
+
+	handler := MessageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error { return nil })
+
+	q, err := NewQueue(
+		js,
+		streamName,
+		"qopt-consumer",
+		"qopt.>",
+		handler,
+		WithConsumerMemoryStorage(true),
+		WithConsumerReplicas(1),
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, q.Start(ctx))
+	defer func() { _ = q.Stop(ctx) }()
+
+	stream, err := js.Stream(ctx, streamName)
+	require.NoError(t, err)
+	cons, err := stream.Consumer(ctx, "qopt-consumer")
+	require.NoError(t, err)
+
+	consInfo, err := cons.Info(ctx)
+	require.NoError(t, err)
+	require.True(t, consInfo.Config.MemoryStorage, "Config.MemoryStorage = false, want true")
+	require.Equal(t, 1, consInfo.Config.Replicas, "Config.Replicas = %d, want 1", consInfo.Config.Replicas)
+}
+
+// TestQueue_ConsumerReplicasExceedsStream_Surfaces10126 verifies the
+// pass-through validation: NewQueue accepts WithConsumerReplicas(2)
+// because it doesn't call NATS; Queue.Start surfaces the 10126 error.
+func TestQueue_ConsumerReplicasExceedsStream_Surfaces10126(t *testing.T) {
+	_, nc := partitesting.StartEmbeddedNATS(t)
+
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	streamName := "Q_VALIDATE"
+	_, err = js.CreateStream(ctx, jetstream.StreamConfig{
+		Name:     streamName,
+		Subjects: []string{"qvalid.>"},
+		Storage:  jetstream.FileStorage,
+		Replicas: 1,
+	})
+	require.NoError(t, err)
+
+	handler := MessageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error { return nil })
+
+	q, err := NewQueue(
+		js,
+		streamName,
+		"qvalid-consumer",
+		"qvalid.>",
+		handler,
+		WithConsumerReplicas(2),
+	)
+	require.NoError(t, err, "NewQueue should not call NATS; the error should surface at Start")
+	require.NotNil(t, q)
+
+	err = q.Start(ctx)
+	require.Error(t, err, "Queue.Start should reject Replicas=2 with stream Replicas=1")
+	// On clustered streams NATS rejects with err_code 10126 ("consumer
+	// config replica count exceeds parent stream"). On single-node
+	// embedded NATS the earlier guard fires instead: err_code 10074
+	// ("replicas > 1 not supported in non-clustered mode"). Both
+	// prove pass-through validation: parti surfaces the NATS error
+	// verbatim from Queue.Start without pre-validating.
+	msg := err.Error()
+	require.True(t,
+		strings.Contains(msg, "10126") || strings.Contains(msg, "10074"),
+		"expected NATS error code 10126 or 10074 in error message, got: %v", err)
+}
+
+// TestQueue_RecoverySnapshot_CarriesConsumerOptions verifies the stored
+// recovery-snapshot config has both new fields set. Single-node embedded
+// NATS resolves Replicas=0 and Replicas=1 to the same Info().Config.Replicas,
+// so the integration test can't distinguish them; this white-box test reads
+// the cfg parti actually sent to NATS.
+func TestQueue_RecoverySnapshot_CarriesConsumerOptions(t *testing.T) {
+	_, nc := partitesting.StartEmbeddedNATS(t)
+
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	streamName := "Q_SNAP"
+	_, err = js.CreateStream(ctx, jetstream.StreamConfig{
+		Name:     streamName,
+		Subjects: []string{"qsnap.>"},
+		Storage:  jetstream.FileStorage,
+		Replicas: 1,
+	})
+	require.NoError(t, err)
+
+	handler := MessageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error { return nil })
+
+	qExplicit, err := NewQueue(js, streamName, "qsnap-explicit", "qsnap.>", handler,
+		WithConsumerMemoryStorage(true), WithConsumerReplicas(1))
+	require.NoError(t, err)
+	require.NoError(t, qExplicit.Start(ctx))
+	defer func() { _ = qExplicit.Stop(ctx) }()
+
+	require.True(t, qExplicit.consumerConfig.MemoryStorage,
+		"explicit case: consumerConfig.MemoryStorage = false, want true")
+	require.Equal(t, 1, qExplicit.consumerConfig.Replicas,
+		"explicit case: consumerConfig.Replicas = %d, want 1", qExplicit.consumerConfig.Replicas)
+
+	qDefault, err := NewQueue(js, streamName, "qsnap-default", "qsnap.>", handler)
+	require.NoError(t, err)
+	require.NoError(t, qDefault.Start(ctx))
+	defer func() { _ = qDefault.Stop(ctx) }()
+
+	require.False(t, qDefault.consumerConfig.MemoryStorage)
+	require.Equal(t, 0, qDefault.consumerConfig.Replicas)
+}
