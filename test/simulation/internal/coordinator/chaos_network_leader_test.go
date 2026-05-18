@@ -27,14 +27,14 @@ func TestNetworkDisconnectLeaderEvent_ParamsAndStringer(t *testing.T) {
 	}
 	cc := NewChaosController(cfg)
 
-	// generateEventParams duration matches the random variant: 5–30s.
+	// generateEventParams duration matches the random variant: 5–15s.
 	params := cc.generateEventParams(NetworkDisconnectLeaderEvent)
 	dur, ok := params["duration"].(time.Duration)
 	if !ok {
 		t.Fatalf("params[duration] missing or wrong type: %T %+v", params["duration"], params)
 	}
-	if dur < 5*time.Second || dur > 30*time.Second {
-		t.Errorf("duration = %v, want 5s..30s", dur)
+	if dur < 5*time.Second || dur > 15*time.Second {
+		t.Errorf("duration = %v, want 5s..15s", dur)
 	}
 
 	// String() must not fall through to "Unknown Event".

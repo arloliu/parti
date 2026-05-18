@@ -111,6 +111,45 @@ func TestHandleAssignmentChanged_BlockingSendDelivers(t *testing.T) {
 	}
 }
 
+// TestHandleAssignmentChanged_StampsInitialCohortFlag proves that the
+// per-worker IsInitialCohort flag is carried into the StartLatencyReport.
+// The coordinator's classifier depends on this stamp to bucket samples
+// without racing against baselineLocked flips — a slow chaos-delayed
+// initial-cohort worker must still land in the initial bucket regardless
+// of channel-receive timing.
+func TestHandleAssignmentChanged_StampsInitialCohortFlag(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		cohort bool
+	}{
+		{"initial", true},
+		{"takeover", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ch := make(chan coordinator.StartLatencyReport, 1)
+			w := &Worker{
+				id:                "test-worker",
+				ctx:               context.Background(),
+				startLatencyCh:    ch,
+				startCalledAt:     time.Now().Add(-50 * time.Millisecond),
+				firstAssignmentOK: atomic.Bool{},
+				isInitialCohort:   tc.cohort,
+			}
+			_ = w.handleAssignmentChanged(context.Background(), nil, []types.Partition{
+				{Keys: []string{"0"}, Weight: 1},
+			})
+			select {
+			case rep := <-ch:
+				if rep.IsInitialCohort != tc.cohort {
+					t.Errorf("IsInitialCohort = %v, want %v", rep.IsInitialCohort, tc.cohort)
+				}
+			case <-time.After(1 * time.Second):
+				t.Fatal("no StartLatencyReport received")
+			}
+		})
+	}
+}
+
 // TestHandleAssignmentChanged_CancellationDoesNotWedge proves that the
 // blocking send respects ctx.Done() and does not hang on shutdown when
 // the coordinator has stopped draining.

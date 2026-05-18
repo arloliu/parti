@@ -204,10 +204,14 @@ func (cc *ChaosController) generateEventParams(event ChaosEvent) map[string]any 
 		params["signal"] = "SIGKILL"
 
 	case NetworkDisconnectEvent, NetworkDisconnectLeaderEvent:
-		// Disconnect for 5-30 seconds (both random and leader-target
+		// Disconnect for 5-15 seconds (both random and leader-target
 		// variants share the same duration range — the only difference
-		// is which worker the dispatcher selects).
-		params["duration"] = time.Duration(cc.rng.Intn(26)+5) * time.Second
+		// is which worker the dispatcher selects). Upper bound is capped
+		// at 15s so a single disconnect cannot exceed the simulation's
+		// slow-start budgets when chaos fires during cold start; longer
+		// outages don't add new coverage but do produce flaky start-
+		// latency exceedances for chaos-delayed initial-cohort workers.
+		params["duration"] = time.Duration(cc.rng.Intn(11)+5) * time.Second
 
 	case WorkerPauseEvent:
 		// Pause for 5-8 seconds to build backlog

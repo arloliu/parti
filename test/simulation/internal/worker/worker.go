@@ -65,6 +65,11 @@ type Worker struct {
 	// past its caller's deadline.
 	startCalledAt     time.Time
 	firstAssignmentOK atomic.Bool
+	// isInitialCohort stamps the start-latency report so the coordinator's
+	// classifier can bucket the sample without depending on receive-time
+	// ordering of channels. True for workers constructed during simulation
+	// bootstrap; false for restart / scale_up replacements.
+	isInitialCohort bool
 	// throughput controls
 	handlerConcurrency int
 	consumerBatchSize  int
@@ -148,6 +153,11 @@ type Config struct {
 	GateNakJitter               float64
 	// Gate debug logging
 	GateDebug bool
+	// IsInitialCohort tags this worker as part of the simulation's initial
+	// cluster (true) or as a later joiner via scale_up / restart (false).
+	// Carried through to StartLatencyReport so the coordinator's classifier
+	// can pick the right budget without depending on channel-receive timing.
+	IsInitialCohort bool
 }
 
 // NewWorker creates a new worker.
@@ -240,6 +250,7 @@ func NewWorker(cfg Config) (*Worker, error) { //nolint:cyclop
 		currentPartitions:   0,
 		handlerConcurrency:  cfg.HandlerConcurrency,
 		consumerBatchSize:   cfg.ConsumerBatchSize,
+		isInitialCohort:     cfg.IsInitialCohort,
 	}
 
 	perSubMaxAckPending := max(worker.consumerBatchSize*2,
@@ -455,7 +466,7 @@ func (w *Worker) handleAssignmentChanged(ctx context.Context, oldSet, newSet []t
 			// chaos bursts. Symmetric with the assignmentReportCh send below.
 			select {
 			case <-ctx.Done():
-			case w.startLatencyCh <- coordinator.StartLatencyReport{WorkerID: w.id, Latency: latency}:
+			case w.startLatencyCh <- coordinator.StartLatencyReport{WorkerID: w.id, Latency: latency, IsInitialCohort: w.isInitialCohort}:
 			}
 		}
 	}

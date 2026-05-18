@@ -200,9 +200,18 @@ type AssignmentReport struct {
 // StartLatencyReport reports the latency from Worker.Start() to the first
 // OnAssignmentChanged hook firing with a non-empty partition set. It is
 // emitted exactly once per worker instance.
+//
+// IsInitialCohort is set by the caller at worker construction: true for
+// workers spawned during simulation bootstrap, false for workers created
+// via scale_up or restart. The coordinator uses this flag (not the
+// receive-time view of baselineLocked) to decide which budget applies,
+// closing a race where a chaos-delayed initial-cohort worker's report
+// arrives after baselineLocked has already flipped and is misbucketed
+// as takeover.
 type StartLatencyReport struct {
-	WorkerID string
-	Latency  time.Duration
+	WorkerID        string
+	Latency         time.Duration
+	IsInitialCohort bool
 }
 
 // NewCoordinator creates a new coordinator.
@@ -1363,15 +1372,18 @@ func (c *Coordinator) processAssignments(ctx context.Context) { //nolint:gocyclo
 				c.prevPartitionOwners = fresh
 			}
 		case sl := <-c.startLatenciesCh:
-			// Classify using this goroutine's live view of baselineLocked so the
-			// distinction between "initial fleet coming up" and "late joiner /
-			// takeover replacement" is decided at the moment the worker's first
-			// assignment landed, without cross-goroutine locking.
+			// Classify by the caller-provided cohort flag. Earlier versions
+			// used baselineLocked at receive time, but that races: when the
+			// worker's assignment report and startLatency report sit in
+			// separate channels, the select can drain the assignment first,
+			// flip baselineLocked, then misbucket the trailing startLatency
+			// of an initial-cohort worker as takeover. The flag is stamped
+			// at worker construction, so the decision is timing-invariant.
 			c.startLatencyMu.Lock()
-			if c.baselineLocked {
-				c.takeoverStartLatencies[sl.WorkerID] = sl.Latency
-			} else {
+			if sl.IsInitialCohort {
 				c.initialStartLatencies[sl.WorkerID] = sl.Latency
+			} else {
+				c.takeoverStartLatencies[sl.WorkerID] = sl.Latency
 			}
 			c.startLatencyMu.Unlock()
 		case ar := <-c.assignmentsCh:

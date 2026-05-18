@@ -460,6 +460,7 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 			GateNakDelay:                cfg.Workers.ProcessingGate.NakDelay,
 			GateNakJitter:               cfg.Workers.ProcessingGate.NakJitter,
 			GateDebug:                   cfg.Workers.ProcessingGate.Debug,
+			IsInitialCohort:             true,
 		}
 
 		w, err := worker.NewWorker(workerCfg)
@@ -485,6 +486,7 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 
 			newCfg := workerCfg
 			newCfg.NC = newNC
+			newCfg.IsInitialCohort = false // restart is not part of the initial cohort
 
 			// Recreate a new worker instance for clean restart
 			nw, err := worker.NewWorker(newCfg)
@@ -1400,6 +1402,7 @@ func spawnAllInOneWorker(parent context.Context, workerID string) bool {
 		GateNakDelay:                aioCfg.Workers.ProcessingGate.NakDelay,
 		GateNakJitter:               aioCfg.Workers.ProcessingGate.NakJitter,
 		GateDebug:                   aioCfg.Workers.ProcessingGate.Debug,
+		IsInitialCohort:             false, // scale_up / restart is a takeover-cohort worker
 	}
 	w, err := worker.NewWorker(wcfg)
 	if err != nil {
