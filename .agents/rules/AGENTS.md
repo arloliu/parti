@@ -27,5 +27,10 @@
 - **[800-modernize-after-write.md](800-modernize-after-write.md)**
   *Run `go fix` on touched packages; avoid repo-wide sweeps in feature commits.*
 
+### 4. Design & Review
+
+- **[900-design-and-review-loops.md](900-design-and-review-loops.md)**
+  *State invariants first; enumerate paths; design atomicity in. Lessons from multi-round Codex review loops.*
+
 ---
 *Rules are split for readability and context optimization.*
