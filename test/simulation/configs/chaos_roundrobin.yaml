@@ -1,0 +1,61 @@
+simulation:
+  duration: 90s
+  mode: all-in-one
+
+nats:
+  mode: embedded
+
+partitions:
+  count: 50
+  message_rate_per_partition: 5
+  distribution: uniform
+
+producers:
+  count: 2
+
+workers:
+  count: 10
+  # RoundRobin intentionally does not preserve cache affinity on rebalance
+  # (see strategy/round_robin.go). This config exercises that strategy
+  # under the comprehensive chaos workload to surface RR-specific bugs.
+  assignment_strategy: RoundRobin
+  processing_delay:
+    min: 1ms
+    max: 5ms
+
+chaos:
+  enabled: true
+  # Roughly 6–9 events over 90s — covers all listed events with high probability.
+  interval: "10s-15s"
+  min_workers: 8
+  max_workers: 14
+  # Mirror chaos_comprehensive.yaml's event set so the RoundRobin job
+  # exercises the same chaos surface, just with a different assignment
+  # strategy. Plan §5 contract.
+  events:
+    - worker_crash
+    - worker_restart
+    - leader_failure
+    - producer_crash
+    - scale_down
+    - scale_up
+    - worker_pause
+    - network_disconnect
+    - network_disconnect_leader
+    - slow_consumer
+
+coordinator:
+  # 60s is long enough to absorb a scale-down + reassignment storm under
+  # RoundRobin's broader reassignment behavior (RR moves more partitions
+  # per scale event than WeightedConsistentHash), but short enough that
+  # the 90s run can still produce gap signal if something truly breaks.
+  gap_aging: 60s
+  slo:
+    enable_catch_up: true
+    catch_up_deadline: 30s
+    catch_up_percent: 99
+    absence_threshold: 5s
+
+metrics:
+  prometheus:
+    enabled: false

@@ -32,6 +32,9 @@ workers:
   consumer_batch_size: 16
   handler_concurrency: 4  # Increase concurrency to heal backlog faster
   max_subjects: 300
+  # ack_wait must be < coordinator.gap_aging (30s). 15s leaves a 2x headroom
+  # for JetStream redelivery without sacrificing detection speed.
+  ack_wait: 15s
   enforce_exclusive_consumption: true
   processing_gate:
     warmup_duration: 5s

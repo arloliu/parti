@@ -32,6 +32,8 @@ workers:
   consumer_batch_size: 16
   handler_concurrency: 2
   max_subjects: 300
+  # ack_wait must be < coordinator.gap_aging (20s). See gap_aging below.
+  ack_wait: 10s
   enforce_exclusive_consumption: true
   processing_gate:
     warmup_duration: 5s

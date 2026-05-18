@@ -19,6 +19,14 @@ workers:
   processing_delay:
     min: 1ms
     max: 5ms
+  # Processing Gate is deliberately OFF in this config — adding it
+  # alongside the aggressive 15-25s chaos interval, burst-enabled
+  # bursts, and 8m duration creates sustained NAK loops that prevent
+  # the cluster from draining (empirically: ~40% of messages
+  # undelivered under gate-on + comprehensive chaos in local 8m runs).
+  # The gate-on CI signal lives on chaos_gate.yaml under a lighter
+  # workload (see .github/workflows/simulation-stress.yml's
+  # gate-on-simulation job).
 
 chaos:
   enabled: true
@@ -35,7 +43,8 @@ chaos:
     - scale_down
     - scale_up
     - worker_pause
-    # - network_disconnect
+    - network_disconnect
+    - network_disconnect_leader
     - slow_consumer
 
 coordinator:

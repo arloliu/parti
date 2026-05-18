@@ -220,10 +220,14 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 	// when many workers ensure the same buckets concurrently.
 	{
 		pc := parti.DefaultConfig()
-		// Disable KV TTL for handoff claims in simulation runs. Auto-purging the
-		// handoff bucket causes ownership entries to disappear in steady state, which
-		// forces the Processing Gate into unknown-ownership NAK loops and inflates
-		// apparent gaps. We want claims to persist until superseded.
+		// LOAD-BEARING: disable JetStream KV TTL for the handoff bucket in
+		// simulation runs. This is the only path that actually controls the
+		// bucket's storage-level TTL — kvutil opens an existing bucket without
+		// reconciling config, so this pre-create value sticks. Without it,
+		// auto-purging would drop ownership entries in steady state, forcing
+		// the Processing Gate into unknown-ownership NAK loops and inflating
+		// apparent gaps. The manager's in-memory cfg.KVBuckets.HandoffTTL is
+		// purely advisory once the bucket exists.
 		pc.KVBuckets.HandoffTTL = 0
 		// Use short, independent timeouts per bucket to avoid blocking startup
 		timeBuckets := []struct {
@@ -295,6 +299,7 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 		TopN:            cfg.Coordinator.DupTrace.TopN,
 	}
 	coord := coordinator.NewCoordinator(cfg.Partitions.Count, metricsCollector, dupCfg, cfg.Coordinator.StopOnFailure, cfg.Coordinator.FailureReportPath)
+	coord.GetTracker().SetWorkerCacheMax(cfg.Coordinator.WorkerCacheMaxPerPartition)
 	// Configure optional SLO threshold for oldest pending hole age
 	coord.SetSLOHoleMaxAge(cfg.Coordinator.SLO.HoleMaxAge)
 	// Wire catch-up SLO (healing latency after absence)
@@ -360,6 +365,13 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 			BurstEnabled:     cfg.Chaos.BurstEnabled,
 			BurstProbability: cfg.Chaos.BurstProbability,
 			EventCallback: func(event coordinator.ChaosEvent, params map[string]any) {
+				// Mark the first chaos event so the classifier can route
+				// unobserved-owner duplicates into the post-chaos bucket.
+				// Must fire BEFORE the handler runs so any receipts
+				// triggered by this event are correctly attributed.
+				if coord != nil {
+					coord.MarkChaosStarted()
+				}
 				handleChaosEvent(ctx, coord, event, params, processMgr, metricsCollector, checkpointMgr, goroutineRegistry)
 			},
 		}
@@ -438,6 +450,7 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 			MetricsCollector:    metricsCollector,
 			ConsumerBatchSize:   cfg.Workers.ConsumerBatchSize,
 			HandlerConcurrency:  cfg.Workers.HandlerConcurrency,
+			AckWait:             cfg.Workers.AckWait,
 			MaxSubjects:         cfg.Workers.MaxSubjects,
 			// Exclusive consumption (Processing Gate)
 			EnforceExclusiveConsumption: cfg.Workers.EnforceExclusiveConsumption,
@@ -655,14 +668,19 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 				lost := metricsCollector.GetLostMessagesTotal()
 				failures := metricsCollector.GetAuditFailuresTotal()
 				initialExc, takeoverExc := coord.SlowStartExceedances()
-				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 {
+				tr := coord.GetTracker()
+				violations := tr.GetOwnershipViolationCount()
+				concurrent := tr.GetConcurrentOwnersViolationCount()
+				inconclusive := tr.GetOwnershipInconclusiveCount()
+				_, unobservedPost := tr.GetOwnershipUnobservedCounts()
+				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 {
 					// Record error but proceed to ordered shutdown
-					invariantsErr = fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d",
-						failures, late, lost, initialExc, takeoverExc)
+					invariantsErr = fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost)
 				}
 				if invariantsErr == nil {
-					log.Printf("Stability invariants passed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d",
-						failures, late, lost, initialExc, takeoverExc)
+					log.Printf("Stability invariants passed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost)
 				} else {
 					log.Printf("Stability invariants failed: %v", invariantsErr)
 				}
@@ -703,9 +721,23 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 				lost := metricsCollector.GetLostMessagesTotal()
 				failures := metricsCollector.GetAuditFailuresTotal()
 				initialExc, takeoverExc := coord.SlowStartExceedances()
-				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 {
-					return fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d",
-						failures, late, lost, initialExc, takeoverExc)
+				tr := coord.GetTracker()
+				violations := tr.GetOwnershipViolationCount()
+				concurrent := tr.GetConcurrentOwnersViolationCount()
+				inconclusive := tr.GetOwnershipInconclusiveCount()
+				_, unobservedPost := tr.GetOwnershipUnobservedCounts()
+				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 {
+					invariantsErr := fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost)
+					// Emit the structured failure_report.json so CI artifacts
+					// include InconclusiveOwnerEvents / unobserved counters /
+					// FirstChaosEventAt — auditability that the new
+					// shutdown-invariant counters demand. TriggerFailure
+					// is idempotent via failureOnce, safe to call even if
+					// an earlier critical failure already wrote the report.
+					coord.TriggerFailure("Stability invariants failed at shutdown", invariantsErr)
+
+					return invariantsErr
 				}
 			}
 
@@ -859,6 +891,7 @@ func runWorker(ctx context.Context, cfg *config.Config) error {
 		MetricsCollector:    nil, // No metrics in standalone worker mode
 		ConsumerBatchSize:   cfg.Workers.ConsumerBatchSize,
 		HandlerConcurrency:  cfg.Workers.HandlerConcurrency,
+		AckWait:             cfg.Workers.AckWait,
 		MaxSubjects:         cfg.Workers.MaxSubjects,
 	}
 
@@ -917,6 +950,8 @@ func runCoordinator(ctx context.Context, cfg *config.Config) error {
 }
 
 // handleChaosEvent handles chaos events by interacting with the process manager.
+//
+//nolint:cyclop // Branching mirrors the chaos-event matrix.
 func handleChaosEvent(
 	ctx context.Context,
 	coord *coordinator.Coordinator,
@@ -998,6 +1033,12 @@ func handleChaosEvent(
 		}
 		handleNetworkDisconnect(duration, processMgr, metricsCollector)
 
+	case coordinator.NetworkDisconnectLeaderEvent:
+		// Process-mode has no real leader lookup (handleLeaderFailure
+		// just kills the first running worker). Rather than approximate,
+		// skip — the event is all-in-one only.
+		log.Println("[Chaos] process mode does not support leader-disconnect; skipping")
+
 	case coordinator.WorkerPauseEvent:
 		// Simulate worker pause
 		duration, ok := params["duration"].(time.Duration)
@@ -1028,7 +1069,7 @@ func handleGoroutineChaos( //nolint:cyclop,gocyclo
 	// Guard: skip worker-related events when no active workers
 	activeWorkers := registry.GetActiveCount(coordinator.WorkerGoroutine)
 	switch event {
-	case coordinator.WorkerCrashEvent, coordinator.WorkerRestartEvent, coordinator.LeaderFailureEvent, coordinator.ScaleDownEvent, coordinator.NetworkDisconnectEvent, coordinator.WorkerPauseEvent, coordinator.SlowConsumerEvent:
+	case coordinator.WorkerCrashEvent, coordinator.WorkerRestartEvent, coordinator.LeaderFailureEvent, coordinator.ScaleDownEvent, coordinator.NetworkDisconnectEvent, coordinator.NetworkDisconnectLeaderEvent, coordinator.WorkerPauseEvent, coordinator.SlowConsumerEvent:
 		if activeWorkers == 0 {
 			log.Printf("[Chaos] Skipping %s: no active workers", event)
 			return
@@ -1152,6 +1193,9 @@ func handleGoroutineChaos( //nolint:cyclop,gocyclo
 		} else {
 			log.Printf("[Chaos] Worker %s missing underlying object; cannot disconnect", target.ID)
 		}
+
+	case coordinator.NetworkDisconnectLeaderEvent:
+		handleLeaderGoroutineNetworkDisconnect(registry, params)
 
 	case coordinator.SlowConsumerEvent:
 		// Slow down a random worker's processing
@@ -1347,6 +1391,7 @@ func spawnAllInOneWorker(parent context.Context, workerID string) bool {
 		MetricsCollector:            aioMetrics,
 		ConsumerBatchSize:           aioCfg.Workers.ConsumerBatchSize,
 		HandlerConcurrency:          aioCfg.Workers.HandlerConcurrency,
+		AckWait:                     aioCfg.Workers.AckWait,
 		MaxSubjects:                 aioCfg.Workers.MaxSubjects,
 		EnforceExclusiveConsumption: aioCfg.Workers.EnforceExclusiveConsumption,
 		GateAllowedStates:           aioCfg.Workers.ProcessingGate.AllowedStates,
@@ -1672,6 +1717,47 @@ func handleWorkerPause(duration time.Duration, processMgr *coordinator.ProcessMa
 		if err := processMgr.SignalProcess(targetID, syscall.SIGCONT); err != nil {
 			log.Printf("[Chaos] Failed to resume worker %s: %v", targetID, err)
 		}
+	})
+}
+
+// handleLeaderGoroutineNetworkDisconnect implements the "Split Brain"
+// chaos variant: pick the current leader and isolate it from NATS for
+// the configured duration. Mirrors handleLeaderGoroutineFailure's
+// leader-selection pattern but uses Disconnect() instead of Cancel().
+func handleLeaderGoroutineNetworkDisconnect(
+	registry *coordinator.GoroutineRegistry,
+	params map[string]any,
+) {
+	workers := registry.GetByType(coordinator.WorkerGoroutine)
+	if len(workers) == 0 {
+		log.Println("[Chaos] No active workers to disconnect (leader variant)")
+		return
+	}
+	var leader *coordinator.GoroutineInfo
+	for _, w := range workers {
+		if wobj, ok := w.Obj.(*worker.Worker); ok && wobj.IsLeader() {
+			leader = w
+			break
+		}
+	}
+	if leader == nil {
+		log.Println("[Chaos] No leader worker found to disconnect (network_disconnect_leader)")
+		return
+	}
+	dur, ok := params["duration"].(time.Duration)
+	if !ok || dur <= 0 {
+		dur = 10 * time.Second
+	}
+	wobj, ok := leader.Obj.(*worker.Worker)
+	if !ok {
+		log.Printf("[Chaos] Leader worker %s missing underlying object; cannot disconnect", leader.ID)
+		return
+	}
+	log.Printf("[Chaos] Disconnecting LEADER worker %s for %v", leader.ID, dur)
+	wobj.Disconnect()
+	time.AfterFunc(dur, func() {
+		log.Printf("[Chaos] Reconnecting LEADER worker %s", leader.ID)
+		wobj.Reconnect()
 	})
 }
 

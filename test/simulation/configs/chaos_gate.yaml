@@ -1,0 +1,98 @@
+# Gate-on CI config. Exercises enforce_exclusive_consumption end-to-end
+# under chaos so the refined ownership-violation classifier has signal.
+#
+# OUTCOME (2026-05-18, 5m local run): clean. 24240/24240 messages
+# received, zero OwnershipViolations, zero ConcurrentOwnerEvents, zero
+# InconclusiveOwnerEvents, zero post-chaos OwnershipUnobservedCount.
+# A historical chaos finding (cross-worker observation of partition=19
+# seq=153 after worker_restart + network_disconnect_leader) was a
+# classifier false positive — under JetStream at-least-once semantics,
+# redelivery to the new partition owner after a legitimate handoff is
+# correct, not a violation. The refined classifier consults the
+# leader-reported owner snapshot and distinguishes:
+#   - Redelivery (same worker OR handoff to single new owner)
+#   - OwnershipViolation (stale / stranger / ownerLookup-nil fallback)
+#   - ConcurrentOwnersViolation (snapshot reports >1 current owner — split-brain)
+#   - OwnershipInconclusive (mid-handoff after baseline; empty snapshot)
+#   - OwnershipUnobserved (cold start; snapshot uninitialized)
+#
+# Known residual blind spot: an H2 heartbeat-watcher / resolver bug that
+# presents the receiving worker as the sole current owner per the
+# worker-reported snapshot would be classified as legitimate handoff
+# redelivery. Heartbeat-watcher hardening is deferred; gate-on is
+# enabled here at the chaos_gate workload only, not at
+# chaos_comprehensive duration.
+#
+# CI: runs from .github/workflows/simulation-stress.yml as the
+# gate-on-simulation job (5m duration, 3-retry budget).
+# Local repro:
+#   go build -o test/simulation/bin/simulation ./test/simulation/cmd/simulation
+#   ./test/simulation/bin/simulation \
+#     --config test/simulation/configs/chaos_gate.yaml \
+#     --duration 5m --cooldown 30s --stop-on-failure=false
+
+simulation:
+  duration: 5m
+  mode: all-in-one
+
+nats:
+  mode: embedded
+
+partitions:
+  count: 30
+  message_rate_per_partition: 3
+  distribution: uniform
+
+producers:
+  count: 2
+
+workers:
+  count: 6
+  assignment_strategy: WeightedConsistentHash
+  processing_delay:
+    min: 5ms
+    max: 20ms
+  consumer_batch_size: 8
+  handler_concurrency: 2
+  # AckWait must be < coordinator.gap_aging (60s).
+  ack_wait: 20s
+  # Exercise the Processing Gate end-to-end. This is the only CI config
+  # that turns on enforce_exclusive_consumption — without it, the
+  # OwnershipViolationCount > 0 invariant has no signal.
+  enforce_exclusive_consumption: true
+  processing_gate:
+    allowed_states: ["commit", "stable"]
+    warmup_duration: 10s
+    warmup_allowed_states: ["stable"]
+    nak_delay: 60ms
+    nak_jitter: 0.3
+
+chaos:
+  enabled: true
+  # Moderate intensity — events every 20-30s. Comprehensive's 15-25s
+  # combined with gate-on creates feedback loops that prevent draining.
+  interval: "20s-30s"
+  min_workers: 4
+  max_workers: 8
+  burst_enabled: false
+  events:
+    - worker_crash
+    - worker_restart
+    - leader_failure
+    - scale_down
+    - scale_up
+    - worker_pause
+    - network_disconnect
+    - network_disconnect_leader
+
+coordinator:
+  gap_aging: 60s
+  slo:
+    enable_catch_up: true
+    catch_up_deadline: 45s
+    catch_up_percent: 99
+    absence_threshold: 5s
+
+metrics:
+  prometheus:
+    enabled: false

@@ -105,6 +105,9 @@ func validateConfig(cfg *Config) error { //nolint:cyclop,gocyclo
 	if cfg.Workers.ProcessingDelay.Min > cfg.Workers.ProcessingDelay.Max {
 		return errors.New("min processing delay must be less than or equal to max processing delay")
 	}
+	if cfg.Workers.AckWait <= 0 {
+		return errors.New("workers.ack_wait must be positive")
+	}
 
 	// Validate Processing Gate jitter range when enabled
 	if cfg.Workers.EnforceExclusiveConsumption {
@@ -119,6 +122,18 @@ func validateConfig(cfg *Config) error { //nolint:cyclop,gocyclo
 	}
 	if cfg.Coordinator.GapAging <= 0 {
 		return errors.New("gap_aging must be positive")
+	}
+	if cfg.Coordinator.WorkerCacheMaxPerPartition <= 0 {
+		return errors.New("coordinator.worker_cache_max_per_partition must be positive")
+	}
+	// AckWait must be strictly less than GapAging so JetStream redelivers a
+	// crashed worker's in-flight messages before the coordinator escalates
+	// the hole to a confirmed gap. Equal values still race under scheduler
+	// jitter.
+	if cfg.Workers.AckWait >= cfg.Coordinator.GapAging {
+		return fmt.Errorf("workers.ack_wait (%s) must be < coordinator.gap_aging (%s) "+
+			"to avoid false-positive gap escalations during JetStream redelivery",
+			cfg.Workers.AckWait, cfg.Coordinator.GapAging)
 	}
 	// Validate SLO (optional)
 	if cfg.Coordinator.SLO.HoleMaxAge < 0 {

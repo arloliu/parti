@@ -31,8 +31,15 @@ const (
 	// ProducerCrashEvent simulates a producer process crash.
 	ProducerCrashEvent ChaosEvent = "producer_crash"
 
-	// NetworkDisconnectEvent simulates NATS connection loss.
+	// NetworkDisconnectEvent simulates NATS connection loss on a random worker.
 	NetworkDisconnectEvent ChaosEvent = "network_disconnect"
+
+	// NetworkDisconnectLeaderEvent simulates NATS connection loss targeted
+	// at the current leader worker — the "Split Brain" scenario the audit's
+	// DESIGN_REVIEW.md called out. All-in-one mode only; process-mode
+	// dispatch logs and skips because process-mode has no real leader
+	// lookup.
+	NetworkDisconnectLeaderEvent ChaosEvent = "network_disconnect_leader"
 
 	// WorkerPauseEvent temporarily pauses a worker's processing without removing it.
 	WorkerPauseEvent ChaosEvent = "worker_pause"
@@ -196,8 +203,10 @@ func (cc *ChaosController) generateEventParams(event ChaosEvent) map[string]any 
 		params["target"] = "leader"
 		params["signal"] = "SIGKILL"
 
-	case NetworkDisconnectEvent:
-		// Disconnect for 5-30 seconds
+	case NetworkDisconnectEvent, NetworkDisconnectLeaderEvent:
+		// Disconnect for 5-30 seconds (both random and leader-target
+		// variants share the same duration range — the only difference
+		// is which worker the dispatcher selects).
 		params["duration"] = time.Duration(cc.rng.Intn(26)+5) * time.Second
 
 	case WorkerPauseEvent:
@@ -320,7 +329,9 @@ func (e ChaosEvent) String() string {
 	case ProducerCrashEvent:
 		return "Producer Crash (SIGKILL)"
 	case NetworkDisconnectEvent:
-		return "Network Disconnect"
+		return "Network Disconnect (Random)"
+	case NetworkDisconnectLeaderEvent:
+		return "Network Disconnect (Leader)"
 	case WorkerPauseEvent:
 		return "Worker Pause"
 	case SlowConsumerEvent:

@@ -21,10 +21,10 @@ type FailureReport struct {
 }
 
 type MessageGapError struct {
-	PartitionID int   `json:"PartitionID"`
-	ExpectedSeq int64 `json:"ExpectedSeq"`
-	ReceivedSeq int64 `json:"ReceivedSeq"`
-	LastSent    int64 `json:"LastSent"`
+	PartitionID int   `json:"partition_id"`
+	ExpectedSeq int64 `json:"expected_seq"`
+	ReceivedSeq int64 `json:"received_seq"`
+	LastSent    int64 `json:"last_sent"`
 }
 
 type LogEvent struct {

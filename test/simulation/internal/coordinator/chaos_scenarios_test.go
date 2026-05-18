@@ -45,6 +45,7 @@ func TestChaos_WorkerPause(t *testing.T) {
 		AssignmentStrategy:  "consistent-hash",
 		ProcessingDelayMin:  1 * time.Millisecond,
 		ProcessingDelayMax:  5 * time.Millisecond,
+		AckWait:             30 * time.Second,
 		CoordinatorReportCh: reportCh,
 		AssignmentReportCh:  assignCh,
 	}
@@ -156,6 +157,7 @@ func TestChaos_NetworkDisconnect(t *testing.T) {
 		AssignmentStrategy:  "consistent-hash",
 		ProcessingDelayMin:  1 * time.Millisecond,
 		ProcessingDelayMax:  5 * time.Millisecond,
+		AckWait:             30 * time.Second,
 		CoordinatorReportCh: reportCh,
 		AssignmentReportCh:  assignCh,
 	}

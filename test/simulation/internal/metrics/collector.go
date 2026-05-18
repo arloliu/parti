@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/arloliu/parti/v2/internal/durable"
+	"github.com/arloliu/parti/v2/consumer"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	promclient "github.com/prometheus/client_model/go"
@@ -16,10 +16,12 @@ type Collector struct {
 	// Protects cached assignment metrics reads/writes
 	assignMu sync.RWMutex
 	// Message counters (per-partition)
-	messagesSentTotal      *prometheus.CounterVec
-	messagesReceivedTotal  *prometheus.CounterVec
-	messageGapsTotal       prometheus.Counter
-	messageDuplicatesTotal prometheus.Counter
+	messagesSentTotal        *prometheus.CounterVec
+	messagesReceivedTotal    *prometheus.CounterVec
+	messageGapsTotal         prometheus.Counter
+	messageDuplicatesTotal   prometheus.Counter
+	redeliveriesTotal        prometheus.Counter
+	ownershipViolationsTotal prometheus.Counter
 	// Per-partition duplicates
 	messageDuplicatesByPartition *prometheus.CounterVec
 
@@ -190,7 +192,19 @@ func NewCollectorWithRegistry(reg prometheus.Registerer) *Collector {
 		messageDuplicatesTotal: factory.NewCounter(
 			prometheus.CounterOpts{
 				Name: "simulation_message_duplicates_total",
-				Help: "Total number of duplicate messages detected",
+				Help: "Total number of duplicate messages detected (legacy fallback — origin pruned or unknown)",
+			},
+		),
+		redeliveriesTotal: factory.NewCounter(
+			prometheus.CounterOpts{
+				Name: "simulation_redeliveries_total",
+				Help: "Total number of same-worker redeliveries (informational; not a failure)",
+			},
+		),
+		ownershipViolationsTotal: factory.NewCounter(
+			prometheus.CounterOpts{
+				Name: "simulation_ownership_violations_total",
+				Help: "Total number of cross-worker same-seq observations (parti exclusivity contract violation)",
 			},
 		),
 		messageDuplicatesByPartition: factory.NewCounterVec(
@@ -590,6 +604,17 @@ func (c *Collector) RecordDuplicate() {
 	c.messageDuplicatesTotal.Inc()
 }
 
+// RecordRedelivery records a same-worker redelivery (informational).
+func (c *Collector) RecordRedelivery() {
+	c.redeliveriesTotal.Inc()
+}
+
+// RecordOwnershipViolation records a cross-worker same-seq detection
+// (parti exclusivity contract violation — a failure signal).
+func (c *Collector) RecordOwnershipViolation() {
+	c.ownershipViolationsTotal.Inc()
+}
+
 // RecordDuplicatePartition records a duplicate event for a specific partition.
 // Parameters:
 //   - partitionID: Partition ID
@@ -853,50 +878,6 @@ func (c *Collector) RecoveryDurationSummary() (uint64, float64) {
 	return 0, 0
 }
 
-// RecordDrainAudit records aggregated drain audit results from a worker's tracker.
-// Parameters:
-//   - results: Slice of audit results per partition
-//   - workerID: ID of the worker performing the audit (for future labeling; currently unused)
-func (c *Collector) RecordDrainAudit(results []durable.AuditResult, workerID string) {
-	var totalLate, totalLost, totalHoles int
-	var maxDuration time.Duration
-	timedOut := false
-	for _, r := range results {
-		if r.LateMessages > 0 {
-			totalLate += r.LateMessages
-		}
-		if r.LostMessages > 0 {
-			totalLost += r.LostMessages
-		}
-		if r.UnresolvedHoles > 0 {
-			totalHoles += r.UnresolvedHoles
-		}
-		if r.Duration > maxDuration {
-			maxDuration = r.Duration
-		}
-		if r.TimedOut {
-			timedOut = true
-		}
-	}
-	if totalLate > 0 {
-		for i := 0; i < totalLate; i++ { // counter has no Add pre v1.19
-			c.lateMessagesTotal.Inc()
-		}
-	}
-	if totalLost > 0 {
-		for i := 0; i < totalLost; i++ {
-			c.lostMessagesTotal.Inc()
-		}
-	}
-	c.holesOpen.Set(float64(totalHoles))
-	if maxDuration > 0 {
-		c.auditDurationSeconds.Observe(maxDuration.Seconds())
-	}
-	if timedOut || totalLate > 0 || totalLost > 0 {
-		c.auditFailuresTotal.Inc()
-	}
-}
-
 // GetLateMessagesTotal returns the total late messages counter value.
 func (c *Collector) GetLateMessagesTotal() uint64 {
 	m := &promclient.Metric{}
@@ -936,13 +917,13 @@ func (c *Collector) ColdStartConvergenceSummary() (uint64, float64) {
 	return 0, 0
 }
 
-// GateMetricsAdapter returns an adapter that implements durable.GateMetrics.
-func (c *Collector) GateMetricsAdapter() durable.GateMetrics {
+// GateMetricsAdapter returns an adapter that implements consumer.GateMetrics.
+func (c *Collector) GateMetricsAdapter() consumer.GateMetrics {
 	return gateMetricsAdapter{c: c}
 }
 
-// ResolverMetricsAdapter returns an adapter that implements durable.ResolverMetrics.
-func (c *Collector) ResolverMetricsAdapter() durable.ResolverMetrics {
+// ResolverMetricsAdapter returns an adapter that implements consumer.ResolverMetrics.
+func (c *Collector) ResolverMetricsAdapter() consumer.ResolverMetrics {
 	return resolverMetricsAdapter{c: c}
 }
 
