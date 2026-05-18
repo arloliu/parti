@@ -374,6 +374,172 @@ func TestStateMachine_ScalingCancellation(t *testing.T) {
 	require.Equal(t, types.CalcStateScaling, sm.GetState(), "state remains Scaling when timer is cancelled")
 }
 
+// newTestStateMachine returns a state machine with the supplied callback.
+func newTestStateMachine(t *testing.T, cb func(ctx context.Context, reason string) error) (*StateMachine, chan struct{}) {
+	t.Helper()
+	stopCh := make(chan struct{})
+	sm := NewStateMachine(logging.NewNop(), metrics.NewNop(), cb, stopCh)
+	return sm, stopCh
+}
+
+// S1: compareAndSwapState succeeds when the current state matches `from`.
+func TestCompareAndSwapState_SucceedsOnMatch(t *testing.T) {
+	sm, stopCh := newTestStateMachine(t, func(context.Context, string) error { return nil })
+	defer close(stopCh)
+
+	require.True(t, sm.compareAndSwapState(types.CalcStateIdle, types.CalcStateScaling))
+	require.Equal(t, types.CalcStateScaling, sm.GetState())
+}
+
+// S2: compareAndSwapState fails when the current state differs from `from`.
+func TestCompareAndSwapState_FailsOnMismatch(t *testing.T) {
+	sm, stopCh := newTestStateMachine(t, func(context.Context, string) error { return nil })
+	defer close(stopCh)
+
+	require.False(t, sm.compareAndSwapState(types.CalcStateScaling, types.CalcStateRebalancing))
+	require.Equal(t, types.CalcStateIdle, sm.GetState(), "state unchanged on failed CAS")
+}
+
+// S3: TryClaimEmergency accepts from Idle.
+func TestTryClaimEmergency_AcceptsFromIdle(t *testing.T) {
+	sm, stopCh := newTestStateMachine(t, func(context.Context, string) error { return nil })
+	defer close(stopCh)
+
+	require.True(t, sm.TryClaimEmergency(context.Background()))
+	require.Equal(t, types.CalcStateEmergency, sm.GetState())
+	require.Equal(t, "emergency", sm.GetScalingReason())
+}
+
+// S4: TryClaimEmergency accepts from Scaling (preempts the timer).
+func TestTryClaimEmergency_AcceptsFromScaling_PreemptsTimer(t *testing.T) {
+	sm, stopCh := newTestStateMachine(t, func(context.Context, string) error { return nil })
+	defer close(stopCh)
+
+	require.True(t, sm.compareAndSwapState(types.CalcStateIdle, types.CalcStateScaling))
+	require.True(t, sm.TryClaimEmergency(context.Background()))
+	require.Equal(t, types.CalcStateEmergency, sm.GetState())
+}
+
+// S5: TryClaimEmergency rejects when scaling timer already advanced to Rebalancing.
+//
+// This guards the strict-source CAS: once the scaling timer has CAS'd
+// Scaling→Rebalancing, emergency cannot claim because neither Idle nor
+// Scaling matches the current state.
+func TestTryClaimEmergency_RejectsWhenScalingTimerAlreadyAdvanced(t *testing.T) {
+	sm, stopCh := newTestStateMachine(t, func(context.Context, string) error { return nil })
+	defer close(stopCh)
+
+	require.True(t, sm.compareAndSwapState(types.CalcStateIdle, types.CalcStateScaling))
+	// Scaling timer wins the race and advances to Rebalancing.
+	require.True(t, sm.compareAndSwapState(types.CalcStateScaling, types.CalcStateRebalancing))
+
+	require.False(t, sm.TryClaimEmergency(context.Background()))
+	require.Equal(t, types.CalcStateRebalancing, sm.GetState())
+}
+
+// S6: TryClaimEmergency rejects from Rebalancing.
+func TestTryClaimEmergency_RejectsFromRebalancing(t *testing.T) {
+	sm, stopCh := newTestStateMachine(t, func(context.Context, string) error { return nil })
+	defer close(stopCh)
+
+	require.True(t, sm.compareAndSwapState(types.CalcStateIdle, types.CalcStateScaling))
+	require.True(t, sm.compareAndSwapState(types.CalcStateScaling, types.CalcStateRebalancing))
+
+	require.False(t, sm.TryClaimEmergency(context.Background()))
+}
+
+// S7: TryClaimEmergency rejects from Emergency (already claimed).
+func TestTryClaimEmergency_RejectsFromEmergency(t *testing.T) {
+	sm, stopCh := newTestStateMachine(t, func(context.Context, string) error { return nil })
+	defer close(stopCh)
+
+	require.True(t, sm.compareAndSwapState(types.CalcStateIdle, types.CalcStateEmergency))
+	require.False(t, sm.TryClaimEmergency(context.Background()))
+}
+
+// S8: EnterRebalancing is a no-op when state changed out of Scaling.
+func TestEnterRebalancing_NoOpWhenStateChanged(t *testing.T) {
+	called := atomic.Bool{}
+	sm, stopCh := newTestStateMachine(t, func(context.Context, string) error {
+		called.Store(true)
+		return nil
+	})
+	defer close(stopCh)
+
+	// State is Idle (not Scaling). EnterRebalancing should bail.
+	sm.EnterRebalancing(context.Background())
+
+	require.False(t, called.Load(), "rebalance callback must not be invoked when state is not Scaling")
+	require.Equal(t, types.CalcStateIdle, sm.GetState())
+}
+
+// S9: RunClaimedRebalance returns to Idle on success.
+func TestRunClaimedRebalance_ReturnsToIdleOnSuccess(t *testing.T) {
+	called := atomic.Bool{}
+	sm, stopCh := newTestStateMachine(t, func(context.Context, string) error {
+		called.Store(true)
+		return nil
+	})
+	defer close(stopCh)
+
+	// Pre-claim emergency for context.
+	require.True(t, sm.TryClaimEmergency(context.Background()))
+	sm.RunClaimedRebalance(context.Background(), "emergency")
+
+	require.True(t, called.Load())
+	require.Equal(t, types.CalcStateIdle, sm.GetState())
+	require.Empty(t, sm.GetScalingReason())
+}
+
+// S10: RunClaimedRebalance returns to Idle on error.
+func TestRunClaimedRebalance_ReturnsToIdleOnError(t *testing.T) {
+	sm, stopCh := newTestStateMachine(t, func(context.Context, string) error {
+		return context.Canceled
+	})
+	defer close(stopCh)
+
+	require.True(t, sm.TryClaimEmergency(context.Background()))
+	sm.RunClaimedRebalance(context.Background(), "emergency")
+
+	require.Equal(t, types.CalcStateIdle, sm.GetState())
+}
+
+// S11: TryClaimEmergency sets scalingReason BEFORE notifying subscribers.
+//
+// Subscribers observing the Emergency state must see the correct reason on
+// their first GetScalingReason() read. If reason were set after the
+// notification, a subscriber could read empty.
+func TestEnterEmergency_ScalingReasonSetBeforeSubscriberNotification(t *testing.T) {
+	release := make(chan struct{})
+	sm, stopCh := newTestStateMachine(t, func(context.Context, string) error {
+		// Block until release so the rebalance callback doesn't reset the reason.
+		<-release
+		return nil
+	})
+	defer close(stopCh)
+	defer close(release)
+
+	ch, unsub := sm.Subscribe()
+	defer unsub()
+	// Drain initial Idle state.
+	<-ch
+
+	go func() {
+		_ = sm.TryClaimEmergency(context.Background())
+		sm.RunClaimedRebalance(context.Background(), "emergency")
+	}()
+
+	select {
+	case state := <-ch:
+		require.Equal(t, types.CalcStateEmergency, state)
+		// Reason must already be set when the subscriber receives the state.
+		require.Equal(t, "emergency", sm.GetScalingReason(),
+			"scalingReason must be set BEFORE the Emergency notification is fanned out")
+	case <-time.After(time.Second):
+		t.Fatal("did not receive Emergency state notification")
+	}
+}
+
 func TestStateMachine_RebalanceError(t *testing.T) {
 	stopCh := make(chan struct{})
 	defer close(stopCh)

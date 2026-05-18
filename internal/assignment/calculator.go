@@ -43,6 +43,7 @@ type Calculator struct {
 	started            atomic.Bool
 	mu                 sync.RWMutex
 	rebalanceMu        sync.Mutex // Serializes rebalance operations
+	pollMu             sync.Mutex // Serializes the observe→decide→claim critical section
 	currentWorkers     map[string]bool
 	currentAssignments map[string][]types.Partition
 
@@ -424,69 +425,49 @@ func (c *Calculator) discoverHighestVersion(ctx context.Context) ([]string, erro
 	return c.publisher.DiscoverHighestVersion(ctx)
 }
 
-// detectRebalanceType determines the type of rebalance needed based on worker topology changes.
+// detectRebalanceType classifies a non-emergency rebalance.
 //
-// This method classifies the rebalance scenario:
-//   - Emergency: Workers disappeared beyond grace period → No window, immediate rebalance
-//   - Cold start: Starting from 0 workers → Use 30s stabilization window
-//   - Planned scale: Gradual worker additions → Use 10s stabilization window
+// Emergency detection and claim are handled in observeAndDecide, BEFORE
+// this method is called; detectRebalanceType is pure: it returns only
+// "cold_start", "planned_scale", or "" (suppressed).
+//
+// When pending is true (the detector is tracking at least one mid-grace
+// disappearance for a worker that is still in `prev`), the scheduler must
+// not start a planned_scale rebalance — letting the grace expire and the
+// emergency path fire instead avoids the same-count-replacement race where
+// a planned_scale would pick up the replacement worker and the detector
+// would lose the tracking for the disappeared one.
 //
 // Parameters:
-//   - lastWorkers: Previous set of active workers
-//   - currentWorkers: Current set of active workers
+//   - prev: Previous set of active workers
+//   - curr: Current set of active workers
+//   - pending: True if the detector is currently tracking a disappearance for a worker in prev
 //
 // Returns:
-//   - reason: Rebalance type ("emergency", "cold_start", "planned_scale", or "" if in grace period)
-//   - window: Stabilization window duration (0 for emergency or during grace period)
-func (c *Calculator) detectRebalanceType(lastWorkers, currentWorkers map[string]bool) (reason string, window time.Duration) {
-	prevCount := len(lastWorkers)
-	currCount := len(currentWorkers)
-
-	// Case 1: Worker(s) disappeared - Check for emergency with hysteresis
-	if currCount < prevCount {
-		emergency, disappearedWorkers := c.emergencyDetector.CheckEmergency(lastWorkers, currentWorkers)
-
-		if emergency {
-			c.Logger.Warn("emergency: workers disappeared beyond grace period",
-				"disappeared", disappearedWorkers,
-				"prev_count", prevCount,
-				"curr_count", currCount,
-			)
-
-			// Record emergency rebalance metric
-			c.Metrics.RecordEmergencyRebalance(len(disappearedWorkers))
-
-			// Store disappeared workers for emergency rebalancing
-			c.mu.Lock()
-			c.disappearedWorkers = disappearedWorkers
-			c.mu.Unlock()
-
-			return "emergency", 0 // No stabilization - immediate action
-		}
-
-		// Still in grace period - no action yet
-		c.Logger.Info("workers disappeared but within grace period",
-			"prev_count", prevCount,
-			"curr_count", currCount,
+//   - reason: "cold_start" | "planned_scale" | "" (suppressed)
+//   - window: Stabilization window duration (0 if suppressed)
+func (c *Calculator) detectRebalanceType(prev, curr map[string]bool, pending bool) (reason string, window time.Duration) {
+	if pending {
+		c.Logger.Info("worker change in grace period - waiting for confirmation",
+			"prev_count", len(prev),
+			"curr_count", len(curr),
 		)
 
-		return "", 0 // Wait for grace period to expire
+		return "", 0
 	}
 
-	// Case 2: Cold start - First workers joining
-	if prevCount == 0 {
+	if len(prev) == 0 {
 		c.Logger.Info("cold start detected",
-			"worker_count", currCount,
+			"worker_count", len(curr),
 			"window", c.ColdStartWindow,
 		)
 
 		return "cold_start", c.ColdStartWindow
 	}
 
-	// Case 3: Planned scale - Worker(s) added
 	c.Logger.Info("planned scale detected",
-		"prev_count", prevCount,
-		"curr_count", currCount,
+		"prev_count", len(prev),
+		"curr_count", len(curr),
 		"window", c.PlannedScaleWindow,
 	)
 
@@ -539,7 +520,7 @@ func (c *Calculator) enterEmergencyState(ctx context.Context) {
 
 // selectStabilizationWindow chooses between cold start and planned scale window.
 func (c *Calculator) selectStabilizationWindow(ctx context.Context) time.Duration {
-	workers, _ := c.getActiveWorkers(ctx)
+	workers, _, _ := c.getActiveWorkers(ctx)
 	if len(workers) == 0 {
 		return c.ColdStartWindow
 	}
@@ -563,32 +544,11 @@ func (c *Calculator) selectStabilizationWindow(ctx context.Context) time.Duratio
 	return c.PlannedScaleWindow
 }
 
+// pollForChanges is the WorkerMonitor callback. It runs the observe→decide→
+// claim critical section under pollMu and, on an emergency claim, releases
+// pollMu before invoking the long-running rebalance.
 func (c *Calculator) pollForChanges(ctx context.Context) error {
-	workers, err := c.getActiveWorkers(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get active workers: %w", err)
-	}
-
-	// Convert workers slice to map for comparison
-	currentWorkers := make(map[string]bool)
-	for _, w := range workers {
-		currentWorkers[w] = true
-	}
-
-	c.mu.RLock()
-	// Optimization: Check for changes before proceeding to avoid log noise
-	// and unnecessary processing.
-	changed := c.hasWorkersChangedLocked(currentWorkers)
-	c.mu.RUnlock()
-
-	if !changed {
-		return nil
-	}
-
-	c.Logger.Info("polling detected worker change", "workers", len(workers))
-
-	// Trigger rebalancing
-	return c.checkForChanges(ctx, currentWorkers)
+	return c.observeAndDecide(ctx, nil)
 }
 
 // Partition-lifecycle constants. monitorPartitions threads these through
@@ -767,16 +727,8 @@ func (c *Calculator) monitorPartitions(ctx context.Context, source types.Watchab
 	}
 }
 
-// checkForChanges evaluates worker topology changes and triggers rebalancing if needed.
-//
-// Implements "Emergency-First" priority model:
-//  1. Detection (Tier 1) - Identify change type immediately
-//  2. Emergency (Tier 0) - If emergency, BYPASS cooldown and stabilization
-//  3. Rate Limiting (Tier 3) - If normal change, enforce RebalanceCooldown
-//  4. Stabilization (Tier 2) - If passed cooldown, apply stabilization window
-//
-// This ensures worker crashes are handled immediately while normal scaling
-// is smoothed out to prevent thrashing.
+// checkForChanges is a thin wrapper around observeAndDecide retained for
+// tests and any caller that wants to inject a pre-computed worker set.
 //
 // Parameters:
 //   - ctx: Context for cancellation
@@ -785,102 +737,152 @@ func (c *Calculator) monitorPartitions(ctx context.Context, source types.Watchab
 // Returns:
 //   - error: Processing error, nil on success
 func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[string]bool) error {
-	var workers map[string]bool
-
-	// Use provided workers or fetch from KV
+	var provided map[string]bool
 	if len(currentWorkers) > 0 && currentWorkers[0] != nil {
-		workers = currentWorkers[0]
-	} else {
-		// Fetch active workers from KV
-		workerList, err := c.getActiveWorkers(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to get active workers: %w", err)
-		}
+		provided = currentWorkers[0]
+	}
 
-		workers = make(map[string]bool)
-		for _, w := range workerList {
-			workers[w] = true
-		}
+	return c.observeAndDecide(ctx, provided)
+}
+
+// observeAndDecide is the single critical section that performs a fresh
+// observation of the worker set, runs CheckEmergency (if the observation is
+// fresh), and either claims the emergency lifecycle or enters the planned
+// scaling state. pollMu serializes the entire observe→decide→claim sequence
+// to prevent races between concurrent pollers / watchers / lifecycle callers.
+//
+// The pollMu is released BEFORE the long-running emergency rebalance is
+// invoked: the state machine has already committed to Emergency, so a
+// concurrent poll cannot start a competing decision; the rebalance itself
+// is independently serialized by rebalanceMu.
+//
+// When the observation is not fresh (degraded mode), the detector is NOT
+// mutated and no rebalance decision is taken: stale data must not drive
+// topology changes.
+//
+// Parameters:
+//   - ctx: Context for cancellation
+//   - provided: Pre-computed worker set (nil → fetch fresh from KV)
+//
+// Returns:
+//   - error: Processing error, nil on success
+func (c *Calculator) observeAndDecide(ctx context.Context, provided map[string]bool) error {
+	c.pollMu.Lock()
+
+	workers, fresh, err := c.collectWorkerObservation(ctx, provided)
+	if err != nil {
+		c.pollMu.Unlock()
+		return err
 	}
 
 	c.mu.RLock()
-	// We must re-check for changes here because lastWorkers might have been updated
-	// by a concurrent rebalance (e.g., from the scaling timer) since the caller's check.
 	changed := c.hasWorkersChangedLocked(workers)
 	lastWorkersCopy := c.cloneLastWorkersLocked()
 	c.mu.RUnlock()
 
 	if !changed {
+		c.pollMu.Unlock()
 		return nil
 	}
 
-	// TIER 1: Detect Rebalance Type immediately
-	// We do this BEFORE rate limiting to identify emergencies that must bypass checks
-	reason, window := c.detectRebalanceType(lastWorkersCopy, workers)
+	c.Logger.Info("polling detected worker change", "workers", len(workers), "fresh", fresh)
 
-	// Handle Grace Period (wait for confirmation)
+	// Degraded observation cannot drive detector mutation or topology decisions.
+	if !fresh {
+		c.pollMu.Unlock()
+		c.Logger.Info("skipping rebalance decision: observation is from degraded cache")
+
+		return nil
+	}
+
+	emergency, disappeared, pending := c.emergencyDetector.CheckEmergency(lastWorkersCopy, workers)
+
+	if emergency {
+		claimed := c.claimEmergency(ctx, disappeared)
+		c.pollMu.Unlock()
+		if claimed {
+			c.stateMach.RunClaimedRebalance(ctx, "emergency")
+		}
+
+		return nil
+	}
+
+	reason, window := c.detectRebalanceType(lastWorkersCopy, workers, pending)
 	if reason == "" {
-		c.Logger.Debug("worker change in grace period - waiting for confirmation")
+		c.pollMu.Unlock()
 		return nil
 	}
 
-	// TIER 0: Emergency Handling - Bypass Cooldown & State Checks
-	if reason == "emergency" {
-		c.Logger.Warn("emergency detected - bypassing cooldown and stabilization",
-			"reason", reason,
-			"workers", len(workers))
+	defer c.pollMu.Unlock()
 
-		// Trigger immediate emergency rebalance from Idle/Scaling. If a
-		// rebalance is already in flight (Rebalancing/Emergency),
-		// EnterEmergency defers — the next poll will catch the topology change.
-		c.enterEmergencyState(ctx)
-
-		return nil
-	}
-
-	// Recovery Grace: defer non-emergency rebalancing while the leader is stabilizing
-	// after exiting degraded mode. Emergencies (Tier 0) still proceed immediately.
-	if c.stateProvider != nil && c.stateProvider.IsInRecoveryGrace() {
+	if c.inRecoveryGrace() {
 		c.Logger.Info("skipping rebalance: leader is in recovery grace period after degraded mode")
 		return nil
 	}
 
-	// TIER 3: Rate limiting - Enforce RebalanceCooldown for NON-EMERGENCY changes
-	// This prevents thrashing during rapid successive changes (flapping)
 	if time.Since(c.publisher.LastRebalanceTime()) < c.Cooldown {
-		lastRebalanceTime := c.publisher.LastRebalanceTime()
-		timeSinceLastRebalance := time.Since(lastRebalanceTime)
-		remaining := c.Cooldown - timeSinceLastRebalance
-
 		c.Logger.Debug("worker change detected but rate limit active",
 			"reason", reason,
 			"min_rebalance_interval", c.Cooldown,
-			"time_since_last", timeSinceLastRebalance,
-			"remaining", remaining,
-			"next_allowed", lastRebalanceTime.Add(c.Cooldown),
 		)
-
-		return nil // Defer - will be checked again by next poll/watcher event
+		return nil
 	}
 
-	// Check if we can enter scaling state (must be Idle)
-	currentState := c.GetState()
-	if currentState != types.CalcStateIdle {
+	if c.GetState() != types.CalcStateIdle {
 		c.Logger.Debug("worker change detected but calculator not idle",
-			"state", currentState.String(),
+			"state", c.GetState().String(),
 			"reason", reason,
 		)
-
-		return nil // Defer
+		return nil
 	}
 
-	c.Logger.Debug("worker change detected", "workers", len(workers), "reason", reason)
-
-	// TIER 2: Stabilization - Enter Scaling State
-	// Cold start or planned scale: use stabilization window
 	c.enterScalingState(ctx, reason, window)
 
 	return nil
+}
+
+// collectWorkerObservation builds the current-worker set, either from a
+// caller-supplied map (treated as fresh) or by fetching from KV.
+func (c *Calculator) collectWorkerObservation(ctx context.Context, provided map[string]bool) (map[string]bool, bool, error) {
+	if provided != nil {
+		return provided, true, nil
+	}
+
+	workerList, fresh, err := c.getActiveWorkers(ctx)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to get active workers: %w", err)
+	}
+
+	workers := make(map[string]bool, len(workerList))
+	for _, w := range workerList {
+		workers[w] = true
+	}
+
+	return workers, fresh, nil
+}
+
+// claimEmergency atomically claims the emergency lifecycle on the state
+// machine. Returns true if the claim succeeded; the caller is then
+// responsible for releasing pollMu and invoking RunClaimedRebalance.
+//
+// Lock ownership stays with observeAndDecide: this function never touches
+// pollMu, so the critical-section boundaries are visible in one place.
+func (c *Calculator) claimEmergency(ctx context.Context, disappeared []string) bool {
+	if !c.stateMach.TryClaimEmergency(ctx) {
+		c.Logger.Warn("emergency detected but state machine could not claim",
+			"disappeared", disappeared)
+		return false
+	}
+
+	c.mu.Lock()
+	c.disappearedWorkers = disappeared
+	c.mu.Unlock()
+
+	c.Metrics.RecordEmergencyRebalance(len(disappeared))
+	c.Logger.Warn("emergency claim succeeded - running rebalance",
+		"disappeared", disappeared)
+
+	return true
 }
 
 // setLastWorkersLocked replaces lastWorkers with the provided worker set.
@@ -923,8 +925,8 @@ func (c *Calculator) hasWorkersChangedLocked(workers map[string]bool) bool {
 //
 // This method implements cache fallback for degraded mode:
 //  1. Try to fetch workers from NATS KV (monitor.GetActiveWorkers)
-//  2. On connectivity error, fall back to cached worker list
-//  3. Update cache on successful fetches
+//  2. On connectivity error, fall back to cached worker list (fresh=false)
+//  3. Update cache on successful fetches (fresh=true)
 //  4. Return ErrDegraded if no cache available during connectivity issues
 //
 // Parameters:
@@ -932,8 +934,11 @@ func (c *Calculator) hasWorkersChangedLocked(workers map[string]bool) bool {
 //
 // Returns:
 //   - []string: List of active worker IDs
+//   - bool: true if the list was fetched fresh from KV; false if it came from
+//     the degraded-mode cache. Callers that mutate detector state on the
+//     observation must gate that mutation on fresh==true.
 //   - error: Error if fetch fails and no cache available
-func (c *Calculator) getActiveWorkers(ctx context.Context) ([]string, error) {
+func (c *Calculator) getActiveWorkers(ctx context.Context) ([]string, bool, error) {
 	// Try to fetch from NATS KV
 	workers, err := c.monitor.GetActiveWorkers(ctx)
 	if err != nil {
@@ -949,21 +954,21 @@ func (c *Calculator) getActiveWorkers(ctx context.Context) ([]string, error) {
 				c.Metrics.RecordCacheUsage("workers", age.Seconds())
 				c.Metrics.IncrementCacheFallback("connectivity_error")
 
-				return cached, nil
+				return cached, false, nil
 			}
 			// No cache available - return degraded error
 			c.Metrics.IncrementCacheFallback("no_cache")
 
-			return nil, fmt.Errorf("%w: no cached workers available: %w", types.ErrDegraded, err)
+			return nil, false, fmt.Errorf("%w: no cached workers available: %w", types.ErrDegraded, err)
 		}
 		// Non-connectivity error - return as-is
-		return nil, err
+		return nil, false, err
 	}
 
 	// Success - update cache for future use
 	c.updateCachedWorkers(workers)
 
-	return workers, nil
+	return workers, true, nil
 }
 
 // getActiveWorkersFiltered retrieves workers, excluding those confirmed disappeared in emergency.
@@ -980,16 +985,17 @@ func (c *Calculator) getActiveWorkers(ctx context.Context) ([]string, error) {
 //
 // Returns:
 //   - []string: Active workers excluding disappeared ones
+//   - bool: true if the underlying observation was fresh from KV; false if cached.
 //   - error: KV operation error
-func (c *Calculator) getActiveWorkersFiltered(ctx context.Context, disappearedWorkers []string) ([]string, error) {
-	workers, err := c.getActiveWorkers(ctx)
+func (c *Calculator) getActiveWorkersFiltered(ctx context.Context, disappearedWorkers []string) ([]string, bool, error) {
+	workers, fresh, err := c.getActiveWorkers(ctx)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	// Fast path: no filtering needed
 	if len(disappearedWorkers) == 0 {
-		return workers, nil
+		return workers, fresh, nil
 	}
 
 	// Build disappeared set for O(1) lookups
@@ -1014,7 +1020,7 @@ func (c *Calculator) getActiveWorkersFiltered(ctx context.Context, disappearedWo
 		)
 	}
 
-	return filtered, nil
+	return filtered, fresh, nil
 }
 
 // handleRebalance is the callback invoked by StateMachine when rebalancing should occur.
@@ -1040,18 +1046,46 @@ func (c *Calculator) handleRebalance(ctx context.Context, reason string) error {
 		return fmt.Errorf("rebalance failed for %s: %w", reason, err)
 	}
 
-	// After successful rebalance, update lastWorkers to match currentWorkers
-	// This prevents immediately re-entering scaling on the next poll
+	// After successful rebalance, update lastWorkers to match currentWorkers.
+	// This prevents immediately re-entering scaling on the next poll.
 	c.mu.Lock()
 	c.setLastWorkersLocked(c.currentWorkers)
 	c.mu.Unlock()
 
-	// Reset emergency detector after successful emergency rebalance
-	if reason == "emergency" {
-		c.emergencyDetector.Reset()
+	return nil
+}
+
+// collectRebalanceWorkers fetches the active worker set for a rebalance and
+// maintains the emergency-detector invariant by calling ObserveAlive on the
+// fresh scan result (gated on fresh==true).
+//
+// Only the emergency lifecycle consumes c.disappearedWorkers — other
+// lifecycles must leave the buffer intact so a later emergency rebalance
+// still sees the confirmed-disappeared workers.
+//
+// ObserveAlive keeps the detector consistent across out-of-poll rebalance
+// triggers (audit_repair, scaling-timer, partition-lifecycle, manual): any
+// worker visible to this fresh KV scan has its stale tracking cleared, so a
+// subsequent disappearance starts a fresh grace period.
+func (c *Calculator) collectRebalanceWorkers(ctx context.Context, lifecycle string) ([]string, error) {
+	var disappearedWorkers []string
+	if lifecycle == "emergency" {
+		c.mu.Lock()
+		disappearedWorkers = c.disappearedWorkers
+		c.disappearedWorkers = nil
+		c.mu.Unlock()
 	}
 
-	return nil
+	workers, fresh, err := c.getActiveWorkersFiltered(ctx, disappearedWorkers)
+	if err != nil {
+		return nil, c.wrapStopErr(fmt.Errorf("failed to get active workers: %w", err))
+	}
+
+	if fresh {
+		c.emergencyDetector.ObserveAlive(workers)
+	}
+
+	return workers, nil
 }
 
 // snapshotSource picks the best partition snapshot path for the source. If
@@ -1092,16 +1126,10 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 
 	start := time.Now()
 
-	c.mu.Lock()
-	disappearedWorkers := c.disappearedWorkers
-	c.disappearedWorkers = nil // Clear after reading
-	c.mu.Unlock()
-
-	// Get active workers, filtering out disappeared ones during emergency
-	workers, err := c.getActiveWorkersFiltered(ctx, disappearedWorkers)
+	workers, err := c.collectRebalanceWorkers(ctx, lifecycle)
 	if err != nil {
 		c.Metrics.RecordRebalanceAttempt(lifecycle, false)
-		return c.wrapStopErr(fmt.Errorf("failed to get active workers: %w", err))
+		return err
 	}
 
 	c.Logger.Debug("rebalance started", "lifecycle", lifecycle, "worker_count", len(workers), "workers", workers)

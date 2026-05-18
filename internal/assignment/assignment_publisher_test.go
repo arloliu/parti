@@ -1128,7 +1128,7 @@ func BenchmarkDiscoverHighestVersion_WithCommit(b *testing.B) {
 	require.NoError(b, err)
 
 	// Seed K legacy alias keys.
-	for i := 0; i < numAliases; i++ {
+	for i := range numAliases {
 		asgn := types.Assignment{Version: int64(i + 1), Partitions: []types.Partition{ps(fmt.Sprintf("p%d", i))}}
 		data, merr := json.Marshal(asgn)
 		require.NoError(b, merr)

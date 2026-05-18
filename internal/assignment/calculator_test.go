@@ -401,7 +401,7 @@ func TestCalculator_GetActiveWorkers(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		workers, err := calc.getActiveWorkers(ctx)
+		workers, _, err := calc.getActiveWorkers(ctx)
 		require.NoError(t, err)
 		require.Len(t, workers, 3)
 		require.Contains(t, workers, "worker-1")
@@ -431,7 +431,7 @@ func TestCalculator_GetActiveWorkers(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		workers, err := calc.getActiveWorkers(ctx)
+		workers, _, err := calc.getActiveWorkers(ctx)
 		require.NoError(t, err)
 		require.Empty(t, workers)
 	})

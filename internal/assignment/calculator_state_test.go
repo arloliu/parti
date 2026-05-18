@@ -3,6 +3,7 @@ package assignment
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -196,7 +197,7 @@ func TestCalculator_detectRebalanceType_ColdStart(t *testing.T) {
 		"worker-2": true,
 	}
 
-	reason, window := calc.detectRebalanceType(lastWorkers, currentWorkers)
+	reason, window := calc.detectRebalanceType(lastWorkers, currentWorkers, false)
 
 	require.Equal(t, "cold_start", reason)
 	require.Equal(t, calc.ColdStartWindow, window)
@@ -238,59 +239,11 @@ func TestCalculator_detectRebalanceType_PlannedScale(t *testing.T) {
 		"worker-3": true,
 	}
 
-	reason, window := calc.detectRebalanceType(lastWorkers, currentWorkers)
+	reason, window := calc.detectRebalanceType(lastWorkers, currentWorkers, false)
 
 	require.Equal(t, "planned_scale", reason)
 	require.Equal(t, calc.PlannedScaleWindow, window)
 	require.Equal(t, 10*time.Second, window)
-}
-
-func TestCalculator_detectRebalanceType_Emergency(t *testing.T) {
-	_, nc := partitest.StartEmbeddedNATS(t)
-	assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-emergency-assignment")
-	heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-emergency-heartbeat")
-
-	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
-	strategy := &mockStrategy{}
-
-	// Use shorter intervals for faster test: HeartbeatInterval=1s, GracePeriod=1s (instead of default 0.75*interval)
-	calc, err := NewCalculator(&Config{
-		AssignmentKV:         assignmentKV,
-		HeartbeatKV:          heartbeatKV,
-		AssignmentPrefix:     "test-assignment",
-		Source:               source,
-		Strategy:             strategy,
-		HeartbeatPrefix:      "test-hb",
-		HeartbeatTTL:         1 * time.Second,
-		EmergencyGracePeriod: 1 * time.Second,
-	})
-	require.NoError(t, err)
-
-	// Set up previous workers
-	lastWorkers := map[string]bool{
-		"worker-0": true,
-		"worker-1": true,
-		"worker-2": true,
-	}
-
-	// Emergency: 3 → 2 workers (worker-2 crashed)
-	currentWorkers := map[string]bool{
-		"worker-0": true,
-		"worker-1": true,
-	}
-
-	// First check - should return empty (grace period)
-	reason, window := calc.detectRebalanceType(lastWorkers, currentWorkers)
-	require.Equal(t, "", reason, "Should be in grace period initially")
-	require.Equal(t, time.Duration(0), window)
-
-	// Wait for grace period to expire (grace period = 1s, wait 1.1s to be safe)
-	time.Sleep(1100 * time.Millisecond)
-
-	// Second check - should now be emergency
-	reason, window = calc.detectRebalanceType(lastWorkers, currentWorkers)
-	require.Equal(t, "emergency", reason)
-	require.Equal(t, time.Duration(0), window)
 }
 
 func TestCalculator_detectRebalanceType_Restart(t *testing.T) {
@@ -343,61 +296,11 @@ func TestCalculator_detectRebalanceType_Restart(t *testing.T) {
 		"worker-15": true, // New
 	}
 
-	reason, window := calc.detectRebalanceType(lastWorkers, currentWorkers)
+	reason, window := calc.detectRebalanceType(lastWorkers, currentWorkers, false)
 
 	require.Equal(t, "planned_scale", reason)
 	require.Equal(t, calc.PlannedScaleWindow, window)
 	require.Equal(t, 10*time.Second, window)
-}
-
-func TestCalculator_detectRebalanceType_MultipleWorkersCrashed(t *testing.T) {
-	_, nc := partitest.StartEmbeddedNATS(t)
-	assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-calc-multicrash-assignment")
-	heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-calc-multicrash-heartbeat")
-
-	source := &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}}
-	strategy := &mockStrategy{}
-
-	// Use shorter intervals for faster test: HeartbeatInterval=1s, GracePeriod=1s (instead of default 0.75*interval)
-	calc, err := NewCalculator(&Config{
-		AssignmentKV:         assignmentKV,
-		HeartbeatKV:          heartbeatKV,
-		AssignmentPrefix:     "test-assignment",
-		Source:               source,
-		Strategy:             strategy,
-		HeartbeatPrefix:      "test-hb",
-		HeartbeatTTL:         1 * time.Second,
-		EmergencyGracePeriod: 1 * time.Second,
-	})
-	require.NoError(t, err)
-
-	// Set up previous workers
-	lastWorkers := map[string]bool{
-		"worker-0": true,
-		"worker-1": true,
-		"worker-2": true,
-		"worker-3": true,
-		"worker-4": true,
-	}
-
-	// Emergency: 5 → 2 workers (3 workers crashed)
-	currentWorkers := map[string]bool{
-		"worker-0": true,
-		"worker-1": true,
-	}
-
-	// First check - should return empty (grace period)
-	reason, window := calc.detectRebalanceType(lastWorkers, currentWorkers)
-	require.Equal(t, "", reason, "Should be in grace period initially")
-	require.Equal(t, time.Duration(0), window)
-
-	// Wait for grace period to expire (grace period = 1s, wait 1.1s to be safe)
-	time.Sleep(1100 * time.Millisecond)
-
-	// Second check - should now be emergency
-	reason, window = calc.detectRebalanceType(lastWorkers, currentWorkers)
-	require.Equal(t, "emergency", reason)
-	require.Equal(t, time.Duration(0), window)
 }
 
 func TestCalculator_StateTransitions_GetState(t *testing.T) {
@@ -665,6 +568,426 @@ func TestCalculator_StateTransitions_PreventsConcurrentRebalance(t *testing.T) {
 
 	// Should still be in Scaling state (not started new rebalance)
 	require.Equal(t, types.CalcStateScaling, calc.GetState())
+}
+
+// newV9Calculator returns a calculator wired to embedded NATS for the C-tests.
+// The detector clock is injected so emergency timing is deterministic.
+func newV9Calculator(t *testing.T, bucketSuffix string) (*Calculator, *time.Time) {
+	t.Helper()
+	_, nc := partitest.StartEmbeddedNATS(t)
+	assignmentKV := partitest.CreateJetStreamKV(t, nc, "v9-asn-"+bucketSuffix)
+	heartbeatKV := partitest.CreateJetStreamKV(t, nc, "v9-hb-"+bucketSuffix)
+
+	cfg := &Config{
+		AssignmentKV:         assignmentKV,
+		HeartbeatKV:          heartbeatKV,
+		AssignmentPrefix:     "asn",
+		Source:               &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}}},
+		Strategy:             &mockStrategy{},
+		HeartbeatPrefix:      "v9-hb",
+		HeartbeatTTL:         10 * time.Second,
+		EmergencyGracePeriod: 200 * time.Millisecond,
+		Cooldown:             1 * time.Millisecond,
+		ColdStartWindow:      50 * time.Millisecond,
+		PlannedScaleWindow:   50 * time.Millisecond,
+	}
+	calc, err := NewCalculator(cfg)
+	require.NoError(t, err)
+
+	t0 := time.Unix(0, 0)
+	now := t0
+	calc.emergencyDetector.now = func() time.Time { return now }
+
+	return calc, &now
+}
+
+// putHeartbeat publishes a heartbeat for a worker so monitor.GetActiveWorkers sees it.
+func putHeartbeat(t *testing.T, calc *Calculator, ctx context.Context, workerID string) {
+	t.Helper()
+	_, err := calc.HeartbeatKV.Put(ctx, "v9-hb."+workerID, []byte("alive"))
+	require.NoError(t, err)
+}
+
+// C1: pollForChanges in degraded mode must not mutate the emergency detector.
+func TestPollForChanges_DegradedFetch_SkipsDetector(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	ctx := t.Context()
+
+	_, nc := partitest.StartEmbeddedNATS(t)
+	assignmentKV := partitest.CreateJetStreamKV(t, nc, "v9-c1-asn")
+	heartbeatKV := partitest.CreateJetStreamKV(t, nc, "v9-c1-hb")
+
+	cfg := &Config{
+		AssignmentKV:         assignmentKV,
+		HeartbeatKV:          heartbeatKV,
+		AssignmentPrefix:     "asn",
+		Source:               &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}},
+		Strategy:             &mockStrategy{},
+		HeartbeatPrefix:      "v9-hb",
+		HeartbeatTTL:         10 * time.Second,
+		EmergencyGracePeriod: 100 * time.Millisecond,
+		Cooldown:             1 * time.Millisecond,
+		ColdStartWindow:      50 * time.Millisecond,
+		PlannedScaleWindow:   50 * time.Millisecond,
+	}
+	calc, err := NewCalculator(cfg)
+	require.NoError(t, err)
+
+	// Pre-populate cache with two workers so degraded fetch returns them.
+	calc.updateCachedWorkers([]string{"A", "B"})
+
+	// Pre-populate detector with an in-flight disappearance for A.
+	calc.emergencyDetector.mu.Lock()
+	calc.emergencyDetector.disappearedWorkers["A"] = time.Now()
+	calc.emergencyDetector.mu.Unlock()
+
+	// Drop the NATS connection to force degraded fetch on next call.
+	nc.Close()
+
+	// poll triggers the degraded path. With pre-populated cache, getActiveWorkers
+	// returns the cached list with fresh=false.
+	err = calc.pollForChanges(ctx)
+	require.NoError(t, err)
+
+	// Detector must be unchanged: degraded observation does not mutate detector state.
+	calc.emergencyDetector.mu.Lock()
+	_, stillTracked := calc.emergencyDetector.disappearedWorkers["A"]
+	calc.emergencyDetector.mu.Unlock()
+	require.True(t, stillTracked, "detector must NOT mutate from a degraded (cached) observation")
+}
+
+// C2: emergency claim path releases pollMu before invoking the long-running rebalance,
+// so a concurrent pollForChanges call can proceed past pollMu without deadlock.
+//
+// The rebalance is held inside the strategy callback so the calculator is
+// "in" the emergency rebalance when the second poll fires. If the emergency
+// path held pollMu across the rebalance, the second poll would deadlock.
+func TestPollForChanges_EmergencyPath_ReleasesPollMuBeforeRebalance(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	ctx := t.Context()
+	calc, clock := newV9Calculator(t, "c2")
+
+	release := make(chan struct{})
+	gate := make(chan struct{}, 1)
+	calc.Strategy = &blockingStrategy{block: release, entered: gate}
+
+	// One worker in KV; lastWorkers has a different worker (B) so a change is detected.
+	putHeartbeat(t, calc, ctx, "A")
+	calc.mu.Lock()
+	calc.lastWorkers = map[string]bool{"B": true}
+	calc.mu.Unlock()
+
+	// Pre-mark B as past-grace, using the injected clock.
+	calc.emergencyDetector.mu.Lock()
+	calc.emergencyDetector.disappearedWorkers["B"] = clock.Add(-time.Hour)
+	calc.emergencyDetector.mu.Unlock()
+
+	// First poll: emergency fires; strategy callback blocks → pollMu must already be released.
+	rebalanceDone := make(chan error, 1)
+	go func() {
+		rebalanceDone <- calc.pollForChanges(ctx)
+	}()
+
+	// Wait until the strategy callback has been entered (= rebalance is in-flight).
+	select {
+	case <-gate:
+	case <-time.After(2 * time.Second):
+		close(release)
+		<-rebalanceDone
+		t.Fatal("strategy callback was never entered — rebalance did not run")
+	}
+
+	// Second poll must not block on pollMu.
+	second := make(chan struct{})
+	go func() {
+		_ = calc.pollForChanges(ctx)
+		close(second)
+	}()
+	select {
+	case <-second:
+		// pollMu was released before rebalance — good.
+	case <-time.After(500 * time.Millisecond):
+		close(release)
+		<-rebalanceDone
+		t.Fatal("second pollForChanges blocked on pollMu — emergency path did not release it before rebalance")
+	}
+
+	close(release)
+	<-rebalanceDone
+}
+
+// blockingStrategy blocks Assign() the first time it's called; subsequent calls succeed.
+type blockingStrategy struct {
+	block   chan struct{}
+	entered chan struct{}
+	called  atomic.Bool
+}
+
+func (b *blockingStrategy) Assign(workers []string, partitions []types.Partition) (map[string][]types.Partition, error) {
+	if b.called.CompareAndSwap(false, true) {
+		select {
+		case b.entered <- struct{}{}:
+		default:
+		}
+		<-b.block
+	}
+	result := make(map[string][]types.Partition)
+	for i, part := range partitions {
+		w := workers[i%len(workers)]
+		result[w] = append(result[w], part)
+	}
+
+	return result, nil
+}
+
+// C3: same-count replacement (worker A leaves, B arrives) suppresses planned_scale
+// while A is mid-grace, then fires emergency once the grace expires.
+func TestPollForChanges_SameCountReplacement_SuppressesPlannedScale_FiresEmergencyAfterGrace(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	ctx := t.Context()
+	calc, clock := newV9Calculator(t, "c3")
+
+	// lastWorkers={A,B}.
+	calc.mu.Lock()
+	calc.lastWorkers = map[string]bool{"A": true, "B": true}
+	calc.currentWorkers = map[string]bool{"A": true, "B": true}
+	calc.mu.Unlock()
+
+	// Heartbeats: B and C (A left, C joined — same count).
+	putHeartbeat(t, calc, ctx, "B")
+	putHeartbeat(t, calc, ctx, "C")
+
+	// Initial poll: A is mid-grace; planned_scale suppressed; state stays Idle.
+	require.NoError(t, calc.pollForChanges(ctx))
+	require.Equal(t, types.CalcStateIdle, calc.GetState(),
+		"planned_scale must be suppressed while a disappearance is mid-grace")
+
+	// Advance time past grace.
+	*clock = clock.Add(300 * time.Millisecond)
+
+	// Next poll: A's grace expired; emergency fires.
+	require.NoError(t, calc.pollForChanges(ctx))
+	require.Eventually(t, func() bool {
+		return calc.GetState() == types.CalcStateIdle && calc.publisher.CurrentVersion() > 0
+	}, 2*time.Second, 10*time.Millisecond, "emergency rebalance should fire and return to Idle")
+}
+
+// C4: after a recovery clears pending, a subsequent planned_scale runs normally.
+//
+// The change-detection short-circuit means a pure recovery (workers ==
+// lastWorkers) does not reach CheckEmergency. The test exercises the more
+// realistic shape: a fresh observation in which the missing worker is back
+// AND the topology has otherwise drifted (so the change check triggers
+// re-evaluation), and verifies that CheckEmergency clears the stale tracking.
+func TestPollForChanges_RecoveryClearsPending_NormalRebalanceResumes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	ctx := t.Context()
+	calc, _ := newV9Calculator(t, "c4")
+
+	calc.mu.Lock()
+	calc.lastWorkers = map[string]bool{"A": true, "B": true, "C": true}
+	calc.currentWorkers = map[string]bool{"A": true, "B": true, "C": true}
+	calc.mu.Unlock()
+
+	// A disappears (B, C alive). pending starts.
+	putHeartbeat(t, calc, ctx, "B")
+	putHeartbeat(t, calc, ctx, "C")
+	require.NoError(t, calc.pollForChanges(ctx))
+	calc.emergencyDetector.mu.Lock()
+	_, tracked := calc.emergencyDetector.disappearedWorkers["A"]
+	calc.emergencyDetector.mu.Unlock()
+	require.True(t, tracked, "A should be tracked after disappearance observation")
+
+	// A recovers AND a new worker D joins (so the change check triggers re-evaluation).
+	putHeartbeat(t, calc, ctx, "A")
+	putHeartbeat(t, calc, ctx, "D")
+	require.NoError(t, calc.pollForChanges(ctx))
+
+	calc.emergencyDetector.mu.Lock()
+	_, stillTracked := calc.emergencyDetector.disappearedWorkers["A"]
+	calc.emergencyDetector.mu.Unlock()
+	require.False(t, stillTracked, "recovery must clear pending via Phase 1")
+}
+
+// C5 (FP-3): rebalance with a non-emergency lifecycle must NOT consume
+// c.disappearedWorkers — that buffer is reserved for the emergency rebalance.
+func TestRebalance_NonEmergencyLifecycle_DoesNotConsumeDisappearedWorkers(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	ctx := t.Context()
+	calc, _ := newV9Calculator(t, "c5")
+
+	// Pre-populate disappearedWorkers.
+	calc.mu.Lock()
+	calc.disappearedWorkers = []string{"A", "B"}
+	calc.mu.Unlock()
+
+	putHeartbeat(t, calc, ctx, "C")
+
+	// Non-emergency lifecycle: must not consume the buffer.
+	require.NoError(t, calc.rebalance(ctx, "planned_scale"))
+
+	calc.mu.Lock()
+	remaining := calc.disappearedWorkers
+	calc.mu.Unlock()
+	require.ElementsMatch(t, []string{"A", "B"}, remaining,
+		"disappearedWorkers buffer must survive a non-emergency rebalance")
+}
+
+// C6: when two workers are co-pending, the one whose grace expires first fires
+// emergency; the other's tracking is preserved.
+func TestPollForChanges_CoPending_AFiresEmergencyEPreserved(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	ctx := t.Context()
+	calc, clock := newV9Calculator(t, "c6")
+
+	calc.mu.Lock()
+	calc.lastWorkers = map[string]bool{"A": true, "B": true, "C": true}
+	calc.currentWorkers = map[string]bool{"A": true, "B": true, "C": true}
+	calc.mu.Unlock()
+
+	// Only C heartbeats — both A and B are missing, but A disappeared first.
+	putHeartbeat(t, calc, ctx, "C")
+
+	// First observation: track A and B at t=0 (both observed missing at the same time).
+	// To get separate firstSeen, we observe A as missing first (B still alive), then both missing.
+	// Use direct CheckEmergency calls on the detector to set up the staggered firstSeen.
+	calc.emergencyDetector.mu.Lock()
+	calc.emergencyDetector.disappearedWorkers["A"] = *clock
+	calc.emergencyDetector.disappearedWorkers["B"] = clock.Add(100 * time.Millisecond)
+	calc.emergencyDetector.mu.Unlock()
+
+	// Advance past A's grace (200ms) but before B's grace would expire (B firstSeen=100ms,
+	// so grace expires at 300ms). At t=210ms, A is confirmed, B is still pending.
+	*clock = clock.Add(210 * time.Millisecond)
+	require.NoError(t, calc.pollForChanges(ctx))
+
+	// Wait for emergency to complete and return to Idle.
+	require.Eventually(t, func() bool {
+		return calc.GetState() == types.CalcStateIdle
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// After the rebalance, B's tracking should be preserved. But because the rebalance
+	// called ObserveAlive with the live worker set (C only), B is NOT in that set, so
+	// B's tracking is preserved (ObserveAlive only deletes workers in the alive set).
+	calc.emergencyDetector.mu.Lock()
+	_, bTracked := calc.emergencyDetector.disappearedWorkers["B"]
+	calc.emergencyDetector.mu.Unlock()
+	require.True(t, bTracked, "B's tracking must survive the emergency rebalance for A")
+}
+
+// C7: scaling timer racing emergency claim — only one wins via strict-source CAS.
+func TestPollForChanges_ScalingTimerVsEmergencyClaim_AtomicTransition(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	calc, _ := newV9Calculator(t, "c7")
+
+	// Move state to Scaling manually.
+	require.True(t, calc.stateMach.compareAndSwapState(types.CalcStateIdle, types.CalcStateScaling))
+
+	// Simulate scaling timer winning: advance Scaling -> Rebalancing.
+	require.True(t, calc.stateMach.compareAndSwapState(types.CalcStateScaling, types.CalcStateRebalancing))
+
+	// Emergency claim must fail because neither Idle nor Scaling matches.
+	require.False(t, calc.stateMach.TryClaimEmergency(context.Background()))
+	require.Equal(t, types.CalcStateRebalancing, calc.stateMach.GetState())
+}
+
+// C8: scaling timer wins; subsequent emergency tracking is preserved across the
+// rebalance, becomes stranded; on the next planned rebalance picking up the
+// recovered/absorbed worker, ObserveAlive clears the entry.
+func TestPollForChanges_ScalingTimerWins_ThenRebalanceAbsorbsWorker(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	ctx := t.Context()
+	calc, clock := newV9Calculator(t, "c8")
+
+	// lastWorkers={A,B}. A disappears; B still alive.
+	calc.mu.Lock()
+	calc.lastWorkers = map[string]bool{"A": true, "B": true}
+	calc.currentWorkers = map[string]bool{"A": true, "B": true}
+	calc.mu.Unlock()
+
+	putHeartbeat(t, calc, ctx, "B")
+
+	// Track A.
+	require.NoError(t, calc.pollForChanges(ctx))
+
+	// "Scaling timer wins" — simulate a planned rebalance running that absorbs the change.
+	// Drive the rebalance directly with a non-emergency lifecycle.
+	require.NoError(t, calc.rebalance(ctx, "planned_scale"))
+
+	// A's tracking should now be stranded (A removed from lastWorkers by handleRebalance —
+	// but handleRebalance isn't called by direct rebalance(); we update manually).
+	calc.mu.Lock()
+	calc.lastWorkers = map[string]bool{"B": true}
+	calc.mu.Unlock()
+
+	*clock = clock.Add(time.Second)
+
+	// A reappears; planned rebalance picks A up. ObserveAlive must clear A.
+	putHeartbeat(t, calc, ctx, "A")
+	require.NoError(t, calc.rebalance(ctx, "planned_scale"))
+
+	calc.emergencyDetector.mu.Lock()
+	_, aTracked := calc.emergencyDetector.disappearedWorkers["A"]
+	calc.emergencyDetector.mu.Unlock()
+	require.False(t, aTracked, "ObserveAlive in rebalance must clear A when A becomes visible again")
+}
+
+// C9 (v9 fix verification): audit_repair path triggers a rebalance with a fresh
+// KV scan. If a stranded detector entry for A exists and A's heartbeat is now in
+// KV, ObserveAlive must clear A's entry before a subsequent disappearance starts
+// a fresh grace period.
+func TestRebalance_AuditRepairPath_ObserveAliveClearsStaleEntry(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	ctx := t.Context()
+	calc, clock := newV9Calculator(t, "c9")
+
+	// Pre-populate a stranded detector entry for A.
+	calc.emergencyDetector.mu.Lock()
+	calc.emergencyDetector.disappearedWorkers["A"] = *clock
+	calc.emergencyDetector.mu.Unlock()
+
+	// Put A's heartbeat into KV so the audit_repair rebalance's fresh scan sees A.
+	putHeartbeat(t, calc, ctx, "A")
+
+	// audit_repair triggers rebalance with a non-emergency lifecycle.
+	require.NoError(t, calc.rebalance(ctx, "audit_repair"))
+
+	// A's entry must be cleared by ObserveAlive.
+	calc.emergencyDetector.mu.Lock()
+	_, stillTracked := calc.emergencyDetector.disappearedWorkers["A"]
+	calc.emergencyDetector.mu.Unlock()
+	require.False(t, stillTracked, "ObserveAlive in rebalance must clear A's stranded tracking")
+
+	// Subsequent disappearance starts a fresh grace.
+	*clock = clock.Add(time.Second)
+	// Set lastWorkers so A enters prev.
+	calc.mu.Lock()
+	calc.lastWorkers = map[string]bool{"A": true}
+	calc.mu.Unlock()
+
+	emergency, _, _ := calc.emergencyDetector.CheckEmergency(
+		map[string]bool{"A": true},
+		map[string]bool{},
+	)
+	require.False(t, emergency, "fresh grace period must not be voided by the prior stranded entry")
 }
 
 func TestCalculator_StateString(t *testing.T) {

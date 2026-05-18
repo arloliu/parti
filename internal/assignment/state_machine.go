@@ -220,22 +220,21 @@ func (sm *StateMachine) EnterScaling(ctx context.Context, reason string, window 
 
 // EnterRebalancing transitions to rebalancing state and triggers the rebalance callback.
 //
-// This method invokes the rebalance callback to perform the actual assignment calculation.
-// On success, it automatically transitions back to Idle. On error, it also returns to Idle
-// to allow retry on the next worker change detection.
+// This method must be called from the scaling-timer goroutine after the
+// stabilization window expires. It uses a strict-source CAS from Scaling to
+// Rebalancing: if any other transition (e.g., a concurrent emergency claim)
+// has moved the state out of Scaling, the call is a no-op.
 //
-// This method should only be called from Scaling state (by the stabilization timer).
-// If an emergency occurred during scaling, the state will have changed and this
-// call becomes a no-op to prevent redundant rebalances.
+// On success or error, the state is returned to Idle to allow the next change
+// to be picked up.
 //
 // Parameters:
 //   - ctx: Context for the rebalance operation
 func (sm *StateMachine) EnterRebalancing(ctx context.Context) {
-	// Guard: Only transition from Scaling state
-	// If emergency occurred during scaling, we're no longer in Scaling
-	// and should skip this (emergency already handled it)
-	currentState := types.CalculatorState(sm.current.Load())
-	if currentState != types.CalcStateScaling {
+	// Strict-source CAS: only transition Scaling -> Rebalancing. If the
+	// state moved (e.g., emergency claimed it), bail.
+	if !sm.compareAndSwapState(types.CalcStateScaling, types.CalcStateRebalancing) {
+		currentState := types.CalculatorState(sm.current.Load())
 		sm.logger.Info("skipping rebalancing: not in scaling state",
 			"current_state", currentState.String())
 		return
@@ -243,74 +242,85 @@ func (sm *StateMachine) EnterRebalancing(ctx context.Context) {
 
 	sm.logger.Info("entering rebalancing state")
 
-	// Notify subscribers of state change
-	sm.emitStateChange(types.CalcStateRebalancing)
+	// Notify subscribers of the just-committed state change.
+	sm.notifyStateChange(types.CalcStateRebalancing)
 
-	// Get the scaling reason before rebalancing
+	// Get the scaling reason before rebalancing.
 	sm.mu.RLock()
 	reason := sm.scalingReason
 	sm.mu.RUnlock()
 
-	// Perform rebalance via callback
+	sm.RunClaimedRebalance(ctx, reason)
+}
+
+// TryClaimEmergency attempts to atomically claim the emergency lifecycle.
+//
+// Strict-source CAS from either Idle or Scaling to Emergency. Returns true if
+// the claim succeeded; the caller is then responsible for invoking
+// RunClaimedRebalance to execute the rebalance and return to Idle.
+//
+// When the claim succeeds, scalingReason is set BEFORE the state-change
+// notification is fanned out to subscribers, so subscribers observing the
+// Emergency state see the correct reason on their first read.
+//
+// Parameters:
+//   - ctx: Context (currently unused but kept for symmetry with other Enter* methods)
+//
+// Returns:
+//   - bool: true if the emergency lifecycle was successfully claimed; false if
+//     another lifecycle (Rebalancing or Emergency) is already in flight.
+func (sm *StateMachine) TryClaimEmergency(_ context.Context) bool {
+	// Try Idle first, then Scaling. Both are valid claim sources.
+	// Reject from Rebalancing or Emergency (already handling changes).
+	if sm.tryClaimEmergencyFrom(types.CalcStateIdle) {
+		return true
+	}
+	if sm.tryClaimEmergencyFrom(types.CalcStateScaling) {
+		return true
+	}
+
+	currentState := types.CalculatorState(sm.current.Load())
+	sm.logger.Warn("emergency detected but rebalance already in progress - deferring",
+		"current_state", currentState.String())
+
+	return false
+}
+
+// RunClaimedRebalance runs the rebalance callback for a previously-claimed
+// lifecycle and returns the state machine to Idle.
+//
+// Must be called after a successful TryClaimEmergency or after a successful
+// strict-source CAS into Rebalancing (see EnterRebalancing).
+//
+// Parameters:
+//   - ctx: Context for the rebalance operation
+//   - reason: Lifecycle reason to pass to the callback ("emergency", "cold_start", etc.)
+func (sm *StateMachine) RunClaimedRebalance(ctx context.Context, reason string) {
 	if sm.onRebalanceCb != nil {
 		if err := sm.onRebalanceCb(ctx, reason); err != nil {
-			sm.logger.Error("rebalancing failed", "error", err)
-			// Return to idle even on error to allow retry
+			sm.logger.Error("rebalance failed", "reason", reason, "error", err)
 			sm.ReturnToIdle()
 
 			return
 		}
 	}
 
-	// Successfully rebalanced, return to idle
 	sm.ReturnToIdle()
 }
 
 // EnterEmergency transitions to emergency state for immediate rebalancing.
 //
-// Emergency rebalancing has no stabilization window and happens immediately
-// when a worker crash is detected.
-//
-// This method can be called from Idle or Scaling states. If already in
-// Rebalancing or Emergency state, the call is deferred to prevent cascading
-// rebalances - the next poll cycle will detect the change.
+// Backward-compatible wrapper around TryClaimEmergency + RunClaimedRebalance.
+// If the claim fails (Rebalancing or Emergency already in flight), the call
+// is deferred — the next poll cycle will detect the topology change.
 //
 // Parameters:
 //   - ctx: Context for the rebalance operation
 func (sm *StateMachine) EnterEmergency(ctx context.Context) {
-	// Check if we can enter emergency state
-	// Allow from Idle or Scaling (interrupts stabilization window)
-	// Reject from Rebalancing or Emergency (already handling changes)
-	currentState := types.CalculatorState(sm.current.Load())
-	if currentState == types.CalcStateRebalancing || currentState == types.CalcStateEmergency {
-		sm.logger.Warn("emergency detected but rebalance already in progress - deferring",
-			"current_state", currentState.String())
+	if !sm.TryClaimEmergency(ctx) {
 		return
 	}
-
-	sm.mu.Lock()
-	sm.scalingReason = "emergency"
-	sm.mu.Unlock()
-
-	sm.logger.Warn("entering emergency state - immediate rebalance",
-		"from_state", currentState.String())
-
-	// Notify subscribers of state change
-	sm.emitStateChange(types.CalcStateEmergency)
-
-	// Perform immediate rebalance via callback
-	if sm.onRebalanceCb != nil {
-		if err := sm.onRebalanceCb(ctx, "emergency"); err != nil {
-			sm.logger.Error("emergency rebalancing failed", "error", err)
-			// Return to idle to allow retry
-			sm.ReturnToIdle()
-
-			return
-		}
-	}
-
-	// Successfully rebalanced, return to idle
-	sm.ReturnToIdle()
+	sm.RunClaimedRebalance(ctx, "emergency")
 }
 
 // ReturnToIdle transitions the state machine back to idle after rebalancing completes.
@@ -337,7 +347,67 @@ func (sm *StateMachine) WaitForShutdown() {
 	sm.wg.Wait()
 }
 
+// compareAndSwapState atomically swaps the state from `from` to `to`.
+//
+// Returns true if the swap succeeded (the previous state was exactly `from`),
+// false otherwise. Does NOT notify subscribers — callers that need a
+// subscriber notification must invoke notifyStateChange after a successful CAS.
+//
+// Used for strict-source transitions where the caller wants to fail loudly
+// if another goroutine has already moved the state (e.g., scaling timer racing
+// an emergency claim).
+func (sm *StateMachine) compareAndSwapState(from, to types.CalculatorState) bool {
+	return sm.current.CompareAndSwap(int32(from), int32(to)) //nolint:gosec // G115: enum to int32 is safe
+}
+
+// notifyStateChange fans out a state-change notification to all subscribers.
+//
+// Does NOT change the underlying state — the caller is responsible for that
+// (typically via compareAndSwapState). Designed for use after a successful
+// strict-source CAS so the side-effect (notification) happens once and only
+// for the winning transition.
+func (sm *StateMachine) notifyStateChange(state types.CalculatorState) {
+	sm.logger.Info("state transition", "to", state)
+
+	sm.subscribers.Range(func(_ any, value any) bool {
+		if sub, ok := value.(*stateSubscriber); ok {
+			sub.trySend(state, sm.metrics)
+		}
+		return true
+	})
+}
+
+// tryClaimEmergencyFrom is the strict-source claim primitive used by
+// TryClaimEmergency. It atomically transitions `from` -> Emergency, sets the
+// scaling reason to "emergency" BEFORE notifying subscribers (so subscribers
+// observing the Emergency state see the correct reason on their first read),
+// then fans out the notification.
+//
+// Returns true if the CAS succeeded; false otherwise.
+func (sm *StateMachine) tryClaimEmergencyFrom(from types.CalculatorState) bool {
+	if !sm.compareAndSwapState(from, types.CalcStateEmergency) {
+		return false
+	}
+
+	// Set scalingReason BEFORE notification so subscribers see it on their
+	// first read of the Emergency state.
+	sm.mu.Lock()
+	sm.scalingReason = "emergency"
+	sm.mu.Unlock()
+
+	sm.logger.Warn("entering emergency state - immediate rebalance",
+		"from_state", from.String())
+
+	sm.notifyStateChange(types.CalcStateEmergency)
+
+	return true
+}
+
 // emitStateChange notifies all subscribers of a state transition.
+//
+// Retained for callers (EnterScaling, ReturnToIdle) whose transition source
+// is not strict (any state -> target). Strict-source callers must use
+// compareAndSwapState + notifyStateChange instead.
 func (sm *StateMachine) emitStateChange(state types.CalculatorState) {
 	// Atomically set the new state and emit exactly one notification.
 	// This prevents duplicate notifications when multiple goroutines
@@ -345,19 +415,11 @@ func (sm *StateMachine) emitStateChange(state types.CalculatorState) {
 	for {
 		old := types.CalculatorState(sm.current.Load())
 		if old == state {
-			return // No change, nothing to do
+			return
 		}
 
 		if sm.current.CompareAndSwap(int32(old), int32(state)) { //nolint:gosec // G115: enum to int32 is safe
-			sm.logger.Info("state transition", "from", old, "to", state)
-
-			sm.subscribers.Range(func(_ any, value any) bool {
-				if sub, ok := value.(*stateSubscriber); ok {
-					sub.trySend(state, sm.metrics)
-				}
-				return true
-			})
-
+			sm.notifyStateChange(state)
 			return
 		}
 		// Another goroutine changed the state; retry with the new current value

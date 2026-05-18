@@ -11,17 +11,18 @@ import (
 // Workers must remain disappeared for the grace period before triggering
 // an emergency rebalance. This prevents flapping during brief connectivity loss.
 type EmergencyDetector struct {
-	// disappearedWorkers tracks when each worker was first seen as disappeared
+	// disappearedWorkers tracks when each worker was first seen as disappeared.
 	disappearedWorkers map[string]time.Time
 
-	// gracePeriod is the minimum time a worker must be missing before emergency
+	// gracePeriod is the minimum time a worker must be missing before emergency.
 	gracePeriod time.Duration
 
-	mu sync.RWMutex
-}
+	// now returns the current time. Defaults to time.Now; tests inject a
+	// deterministic clock by overriding this field.
+	now func() time.Time
 
-// Compile-time assertion that EmergencyDetector is properly initialized.
-var _ = (*EmergencyDetector)(nil)
+	mu sync.Mutex
+}
 
 // NewEmergencyDetector creates a new emergency detector with specified grace period.
 //
@@ -38,64 +39,95 @@ func NewEmergencyDetector(gracePeriod time.Duration) *EmergencyDetector {
 	return &EmergencyDetector{
 		disappearedWorkers: make(map[string]time.Time),
 		gracePeriod:        gracePeriod,
+		now:                time.Now,
 	}
 }
 
-// CheckEmergency determines if an emergency rebalance is needed based on worker changes.
+// ObserveAlive clears tracking for every worker observed alive in alive.
 //
-// Implements hysteresis by tracking disappearance timestamps. Workers that reappear
-// within the grace period are not considered emergencies. Only workers that remain
-// absent for the full grace period trigger emergency rebalancing.
+// Intended to be called by every code path that performs a fresh live-worker
+// scan, not only CheckEmergency: rebalance(), audit-repair flows, partition-
+// lifecycle rebalances, manual TriggerRebalance — all of them perform an
+// independent KV scan and would otherwise update c.lastWorkers (eventually,
+// via handleRebalance) without the detector observing the freshly-seen
+// workers. This invariant must hold:
 //
-// The method performs the following:
-//   - Tracks newly disappeared workers with their first seen timestamp
-//   - Clears tracking for workers that reappear
-//   - Returns workers that have exceeded the grace period
+//	"firstSeen[A] is the moment since which A has been continuously absent
+//	 from any leader observation of the live worker set."
+//
+// ObserveAlive is the side-channel that maintains it for non-poll observations.
 //
 // Parameters:
-//   - prev: Previous set of active worker IDs
-//   - curr: Current set of active worker IDs
+//   - alive: Worker IDs observed alive in the most recent fresh scan.
+func (d *EmergencyDetector) ObserveAlive(alive []string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, workerID := range alive {
+		delete(d.disappearedWorkers, workerID)
+	}
+}
+
+// CheckEmergency reconciles detector state with a fresh poll observation.
+// Atomic under the detector mutex.
+//
+// Phases:
+//  1. Clear by curr — any heartbeat-visible worker is alive.
+//  2. Track newly missing workers in prev (firstSeen preserved if already tracked).
+//  3. Safety valve — drop stranded (!prev) entries older than 10*gracePeriod
+//     to bound map growth under pathological churn.
+//  4. Confirm — entries in prev whose firstSeen exceeds gracePeriod.
+//
+// Parameters:
+//   - prev: Previous set of active worker IDs.
+//   - curr: Current set of active worker IDs.
 //
 // Returns:
-//   - bool: true if emergency conditions met (workers confirmed disappeared beyond grace period)
-//   - []string: List of workers that disappeared beyond grace period (empty if no emergency)
-func (d *EmergencyDetector) CheckEmergency(prev, curr map[string]bool) (bool, []string) {
+//   - emergency: true if at least one worker's grace period has expired.
+//   - confirmed: workers whose grace period has expired (empty if none).
+//   - pending: true if at least one tracked entry is in prev (informational —
+//     allows callers to suppress planned_scale while a disappearance is mid-grace).
+func (d *EmergencyDetector) CheckEmergency(
+	prev, curr map[string]bool,
+) (emergency bool, confirmed []string, pending bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	now := time.Now()
+	now := d.now()
 
-	// Track newly disappeared workers and clear reappeared ones
+	// Phase 1: Clear by curr — any heartbeat-visible worker is alive.
+	for workerID := range curr {
+		delete(d.disappearedWorkers, workerID)
+	}
+
+	// Phase 2: Track newly missing workers in prev.
 	for workerID := range prev {
-		if !curr[workerID] {
-			// Worker disappeared - track if not already tracking
-			if _, exists := d.disappearedWorkers[workerID]; !exists {
-				d.disappearedWorkers[workerID] = now
-			}
-		} else {
-			// Worker reappeared - clear tracking
+		if curr[workerID] {
+			continue
+		}
+		if _, exists := d.disappearedWorkers[workerID]; !exists {
+			d.disappearedWorkers[workerID] = now
+		}
+	}
+
+	// Phase 3: Safety valve — drop stranded entries older than 10*gracePeriod.
+	expiry := 10 * d.gracePeriod
+	for workerID, firstSeen := range d.disappearedWorkers {
+		if !prev[workerID] && now.Sub(firstSeen) > expiry {
 			delete(d.disappearedWorkers, workerID)
 		}
 	}
 
-	// Check which workers exceeded grace period
-	confirmed := make([]string, 0)
+	// Phase 4: Confirm — entries in prev whose firstSeen exceeds gracePeriod.
+	confirmed = make([]string, 0)
 	for workerID, firstSeen := range d.disappearedWorkers {
+		if !prev[workerID] {
+			continue
+		}
+		pending = true
 		if now.Sub(firstSeen) >= d.gracePeriod {
 			confirmed = append(confirmed, workerID)
 		}
 	}
 
-	return len(confirmed) > 0, confirmed
-}
-
-// Reset clears all tracked disappearances.
-//
-// Called after successful rebalance or when emergency state ends to prepare
-// for fresh tracking of future disappearances. This prevents stale tracking
-// data from affecting future emergency detection.
-func (d *EmergencyDetector) Reset() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.disappearedWorkers = make(map[string]time.Time)
+	return len(confirmed) > 0, confirmed, pending
 }

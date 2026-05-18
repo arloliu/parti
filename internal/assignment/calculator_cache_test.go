@@ -68,7 +68,7 @@ func TestCalculator_CacheFallback_ConnectivityError(t *testing.T) {
 	// Try to fetch workers - should fall back to cache
 	var workers []string
 	require.Eventually(t, func() bool {
-		fetched, err := calc.getActiveWorkers(ctx)
+		fetched, _, err := calc.getActiveWorkers(ctx)
 		if err != nil {
 			return false
 		}
@@ -125,7 +125,7 @@ func TestCalculator_CacheFallback_NoCacheAvailable(t *testing.T) {
 	var workers []string
 	var gotErr error
 	require.Eventually(t, func() bool {
-		workers, gotErr = calc.getActiveWorkers(ctx)
+		workers, _, gotErr = calc.getActiveWorkers(ctx)
 		return errors.Is(gotErr, types.ErrDegraded)
 	}, 1*time.Second, 25*time.Millisecond, "should return ErrDegraded when no cache is available")
 	require.Error(t, gotErr, "should return error when no cache available")
@@ -172,7 +172,7 @@ func TestCalculator_CacheUpdate_OnSuccess(t *testing.T) {
 	require.NotNil(t, calc)
 
 	// Fetch workers - should populate cache
-	workers, err := calc.getActiveWorkers(ctx)
+	workers, _, err := calc.getActiveWorkers(ctx)
 	require.NoError(t, err)
 	require.Len(t, workers, 2)
 
@@ -188,7 +188,7 @@ func TestCalculator_CacheUpdate_OnSuccess(t *testing.T) {
 
 	// Fetch workers again - should update cache
 	require.Eventually(t, func() bool {
-		workers, err = calc.getActiveWorkers(ctx)
+		workers, _, err = calc.getActiveWorkers(ctx)
 		if err != nil || len(workers) != 3 {
 			return false
 		}
