@@ -780,6 +780,26 @@ func (c *Calculator) observeAndDecide(ctx context.Context, provided map[string]b
 	lastWorkersCopy := c.cloneLastWorkersLocked()
 	c.mu.RUnlock()
 
+	// Reconcile the detector against every fresh observation, BEFORE the
+	// unchanged short-circuit. The detector invariant — firstSeen[A] is the
+	// moment A was last observed alive in any leader scan — requires that a
+	// fresh observation in which A is alive clears stale tracking for A even
+	// when the topology is otherwise unchanged. Skipping this on !changed
+	// would let a "pure recovery" poll keep an old firstSeen, so the next
+	// disappearance of A would inherit the stale timestamp and bypass the
+	// grace period.
+	//
+	// In degraded mode the worker list comes from cache; we must not mutate
+	// detector state from stale data, so CheckEmergency is gated on fresh.
+	var (
+		emergency   bool
+		disappeared []string
+		pending     bool
+	)
+	if fresh {
+		emergency, disappeared, pending = c.emergencyDetector.CheckEmergency(lastWorkersCopy, workers)
+	}
+
 	if !changed {
 		c.pollMu.Unlock()
 		return nil
@@ -787,15 +807,14 @@ func (c *Calculator) observeAndDecide(ctx context.Context, provided map[string]b
 
 	c.Logger.Info("polling detected worker change", "workers", len(workers), "fresh", fresh)
 
-	// Degraded observation cannot drive detector mutation or topology decisions.
+	// Degraded observation cannot drive a topology decision: the worker list
+	// was returned from cache and may not reflect current truth.
 	if !fresh {
 		c.pollMu.Unlock()
 		c.Logger.Info("skipping rebalance decision: observation is from degraded cache")
 
 		return nil
 	}
-
-	emergency, disappeared, pending := c.emergencyDetector.CheckEmergency(lastWorkersCopy, workers)
 
 	if emergency {
 		claimed := c.claimEmergency(ctx, disappeared)
@@ -1025,8 +1044,9 @@ func (c *Calculator) getActiveWorkersFiltered(ctx context.Context, disappearedWo
 
 // handleRebalance is the callback invoked by StateMachine when rebalancing should occur.
 //
-// This method bridges the StateMachine component to the Calculator's rebalancing logic.
-// It also handles post-rebalance state updates (updating lastWorkers, resetting emergency detector).
+// This method bridges the StateMachine component to the Calculator's rebalancing logic
+// and refreshes lastWorkers after a successful rebalance so the next poll does not
+// re-enter scaling for the same topology.
 //
 // Parameters:
 //   - ctx: Context for the rebalance operation

@@ -778,13 +778,12 @@ func TestPollForChanges_SameCountReplacement_SuppressesPlannedScale_FiresEmergen
 	}, 2*time.Second, 10*time.Millisecond, "emergency rebalance should fire and return to Idle")
 }
 
-// C4: after a recovery clears pending, a subsequent planned_scale runs normally.
-//
-// The change-detection short-circuit means a pure recovery (workers ==
-// lastWorkers) does not reach CheckEmergency. The test exercises the more
-// realistic shape: a fresh observation in which the missing worker is back
-// AND the topology has otherwise drifted (so the change check triggers
-// re-evaluation), and verifies that CheckEmergency clears the stale tracking.
+// C4: after a recovery clears pending, the detector tracking for the
+// recovered worker is gone, so a subsequent observation does not inherit
+// stale state. This variant exercises recovery combined with another
+// topology change (worker D joins), so the change-detection path also fires.
+// See TestPollForChanges_PureRecoveryNoTopologyChange_ClearsDetector for the
+// pure-recovery shape where only the recovered worker reappears.
 func TestPollForChanges_RecoveryClearsPending_NormalRebalanceResumes(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
@@ -815,6 +814,62 @@ func TestPollForChanges_RecoveryClearsPending_NormalRebalanceResumes(t *testing.
 	_, stillTracked := calc.emergencyDetector.disappearedWorkers["A"]
 	calc.emergencyDetector.mu.Unlock()
 	require.False(t, stillTracked, "recovery must clear pending via Phase 1")
+}
+
+// TestPollForChanges_PureRecoveryNoTopologyChange_ClearsDetector exercises the
+// pure-recovery shape: A disappears, A reappears with no other topology
+// change (workers == lastWorkers), then A disappears again. The detector
+// invariant requires firstSeen[A] to be cleared by the recovery poll so a
+// subsequent disappearance starts a fresh grace period.
+//
+// Without the detector reconciliation running on every fresh observation
+// (before the !changed short-circuit), the recovery poll would skip
+// CheckEmergency, A's stranded firstSeen would survive, and the next
+// disappearance would inherit the stale timestamp — firing immediate
+// emergency once enough wall-clock time had elapsed since the original
+// disappearance.
+func TestPollForChanges_PureRecoveryNoTopologyChange_ClearsDetector(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	ctx := t.Context()
+	calc, clock := newV9Calculator(t, "c-pure-recovery")
+
+	calc.mu.Lock()
+	calc.lastWorkers = map[string]bool{"A": true, "B": true}
+	calc.currentWorkers = map[string]bool{"A": true, "B": true}
+	calc.mu.Unlock()
+
+	// Step 1: A disappears. Only B heartbeats.
+	putHeartbeat(t, calc, ctx, "B")
+	require.NoError(t, calc.pollForChanges(ctx))
+	calc.emergencyDetector.mu.Lock()
+	_, tracked := calc.emergencyDetector.disappearedWorkers["A"]
+	calc.emergencyDetector.mu.Unlock()
+	require.True(t, tracked, "A must be tracked after first observation")
+
+	// Step 2: A recovers. workers == lastWorkers → !changed.
+	// With the fix, CheckEmergency still runs and Phase 1 clears A.
+	putHeartbeat(t, calc, ctx, "A")
+	*clock = clock.Add(50 * time.Millisecond)
+	require.NoError(t, calc.pollForChanges(ctx))
+
+	calc.emergencyDetector.mu.Lock()
+	_, stillTracked := calc.emergencyDetector.disappearedWorkers["A"]
+	calc.emergencyDetector.mu.Unlock()
+	require.False(t, stillTracked,
+		"pure-recovery poll (workers == lastWorkers) must clear detector tracking for A")
+
+	// Step 3: advance past the original grace period, then A disappears
+	// again. Without the fix, the stale firstSeen from step 1 would make
+	// this an immediate confirmed emergency; with the fix, the recovery
+	// poll cleared A so the disappearance starts a fresh grace.
+	*clock = clock.Add(300 * time.Millisecond) // > grace (200ms)
+	require.NoError(t, calc.HeartbeatKV.Delete(ctx, "v9-hb.A"))
+	require.NoError(t, calc.pollForChanges(ctx))
+
+	require.Equal(t, types.CalcStateIdle, calc.GetState(),
+		"second disappearance must observe a fresh grace period, not fire immediate emergency")
 }
 
 // C5 (FP-3): rebalance with a non-emergency lifecycle must NOT consume
