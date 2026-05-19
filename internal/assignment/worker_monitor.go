@@ -2,13 +2,23 @@ package assignment
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	rand "math/rand/v2"
 	"sync"
 	"time"
 
 	"github.com/arloliu/parti/v2/internal/natsutil"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
+)
+
+// Package-private backoff constants for the heartbeat watcher retry loop.
+// Declared as vars so tests can override.
+var (
+	workerWatcherBaseBackoff = 2 * time.Second
+	workerWatcherMaxBackoff  = 30 * time.Second
+	workerWatcherJitter      = 0.3 // ±30%
 )
 
 // WorkerMonitor handles worker health detection via NATS KV heartbeats.
@@ -32,6 +42,11 @@ type WorkerMonitor struct {
 	onChangeCb func(ctx context.Context) error
 
 	logger types.Logger
+
+	// watchBaseBackoff is the initial backoff for the watcher retry loop.
+	// Defaults to workerWatcherBaseBackoff; tests may set a smaller value
+	// on the struct before calling Start to avoid racy global mutations.
+	watchBaseBackoff time.Duration
 
 	// Lifecycle management
 	mu      sync.Mutex
@@ -60,14 +75,15 @@ func NewWorkerMonitor(
 	logger types.Logger,
 ) *WorkerMonitor {
 	return &WorkerMonitor{
-		heartbeatKV:    heartbeatKV,
-		hbPrefix:       hbPrefix,
-		hbTTL:          hbTTL,
-		hbWatchPattern: fmt.Sprintf("%s.*", hbPrefix),
-		onChangeCb:     onChange,
-		logger:         logger,
-		stopCh:         make(chan struct{}),
-		doneCh:         make(chan struct{}),
+		heartbeatKV:      heartbeatKV,
+		hbPrefix:         hbPrefix,
+		hbTTL:            hbTTL,
+		hbWatchPattern:   fmt.Sprintf("%s.*", hbPrefix),
+		onChangeCb:       onChange,
+		logger:           logger,
+		watchBaseBackoff: workerWatcherBaseBackoff,
+		stopCh:           make(chan struct{}),
+		doneCh:           make(chan struct{}),
 	}
 }
 
@@ -144,8 +160,11 @@ func (m *WorkerMonitor) Stop() error {
 //   - []string: List of active worker IDs
 //   - error: Nil on success, error on KV access failure
 func (m *WorkerMonitor) GetActiveWorkers(ctx context.Context) ([]string, error) {
+	opCtx, cancel := m.boundedOpCtx(ctx)
+	defer cancel()
+
 	// List all keys with heartbeat prefix
-	keys, err := m.heartbeatKV.Keys(ctx)
+	keys, err := m.heartbeatKV.Keys(opCtx)
 	if err != nil {
 		// Handle "no keys found" as empty list
 		if types.IsNoKeysFoundError(err) {
@@ -187,7 +206,10 @@ func (m *WorkerMonitor) GetActiveWorkers(ctx context.Context) ([]string, error) 
 //   - map[string]types.Heartbeat: Decoded heartbeats, keyed by worker ID
 //   - error: Non-nil only on KV access failure that prevents listing keys
 func (m *WorkerMonitor) GetHeartbeats(ctx context.Context) (map[string]types.Heartbeat, error) {
-	keys, err := m.heartbeatKV.Keys(ctx)
+	opCtx, cancel := m.boundedOpCtx(ctx)
+	defer cancel()
+
+	keys, err := m.heartbeatKV.Keys(opCtx)
 	if err != nil {
 		if types.IsNoKeysFoundError(err) {
 			return map[string]types.Heartbeat{}, nil
@@ -220,6 +242,24 @@ func (m *WorkerMonitor) GetHeartbeats(ctx context.Context) (map[string]types.Hea
 	return out, nil
 }
 
+// boundedOpCtx returns a child context with a deadline bounded to hbTTL/2.
+// If hbTTL is zero (e.g. unit tests that construct WorkerMonitor directly),
+// the parent context is returned unchanged so callers are not immediately
+// cancelled. The caller must always call the returned cancel function.
+func (m *WorkerMonitor) boundedOpCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	if m.hbTTL == 0 {
+		return context.WithCancel(ctx)
+	}
+	opTimeout := m.hbTTL / 2
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining < opTimeout {
+			opTimeout = remaining
+		}
+	}
+
+	return context.WithTimeout(ctx, opTimeout)
+}
+
 // monitorWorkers runs the hybrid monitoring loop.
 //
 // This is the main goroutine that coordinates watcher and polling.
@@ -227,19 +267,17 @@ func (m *WorkerMonitor) GetHeartbeats(ctx context.Context) (map[string]types.Hea
 func (m *WorkerMonitor) monitorWorkers(ctx context.Context) {
 	defer close(m.doneCh)
 
-	// Start watcher for fast detection
-	if err := m.startWatcher(ctx); err != nil {
-		m.logger.Warn("failed to start watcher, falling back to polling only", "error", err)
-	}
+	// Start watcher in a separate goroutine with rewatch-on-close.
+	go m.monitorWatcherWithRetry(ctx)
 
-	// Polling ticker for worker changes (fallback)
-	ticker := time.NewTicker(m.hbTTL / 2) // Check twice per TTL
+	// Polling ticker for worker changes (fallback for silent-stall and
+	// watcher-close backoff gaps). Runs independently of the watcher.
+	ticker := time.NewTicker(m.hbTTL / 2)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ticker.C:
-			// Check for worker changes via polling (fallback)
 			if m.onChangeCb != nil {
 				if err := m.onChangeCb(ctx); err != nil {
 					m.logger.Error("polling error", "error", err)
@@ -247,41 +285,47 @@ func (m *WorkerMonitor) monitorWorkers(ctx context.Context) {
 			}
 
 		case <-m.stopCh:
-			m.stopWatcher()
 			return
 
 		case <-ctx.Done():
-			m.stopWatcher()
 			return
 		}
 	}
 }
 
-// startWatcher starts the NATS KV watcher for fast worker change detection.
-func (m *WorkerMonitor) startWatcher(ctx context.Context) error {
-	m.watcherMu.Lock()
-	defer m.watcherMu.Unlock()
+// monitorWatcherWithRetry retries processWatcherEvents on failure with
+// exponential backoff + jitter. It exits when ctx is cancelled or
+// m.stopCh is closed.
+func (m *WorkerMonitor) monitorWatcherWithRetry(ctx context.Context) {
+	backoff := m.watchBaseBackoff
+	for {
+		err := m.processWatcherEvents(ctx)
+		if err == nil || ctx.Err() != nil {
+			return
+		}
+		select {
+		case <-m.stopCh:
+			return
+		default:
+		}
+		m.logger.Warn("heartbeat watcher failed, retrying", "error", err, "backoff", backoff)
 
-	if m.watcher != nil {
-		return nil // Already started
+		//nolint:gosec // jitter does not require crypto-secure random
+		f := rand.Float64()
+		low := 1 - workerWatcherJitter
+		high := 1 + workerWatcherJitter
+		delay := time.Duration(float64(backoff) * (low + f*(high-low)))
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-m.stopCh:
+			return
+		case <-time.After(delay):
+		}
+
+		backoff = min(backoff*2, workerWatcherMaxBackoff)
 	}
-
-	// Watch all heartbeat keys with prefix pattern
-	watcher, err := m.heartbeatKV.Watch(ctx, m.hbWatchPattern)
-	if err != nil {
-		return fmt.Errorf("failed to start watcher: %w", err)
-	}
-
-	m.watcher = watcher
-	m.logger.Info("watcher started for fast worker detection",
-		"pattern", m.hbWatchPattern,
-		"hbPrefix", m.hbPrefix,
-	)
-
-	// Start goroutine to process watcher events
-	go m.processWatcherEvents(ctx)
-
-	return nil
 }
 
 // stopWatcher stops the NATS KV watcher.
@@ -298,59 +342,55 @@ func (m *WorkerMonitor) stopWatcher() {
 	}
 }
 
-// processWatcherEvents processes events from the NATS KV watcher.
-//
-// This goroutine debounces rapid events to avoid excessive checks.
-// It notifies the calculator when worker topology changes are detected.
-func (m *WorkerMonitor) processWatcherEvents(ctx context.Context) {
-	m.logger.Debug("watcher event processor goroutine started")
-	defer m.logger.Debug("watcher event processor goroutine stopped")
+// processWatcherEvents runs one watch session on all heartbeat keys.
+// Channel closure or initial Watch failure is returned as an error so
+// monitorWatcherWithRetry can restart with backoff. Context cancellation
+// or m.stopCh closure returns nil for clean exit.
+func (m *WorkerMonitor) processWatcherEvents(ctx context.Context) error {
+	watcher, err := m.heartbeatKV.Watch(ctx, m.hbWatchPattern)
+	if err != nil {
+		return fmt.Errorf("failed to start heartbeat watcher: %w", err)
+	}
+	defer func() {
+		if serr := watcher.Stop(); serr != nil && !natsutil.IsConsumerNotFound(serr) {
+			m.logger.Warn("failed to stop heartbeat watcher", "error", serr)
+		}
+		m.watcherMu.Lock()
+		m.watcher = nil
+		m.watcherMu.Unlock()
+	}()
 
 	m.watcherMu.Lock()
-	watcher := m.watcher
+	m.watcher = watcher
 	m.watcherMu.Unlock()
+	m.logger.Info("heartbeat watcher started", "pattern", m.hbWatchPattern)
 
-	if watcher == nil {
-		m.logger.Warn("watcher is nil, cannot process events")
-		return
-	}
-
-	// Debounce rapid events
 	debounceTimer := time.NewTimer(100 * time.Millisecond)
-	debounceTimer.Stop() // Stop initially
+	debounceTimer.Stop()
 	var pendingCheck bool
 
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case <-m.stopCh:
-			return
+			return nil
 		case entry, ok := <-watcher.Updates():
 			if !ok {
-				m.logger.Debug("watcher update channel closed")
-				return
+				return errors.New("heartbeat watcher channel closed")
 			}
 			if entry == nil {
-				// Watcher stopped or initial replay done
 				continue
 			}
-
-			// Heartbeat key changed (worker added or updated)
 			m.logger.Debug("watcher: received entry", "key", entry.Key(), "operation", entry.Operation())
-
-			// Schedule a debounced check
 			if !pendingCheck {
 				pendingCheck = true
 				debounceTimer.Reset(100 * time.Millisecond)
 			}
-
 		case <-debounceTimer.C:
 			if pendingCheck {
 				pendingCheck = false
 				m.logger.Debug("watcher detected change, triggering check")
-
-				// Invoke callback to handle the change
 				if m.onChangeCb != nil {
 					if err := m.onChangeCb(ctx); err != nil {
 						m.logger.Error("watcher-triggered check failed", "error", err)

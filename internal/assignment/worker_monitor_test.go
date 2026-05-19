@@ -3,7 +3,9 @@ package assignment
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -14,6 +16,8 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 )
+
+var errFakeKVNotImplemented = errors.New("not implemented by fakeKV stub")
 
 func TestWorkerMonitor_StartStop(t *testing.T) {
 	t.Parallel()
@@ -432,6 +436,7 @@ func TestWorkerMonitor_MultipleWorkerChanges(t *testing.T) {
 	}, 5*time.Second, 100*time.Millisecond)
 }
 
+// fakeKeyWatcher is a minimal jetstream.KeyWatcher double for unit tests.
 type fakeKeyWatcher struct {
 	ctx     context.Context
 	updates chan jetstream.KeyValueEntry
@@ -454,36 +459,152 @@ func (f *fakeKeyWatcher) Error() <-chan error {
 	return f.errCh
 }
 
+// fakeKV is a jetstream.KeyValue double that counts Watch calls and supports
+// closing the current Updates channel to simulate watcher disconnect.
+type fakeKV struct {
+	mu             sync.Mutex
+	watchCount     int
+	currentWatcher *fakeKeyWatcher
+	// keysBlocking, when true, causes Keys to block until ctx.Done().
+	keysBlocking bool
+}
+
+func (f *fakeKV) WatchCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.watchCount
+}
+
+func (f *fakeKV) CloseUpdates() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.currentWatcher != nil {
+		close(f.currentWatcher.updates)
+		f.currentWatcher = nil
+	}
+}
+
+func (f *fakeKV) Watch(_ context.Context, _ string, _ ...jetstream.WatchOpt) (jetstream.KeyWatcher, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.watchCount++
+	w := &fakeKeyWatcher{
+		ctx:     context.Background(),
+		updates: make(chan jetstream.KeyValueEntry),
+		errCh:   make(chan error),
+	}
+	f.currentWatcher = w
+
+	return w, nil
+}
+
+func (f *fakeKV) Keys(ctx context.Context, _ ...jetstream.WatchOpt) ([]string, error) {
+	if f.keysBlocking {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return nil, nil
+}
+
+// Unimplemented stubs required by the jetstream.KeyValue interface.
+func (f *fakeKV) Put(_ context.Context, _ string, _ []byte) (uint64, error) { return 0, nil }
+func (f *fakeKV) PutString(_ context.Context, _ string, _ string) (uint64, error) {
+	return 0, nil
+}
+func (f *fakeKV) Create(_ context.Context, _ string, _ []byte, _ ...jetstream.KVCreateOpt) (uint64, error) {
+	return 0, nil
+}
+func (f *fakeKV) Update(_ context.Context, _ string, _ []byte, _ uint64) (uint64, error) {
+	return 0, nil
+}
+func (f *fakeKV) Delete(_ context.Context, _ string, _ ...jetstream.KVDeleteOpt) error { return nil }
+func (f *fakeKV) Purge(_ context.Context, _ string, _ ...jetstream.KVDeleteOpt) error  { return nil }
+func (f *fakeKV) Get(_ context.Context, _ string) (jetstream.KeyValueEntry, error) {
+	return nil, jetstream.ErrKeyNotFound
+}
+func (f *fakeKV) GetRevision(_ context.Context, _ string, _ uint64) (jetstream.KeyValueEntry, error) {
+	return nil, jetstream.ErrKeyNotFound
+}
+func (f *fakeKV) History(_ context.Context, _ string, _ ...jetstream.WatchOpt) ([]jetstream.KeyValueEntry, error) {
+	return nil, errFakeKVNotImplemented
+}
+func (f *fakeKV) WatchAll(_ context.Context, _ ...jetstream.WatchOpt) (jetstream.KeyWatcher, error) {
+	return nil, errFakeKVNotImplemented
+}
+func (f *fakeKV) WatchFiltered(_ context.Context, _ []string, _ ...jetstream.WatchOpt) (jetstream.KeyWatcher, error) {
+	return nil, errFakeKVNotImplemented
+}
+func (f *fakeKV) ListKeys(_ context.Context, _ ...jetstream.WatchOpt) (jetstream.KeyLister, error) {
+	return nil, errFakeKVNotImplemented
+}
+func (f *fakeKV) ListKeysFiltered(_ context.Context, _ ...string) (jetstream.KeyLister, error) {
+	return nil, errFakeKVNotImplemented
+}
+func (f *fakeKV) Bucket() string { return "fake" }
+func (f *fakeKV) Status(_ context.Context) (jetstream.KeyValueStatus, error) {
+	return nil, errFakeKVNotImplemented
+}
+func (f *fakeKV) PurgeDeletes(_ context.Context, _ ...jetstream.KVPurgeOpt) error { return nil }
+
+// TestWorkerMonitor_ProcessWatcherEvents_ClosedChannel verifies that closing
+// the watcher Updates channel causes monitorWatcherWithRetry to rewatch — i.e.
+// Watch is called at least twice. Previously the function exited permanently on
+// channel close; it must now return an error so the retry loop restarts it.
 func TestWorkerMonitor_ProcessWatcherEvents_ClosedChannel(t *testing.T) {
 	t.Parallel()
 
-	updates := make(chan jetstream.KeyValueEntry)
-	close(updates)
-	errCh := make(chan error)
-	close(errCh)
-
-	monitor := &WorkerMonitor{
-		logger: logging.NewNop(),
-		stopCh: make(chan struct{}),
-	}
-	monitor.watcher = &fakeKeyWatcher{
-		ctx:     context.Background(),
-		updates: updates,
-		errCh:   errCh,
-	}
+	kv := &fakeKV{}
+	monitor := NewWorkerMonitor(kv, "worker", 5*time.Second, nil, logging.NewNop())
+	// Speed up the retry backoff so the test finishes quickly.
+	// Set on the struct (not the package var) to avoid a data race with
+	// parallel tests that also create monitors.
+	monitor.watchBaseBackoff = 10 * time.Millisecond
 
 	ctx := t.Context()
+	require.NoError(t, monitor.Start(ctx))
+	t.Cleanup(func() {
+		_ = monitor.Stop()
+	})
 
-	done := make(chan struct{})
-	go func() {
-		monitor.processWatcherEvents(ctx)
-		close(done)
-	}()
+	// Wait for the first watcher session to be active.
+	require.Eventually(t, func() bool {
+		return kv.WatchCallCount() >= 1
+	}, 200*time.Millisecond, 5*time.Millisecond, "first Watch call should happen quickly")
 
-	select {
-	case <-done:
-		return
-	case <-time.After(200 * time.Millisecond):
-		t.Fatal("processWatcherEvents did not exit after channel close")
-	}
+	// Simulate NATS disconnect: close the Updates channel.
+	kv.CloseUpdates()
+
+	// The retry loop should re-call Watch within the 10ms backoff + jitter window.
+	require.Eventually(t, func() bool {
+		return kv.WatchCallCount() >= 2
+	}, 500*time.Millisecond, 5*time.Millisecond, "Watch should be called again after channel close")
+
+	require.NoError(t, monitor.Stop())
+}
+
+// TestWorkerMonitor_GetActiveWorkers_BoundedTimeout verifies that GetActiveWorkers
+// returns quickly (with context.DeadlineExceeded) when kv.Keys blocks indefinitely.
+// Without the boundedOpCtx fix, GetActiveWorkers would block until ctx itself is
+// cancelled, which is unbounded in production.
+func TestWorkerMonitor_GetActiveWorkers_BoundedTimeout(t *testing.T) {
+	t.Parallel()
+
+	kv := &fakeKV{keysBlocking: true}
+	fakeTTL := 200 * time.Millisecond
+	// NewWorkerMonitor is used only for its boundedOpCtx logic; no Start needed.
+	monitor := NewWorkerMonitor(kv, "worker", fakeTTL, nil, logging.NewNop())
+
+	ctx := context.Background()
+	start := time.Now()
+	_, err := monitor.GetActiveWorkers(ctx)
+	elapsed := time.Since(start)
+
+	// The call must return with a deadline-exceeded error: the bounded context
+	// (hbTTL/2 = 100ms) must have fired well before the test timeout.
+	require.ErrorIs(t, err, context.DeadlineExceeded,
+		"GetActiveWorkers must return context.DeadlineExceeded when kv.Keys blocks")
+
+	// Elapsed should be roughly fakeTTL/2 (100ms). Allow 3× for CI headroom.
+	require.Less(t, elapsed, 3*fakeTTL,
+		"GetActiveWorkers returned too late (%v); expected ~%v", elapsed, fakeTTL/2)
 }

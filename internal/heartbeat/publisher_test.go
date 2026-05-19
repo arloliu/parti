@@ -1,8 +1,13 @@
 package heartbeat
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -12,6 +17,8 @@ import (
 	"github.com/arloliu/parti/v2/partitest"
 	"github.com/arloliu/parti/v2/types"
 )
+
+var errSlowKVNotImplemented = errors.New("not implemented by slowPutKV stub")
 
 func requireHeartbeatEntry(t *testing.T, kv jetstream.KeyValue, key string, wait time.Duration) jetstream.KeyValueEntry {
 	t.Helper()
@@ -528,4 +535,187 @@ func TestPublisher_JSONOutputRoundTrip(t *testing.T) {
 	require.NoError(t, json.Unmarshal(entry.Value(), &hb))
 	require.Equal(t, "worker-1", hb.WorkerID)
 	require.False(t, hb.Timestamp.IsZero())
+}
+
+// capturingLogger captures Warn messages for test assertions.
+type capturingLogger struct {
+	mu    sync.Mutex
+	warns []string
+}
+
+func (l *capturingLogger) Debug(_ string, _ ...any) {}
+func (l *capturingLogger) Info(_ string, _ ...any)  {}
+func (l *capturingLogger) Error(_ string, _ ...any) {}
+func (l *capturingLogger) Fatal(_ string, _ ...any) {}
+func (l *capturingLogger) Warn(msg string, _ ...any) {
+	l.mu.Lock()
+	l.warns = append(l.warns, msg)
+	l.mu.Unlock()
+}
+func (l *capturingLogger) hasWarn(substr string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, w := range l.warns {
+		if strings.Contains(w, substr) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// warnCount returns the number of Warn messages containing substr.
+func (l *capturingLogger) warnCount(substr string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := 0
+	for _, w := range l.warns {
+		if strings.Contains(w, substr) {
+			n++
+		}
+	}
+
+	return n
+}
+
+// slowPutKV is a test-only jetstream.KeyValue fake whose Put method ignores
+// ctx.Done() and blocks until releaseCh is closed. This ensures the in-flight
+// gate stays set across tick boundaries regardless of the per-goroutine timeout,
+// allowing TestPublisher_OverlappingPublishSkipsTick to observe the skip path.
+// The first put call (from Start's initial publish) is let through immediately
+// by a buffered channel; subsequent calls block until releaseCh is closed.
+type slowPutKV struct {
+	mu        sync.Mutex
+	firstDone bool
+	releaseCh chan struct{}
+	putCount  atomic.Int32
+}
+
+func (k *slowPutKV) Put(_ context.Context, _ string, _ []byte) (uint64, error) {
+	k.mu.Lock()
+	first := !k.firstDone
+	if first {
+		k.firstDone = true
+	}
+	k.mu.Unlock()
+
+	if !first {
+		<-k.releaseCh // intentionally ignores ctx.Done()
+	}
+	k.putCount.Add(1)
+
+	return 0, nil
+}
+
+// Stub implementations for unused KeyValue interface methods.
+func (k *slowPutKV) PutString(_ context.Context, _ string, _ string) (uint64, error) {
+	return 0, nil
+}
+func (k *slowPutKV) Create(_ context.Context, _ string, _ []byte, _ ...jetstream.KVCreateOpt) (uint64, error) {
+	return 0, nil
+}
+func (k *slowPutKV) Update(_ context.Context, _ string, _ []byte, _ uint64) (uint64, error) {
+	return 0, nil
+}
+func (k *slowPutKV) Delete(_ context.Context, _ string, _ ...jetstream.KVDeleteOpt) error {
+	return nil
+}
+func (k *slowPutKV) Purge(_ context.Context, _ string, _ ...jetstream.KVDeleteOpt) error {
+	return nil
+}
+func (k *slowPutKV) Get(_ context.Context, _ string) (jetstream.KeyValueEntry, error) {
+	return nil, jetstream.ErrKeyNotFound
+}
+func (k *slowPutKV) GetRevision(_ context.Context, _ string, _ uint64) (jetstream.KeyValueEntry, error) {
+	return nil, jetstream.ErrKeyNotFound
+}
+func (k *slowPutKV) History(_ context.Context, _ string, _ ...jetstream.WatchOpt) ([]jetstream.KeyValueEntry, error) {
+	return nil, errSlowKVNotImplemented
+}
+func (k *slowPutKV) Watch(_ context.Context, _ string, _ ...jetstream.WatchOpt) (jetstream.KeyWatcher, error) {
+	return nil, errSlowKVNotImplemented
+}
+func (k *slowPutKV) WatchAll(_ context.Context, _ ...jetstream.WatchOpt) (jetstream.KeyWatcher, error) {
+	return nil, errSlowKVNotImplemented
+}
+func (k *slowPutKV) WatchFiltered(_ context.Context, _ []string, _ ...jetstream.WatchOpt) (jetstream.KeyWatcher, error) {
+	return nil, errSlowKVNotImplemented
+}
+func (k *slowPutKV) Keys(_ context.Context, _ ...jetstream.WatchOpt) ([]string, error) {
+	return nil, nil
+}
+func (k *slowPutKV) ListKeys(_ context.Context, _ ...jetstream.WatchOpt) (jetstream.KeyLister, error) {
+	return nil, errSlowKVNotImplemented
+}
+func (k *slowPutKV) ListKeysFiltered(_ context.Context, _ ...string) (jetstream.KeyLister, error) {
+	return nil, errSlowKVNotImplemented
+}
+func (k *slowPutKV) Bucket() string { return "fake" }
+func (k *slowPutKV) Status(_ context.Context) (jetstream.KeyValueStatus, error) {
+	return nil, errSlowKVNotImplemented
+}
+func (k *slowPutKV) PurgeDeletes(_ context.Context, _ ...jetstream.KVPurgeOpt) error { return nil }
+
+// TestPublisher_OverlappingPublishSkipsTick verifies that when a Put call
+// blocks beyond one tick interval, subsequent ticks are skipped (Warn log via
+// recordSkippedPublish) rather than blocking the main publishLoop goroutine.
+// After the blocked Put is released, the gate clears and the publisher recovers.
+func TestPublisher_OverlappingPublishSkipsTick(t *testing.T) {
+	t.Parallel()
+
+	releaseCh := make(chan struct{})
+	kv := &slowPutKV{releaseCh: releaseCh}
+	logger := &capturingLogger{}
+
+	interval := 50 * time.Millisecond
+	p := New(kv, "worker-hb", "worker-1", interval, nil, logger)
+
+	var onErrorCount atomic.Int32
+	p.SetOnError(func(error) { onErrorCount.Add(1) })
+
+	ctx := t.Context()
+	// Start succeeds immediately: the initial synchronous publish is the first
+	// put and is let through by slowPutKV's first-done logic.
+	require.NoError(t, p.Start(ctx))
+
+	// Phase 1: the first periodic tick spawns a publish goroutine whose Put
+	// blocks (it's not the first put). Let at least two more ticks fire while
+	// the goroutine is blocked — each should log a skip warning.
+	time.Sleep(3 * interval)
+
+	require.True(t, logger.hasWarn("heartbeat publish in flight, skipping tick"),
+		"expected skip warning to be logged")
+
+	// onError must NOT have been called — skipping is not a KV error.
+	require.Zero(t, onErrorCount.Load(), "onError must not be called on skipped tick")
+
+	// Phase 2: release the blocked Put so the in-flight goroutine completes
+	// and the gate clears.
+	close(releaseCh)
+
+	// Wait for at least one successful publish AFTER the gate clears:
+	// putCount=1 (initial), putCount=2 (blocked put returns), putCount=3 (new tick).
+	// putCount >= 3 proves a post-release tick reached Put, not just the
+	// unblocking of the previously blocked goroutine.
+	require.Eventually(t, func() bool {
+		return kv.putCount.Load() >= 3
+	}, 500*time.Millisecond, 5*time.Millisecond, "publish should succeed after release")
+
+	// Once putCount >= 3 is confirmed the gate has cleared and a full new tick
+	// succeeded. Snapshot the skip count now and verify it does not grow further
+	// over the next two tick intervals — the publisher has recovered.
+	skipsAfterRecovery := logger.warnCount("heartbeat publish in flight, skipping tick")
+	time.Sleep(2 * interval)
+	require.Equal(t, skipsAfterRecovery, logger.warnCount("heartbeat publish in flight, skipping tick"),
+		"no new skip warnings expected after recovery")
+
+	// Stop must drain the in-flight WaitGroup and return within 500ms.
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- p.Stop() }()
+	select {
+	case err := <-stopDone:
+		require.NoError(t, err)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Stop hung — in-flight WaitGroup not draining")
+	}
 }

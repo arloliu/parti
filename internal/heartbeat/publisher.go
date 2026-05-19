@@ -23,6 +23,8 @@ var (
 	ErrNoWorkerID     = errors.New("worker ID not set")
 )
 
+const maxPublishTimeout = 5 * time.Second
+
 // AppliedAssignment is a DTO carrying the state of the last successfully applied
 // assignment. The manager passes this to Publisher.SetAppliedAssignment after a
 // successful Apply call. All fields map 1:1 to the corresponding Heartbeat fields.
@@ -75,6 +77,12 @@ type Publisher struct {
 	logger  types.Logger
 	metrics types.WorkerMetrics
 	onError atomic.Pointer[func(error)]
+
+	// inFlight guards concurrent publish attempts; set atomically before
+	// spawning the goroutine, cleared when the goroutine completes.
+	inFlight atomic.Bool
+	// inFlightWG tracks in-flight publish goroutines so Stop can drain them.
+	inFlightWG sync.WaitGroup
 
 	// appliedMu guards the applied snapshot; separate from mu so the publish
 	// loop does not contend with lifecycle operations.
@@ -302,28 +310,45 @@ func (p *Publisher) Stop() error {
 // publishLoop is the background goroutine that publishes heartbeats.
 func (p *Publisher) publishLoop() {
 	defer close(p.doneCh)
+	defer p.inFlightWG.Wait() // drain any in-flight goroutine before signalling done
 
 	for {
 		select {
 		case <-p.stopCh:
 			return
 		case <-p.ticker.C:
-			// Use background context since this is a long-running goroutine
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			err := p.publish(ctx)
-			cancel()
-
-			if err != nil {
-				p.recordMetric(false)
-				p.logger.Warn("heartbeat publish failed", "worker_id", p.workerID, "error", err)
-				if onError := p.onError.Load(); onError != nil {
-					(*onError)(err)
-				}
-			} else {
-				p.recordMetric(true)
+			if !p.inFlight.CompareAndSwap(false, true) {
+				p.recordSkippedPublish()
+				continue
 			}
+			p.inFlightWG.Add(1)
+			go func() {
+				defer p.inFlightWG.Done()
+				defer p.inFlight.Store(false)
+
+				timeout := min(maxPublishTimeout, p.interval/2)
+				ctx, cancel := context.WithTimeout(context.Background(), timeout)
+				err := p.publish(ctx)
+				cancel()
+
+				if err != nil {
+					p.recordMetric(false)
+					p.logger.Warn("heartbeat publish failed", "worker_id", p.workerID, "error", err)
+					if onError := p.onError.Load(); onError != nil {
+						(*onError)(err)
+					}
+				} else {
+					p.recordMetric(true)
+				}
+			}()
 		}
 	}
+}
+
+// recordSkippedPublish logs a warning when a tick is skipped because the
+// prior publish goroutine is still in flight.
+func (p *Publisher) recordSkippedPublish() {
+	p.logger.Warn("heartbeat publish in flight, skipping tick", "worker_id", p.workerID)
 }
 
 // build composes a Heartbeat value from the current applied snapshot and the
