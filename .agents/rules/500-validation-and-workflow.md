@@ -9,11 +9,8 @@ Apply these rules before validation, commits, or PR work.
 - Verify docs are updated when exported API changes.
 
 ## Git Conventions
-- **Branches:** `feat/`, `fix/`, `docs/`, `chore/`, `test/`.
-- **Commits:** Conventional format. Present tense. First line < 50 chars.
-    - `feat: add weighted consistent hash strategy`
-    - `fix: handle nil partition source`
-- **Attribution:** Never add `Co-Authored-By` or any other attribution trailers.
+See [550-git-conventions.md](550-git-conventions.md) for branch
+naming, commit message format and body guidelines, and PR conventions.
 
 ## Code Review Checklist
 - [ ] Correctness
