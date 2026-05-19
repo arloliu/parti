@@ -73,6 +73,13 @@ type Calculator struct {
 	// confirm the audit goroutine has exited. wg.Wait() already covers the
 	// shutdown sequence; this channel is purely an observation hook.
 	auditDoneCh chan struct{}
+
+	// partitionRebalanceEntries counts successful entries into
+	// handlePartitionRebalance (incremented as the first line of the callback,
+	// before c.rebalance runs). Test-only signal exposed via export_test.go;
+	// the §2.2.3 / §10.3 "at most one extra cycle" invariant is asserted as a
+	// counter delta equal to 1 per dropped partition update.
+	partitionRebalanceEntries atomic.Int64
 }
 
 // cachedWorkerList bundles worker data with its timestamp for atomic operations.
@@ -167,6 +174,10 @@ func NewCalculator(cfg *Config) (*Calculator, error) {
 		c.handleRebalance,
 		stopCh,
 	)
+	// Partition-lifecycle callback is wired here rather than via the
+	// constructor signature to keep NewStateMachine's surface stable (tests
+	// construct StateMachine directly without the partition path).
+	c.stateMach.onPartitionRebalanceCb = c.handlePartitionRebalance
 
 	c.monitor = NewWorkerMonitor(
 		cfg.HeartbeatKV,
@@ -642,16 +653,108 @@ func (c *Calculator) wrapStopErr(err error) error {
 	}
 }
 
-// triggerPartitionRebalance runs a partition-lifecycle rebalance and
-// returns the result so the caller can restore pendingPartitionUpdate
-// on a grace bail. Logs only non-errShuttingDown failures.
-func (c *Calculator) triggerPartitionRebalance(lifecycle string) error {
-	reqCtx, cancel := ctxFromStopCh(context.Background(), c.stopCh, 30*time.Second)
-	defer cancel()
-	err := c.rebalance(reqCtx, lifecycle)
-	if err != nil && !errors.Is(err, errShuttingDown) {
-		c.Logger.Error("failed to rebalance after partition update", "error", err, "lifecycle", lifecycle)
+// partitionRebalanceRequestTimeout bounds the request context allocated for
+// the partition-lifecycle rebalance itself. Production default matches the
+// pre-PR-3 hard-coded 30s used by the legacy triggerPartitionRebalance.
+// Declared as a package-level var so tests can shorten it via export_test.go
+// to force deterministic context-exhaustion regressions. Production callers
+// MUST NOT mutate this value.
+var partitionRebalanceRequestTimeout = 30 * time.Second
+
+// partitionTailCheckTimeout bounds the in-line observeAndDecide tail-check
+// that runs after a partition-lifecycle rebalance returns to Idle. It MUST
+// be allocated on a fresh ctxFromStopCh-derived context — NOT on the
+// rebalance's reqCtx — because reqCtx may already be cancelled or near its
+// partitionRebalanceRequestTimeout deadline by the time RunClaimedRebalanceErr
+// returns.
+//
+// 15s gives roughly 3x headroom over the expected p99 of one worker-set KV
+// read (the dominant cost; TryClaimEmergency is sub-microsecond), stays well
+// below partitionRebalanceRequestTimeout, and shutdown still cancels via
+// stopCh regardless of the value. Operational policy bound, not an
+// empirically proven threshold.
+var partitionTailCheckTimeout = 15 * time.Second
+
+// partitionRebalanceBlocker is a test-only synchronization hook consumed by
+// handlePartitionRebalance after the entries counter is incremented and
+// before c.rebalance runs. Nil in production; tests install a non-nil
+// channel via export_test.go to hold the callback open until they have
+// observed callback entry and confirmed reqCtx has expired. The hook is
+// scoped to the partition callback only; scaling/emergency callbacks do not
+// consult it, so production rebalance latency is unaffected.
+var partitionRebalanceBlocker chan struct{}
+
+// partitionTailCheckEntryHook is a test-only observation hook fired
+// immediately before the tail-check observeAndDecide call in
+// triggerPartitionRebalance. Tests install it via export_test.go to capture
+// tailCtx state and prove the §3.5 fresh-context invariant directly. Nil in
+// production.
+var partitionTailCheckEntryHook func(tailCtx context.Context, reqCtxErr error)
+
+// handlePartitionRebalance is the partition-lifecycle rebalance callback
+// invoked by StateMachine.RunClaimedRebalanceErr. Unlike handleRebalance, it
+// does NOT swallow errShuttingDown — the caller needs that error so
+// restorePendingOnGraceBail can restore pendingPartitionUpdate when grace
+// flipped between the pre-check and rebalanceMu acquisition.
+func (c *Calculator) handlePartitionRebalance(ctx context.Context, lifecycle string) error {
+	c.partitionRebalanceEntries.Add(1)
+	if h := partitionRebalanceBlocker; h != nil {
+		<-h
 	}
+	if err := c.rebalance(ctx, lifecycle); err != nil {
+		if errors.Is(err, errShuttingDown) {
+			c.Logger.Info("partition rebalance skipped during shutdown / grace flip",
+				"lifecycle", lifecycle)
+			return err
+		}
+		return fmt.Errorf("partition rebalance failed for %s: %w", lifecycle, err)
+	}
+	// IMPORTANT: do NOT update lastWorkers here. The immediate tail-check in
+	// triggerPartitionRebalance must see lastWorkers as it was BEFORE this
+	// partition rebalance so EmergencyDetector.CheckEmergency Phase 4 can
+	// still recognise any worker that disappeared during the rebalance
+	// window (it needs the disappeared worker in `prev`). If the tail-check
+	// observes a worker-set change it claims emergency / scaling and
+	// handleRebalance refreshes lastWorkers on that path; if it does not,
+	// the next observeAndDecide cycle refreshes lastWorkers naturally on
+	// its own write path.
+	return nil
+}
+
+// triggerPartitionRebalance runs a partition-lifecycle rebalance via the
+// state-machine claim path. On claim success it drives the rebalance via
+// RunClaimedRebalanceErr, then runs a single tail-check observeAndDecide so
+// any emergency that arrived during the rebalance window gets an immediate
+// claim opportunity. On claim failure it restores pendingPartitionUpdate so
+// the drain ticker retries.
+//
+// Returns the rebalance callback's error so the caller can run
+// restorePendingOnGraceBail.
+func (c *Calculator) triggerPartitionRebalance(lifecycle string) error {
+	if !c.stateMach.TryClaimRebalancing(context.Background(), lifecycle) {
+		c.pendingPartitionUpdate.Store(true)
+		return nil
+	}
+
+	reqCtx, cancel := ctxFromStopCh(context.Background(), c.stopCh, partitionRebalanceRequestTimeout)
+	defer cancel()
+
+	err := c.stateMach.RunClaimedRebalanceErr(reqCtx, lifecycle)
+
+	// Tail-check on a FRESH stop-aware context: reqCtx may already be near or
+	// past its deadline; observeAndDecide exits fast on a cancelled context
+	// and would strand any emergency loser until the next poll tick.
+	tailCtx, tailCancel := ctxFromStopCh(context.Background(), c.stopCh, partitionTailCheckTimeout)
+	defer tailCancel()
+	if h := partitionTailCheckEntryHook; h != nil {
+		h(tailCtx, reqCtx.Err())
+	}
+	if tailErr := c.observeAndDecide(tailCtx, nil); tailErr != nil &&
+		!errors.Is(tailErr, errShuttingDown) {
+		c.Logger.Debug("post-partition-rebalance tail-check observeAndDecide returned error",
+			"lifecycle", lifecycle, "error", tailErr)
+	}
+
 	return err
 }
 

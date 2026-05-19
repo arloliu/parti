@@ -186,6 +186,10 @@ type assignmentCalculator interface {
 	Stop(ctx context.Context) error
 	SubscribeToStateChanges() (<-chan types.CalculatorState, func())
 	TriggerRebalance(ctx context.Context) error
+	// GetState returns the calculator's current state. Used by
+	// monitorCalculatorState's periodic reconcile to recover from dropped
+	// subscriber events (the buffer is fixed-size and trySend drops on full).
+	GetState() types.CalculatorState
 }
 
 // heartbeatPublisher defines the interface for heartbeat publishing.

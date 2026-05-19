@@ -149,11 +149,25 @@ func (m *Manager) startCalculator(assignmentKV, heartbeatKV jetstream.KeyValue) 
 	return nil
 }
 
+// calculatorStateReconcileInterval is the period between idempotent reads of
+// calc.GetState() in monitorCalculatorState. Recovers from dropped subscriber
+// events (state_subscriber.go trySend drops on a 4-slot full buffer).
+//
+// Reconcile guarantees eventual projection of the CURRENT calculator state.
+// If a transient state (e.g. Rebalancing) is dropped AND completes between
+// two reconcile ticks, the intermediate transition is NOT replayed — only
+// the current state is projected.
+//
+// Declared as a package-level var (not a const) so reconcile-timing tests can
+// override it. Production callers MUST NOT mutate this value.
+var calculatorStateReconcileInterval = 1 * time.Second
+
 // monitorCalculatorState monitors the calculator's internal state and syncs it to Manager state.
 //
 // This goroutine listens to the Calculator's state change channel and updates
-// the Manager's state machine accordingly. Replaces the previous polling-based
-// approach (200ms ticker) with event-driven synchronization for zero-lag updates.
+// the Manager's state machine accordingly. A periodic reconcile arm re-reads
+// calc.GetState() and re-drives syncStateFromCalculator when the current state
+// differs from the last applied value, recovering from any subscriber drop.
 //
 // readyCh is closed once the subscription is established, signalling the caller
 // that no state changes can be missed from that point onward.
@@ -170,6 +184,26 @@ func (m *Manager) monitorCalculatorState(calc assignmentCalculator, readyCh chan
 	close(readyCh) // Subscription established — caller may now start the calculator
 	defer unsubscribe()
 
+	reconcileTicker := time.NewTicker(calculatorStateReconcileInterval)
+	defer reconcileTicker.Stop()
+
+	var (
+		lastApplied    types.CalculatorState
+		lastAppliedSet bool
+	)
+
+	apply := func(calcState types.CalculatorState) {
+		if err := m.syncStateFromCalculator(calcState); err != nil {
+			m.logError("failed to sync state from calculator",
+				"calc_state", calcState,
+				"error", err,
+			)
+			return
+		}
+		lastApplied = calcState
+		lastAppliedSet = true
+	}
+
 	for {
 		select {
 		case <-m.ctx.Done():
@@ -181,13 +215,14 @@ func (m *Manager) monitorCalculatorState(calc assignmentCalculator, readyCh chan
 				m.logger.Info("calculator state channel closed, stopping monitor")
 				return
 			}
-			// Synchronize Manager state based on Calculator state
-			if err := m.syncStateFromCalculator(calcState); err != nil {
-				m.logError("failed to sync state from calculator",
-					"calc_state", calcState,
-					"error", err,
-				)
+			apply(calcState)
+
+		case <-reconcileTicker.C:
+			current := calc.GetState()
+			if lastAppliedSet && current == lastApplied {
+				continue
 			}
+			apply(current)
 		}
 	}
 }

@@ -250,6 +250,7 @@ func TestMonitorCalculatorState_ReadyChannelEstablishesSubscriptionFirst(t *test
 type monitorTestCalculator struct {
 	onSubscribe func()
 	stateCh     chan types.CalculatorState
+	state       atomic.Int64 // types.CalculatorState; controllable by tests
 }
 
 func (c *monitorTestCalculator) Start(context.Context) error { return nil }
@@ -261,3 +262,9 @@ func (c *monitorTestCalculator) SubscribeToStateChanges() (<-chan types.Calculat
 	return c.stateCh, func() {}
 }
 func (c *monitorTestCalculator) TriggerRebalance(context.Context) error { return nil }
+func (c *monitorTestCalculator) GetState() types.CalculatorState {
+	return types.CalculatorState(c.state.Load())
+}
+func (c *monitorTestCalculator) setState(s types.CalculatorState) {
+	c.state.Store(int64(s))
+}

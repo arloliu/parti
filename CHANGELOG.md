@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `Manager.State()` and `OnStateChanged` now correctly reflect partition-lifecycle
+  rebalances (previously, partition-source changes ran a rebalance without
+  entering `StateRebalancing`). A low-frequency reconcile in
+  `monitorCalculatorState` also ensures the manager's projected state recovers
+  within ~1 s of a dropped calculator state-machine subscriber event. The
+  reconcile path guarantees eventual projection of the current calculator state,
+  not replay of every missed transient transition.
+
+### Documentation
+
+- Glossary entry for `Rebalancing` broadened to cover partition-source changes
+  in addition to worker-count changes.
+
 ## [v2.4.0] - 2026-05-18
 
 This release delivers partition-assignment robustness across six phases of

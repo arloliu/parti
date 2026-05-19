@@ -35,6 +35,12 @@ type StateMachine struct {
 	// Callback invoked when rebalancing needs to occur
 	onRebalanceCb func(ctx context.Context, reason string) error
 
+	// Callback invoked by RunClaimedRebalanceErr for partition-lifecycle
+	// rebalances. Distinct from onRebalanceCb because the partition path needs
+	// errShuttingDown to propagate to restorePendingOnGraceBail rather than
+	// being swallowed (see calculator.go handlePartitionRebalance).
+	onPartitionRebalanceCb func(ctx context.Context, reason string) error
+
 	// For tracking scaling timer goroutine
 	wg sync.WaitGroup
 	// Mutex to serialize Go() vs Wait() to avoid WaitGroup data race
@@ -306,6 +312,66 @@ func (sm *StateMachine) RunClaimedRebalance(ctx context.Context, reason string) 
 	}
 
 	sm.ReturnToIdle()
+}
+
+// TryClaimRebalancing attempts to atomically claim the rebalancing lifecycle
+// from Idle. Strict-source CAS from Idle to Rebalancing.
+//
+// Designed for partition-lifecycle callers (monitorPartitions) that need to
+// drive a rebalance but did NOT first enter Scaling. Without this primitive
+// monitorPartitions would bypass the FSM entirely, violating the public
+// contract that Rebalancing means "active partition rebalance in progress".
+//
+// scalingReason is recorded BEFORE the state-change notification fans out so
+// subscribers see the reason on their first read of the Rebalancing state.
+//
+// Returns true if the claim succeeded; the caller is then responsible for
+// invoking RunClaimedRebalanceErr to execute the rebalance and return to Idle.
+func (sm *StateMachine) TryClaimRebalancing(_ context.Context, reason string) bool {
+	if !sm.compareAndSwapState(types.CalcStateIdle, types.CalcStateRebalancing) {
+		currentState := types.CalculatorState(sm.current.Load())
+		sm.logger.Debug("partition rebalance claim deferred: state machine not idle",
+			"current_state", currentState.String(),
+			"reason", reason)
+		return false
+	}
+
+	sm.mu.Lock()
+	sm.scalingReason = reason
+	sm.mu.Unlock()
+
+	sm.logger.Info("entering rebalancing state via partition-lifecycle claim",
+		"reason", reason)
+
+	sm.notifyStateChange(types.CalcStateRebalancing)
+
+	return true
+}
+
+// RunClaimedRebalanceErr runs the partition-rebalance callback for a
+// previously-claimed lifecycle and returns the callback's error to the caller.
+// The FSM is returned to Idle whether the callback succeeded, failed, or
+// returned errShuttingDown.
+//
+// Distinct from RunClaimedRebalance: this variant gives the caller the
+// callback error so the partition-lifecycle path can run
+// restorePendingOnGraceBail when the rebalance bails on a recovery-grace
+// re-check. The general RunClaimedRebalance preserves the existing void
+// contract for emergency/scaling callers whose callback swallows
+// errShuttingDown.
+//
+// Must be called after a successful TryClaimRebalancing.
+func (sm *StateMachine) RunClaimedRebalanceErr(ctx context.Context, reason string) error {
+	var cbErr error
+	if sm.onPartitionRebalanceCb != nil {
+		cbErr = sm.onPartitionRebalanceCb(ctx, reason)
+		if cbErr != nil {
+			sm.logger.Error("partition rebalance failed", "reason", reason, "error", cbErr)
+		}
+	}
+	sm.ReturnToIdle()
+
+	return cbErr
 }
 
 // EnterEmergency transitions to emergency state for immediate rebalancing.

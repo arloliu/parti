@@ -41,6 +41,7 @@ func (s *stubCalculator) SubscribeToStateChanges() (<-chan types.CalculatorState
 	return nil, func() {}
 }
 func (s *stubCalculator) TriggerRebalance(context.Context) error { return nil }
+func (s *stubCalculator) GetState() types.CalculatorState        { return types.CalcStateIdle }
 
 func TestManager_calculateAndPublish(t *testing.T) {
 	t.Run("returns error for NopCalculator", func(t *testing.T) {

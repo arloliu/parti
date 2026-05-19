@@ -355,7 +355,7 @@ func TestPartitionProcessing(t *testing.T) {
 | **Partitioner**         | Application-level component mapping keys to partition IDs                                            |
 | **Prepare Phase**       | First phase of two-phase handoff; old owner stops processing                                        |
 | **Processing Gate**     | Component preventing message processing during handoff                                               |
-| **Rebalancing**         | Redistributing partitions after worker count changes                                                 |
+| **Rebalancing**         | Redistributing partitions after worker or partition-source changes                                   |
 | **Recovery Grace**      | Period after degraded mode exit before emergency rebalancing is triggered                            |
 | **Scaling Window**      | Stabilization delay after worker joins/leaves established cluster (default: 10s)                   |
 | **Stable ID**           | Persistent worker identifier claimed from a pool; survives restarts within TTL                      |
