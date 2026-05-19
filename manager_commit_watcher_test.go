@@ -235,21 +235,21 @@ func TestMonitorCommitChanges_DeleteEventIgnored(t *testing.T) {
 // convergence is then the reconcile tick — proving the periodic primitive
 // (not the manually-invoked handleCommitValue).
 //
-// We dial commitReconcileInterval down to 1s via the package-level var
+// We dial watcherReconcileInterval down to 1s via the package-level var
 // (testable because manager_assignment.go declares it as var, not const,
 // with an explicit "tests may override" contract). 1s gives us enough
 // headroom to assert the "no recovery before first tick" invariant.
 //
 // NOTE: this test does NOT use t.Parallel() because it mutates the package
-// global commitReconcileInterval (v2 review P2: avoid parallel races on a
+// global watcherReconcileInterval (v2 review P2: avoid parallel races on a
 // test-mutable global).
 func TestMonitorCommitChanges_PeriodicReconcile_RecoversDivergence(t *testing.T) {
 	_, nc := partitest.StartEmbeddedNATS(t)
 	kv := partitest.CreateJetStreamKV(t, nc, "watcher-reconcile")
 
-	prev := commitReconcileInterval
-	commitReconcileInterval = 1 * time.Second
-	t.Cleanup(func() { commitReconcileInterval = prev })
+	prev := watcherReconcileInterval
+	watcherReconcileInterval = 1 * time.Second
+	t.Cleanup(func() { watcherReconcileInterval = prev })
 
 	m, _, _, _ := newTestManager(t)
 	m.assignmentKV = kv

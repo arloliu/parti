@@ -26,14 +26,16 @@ const (
 	commitKeyName = "_commit"
 )
 
-// commitReconcileInterval is the period between idempotent KV re-reads of
-// the commit key. Recovers from missed watcher events (channel close
-// gaps, NATS reconnects) without depending on the watcher's resync.
+// watcherReconcileInterval is the period between idempotent KV re-reads
+// of the commit key and the legacy per-worker alias key. Recovers from
+// missed watcher events (channel close gaps, NATS reconnects) without
+// depending on the watcher's resync. Shared by monitorCommitChanges and
+// monitorAssignmentChanges.
 //
-// Declared as a package-level var (not a const) so reconcile-timing tests
-// can override it via export_test.go without depending on a 30s wall-clock
-// timer. Production callers MUST NOT mutate this value.
-var commitReconcileInterval = 30 * time.Second
+// Declared as a package-level var (not a const) so reconcile-timing
+// tests can override it without depending on a 30s wall-clock timer.
+// Production callers MUST NOT mutate this value.
+var watcherReconcileInterval = 30 * time.Second
 
 // RefreshPartitions triggers partition discovery refresh.
 //
@@ -276,15 +278,21 @@ func (m *Manager) fetchAssignment(ctx context.Context, kv jetstream.KeyValue) (*
 	return asgn, nil
 }
 
-// monitorAssignmentChanges monitors for assignment changes with automatic retry.
+// monitorAssignmentChanges monitors for assignment changes with automatic
+// retry. The reconcile ticker is created once (shared with watchAssignment
+// via reconcileTicker.C) and survives rewatch boundaries — a missed event
+// during a backoff window is still recovered on the next tick.
 //
-// On watcher failure (e.g., transient NATS error), the monitor retries with
-// exponential backoff and jitter, capped at watcherMaxBackoff. A clean exit
-// (context cancelled or watcher channel closed) stops the loop immediately.
+// On watcher failure (transient NATS error, Updates() channel close), the
+// monitor records the failure into the degraded-mode circuit and retries
+// with exponential backoff + jitter, capped at watcherMaxBackoff. Only
+// context cancellation stops the loop cleanly.
 func (m *Manager) monitorAssignmentChanges(ctx context.Context, kv jetstream.KeyValue) {
 	backoff := watcherBaseBackoff
+	reconcileTicker := time.NewTicker(watcherReconcileInterval)
+	defer reconcileTicker.Stop()
 	for {
-		err := m.watchAssignment(ctx, kv)
+		err := m.watchAssignment(ctx, kv, reconcileTicker.C)
 		if err == nil || ctx.Err() != nil {
 			return
 		}
@@ -311,9 +319,17 @@ func (m *Manager) monitorAssignmentChanges(ctx context.Context, kv jetstream.Key
 }
 
 // watchAssignment runs one watch session on this worker's assignment key.
-// Returns nil on clean exit (context cancelled or channel closed normally),
-// error if the watcher could not be established.
-func (m *Manager) watchAssignment(ctx context.Context, kv jetstream.KeyValue) error {
+// Channel closure is returned as an error so monitorAssignmentChanges can
+// restart with backoff; context cancellation returns nil for clean exit.
+//
+// The reconcileTickC arm idempotently re-reads the alias key so missed
+// watcher events (channel close gaps, NATS reconnects, silent stalls) are
+// eventually recovered. The arm is safe because this select loop is
+// single-goroutine: the reconcile arm cannot run while the watcher arm is
+// mid-apply (and vice versa), and once an apply completes the existing
+// stale-leader/version fences in handleAssignmentEntry reject a re-read of
+// the same alias. See PR-1 spec §4 (idempotency contract).
+func (m *Manager) watchAssignment(ctx context.Context, kv jetstream.KeyValue, reconcileTickC <-chan time.Time) error {
 	workerID := m.WorkerID()
 	key := fmt.Sprintf("assignment.%s", workerID) // Match calculator's key format
 
@@ -323,8 +339,8 @@ func (m *Manager) watchAssignment(ctx context.Context, kv jetstream.KeyValue) er
 	}
 
 	defer func() {
-		if err := watcher.Stop(); err != nil && !natsutil.IsConsumerNotFound(err) {
-			m.logError("failed to stop watcher", "error", err)
+		if serr := watcher.Stop(); serr != nil && !natsutil.IsConsumerNotFound(serr) {
+			m.logError("failed to stop assignment watcher", "error", serr)
 		}
 	}()
 
@@ -335,8 +351,7 @@ func (m *Manager) watchAssignment(ctx context.Context, kv jetstream.KeyValue) er
 			return nil
 		case entry, ok := <-watcher.Updates():
 			if !ok {
-				m.logger.Debug("assignment watcher closed", "worker_id", workerID)
-				return nil
+				return errors.New("assignment watcher channel closed")
 			}
 			if entry == nil {
 				// Nil entry indicates end of initial values replay
@@ -345,6 +360,27 @@ func (m *Manager) watchAssignment(ctx context.Context, kv jetstream.KeyValue) er
 			}
 
 			m.handleAssignmentEntry(workerID, entry)
+		case <-reconcileTickC:
+			// Idempotent re-read. Single-goroutine serialization with the
+			// watcher arm above guarantees no concurrent application of
+			// the same alias; the version fence at handleAssignmentEntry
+			// rejects re-reads of an already-applied alias.
+			current, gerr := kv.Get(ctx, key)
+			if gerr != nil {
+				if errors.Is(gerr, jetstream.ErrKeyNotFound) {
+					// Alias deleted (or never existed). No-op — matches
+					// handleAssignmentEntry's KeyValueDelete branch and
+					// W11's "delete is not a reassignment primitive".
+					continue
+				}
+				// Transient/connectivity error: silently continue,
+				// matching the commit watcher's symmetric reconcile arm.
+				// recordKVError is intentionally NOT called here: feeding
+				// a 30s-ticker into the degraded-mode circuit would
+				// amplify entry under transient KV stress.
+				continue
+			}
+			m.handleAssignmentEntry(workerID, current)
 		}
 	}
 }
@@ -401,12 +437,12 @@ func (m *Manager) handleAssignmentEntry(workerID string, entry jetstream.KeyValu
 
 // monitorCommitChanges watches the singleton "assignment._commit" key. On
 // channel close the watcher restarts with exponential backoff (closes A2 /
-// §4.3); a periodic reconcile every commitReconcileInterval re-fetches the
-// commit and routes idempotently through handleCommitValue so missed
+// §4.3); a periodic reconcile every watcherReconcileInterval re-fetches
+// the commit and routes idempotently through handleCommitValue so missed
 // updates eventually converge.
 func (m *Manager) monitorCommitChanges(ctx context.Context, kv jetstream.KeyValue) {
 	backoff := watcherBaseBackoff
-	reconcileTicker := time.NewTicker(commitReconcileInterval)
+	reconcileTicker := time.NewTicker(watcherReconcileInterval)
 	defer reconcileTicker.Stop()
 	for {
 		err := m.watchCommit(ctx, kv, reconcileTicker.C)
