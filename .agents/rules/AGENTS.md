@@ -10,6 +10,7 @@ every task, then read the files whose triggers match the work.
 - Add `550` when crafting commits, branches, or PR titles/descriptions.
 - Add `700` only for hot paths, external input, credentials, auth, or network-facing code.
 - Add `800` only for non-trivial design, plan, or review-loop work.
+- Add `850` when sequencing a plan or implementation review loop (which reviewer to dispatch, when to stop, how to handle findings).
 - For tiny documentation-only edits, `000` plus the relevant docs or workflow rule is enough.
 
 ## Always
@@ -38,6 +39,7 @@ every task, then read the files whose triggers match the work.
 - **[700-performance-security.md](700-performance-security.md)** — Hot-path performance, allocation discipline, input validation, secrets, NATS auth.
 
 ## Before Plan, Design, or Review-Loop Work
-- **[800-design-and-review-loops.md](800-design-and-review-loops.md)** — Invariants, path enumeration, atomicity, review-loop discipline.
+- **[800-design-and-review-loops.md](800-design-and-review-loops.md)** — Invariants, path enumeration, atomicity, review-loop discipline (how to think during a round).
+- **[850-review-loop-workflow.md](850-review-loop-workflow.md)** — Canonical reviewer sequence, stopping conditions, between-round triage, stage escalation (how to sequence the rounds).
 
 For broad or ambiguous tasks, read all rule files before editing.
