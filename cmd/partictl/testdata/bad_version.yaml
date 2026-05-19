@@ -1,0 +1,5 @@
+apiVersion: parti.io/v99
+controlPlane:
+  workerIdTtl: 75s
+  electionTimeout: 10s
+  heartbeatTtl: 15s
