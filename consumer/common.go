@@ -168,15 +168,23 @@ func (c *CommonConfig) Validate() error {
 	return fuda.Validate(c)
 }
 
-// checkWorkQueueRecoveryCompat returns ErrInvalidConfig when the stream uses
+// CheckWorkQueueRecoveryCompat returns ErrInvalidConfig when the stream uses
 // WorkQueuePolicy and the recovery strategy requires a non-DeliverAllPolicy.
 // NATS only permits DeliverAllPolicy on work-queue streams; RecoverFromNew
 // (DeliverNewPolicy) and RecoverFromLastProcessed (DeliverByStartSequencePolicy)
 // would silently fail during every recovery attempt.
 //
 // The check is best-effort: failures to fetch stream info are silently ignored
-// so callers are not blocked by transient connectivity issues.
-func checkWorkQueueRecoveryCompat(ctx context.Context, js jetstream.JetStream, streamName string, strategy RecoveryStrategy) error {
+// so callers are not blocked by transient connectivity issues. This means
+// transient JetStream API failures during the pre-flight do not block consumer
+// updates; the runtime continues as if the check passed.
+//
+// This function is exported so the provision SDK can reuse the exact same
+// implementation in its dynamic-consumer alignment check
+// (see provision.ValidateLiveDynamicConsumers). Reusing rather than
+// duplicating guarantees byte-equivalent error semantics with the runtime
+// Dynamic.Update path.
+func CheckWorkQueueRecoveryCompat(ctx context.Context, js jetstream.JetStream, streamName string, strategy RecoveryStrategy) error {
 	var strategyName string
 	switch strategy {
 	case RecoverFromNew:

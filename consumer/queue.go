@@ -277,7 +277,7 @@ func (q *Queue) Start(ctx context.Context) error {
 	}
 	q.consumer = cons
 
-	if err := checkWorkQueueRecoveryCompat(ctx, q.js, q.config.StreamName, q.config.RecoveryStrategy); err != nil {
+	if err := CheckWorkQueueRecoveryCompat(ctx, q.js, q.config.StreamName, q.config.RecoveryStrategy); err != nil {
 		return err
 	}
 

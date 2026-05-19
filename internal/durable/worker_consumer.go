@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"text/template"
@@ -13,8 +12,8 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/zeebo/xxh3"
 
+	"github.com/arloliu/parti/v2/internal/dynamicbuild"
 	"github.com/arloliu/parti/v2/jsutil"
 	"github.com/arloliu/parti/v2/kvutil"
 	"github.com/arloliu/parti/v2/types"
@@ -411,19 +410,7 @@ func (wc *WorkerConsumer) addSubjectLoop(ctx context.Context, workerID string, s
 		Metrics:                     wc.config.Metrics,
 	}
 
-	consumerConfig := jetstream.ConsumerConfig{
-		Name:              durable,
-		Durable:           durable,
-		FilterSubject:     subject,
-		AckPolicy:         wc.config.AckPolicy,
-		AckWait:           wc.config.AckWait,
-		MaxDeliver:        wc.config.MaxDeliver,
-		InactiveThreshold: wc.config.InactiveThreshold,
-		MaxWaiting:        wc.config.MaxWaiting,
-		MaxAckPending:     wc.config.MaxAckPending,
-		MemoryStorage:     wc.config.ConsumerMemoryStorage,
-		Replicas:          wc.config.ConsumerReplicas,
-	}
+	consumerConfig := dynamicbuild.ConsumerConfig(durable, subject, wc.defaults())
 
 	pc := newPartitionConsumer(
 		wc.logger,
@@ -458,78 +445,54 @@ func (wc *WorkerConsumer) addSubjectLoop(ctx context.Context, workerID string, s
 // ensurePerSubjectConsumer creates or updates a per-subject durable with FilterSubject.
 // It employs a short retry strategy to handle transient NATS errors.
 func (wc *WorkerConsumer) ensurePerSubjectConsumer(ctx context.Context, durable string, subject string) (jetstream.Consumer, error) {
-	cfg := jetstream.ConsumerConfig{
-		Name:              durable,
-		Durable:           durable,
-		FilterSubject:     subject,
-		AckPolicy:         wc.config.AckPolicy,
-		AckWait:           wc.config.AckWait,
-		MaxDeliver:        wc.config.MaxDeliver,
-		InactiveThreshold: wc.config.InactiveThreshold,
-		MaxWaiting:        wc.config.MaxWaiting,
-		MaxAckPending:     wc.config.MaxAckPending,
-		MemoryStorage:     wc.config.ConsumerMemoryStorage,
-		Replicas:          wc.config.ConsumerReplicas,
-	}
-
+	cfg := dynamicbuild.ConsumerConfig(durable, subject, wc.defaults())
 	return jsutil.EnsureConsumer(ctx, wc.js, wc.config.StreamName, cfg)
 }
 
+// defaults captures the runtime tunables that feed dynamicbuild.ConsumerConfig.
+// Keeping this in one place ensures the two callsites (ensurePerSubjectConsumer
+// and addSubjectLoop) cannot drift from each other.
+func (wc *WorkerConsumer) defaults() dynamicbuild.Defaults {
+	return dynamicbuild.Defaults{
+		AckPolicy:             wc.config.AckPolicy,
+		AckWait:               wc.config.AckWait,
+		MaxDeliver:            wc.config.MaxDeliver,
+		InactiveThreshold:     wc.config.InactiveThreshold,
+		MaxWaiting:            wc.config.MaxWaiting,
+		MaxAckPending:         wc.config.MaxAckPending,
+		ConsumerMemoryStorage: wc.config.ConsumerMemoryStorage,
+		ConsumerReplicas:      wc.config.ConsumerReplicas,
+	}
+}
+
 // perSubjectDurableName returns a stable, sanitized durable for a given subject.
+// Delegates to internal/dynamicbuild so the runtime and provision SDK share
+// one implementation.
 func (wc *WorkerConsumer) perSubjectDurableName(prefix, subject string) string {
-	partID := wc.extractPartitionID(subject)
-	if partID == "" {
-		partID = subject
-	}
-
-	// Hash the subject to ensure uniqueness even if sanitization causes collisions
-	h := xxh3.HashString(subject)
-
-	sanitizedPartID := sanitizeConsumerName(partID)
-	if len(sanitizedPartID) > 50 {
-		sanitizedPartID = sanitizedPartID[:50]
-	}
-
-	// Format: <Prefix>_<SanitizedPartitionID>_<Hash>
-	return fmt.Sprintf("%s_%s_%016x", prefix, sanitizedPartID, h)
+	return dynamicbuild.PerSubjectDurableName(prefix, subject, wc.partitionPrefix, wc.partitionSuffix)
 }
 
 // sanitizeConsumerName sanitizes a consumer name according to allowed runes.
+// Kept as a package-level wrapper so cross-file callers (broadcast_consumer.go)
+// and tests (worker_consumer_test.go) continue to work unchanged.
 func sanitizeConsumerName(name string) string {
-	var b strings.Builder
-	b.Grow(len(name))
-	for _, r := range name {
-		if isAllowedConsumerRune(r) {
-			b.WriteRune(r)
-		} else {
-			b.WriteByte('_')
-		}
-	}
-
-	return b.String()
+	return dynamicbuild.SanitizeConsumerName(name)
 }
 
+// isAllowedConsumerRune reports whether r is allowed in a NATS consumer name.
+// Wrapper around dynamicbuild.IsAllowedConsumerRune for cross-file callers
+// (broadcast_config.go, config.go).
 func isAllowedConsumerRune(r rune) bool {
-	switch {
-	case r >= 'a' && r <= 'z':
-		return true
-	case r >= 'A' && r <= 'Z':
-		return true
-	case r >= '0' && r <= '9':
-		return true
-	case r == '-' || r == '_':
-		return true
-	default:
-		return false
-	}
+	return dynamicbuild.IsAllowedConsumerRune(r)
 }
 
-// buildSubjects generates a sorted, deduplicated list of subjects from partitions,
-// ensuring the subject template is parsed.
+// buildSubjects generates a sorted, deduplicated list of subjects from partitions.
+// Delegates to internal/dynamicbuild for the shared pure-helper implementation;
+// the wrapper exists so callers and tests can continue to invoke it on the
+// receiver and so wc.subjectTemplate stays populated for downstream use.
 func (wc *WorkerConsumer) buildSubjects(partitions []types.Partition) ([]string, error) {
-	// Ensure we have a parsed template even if constructed manually in tests
-	tmpl := wc.subjectTemplate
-	if tmpl == nil {
+	// Ensure we have a parsed template even if constructed manually in tests.
+	if wc.subjectTemplate == nil {
 		t, err := template.New("subject").Parse(wc.config.SubjectTemplate)
 		if err != nil {
 			return nil, fmt.Errorf("parse subject template: %w", err)
@@ -537,59 +500,7 @@ func (wc *WorkerConsumer) buildSubjects(partitions []types.Partition) ([]string,
 		wc.subjectTemplate = t
 	}
 
-	return wc.doBuildSubjects(partitions)
-}
-
-// buildSubjects generates a sorted, deduplicated list of subjects from partitions.
-func (wc *WorkerConsumer) doBuildSubjects(partitions []types.Partition) ([]string, error) {
-	if len(partitions) == 0 {
-		return []string{}, nil
-	}
-
-	// Deduplicate via map
-	m := make(map[string]struct{}, len(partitions))
-	for _, p := range partitions {
-		subj, err := wc.generateSubject(p)
-		if err != nil {
-			return nil, err
-		}
-		m[subj] = struct{}{}
-	}
-
-	subjects := make([]string, 0, len(m))
-	for s := range m {
-		subjects = append(subjects, s)
-	}
-
-	// Sort for deterministic ordering
-	slices.Sort(subjects)
-
-	return subjects, nil
-}
-
-// generateSubject generates a subject from the template.
-//
-// Template context contains PartitionID (keys joined with ".").
-// Example: ["source", "region", "us"] → "source.region.us"
-func (wc *WorkerConsumer) generateSubject(partition types.Partition) (string, error) {
-	if len(partition.Keys) == 0 {
-		return "", errors.New("partition has no keys")
-	}
-
-	// subjectContext is the template context for subject generation.
-	type subjectContext struct {
-		PartitionID string
-	}
-
-	ctx := subjectContext{PartitionID: partition.SubjectKey()}
-
-	// Execute template
-	var buf strings.Builder
-	if err := wc.subjectTemplate.Execute(&buf, ctx); err != nil {
-		return "", fmt.Errorf("failed to execute subject template: %w", err)
-	}
-
-	return buf.String(), nil
+	return dynamicbuild.BuildSubjects(wc.config.SubjectTemplate, partitions)
 }
 
 // ensureGateResolver lazily initializes the automatic claim-based resolver.

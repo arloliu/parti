@@ -233,7 +233,7 @@ func NewStatic(
 //   - error: Non-nil if the consumer is already started or if JetStream
 //     consumer creation fails.
 func (s *Static) Start(ctx context.Context) error {
-	if err := checkWorkQueueRecoveryCompat(ctx, s.js, s.streamName, s.recoveryStrategy); err != nil {
+	if err := CheckWorkQueueRecoveryCompat(ctx, s.js, s.streamName, s.recoveryStrategy); err != nil {
 		return err
 	}
 	return s.inner.Start(ctx)
