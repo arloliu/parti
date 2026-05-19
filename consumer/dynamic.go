@@ -308,7 +308,7 @@ func NewDynamic(
 //     exceeds MaxConcurrentSubjects.
 func (d *Dynamic) Update(ctx context.Context, workerID string, partitions []types.Partition) error {
 	d.workQueueOnce.Do(func() {
-		d.workQueueErr = checkWorkQueueRecoveryCompat(ctx, d.js, d.streamName, d.recoveryStrategy)
+		d.workQueueErr = CheckWorkQueueRecoveryCompat(ctx, d.js, d.streamName, d.recoveryStrategy)
 	})
 	if d.workQueueErr != nil {
 		return d.workQueueErr
