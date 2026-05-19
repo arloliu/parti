@@ -561,6 +561,25 @@ func (cfg *Config) ValidateWithWarnings(logger Logger) {
 		)
 	}
 
+	// Warn when the spread between HeartbeatTTL and EmergencyGracePeriod is
+	// tight enough that a GC pause or a single stalled heartbeat publish can
+	// chew through the entire hysteresis budget and trigger a false emergency
+	// on a healthy worker. The detector fires when a worker has been missing
+	// for EmergencyGracePeriod; the heartbeat key only stays present for
+	// HeartbeatTTL. The remaining headroom (HeartbeatTTL - EmergencyGracePeriod)
+	// is the operator's budget for transient stalls.
+	//
+	// Recommendation: HeartbeatTTL - EmergencyGracePeriod >= HeartbeatTTL/2.
+	if cfg.HeartbeatTTL > 0 && cfg.EmergencyGracePeriod > cfg.HeartbeatTTL/2 {
+		logger.Warn(
+			"EmergencyGracePeriod leaves little headroom under HeartbeatTTL — a GC pause or stalled publish may trigger false emergencies",
+			"heartbeat_ttl", cfg.HeartbeatTTL,
+			"emergency_grace_period", cfg.EmergencyGracePeriod,
+			"hysteresis_budget", cfg.HeartbeatTTL-cfg.EmergencyGracePeriod,
+			"recommended_max_grace", cfg.HeartbeatTTL/2,
+		)
+	}
+
 	// Warn if recovery grace period is very short
 	if cfg.DegradedBehavior.RecoveryGracePeriod < 5*time.Second {
 		logger.Warn(

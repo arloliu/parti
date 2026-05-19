@@ -85,6 +85,42 @@ func TestValidateWithWarnings_StartupTimeout(t *testing.T) {
 	})
 }
 
+// TestValidateWithWarnings_EmergencyGracePeriodHysteresis asserts that
+// ValidateWithWarnings emits a warning when EmergencyGracePeriod consumes more
+// than half of HeartbeatTTL — leaving too little hysteresis budget for GC
+// pauses or single stalled heartbeat publishes — and stays silent otherwise.
+func TestValidateWithWarnings_EmergencyGracePeriodHysteresis(t *testing.T) {
+	const warnPrefix = "EmergencyGracePeriod leaves little headroom"
+
+	t.Run("warns when grace exceeds half of TTL", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.HeartbeatTTL = 10 * time.Second
+		cfg.EmergencyGracePeriod = 7 * time.Second
+		log := &warnCapture{}
+		cfg.ValidateWithWarnings(log)
+		require.True(t, log.contains(warnPrefix),
+			"expected hysteresis warning, got %v", log.warns)
+	})
+
+	t.Run("no warning at exactly half of TTL", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.HeartbeatTTL = 10 * time.Second
+		cfg.EmergencyGracePeriod = 5 * time.Second
+		log := &warnCapture{}
+		cfg.ValidateWithWarnings(log)
+		require.False(t, log.contains(warnPrefix),
+			"did not expect hysteresis warning at the boundary, got %v", log.warns)
+	})
+
+	t.Run("no warning at defaults", func(t *testing.T) {
+		cfg := DefaultConfig()
+		log := &warnCapture{}
+		cfg.ValidateWithWarnings(log)
+		require.False(t, log.contains(warnPrefix),
+			"defaults must not emit the hysteresis warning — recommended ratio is roughly 1:5 (grace:TTL)")
+	})
+}
+
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 
