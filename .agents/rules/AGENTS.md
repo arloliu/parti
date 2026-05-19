@@ -7,6 +7,7 @@ every task, then read the files whose triggers match the work.
 - For most Go implementation tasks, read `000`, `100`, `200`, `500`, and `600`.
 - Add `300` when adding or changing tests.
 - Add `400` when editing docs, examples, README content, or exported API.
+- Add `550` when crafting commits, branches, or PR titles/descriptions.
 - Add `700` only for hot paths, external input, credentials, auth, or network-facing code.
 - Add `800` only for non-trivial design, plan, or review-loop work.
 - For tiny documentation-only edits, `000` plus the relevant docs or workflow rule is enough.
@@ -25,7 +26,10 @@ every task, then read the files whose triggers match the work.
 - **[400-docs.md](400-docs.md)** — Exported symbol docs, README/docs sync, Godoc examples.
 
 ## Before Validation, Commit, or PR Work
-- **[500-validation-and-workflow.md](500-validation-and-workflow.md)** — Git conventions, validation gates, Make targets.
+- **[500-validation-and-workflow.md](500-validation-and-workflow.md)** — Validation gates, code review checklist, Make targets.
+
+## Before Crafting Commits or PRs
+- **[550-git-conventions.md](550-git-conventions.md)** — Branch naming, Conventional Commits, commit body guidelines, plan/review jargon prohibition, attribution.
 
 ## After Modifying Go Files
 - **[600-go-after-write.md](600-go-after-write.md)** — `go fix` scope, lint workflow, stale linter cache handling.

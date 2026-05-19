@@ -1,0 +1,52 @@
+# 550 - Git Conventions
+
+Apply these rules when crafting commits, branches, or pull-request titles and descriptions.
+
+## Branches
+- Prefixes: `feat/`, `fix/`, `docs/`, `chore/`, `test/`, `refactor/`, `perf/`.
+
+## Commit Messages
+
+### Format
+- Follow [Conventional Commits](https://www.conventionalcommits.org/).
+  A type prefix is required: `feat`, `fix`, `docs`, `chore`, `test`, `refactor`, `perf`, etc.
+  An optional scope goes in parentheses: `fix(assignment): ...`. Present tense.
+- First line ≤ 50 characters when possible; hard cap 100.
+
+### Body — short and clear
+The body explains WHY the change is needed and WHAT its PURPOSE is,
+then summarises the MAIN CHANGES at a high level. Aim for 3–8 short
+paragraphs — readable in under a minute.
+
+Skip low-level details that belong in the code, the PR description, or the spec:
+- Per-function or per-file diffs (the code already shows them).
+- Line-by-line walk-throughs.
+- Review-iteration counts and rationale (e.g. how many rounds of reviewer feedback shaped the design).
+- Exhaustive test enumerations.
+
+Bias toward the reader who finds this commit via `git log` or `git blame` months later
+and wants to understand the change quickly.
+
+### No plan / review jargon
+Future readers of `git log` and `git blame` have no access to in-progress plan documents or review reports.
+Do NOT reference:
+- Sequencing labels: `PR-1`, `PR-2`, `Phase 4`, ...
+- Work-item IDs: `W12`, `W15`, `W19`, `H2.C`, ...
+- Review-iteration jargon: `plan-review v2 P0-B`, `post-impl v3.1`, `Codex xhigh`, ...
+- References to specific `tmp/*_review.md` reports.
+
+Bad: `fix(assignment): close W15+W16 per PR-2 spec`.
+
+Good: `fix(assignment): serialize apply pipeline with stale gate`.
+
+Citing the spec FILE PATH is fine (e.g. `See docs/plans/worker-state-hardening/02-pr2-spec.md`) —
+the path is discoverable; the section IDs inside it are not.
+
+### Attribution
+Never add `Co-Authored-By` or any other attribution trailers.
+
+## Pull Requests
+- Title follows the same Conventional Commits format as the commit's first line.
+- Body restates the WHY and PURPOSE for reviewers.
+  Linking the spec and prior review history is acceptable here when it is useful context,
+  but lead with domain language so a reviewer who hasn't read the plan can still understand the change.
