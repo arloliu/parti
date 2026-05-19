@@ -424,7 +424,15 @@ func (c *Calculator) TriggerRebalance(ctx context.Context) error {
 
 	c.Logger.Info("manual rebalance triggered")
 
-	return c.rebalance(ctx, "manual-refresh")
+	if err := c.rebalance(ctx, "manual-refresh"); err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	c.setLastWorkersLocked(c.currentWorkers)
+	c.mu.Unlock()
+
+	return nil
 }
 
 // discoverHighestVersion scans existing assignments in KV to find the highest
