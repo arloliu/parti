@@ -45,6 +45,8 @@ If present, use the Codex path. If absent (plugin uninstalled) or the codex run 
 
 Dispatch via the `Agent` tool using the codex rescue subagent. The subagent is a thin forwarder that runs the Codex CLI with your prompt; pass `--wait`, `--effort xhigh`, and `--write` as routing flags in the prompt prefix. `--write` must be explicit — the rescue subagent's default is read-only for "review" tasks, but this skill needs Codex to write the report file.
 
+The codex-rescue subagent parses these as routing controls and strips them from the task text before invoking `codex-companion.mjs` (see its agent definition: "Preserve the user's task text as-is apart from stripping routing flags"). They are intent signals to the subagent, not literal CLI args appended to the prompt.
+
 ```
 Agent({
   subagent_type: "codex:codex-rescue",
@@ -114,6 +116,9 @@ Replace `<PLAN_PATH>`, `<SHORT_NAME>`, `<COMPANION_DOCS>`, `<CODE_REFS>`, and `<
 >
 > **Produce a review report** at `<REPORT_PATH>`.
 >
+> Write ONLY to `<REPORT_PATH>`. Do not create, modify, or delete any other
+> file.
+>
 > **Report format:**
 >
 > ```markdown
@@ -166,6 +171,13 @@ Replace `<PLAN_PATH>`, `<SHORT_NAME>`, `<COMPANION_DOCS>`, `<CODE_REFS>`, and `<
 ## Loop guidance
 
 If the caller asks to "loop until clean":
+- Step 0: before dispatching, confirm the plan has materially changed since the
+  last `tmp/<plan-stem>_*_review.md` for this plan. If no prior review exists,
+  proceed. If a prior review exists and the plan looks unchanged at a glance
+  (no new sections, no rewritten pillars), surface that to the user and ask
+  whether to dispatch anyway — a re-review on an unchanged plan typically
+  reproduces the previous findings and wastes the budget called out in
+  "Cost notes".
 - Pass 1: dispatch this skill, then summarize.
 - If verdict is "fix-then-merge" or equivalent and findings are addressable in the plan (not in code), edit the plan to address each finding, then dispatch again.
 - Stop when the verdict is "ready" / "merge" / no P0 or P1 findings remain.
