@@ -1,0 +1,4 @@
+apiVersion: parti.io/provision/v1
+kind: Provision
+controlPlane:
+  stableIDBucket: "unclosed string

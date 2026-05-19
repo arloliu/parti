@@ -1,0 +1,35 @@
+# Canonical "Full" provision config matching the example in
+# docs/plans/provision-sdk-cli. Each field uses a distinct value so the
+# YAML-unmarshal test can verify every nested field is populated via its
+# declared yaml tag (a missing tag would surface as a zero-value comparison).
+apiVersion: parti.io/v1
+instance: prod-us-east
+policy: warn
+
+controlPlane:
+  stableIdBucket: parti-stableid
+  electionBucket: parti-election
+  heartbeatBucket: parti-heartbeat
+  assignmentBucket: parti-assignment
+  handoffBucket: parti-handoff
+  workerIdTtl: 75s
+  electionTimeout: 10s
+  heartbeatTtl: 15s
+  assignmentTtl: 1m30s
+  handoffTtl: 2m
+  enableTwoPhaseHandoff: true
+
+partitionSource:
+  bucket: parti-partitions
+  key: partitions/v1
+  replicas: 3
+  storage: file
+  history: 1
+  maxValueSize: 1048576
+  ttl: 7m
+
+dynamicConsumers:
+  - streamName: orders
+    consumerPrefix: ord-worker
+    subjectTemplate: "orders.{partition_id}.>"
+    partitionsRef: ./partitions.yaml

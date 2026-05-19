@@ -1,0 +1,7 @@
+# Minimal provision config — control-plane block with only the three
+# required TTLs. Bucket names default to runtime defaults during Validate.
+apiVersion: parti.io/v1
+controlPlane:
+  workerIdTtl: 75s
+  electionTimeout: 10s
+  heartbeatTtl: 15s
