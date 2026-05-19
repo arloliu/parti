@@ -1,5 +1,5 @@
 simulation:
-  duration: 30s
+  duration: 90s
   mode: all-in-one
 
 nats:
@@ -24,9 +24,17 @@ chaos:
   enabled: true
   interval: "5s-10s"
   events:
+    # Both the random-target and leader-target variants fire across the
+    # 90s window; with the 5-10s interval this yields ~10 events, so
+    # each variant has high probability of firing at least once.
     - network_disconnect
+    - network_disconnect_leader
 
 coordinator:
+  # Explicit gap_aging (overrides 45s default) — chaos may briefly
+  # disconnect the leader, so give the cluster more headroom to recover
+  # before escalating holes to gaps.
+  gap_aging: 60s
   slo:
     enable_catch_up: true
     catch_up_deadline: 30s

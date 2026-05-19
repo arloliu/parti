@@ -64,3 +64,153 @@ jobs:
             failure_report.json
             tmp/simulation.log
             tmp/simulation-attempt*.log
+
+  network-disconnect-simulation:
+    runs-on: ubuntu-latest
+    # 3 attempts × (90s sim + 15s cooldown + ~1m setup) ≈ 8m worst case; 12m gives headroom.
+    timeout-minutes: 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Build Simulation
+        run: go build -o tmp/simulation ./test/simulation/cmd/simulation
+      - name: Run Network-Disconnect Simulation
+        # Focused 90s config exercising both random and leader-targeted
+        # network-disconnect chaos events. Same 3-retry pattern as the
+        # comprehensive job to absorb timing flakes.
+        run: |
+          set +e
+          max_attempts=3
+          for attempt in $(seq 1 $max_attempts); do
+            echo "::group::Network-disconnect attempt $attempt/$max_attempts"
+            ./tmp/simulation \
+              --config test/simulation/configs/chaos_network_disconnect.yaml \
+              --duration 90s \
+              --cooldown 15s \
+              --stop-on-failure=false \
+              2>&1 | tee "tmp/network-attempt${attempt}.log"
+            rc=${PIPESTATUS[0]}
+            echo "::endgroup::"
+            if [ $rc -eq 0 ]; then
+              echo "Attempt $attempt succeeded"
+              cp "tmp/network-attempt${attempt}.log" tmp/network.log
+              exit 0
+            fi
+            echo "Attempt $attempt failed (exit $rc)"
+          done
+          cp "tmp/network-attempt${max_attempts}.log" tmp/network.log
+          exit 1
+      - name: Upload Failure Report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: network-disconnect-failure-report
+          path: |
+            failure_report.json
+            tmp/network.log
+            tmp/network-attempt*.log
+
+  roundrobin-simulation:
+    runs-on: ubuntu-latest
+    # 3 attempts × (90s sim + 20s cooldown + ~1m setup) ≈ 9m worst case; 12m gives headroom.
+    timeout-minutes: 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Build Simulation
+        run: go build -o tmp/simulation ./test/simulation/cmd/simulation
+      - name: Run RoundRobin Chaos Simulation
+        # 90s RoundRobin assignment-strategy run under the comprehensive
+        # chaos workload — surfaces RoundRobin-specific bugs that the
+        # WeightedConsistentHash-only main job would miss.
+        run: |
+          set +e
+          max_attempts=3
+          for attempt in $(seq 1 $max_attempts); do
+            echo "::group::RoundRobin attempt $attempt/$max_attempts"
+            ./tmp/simulation \
+              --config test/simulation/configs/chaos_roundrobin.yaml \
+              --duration 90s \
+              --cooldown 20s \
+              --stop-on-failure=false \
+              2>&1 | tee "tmp/roundrobin-attempt${attempt}.log"
+            rc=${PIPESTATUS[0]}
+            echo "::endgroup::"
+            if [ $rc -eq 0 ]; then
+              echo "Attempt $attempt succeeded"
+              cp "tmp/roundrobin-attempt${attempt}.log" tmp/roundrobin.log
+              exit 0
+            fi
+            echo "Attempt $attempt failed (exit $rc)"
+          done
+          cp "tmp/roundrobin-attempt${max_attempts}.log" tmp/roundrobin.log
+          exit 1
+      - name: Upload Failure Report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: roundrobin-failure-report
+          path: |
+            failure_report.json
+            tmp/roundrobin.log
+            tmp/roundrobin-attempt*.log
+
+  gate-on-simulation:
+    runs-on: ubuntu-latest
+    # 3 attempts × (5m sim + 30s cooldown + ~1m setup) ≈ 22m worst case; 25m gives headroom.
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Build Simulation
+        run: go build -o tmp/simulation ./test/simulation/cmd/simulation
+      - name: Run Gate-On Chaos Simulation
+        # 5m run of chaos_gate.yaml — exercises enforce_exclusive_consumption
+        # end-to-end under chaos. Validates the refined cross-worker
+        # classifier (current-owner discriminator); zero ownership_violations,
+        # concurrent_owners, inconclusive, and post-chaos unobserved
+        # counters are the merge bar. See chaos_gate.yaml header for the
+        # known heartbeat-watcher blind spot that is intentionally
+        # out of scope for this job.
+        run: |
+          set +e
+          max_attempts=3
+          for attempt in $(seq 1 $max_attempts); do
+            echo "::group::Gate-on attempt $attempt/$max_attempts"
+            ./tmp/simulation \
+              --config test/simulation/configs/chaos_gate.yaml \
+              --cooldown 30s \
+              --stop-on-failure=false \
+              2>&1 | tee "tmp/gate-on-attempt${attempt}.log"
+            rc=${PIPESTATUS[0]}
+            echo "::endgroup::"
+            if [ $rc -eq 0 ]; then
+              echo "Attempt $attempt succeeded"
+              cp "tmp/gate-on-attempt${attempt}.log" tmp/gate-on.log
+              exit 0
+            fi
+            echo "Attempt $attempt failed (exit $rc)"
+          done
+          cp "tmp/gate-on-attempt${max_attempts}.log" tmp/gate-on.log
+          exit 1
+      - name: Upload Failure Report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-on-failure-report
+          path: |
+            failure_report.json
+            tmp/gate-on.log
+            tmp/gate-on-attempt*.log

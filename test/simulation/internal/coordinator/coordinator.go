@@ -8,7 +8,9 @@ import (
 	"log"
 	"maps"
 	"os"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/arloliu/parti/v2/test/simulation/internal/metrics"
@@ -34,6 +36,24 @@ type Coordinator struct {
 	prevPartitionOwners map[int]string // partitionID -> workerID for previous snapshot
 	activeOwners        map[int]string // partitionID -> workerID based on actual processing reports
 	ownersMu            sync.RWMutex   // guards activeOwners
+
+	// ownership-violation evidence: bounded slice of cross-worker same-seq
+	// observations. Surfaced verbatim in FailureReport.OwnershipViolations.
+	// Bounded to ownershipViolationsCap entries to keep failure reports
+	// from ballooning under chaos cascades.
+	//
+	// concurrentOwnerEvents indexes the subset of ownershipViolations
+	// where the owner snapshot reported >1 current owner (
+	// split-brain signal); same backing data, separately enumerable.
+	//
+	// inconclusiveOwnerEvents records cross-worker duplicates where the
+	// owner snapshot was initialized but reported no current owner —
+	// classifications that are non-fatal but still block Outcome A.
+	ownershipViolationsMu   sync.Mutex
+	ownershipViolations     []MessageOwnershipViolationError
+	concurrentOwnerEvents   []MessageOwnershipViolationError
+	inconclusiveOwnerEvents []ClassificationEvidence
+	ownershipViolationsCap  int
 
 	// start-latency tracking: time from Worker.Start() to first OnAssignmentChanged with
 	// a non-empty partition set. Surfaces regressions of the leader-takeover hang fix
@@ -93,6 +113,34 @@ type Coordinator struct {
 	stopOnFailure     bool
 	failureReportPath string
 	failureOnce       sync.Once
+	stopOnce          sync.Once // guards close(stopCh) — both Start(ctx) and TriggerFailure can race to close on shutdown.
+
+	// ownerSnap is an immutable per-partition owner snapshot published
+	// by processAssignments. The receipt path reads it via
+	// CurrentOwnersOf without locks. See docs/plans/sim-oracle-phase5/00-plan.md §1.
+	ownerSnap atomic.Pointer[ownerSnapshot]
+
+	// chaosOnce ensures firstChaosEventAt is captured exactly once when
+	// MarkChaosStarted is called. The chaosStarted flag is on the
+	// tracker (atomic.Bool) so the classifier can read it lock-free.
+	//
+	// firstChaosEventAt is published via atomic.Pointer because it is
+	// read from goroutines other than the chaos-dispatch one (failure
+	// report writer, external observers via FirstChaosEventAt).
+	chaosOnce         sync.Once
+	firstChaosEventAt atomic.Pointer[time.Time]
+}
+
+// ownerSnapshot is an immutable view of partition→workers at a moment
+// in time. Built and atomically published by processAssignments;
+// consumed by the tracker via the owner-lookup callback. Slices in
+// perPartition are sorted (deterministic test output) and MUST NOT be
+// mutated after the snapshot pointer is stored — subsequent updates
+// build and publish a new snapshot.
+type ownerSnapshot struct {
+	perPartition map[int][]string
+	initialized  bool
+	asOf         time.Time
 }
 
 // workerRecoveryContext tracks a single worker's backlog healing progress.
@@ -152,9 +200,18 @@ type AssignmentReport struct {
 // StartLatencyReport reports the latency from Worker.Start() to the first
 // OnAssignmentChanged hook firing with a non-empty partition set. It is
 // emitted exactly once per worker instance.
+//
+// IsInitialCohort is set by the caller at worker construction: true for
+// workers spawned during simulation bootstrap, false for workers created
+// via scale_up or restart. The coordinator uses this flag (not the
+// receive-time view of baselineLocked) to decide which budget applies,
+// closing a race where a chaos-delayed initial-cohort worker's report
+// arrives after baselineLocked has already flipped and is misbucketed
+// as takeover.
 type StartLatencyReport struct {
-	WorkerID string
-	Latency  time.Duration
+	WorkerID        string
+	Latency         time.Duration
+	IsInitialCohort bool
 }
 
 // NewCoordinator creates a new coordinator.
@@ -194,12 +251,86 @@ func NewCoordinator(totalPartitions int, metricsCollector *metrics.Collector, du
 		workerRecovery:          make(map[string]*workerRecoveryContext),
 		stopOnFailure:           stopOnFailure,
 		failureReportPath:       failureReportPath,
+		ownershipViolationsCap:  1000,
 	}
 	c.dup = NewDupTracer(dupCfg)
 	// Suppress verbose out-of-order logs by default; metrics capture disorder depth.
 	c.tracker.SetLogOutOfOrder(false)
+	// Initialize the owner-snapshot to a non-nil zero so CurrentOwnersOf
+	// never sees a nil pointer. processAssignments will publish updated
+	// snapshots as AssignmentReports arrive.
+	c.ownerSnap.Store(&ownerSnapshot{perPartition: map[int][]string{}, initialized: false})
+	// Install the discriminator on the tracker.
+	c.tracker.SetOwnerLookup(c.CurrentOwnersOf)
 
 	return c
+}
+
+// CurrentOwnersOf returns the workerIDs currently reporting partitionID
+// in their most-recent OnAssignmentChanged snapshot, plus a flag
+// indicating whether the snapshot has been initialized.
+//
+// snapshotInitialized is false during cold start, before any
+// AssignmentReport has been processed.
+//
+// The returned slice is part of an immutable snapshot. Callers MUST
+// NOT mutate it. Concurrency-safe: backed by atomic.Pointer load.
+func (c *Coordinator) CurrentOwnersOf(partitionID int) (owners []string, snapshotInitialized bool) {
+	snap := c.ownerSnap.Load()
+	if snap == nil {
+		return nil, false
+	}
+	return snap.perPartition[partitionID], snap.initialized
+}
+
+// MarkChaosStarted notifies the coordinator that the first ChaosEvent
+// has fired. Must be called by the chaos dispatch loop BEFORE invoking
+// the chaos handler for the first event. Idempotent — subsequent calls
+// are no-ops. Safe to call concurrently.
+func (c *Coordinator) MarkChaosStarted() {
+	c.chaosOnce.Do(func() {
+		now := time.Now()
+		c.firstChaosEventAt.Store(&now)
+	})
+	c.tracker.MarkChaosStarted()
+}
+
+// FirstChaosEventAt returns the timestamp captured when MarkChaosStarted
+// was first invoked. Zero value if chaos has not yet started.
+func (c *Coordinator) FirstChaosEventAt() time.Time {
+	t := c.firstChaosEventAt.Load()
+	if t == nil {
+		return time.Time{}
+	}
+	return *t
+}
+
+// rebuildOwnerSnapshotLocked rebuilds and publishes an immutable owner
+// snapshot from c.workerAssignments. Caller must be on the
+// processAssignments goroutine (sole writer of workerAssignments).
+//
+// Always sets initialized=true: this function is only invoked from
+// inside processAssignments after consuming an AssignmentReport or
+// stopped-worker event, so reaching this point means at least one
+// report has been processed. The empty-snapshot case (no workers
+// currently own any partition) is a known state, not unknown — the
+// spec's snapshotInitialized==false regime applies strictly to the
+// cold-start window before any report has been ingested.
+func (c *Coordinator) rebuildOwnerSnapshotLocked() {
+	perPartition := make(map[int][]string)
+	for wid, pset := range c.workerAssignments {
+		for pid := range pset {
+			perPartition[pid] = append(perPartition[pid], wid)
+		}
+	}
+	for pid := range perPartition {
+		slices.Sort(perPartition[pid])
+	}
+	c.ownerSnap.Store(&ownerSnapshot{
+		perPartition: perPartition,
+		initialized:  true,
+		asOf:         time.Now(),
+	})
 }
 
 // SetExpectedWorkers sets an optional expected worker count hint for baseline observations.
@@ -316,7 +447,18 @@ func (c *Coordinator) Start(ctx context.Context) {
 
 	<-ctx.Done()
 	log.Println("[Coordinator] Stopping")
-	close(c.stopCh)
+	c.closeStopCh()
+}
+
+// closeStopCh safely closes c.stopCh exactly once. Both the normal
+// Start(ctx) shutdown path and TriggerFailure can fire under shutdown
+// (the shutdown-invariant TriggerFailure runs alongside ctx.Done),
+// and a Go channel double-close panics. The sync.Once guard makes the
+// close idempotent across all paths.
+func (c *Coordinator) closeStopCh() {
+	c.stopOnce.Do(func() {
+		close(c.stopCh)
+	})
 }
 
 // GetStats returns current statistics.
@@ -856,23 +998,118 @@ func (c *Coordinator) processSentMessages(ctx context.Context) {
 	}
 }
 
+// ClassificationEvidence is a bounded record of a cross-worker
+// known-duplicate classification . Used for InconclusiveOwner-
+// Events (and would extend to other downgrade classes if added later).
+// ConcurrentOwners and stale-receipt records are still captured via the
+// extended MessageOwnershipViolationError; this struct exists for the
+// non-violation classifications that still need post-hoc inspection.
+type ClassificationEvidence struct {
+	PartitionID     int       `json:"partition_id"`
+	Sequence        int64     `json:"sequence"`
+	OriginalWorker  string    `json:"original_worker"`
+	ReceivingWorker string    `json:"receiving_worker"`
+	Reason          string    `json:"reason"`
+	ObservedAt      time.Time `json:"observed_at"`
+}
+
 // FailureReport represents the structured failure output.
 type FailureReport struct {
-	Timestamp    time.Time         `json:"timestamp"`
-	Reason       string            `json:"reason"`
-	Stats        TrackerStats      `json:"stats"`
-	GapErrors    []string          `json:"gap_errors,omitempty"`
-	DetailedGaps []MessageGapError `json:"detailed_gaps,omitempty"`
-	ActiveGaps   int               `json:"active_gaps"`
-	PendingHoles int64             `json:"pending_holes"`
+	Timestamp                         time.Time                        `json:"timestamp"`
+	Reason                            string                           `json:"reason"`
+	Stats                             TrackerStats                     `json:"stats"`
+	GapErrors                         []string                         `json:"gap_errors,omitempty"`
+	DetailedGaps                      []MessageGapError                `json:"detailed_gaps,omitempty"`
+	ActiveGaps                        int                              `json:"active_gaps"`
+	PendingHoles                      int64                            `json:"pending_holes"`
+	OwnershipViolations               []MessageOwnershipViolationError `json:"ownership_violations,omitempty"`
+	ConcurrentOwnerEvents             []MessageOwnershipViolationError `json:"concurrent_owner_events,omitempty"`
+	InconclusiveOwnerEvents           []ClassificationEvidence         `json:"inconclusive_owner_events,omitempty"`
+	OwnershipUnobservedPreChaosCount  int64                            `json:"ownership_unobserved_pre_chaos_count"`
+	OwnershipUnobservedPostChaosCount int64                            `json:"ownership_unobserved_post_chaos_count"`
+	FirstChaosEventAt                 time.Time                        `json:"first_chaos_event_at,omitzero"`
+}
+
+// appendOwnershipViolation appends a violation to the bounded list. Caller
+// must not hold any other coordinator locks (this takes its own).
+// ConcurrentOwner-flagged violations are also indexed separately for
+// failure-report visibility — same backing list, just an additional
+// pointer-equivalent slice.
+func (c *Coordinator) appendOwnershipViolation(ove MessageOwnershipViolationError) {
+	c.ownershipViolationsMu.Lock()
+	defer c.ownershipViolationsMu.Unlock()
+	if len(c.ownershipViolations) >= c.ownershipViolationsCap {
+		return
+	}
+	c.ownershipViolations = append(c.ownershipViolations, ove)
+	if ove.ConcurrentOwners {
+		if len(c.concurrentOwnerEvents) < c.ownershipViolationsCap {
+			c.concurrentOwnerEvents = append(c.concurrentOwnerEvents, ove)
+		}
+	}
+}
+
+// appendInconclusiveOwnerEvent appends an inconclusive-owner
+// classification record to its bounded list. Capped at
+// ownershipViolationsCap entries to keep failure reports compact.
+func (c *Coordinator) appendInconclusiveOwnerEvent(ev ClassificationEvidence) {
+	c.ownershipViolationsMu.Lock()
+	defer c.ownershipViolationsMu.Unlock()
+	if len(c.inconclusiveOwnerEvents) >= c.ownershipViolationsCap {
+		return
+	}
+	c.inconclusiveOwnerEvents = append(c.inconclusiveOwnerEvents, ev)
+}
+
+// snapshotOwnershipViolations returns a copy of the current violation list.
+func (c *Coordinator) snapshotOwnershipViolations() []MessageOwnershipViolationError {
+	c.ownershipViolationsMu.Lock()
+	defer c.ownershipViolationsMu.Unlock()
+	if len(c.ownershipViolations) == 0 {
+		return nil
+	}
+	out := make([]MessageOwnershipViolationError, len(c.ownershipViolations))
+	copy(out, c.ownershipViolations)
+
+	return out
+}
+
+// snapshotConcurrentOwnerEvents returns a copy of the concurrent-owner
+// subset of violations.
+func (c *Coordinator) snapshotConcurrentOwnerEvents() []MessageOwnershipViolationError {
+	c.ownershipViolationsMu.Lock()
+	defer c.ownershipViolationsMu.Unlock()
+	if len(c.concurrentOwnerEvents) == 0 {
+		return nil
+	}
+	out := make([]MessageOwnershipViolationError, len(c.concurrentOwnerEvents))
+	copy(out, c.concurrentOwnerEvents)
+
+	return out
+}
+
+// snapshotInconclusiveOwnerEvents returns a copy of the inconclusive-owner
+// classifications.
+func (c *Coordinator) snapshotInconclusiveOwnerEvents() []ClassificationEvidence {
+	c.ownershipViolationsMu.Lock()
+	defer c.ownershipViolationsMu.Unlock()
+	if len(c.inconclusiveOwnerEvents) == 0 {
+		return nil
+	}
+	out := make([]ClassificationEvidence, len(c.inconclusiveOwnerEvents))
+	copy(out, c.inconclusiveOwnerEvents)
+
+	return out
 }
 
 // TriggerFailure triggers a failure report and stops the simulation.
+// Idempotent via failureOnce. The stopCh close goes through closeStopCh
+// (sync.Once) so it cannot panic on a race with Start(ctx)'s shutdown.
 func (c *Coordinator) TriggerFailure(reason string, err error) {
 	c.failureOnce.Do(func() {
 		log.Printf("[Coordinator] CRITICAL FAILURE: %s (%v). Stopping simulation.", reason, err)
 		c.writeFailureReport(reason, err)
-		close(c.stopCh) // Signal global stop
+		c.closeStopCh() // Signal global stop
 	})
 }
 
@@ -886,12 +1123,19 @@ func (c *Coordinator) writeFailureReport(reason string, err error) {
 		path = "failure_report.json"
 	}
 
+	stats := c.tracker.GetStats()
 	report := FailureReport{
-		Timestamp:    time.Now(),
-		Reason:       fmt.Sprintf("%s: %v", reason, err),
-		Stats:        c.tracker.GetStats(),
-		ActiveGaps:   c.tracker.GetStats().GapCount,
-		PendingHoles: c.tracker.GetPendingHoles(),
+		Timestamp:                         time.Now(),
+		Reason:                            fmt.Sprintf("%s: %v", reason, err),
+		Stats:                             stats,
+		ActiveGaps:                        stats.GapCount,
+		PendingHoles:                      c.tracker.GetPendingHoles(),
+		OwnershipViolations:               c.snapshotOwnershipViolations(),
+		ConcurrentOwnerEvents:             c.snapshotConcurrentOwnerEvents(),
+		InconclusiveOwnerEvents:           c.snapshotInconclusiveOwnerEvents(),
+		OwnershipUnobservedPreChaosCount:  stats.OwnershipUnobservedPreChaosCount,
+		OwnershipUnobservedPostChaosCount: stats.OwnershipUnobservedPostChaosCount,
+		FirstChaosEventAt:                 c.FirstChaosEventAt(),
 	}
 
 	// Include specific error details if available
@@ -925,7 +1169,7 @@ func (c *Coordinator) processReceivedMessages(ctx context.Context) {
 			return
 		case msg := <-c.receivedCh:
 			// Record received and handle potential catch-up lifecycle transitions.
-			healed, err := c.tracker.RecordReceived(msg.PartitionID, msg.PartitionSequence)
+			healed, err := c.tracker.RecordReceivedFromWorker(msg.PartitionID, msg.PartitionSequence, msg.WorkerID)
 			if c.catchUpEnabled {
 				c.processCatchUpActivity(msg.WorkerID)
 			}
@@ -933,38 +1177,8 @@ func (c *Coordinator) processReceivedMessages(ctx context.Context) {
 			c.ownersMu.Lock()
 			c.activeOwners[msg.PartitionID] = msg.WorkerID
 			c.ownersMu.Unlock()
-			if err != nil {
-				// Include worker ID for debugging attribution
-				var extra string
-				var ge *MessageGapError
-				if errors.As(err, &ge) {
-					extra = fmt.Sprintf(" worker=%s last_sent=%d", msg.WorkerID, ge.LastSent)
-				}
-				_ = extra
-				// log.Printf("[Coordinator] ERROR: %v%s", err, extra)
-
-				// Record gap/duplicate metrics using proper error type checking
-				if c.metricsCollector != nil {
-					if errors.Is(err, ErrMessageGap) {
-						c.metricsCollector.RecordGap()
-					}
-
-					if errors.Is(err, ErrMessageDuplicate) {
-						c.metricsCollector.RecordDuplicate()
-						c.metricsCollector.RecordDuplicatePartition(msg.PartitionID)
-					}
-				}
-
-				// Trace duplicates into sliding window for analysis
-				if errors.Is(err, ErrMessageDuplicate) {
-					c.dup.RecordDuplicate(msg.PartitionID, msg.WorkerID, msg.PartitionSequence, time.Now())
-				}
-
-				// Trigger stop-on-failure if enabled and it's a gap
-				if c.stopOnFailure && errors.Is(err, ErrMessageGap) {
-					c.internalTriggerFailure("Gap detected", err)
-					return
-				}
+			if err != nil && c.dispatchReceiveError(msg, err) {
+				return
 			}
 
 			// Record metrics
@@ -984,6 +1198,89 @@ func (c *Coordinator) processReceivedMessages(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// dispatchReceiveError routes a tracker error to its appropriate handler
+// (metric, log, failure-report append, stop-on-failure trigger). Returns
+// true if the caller should stop the receive loop (e.g., stop-on-failure
+// triggered).
+func (c *Coordinator) dispatchReceiveError(msg ReceivedMessage, err error) bool {
+	// Redelivery is informational — record metric and continue. Must
+	// dispatch BEFORE the generic error branches so it doesn't fall
+	// through to DupTracer or stop-on-failure.
+	if errors.Is(err, ErrMessageRedelivery) {
+		if c.metricsCollector != nil {
+			c.metricsCollector.RecordRedelivery()
+		}
+
+		return false
+	}
+	if errors.Is(err, ErrMessageOwnershipViolation) {
+		return c.handleOwnershipViolation(err)
+	}
+	//  inconclusive/unobserved owner classifications are
+	// non-fatal but still recorded so Outcome A can be audited.
+	if errors.Is(err, ErrMessageOwnershipInconclusive) {
+		var ie *MessageOwnershipInconclusiveError
+		if errors.As(err, &ie) {
+			c.appendInconclusiveOwnerEvent(ClassificationEvidence{
+				PartitionID:     ie.PartitionID,
+				Sequence:        ie.Sequence,
+				OriginalWorker:  ie.OriginalWorker,
+				ReceivingWorker: ie.CurrentWorker,
+				Reason:          "inconclusive_owner_snapshot_empty",
+				ObservedAt:      time.Now(),
+			})
+		}
+
+		return false
+	}
+	if errors.Is(err, ErrMessageOwnershipUnobserved) {
+		// Count tracking happens in the tracker (pre/post chaos buckets);
+		// no failure-report record per occurrence — only aggregate counts.
+		return false
+	}
+
+	// Generic gap/duplicate path.
+	if c.metricsCollector != nil {
+		if errors.Is(err, ErrMessageGap) {
+			c.metricsCollector.RecordGap()
+		}
+		if errors.Is(err, ErrMessageDuplicate) {
+			c.metricsCollector.RecordDuplicate()
+			c.metricsCollector.RecordDuplicatePartition(msg.PartitionID)
+		}
+	}
+	if errors.Is(err, ErrMessageDuplicate) {
+		c.dup.RecordDuplicate(msg.PartitionID, msg.WorkerID, msg.PartitionSequence, time.Now())
+	}
+	if c.stopOnFailure && errors.Is(err, ErrMessageGap) {
+		c.internalTriggerFailure("Gap detected", err)
+
+		return true
+	}
+
+	return false
+}
+
+func (c *Coordinator) handleOwnershipViolation(err error) bool {
+	var ove *MessageOwnershipViolationError
+	if !errors.As(err, &ove) {
+		return false
+	}
+	if c.metricsCollector != nil {
+		c.metricsCollector.RecordOwnershipViolation()
+	}
+	c.appendOwnershipViolation(*ove)
+	log.Printf("[Coordinator] OWNERSHIP VIOLATION: partition=%d seq=%d original=%s current=%s",
+		ove.PartitionID, ove.Sequence, ove.OriginalWorker, ove.CurrentWorker)
+	if c.stopOnFailure {
+		c.internalTriggerFailure("Ownership violation detected", err)
+
+		return true
+	}
+
+	return false
 }
 
 func (c *Coordinator) runMetricsTicker(ctx context.Context) {
@@ -1062,6 +1359,7 @@ func (c *Coordinator) processAssignments(ctx context.Context) { //nolint:gocyclo
 				continue
 			}
 			delete(c.workerAssignments, wid)
+			c.rebuildOwnerSnapshotLocked()
 			if c.baselineLocked && c.totalPartitions > 0 {
 				fresh := make(map[int]string, c.totalPartitions)
 				for id, wset := range c.workerAssignments {
@@ -1074,15 +1372,18 @@ func (c *Coordinator) processAssignments(ctx context.Context) { //nolint:gocyclo
 				c.prevPartitionOwners = fresh
 			}
 		case sl := <-c.startLatenciesCh:
-			// Classify using this goroutine's live view of baselineLocked so the
-			// distinction between "initial fleet coming up" and "late joiner /
-			// takeover replacement" is decided at the moment the worker's first
-			// assignment landed, without cross-goroutine locking.
+			// Classify by the caller-provided cohort flag. Earlier versions
+			// used baselineLocked at receive time, but that races: when the
+			// worker's assignment report and startLatency report sit in
+			// separate channels, the select can drain the assignment first,
+			// flip baselineLocked, then misbucket the trailing startLatency
+			// of an initial-cohort worker as takeover. The flag is stamped
+			// at worker construction, so the decision is timing-invariant.
 			c.startLatencyMu.Lock()
-			if c.baselineLocked {
-				c.takeoverStartLatencies[sl.WorkerID] = sl.Latency
-			} else {
+			if sl.IsInitialCohort {
 				c.initialStartLatencies[sl.WorkerID] = sl.Latency
+			} else {
+				c.takeoverStartLatencies[sl.WorkerID] = sl.Latency
 			}
 			c.startLatencyMu.Unlock()
 		case ar := <-c.assignmentsCh:
@@ -1103,6 +1404,7 @@ func (c *Coordinator) processAssignments(ctx context.Context) { //nolint:gocyclo
 				}
 			}
 			c.workerAssignments[ar.WorkerID] = set
+			c.rebuildOwnerSnapshotLocked()
 
 			// Build global set.
 			global := make(map[int]struct{})

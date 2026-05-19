@@ -11,28 +11,28 @@ import (
 func TestMessageTrackerHoleHealing(t *testing.T) {
 	tracker := NewMessageTracker()
 
-	// Establish initial contiguous sequence 0
-	healed, err := tracker.RecordReceived(0, 0)
+	// Establish initial contiguous sequence 1 (producer sequences start at 1)
+	healed, err := tracker.RecordReceived(0, 1)
 	if err != nil || len(healed) != 0 {
 		t.Fatalf("initial RecordReceived unexpected err=%v healed=%v", err, healed)
 	}
 
-	// Jump ahead to sequence 2 creating hole for sequence 1
-	healed, err = tracker.RecordReceived(0, 2)
+	// Jump ahead to sequence 3 creating hole for sequence 2
+	healed, err = tracker.RecordReceived(0, 3)
 	if err != nil {
-		t.Fatalf("unexpected error recording out-of-order sequence 2: %v", err)
+		t.Fatalf("unexpected error recording out-of-order sequence 3: %v", err)
 	}
 	if len(healed) != 0 {
 		t.Fatalf("expected no healed durations yet after out-of-order, got %d", len(healed))
 	}
 
-	// Small delay to produce measurable lifetime for hole 1
+	// Small delay to produce measurable lifetime for hole 2
 	time.Sleep(10 * time.Millisecond)
 
-	// Now receive missing sequence 1 healing hole
-	healed, err = tracker.RecordReceived(0, 1)
+	// Now receive missing sequence 2 healing hole
+	healed, err = tracker.RecordReceived(0, 2)
 	if err != nil {
-		t.Fatalf("unexpected error recording missing sequence 1: %v", err)
+		t.Fatalf("unexpected error recording missing sequence 2: %v", err)
 	}
 	if len(healed) != 1 {
 		t.Fatalf("expected 1 healed duration, got %d", len(healed))
@@ -50,29 +50,29 @@ func TestMessageTrackerHoleHealing(t *testing.T) {
 func TestMessageTrackerPhysicalAndGapHealing(t *testing.T) {
 	tracker := NewMessageTracker()
 
-	// Receive initial sequence 0
-	_, err := tracker.RecordReceived(1, 0)
+	// Receive initial sequence 1 (producer sequences start at 1)
+	_, err := tracker.RecordReceived(1, 1)
 	if err != nil {
 		t.Fatalf("unexpected error receiving initial seq: %v", err)
 	}
 
-	// Jump ahead to 3 creating holes 1,2
-	_, err = tracker.RecordReceived(1, 3)
+	// Jump ahead to 4 creating holes 2,3
+	_, err = tracker.RecordReceived(1, 4)
 	if err != nil {
-		t.Fatalf("unexpected error receiving out-of-order seq 3: %v", err)
+		t.Fatalf("unexpected error receiving out-of-order seq 4: %v", err)
 	}
 
-	// At this point physicalReceived should be 2 (seq 0 and 3)
+	// At this point physicalReceived should be 2 (seq 1 and 4)
 	if pr := tracker.GetPhysicalReceivedCount(); pr != 2 {
 		t.Fatalf("expected physical received = 2, got %d", pr)
 	}
 
 	// Age out holes immediately by using cutoff=now
 	escalations := tracker.AgeOut(time.Now())
-	if len(escalations) != 2 { // holes 1 and 2 promoted
+	if len(escalations) != 2 { // holes 2 and 3 promoted
 		t.Fatalf("expected 2 escalations (gaps), got %d", len(escalations))
 	}
-	// Contiguous window advanced virtually to 2, but physical count unchanged
+	// Contiguous window advanced virtually past the holes; physical count unchanged
 	if pr := tracker.GetPhysicalReceivedCount(); pr != 2 {
 		t.Fatalf("physical received should remain 2 after virtual advancement, got %d", pr)
 	}
@@ -85,28 +85,28 @@ func TestMessageTrackerPhysicalAndGapHealing(t *testing.T) {
 		t.Fatalf("gaps healed should be 0, got %d", gh)
 	}
 
-	// Late arrival of sequence 1 (previously escalated gap)
-	_, err = tracker.RecordReceived(1, 1)
+	// Late arrival of sequence 2 (previously escalated gap)
+	_, err = tracker.RecordReceived(1, 2)
 	if err != nil { // treat gap heal as non-error
-		t.Fatalf("unexpected error on gap-healed arrival seq 1: %v", err)
+		t.Fatalf("unexpected error on gap-healed arrival seq 2: %v", err)
 	}
 	if gh := tracker.GetGapsHealedCount(); gh != 1 {
 		t.Fatalf("expected gaps healed count = 1, got %d", gh)
 	}
 	if pr := tracker.GetPhysicalReceivedCount(); pr != 3 {
-		t.Fatalf("expected physical received = 3 after healing seq 1, got %d", pr)
+		t.Fatalf("expected physical received = 3 after healing seq 2, got %d", pr)
 	}
 
-	// Late arrival of sequence 2
-	_, err = tracker.RecordReceived(1, 2)
+	// Late arrival of sequence 3
+	_, err = tracker.RecordReceived(1, 3)
 	if err != nil {
-		t.Fatalf("unexpected error on gap-healed arrival seq 2: %v", err)
+		t.Fatalf("unexpected error on gap-healed arrival seq 3: %v", err)
 	}
 	if gh := tracker.GetGapsHealedCount(); gh != 2 {
 		t.Fatalf("expected gaps healed count = 2, got %d", gh)
 	}
 	if pr := tracker.GetPhysicalReceivedCount(); pr != 4 {
-		t.Fatalf("expected physical received = 4 after healing seq 2, got %d", pr)
+		t.Fatalf("expected physical received = 4 after healing seq 3, got %d", pr)
 	}
 
 	// Ensure holesHealed remains 0 (we did not physically heal holes before escalation)
@@ -122,15 +122,15 @@ func TestMessageTrackerDuplicateDoesNotIncrementPhysical(t *testing.T) {
 	tracker := NewMessageTracker()
 
 	// First receipt increments physical count
-	if _, err := tracker.RecordReceived(2, 0); err != nil {
+	if _, err := tracker.RecordReceived(2, 1); err != nil {
 		t.Fatalf("unexpected error on first receipt: %v", err)
 	}
 	if pr := tracker.GetPhysicalReceivedCount(); pr != 1 {
 		t.Fatalf("expected physical received = 1 after first receipt, got %d", pr)
 	}
 
-	// Duplicate of seq 0 should return duplicate error and not change physical count
-	if _, err := tracker.RecordReceived(2, 0); !errors.Is(err, ErrMessageDuplicate) {
+	// Duplicate of seq 1 should return duplicate error and not change physical count
+	if _, err := tracker.RecordReceived(2, 1); !errors.Is(err, ErrMessageDuplicate) {
 		t.Fatalf("expected ErrMessageDuplicate, got %v", err)
 	}
 	if pr := tracker.GetPhysicalReceivedCount(); pr != 1 {
@@ -147,25 +147,26 @@ func TestSuppressionMarksHeadOnlyAndIdempotent(t *testing.T) {
 	t.Parallel()
 	tracker := NewMessageTracker()
 
-	// Build missing set {1,3} by receiving 0,2,4 on partition 3
-	if _, err := tracker.RecordReceived(3, 0); err != nil {
-		t.Fatalf("unexpected error on seq 0: %v", err)
+	// Build a partition with three consecutive head-of-line holes plus one
+	// gap-separated hole, by receiving seq=5 alone then seq=7. This yields
+	// missing = {1,2,3,4,6}; head-of-line consecutive holes = {1,2,3,4}.
+	if _, err := tracker.RecordReceived(3, 5); err != nil {
+		t.Fatalf("unexpected error on seq 5: %v", err)
 	}
-	if _, err := tracker.RecordReceived(3, 2); err != nil {
-		t.Fatalf("unexpected error on seq 2: %v", err)
-	}
-	if _, err := tracker.RecordReceived(3, 4); err != nil {
-		t.Fatalf("unexpected error on seq 4: %v", err)
+	if _, err := tracker.RecordReceived(3, 7); err != nil {
+		t.Fatalf("unexpected error on seq 7: %v", err)
 	}
 
 	// Age the holes a bit
 	time.Sleep(5 * time.Millisecond)
 	cutoff := time.Now()
 
-	// Head-of-line consecutive holes are {1,2,3}; all should be marked in one pass
+	// Only the four consecutive head holes (1..4) should be marked; seq 6 is
+	// gap-separated by the already-observed seq 5 and must be skipped — that
+	// is the "head only" invariant this test guards.
 	newly := tracker.MarkHeadOfLineAgedHolesSuppressed(cutoff)
-	if newly != 3 {
-		t.Fatalf("expected 3 newly suppressed head-of-line holes, got %d", newly)
+	if newly != 4 {
+		t.Fatalf("expected 4 newly suppressed head-of-line holes, got %d", newly)
 	}
 	// Idempotent on subsequent calls with same state
 	if again := tracker.MarkHeadOfLineAgedHolesSuppressed(cutoff); again != 0 {
@@ -184,12 +185,12 @@ func TestAgeOutSkipsNotYetAged(t *testing.T) {
 	t.Parallel()
 	tracker := NewMessageTracker()
 
-	// Create hole: receive 0, then jump to 2 (missing 1)
-	if _, err := tracker.RecordReceived(4, 0); err != nil {
-		t.Fatalf("unexpected error on seq 0: %v", err)
+	// Create hole: receive 1, then jump to 3 (missing 2)
+	if _, err := tracker.RecordReceived(4, 1); err != nil {
+		t.Fatalf("unexpected error on seq 1: %v", err)
 	}
-	if _, err := tracker.RecordReceived(4, 2); err != nil {
-		t.Fatalf("unexpected error on seq 2: %v", err)
+	if _, err := tracker.RecordReceived(4, 3); err != nil {
+		t.Fatalf("unexpected error on seq 3: %v", err)
 	}
 
 	// Cutoff far in the past: firstSeen will be after this cutoff, so not aged
@@ -197,9 +198,8 @@ func TestAgeOutSkipsNotYetAged(t *testing.T) {
 	if escalations := tracker.AgeOut(past); len(escalations) != 0 {
 		t.Fatalf("expected 0 escalations for not-yet-aged holes, got %d", len(escalations))
 	}
-	// lastReceived should remain at 0
 	if pr := tracker.GetPhysicalReceivedCount(); pr != 2 {
-		t.Fatalf("physical received should be 2 (seq 0 and 2), got %d", pr)
+		t.Fatalf("physical received should be 2 (seq 1 and 3), got %d", pr)
 	}
 
 	// Now with current cutoff, the hole should escalate
@@ -214,22 +214,22 @@ func TestGapHealThenDuplicate(t *testing.T) {
 	tracker := NewMessageTracker()
 
 	// Create two holes and escalate
-	if _, err := tracker.RecordReceived(5, 0); err != nil {
-		t.Fatalf("unexpected error on seq 0: %v", err)
+	if _, err := tracker.RecordReceived(5, 1); err != nil {
+		t.Fatalf("unexpected error on seq 1: %v", err)
 	}
-	if _, err := tracker.RecordReceived(5, 3); err != nil {
-		t.Fatalf("unexpected error on seq 3: %v", err)
+	if _, err := tracker.RecordReceived(5, 4); err != nil {
+		t.Fatalf("unexpected error on seq 4: %v", err)
 	}
 	if escalations := tracker.AgeOut(time.Now()); len(escalations) != 2 {
 		t.Fatalf("expected 2 escalations, got %d", len(escalations))
 	}
 
-	// Heal gap for seq 1
-	if _, err := tracker.RecordReceived(5, 1); err != nil {
-		t.Fatalf("unexpected error healing gap seq 1: %v", err)
+	// Heal gap for seq 2
+	if _, err := tracker.RecordReceived(5, 2); err != nil {
+		t.Fatalf("unexpected error healing gap seq 2: %v", err)
 	}
-	// Sending seq 1 again should be a duplicate
-	if _, err := tracker.RecordReceived(5, 1); !errors.Is(err, ErrMessageDuplicate) {
+	// Sending seq 2 again should be a duplicate
+	if _, err := tracker.RecordReceived(5, 2); !errors.Is(err, ErrMessageDuplicate) {
 		t.Fatalf("expected ErrMessageDuplicate after heal, got %v", err)
 	}
 }
@@ -239,12 +239,12 @@ func TestDisorderDepthAndPendingAges(t *testing.T) {
 	t.Parallel()
 	tracker := NewMessageTracker()
 
-	// Receive 0 then 4 -> holes {1,2,3}; depth = 4 - 0 = 4
-	if _, err := tracker.RecordReceived(6, 0); err != nil {
-		t.Fatalf("unexpected error on seq 0: %v", err)
+	// Receive 1 then 5 -> holes {2,3,4}; depth = highWatermark - lastReceived = 5 - 1 = 4
+	if _, err := tracker.RecordReceived(6, 1); err != nil {
+		t.Fatalf("unexpected error on seq 1: %v", err)
 	}
-	if _, err := tracker.RecordReceived(6, 4); err != nil {
-		t.Fatalf("unexpected error on seq 4: %v", err)
+	if _, err := tracker.RecordReceived(6, 5); err != nil {
+		t.Fatalf("unexpected error on seq 5: %v", err)
 	}
 	if depth := tracker.GetDisorderDepth(); depth != 4 {
 		t.Fatalf("expected disorder depth 4, got %d", depth)
@@ -261,12 +261,12 @@ func TestDisorderDepthAndPendingAges(t *testing.T) {
 		}
 	}
 
-	// Heal head-of-line hole 1 -> depth becomes 3; ages now for {2,3}
-	if _, err := tracker.RecordReceived(6, 1); err != nil {
-		t.Fatalf("unexpected error healing seq 1: %v", err)
+	// Heal head-of-line hole 2 -> depth becomes 3; ages now for {3,4}
+	if _, err := tracker.RecordReceived(6, 2); err != nil {
+		t.Fatalf("unexpected error healing seq 2: %v", err)
 	}
 	if depth := tracker.GetDisorderDepth(); depth != 3 {
-		t.Fatalf("expected disorder depth 3 after healing 1, got %d", depth)
+		t.Fatalf("expected disorder depth 3 after healing 2, got %d", depth)
 	}
 	ages = tracker.GetPendingHoleAges()
 	if len(ages) != 2 {
@@ -280,8 +280,8 @@ func TestMassiveGap(t *testing.T) {
 	tracker := NewMessageTracker()
 
 	// 1. Receive initial sequence
-	if _, err := tracker.RecordReceived(1, 0); err != nil {
-		t.Fatalf("unexpected error on seq 0: %v", err)
+	if _, err := tracker.RecordReceived(1, 1); err != nil {
+		t.Fatalf("unexpected error on seq 1: %v", err)
 	}
 
 	// 2. Receive sequence with massive gap (> 10000)

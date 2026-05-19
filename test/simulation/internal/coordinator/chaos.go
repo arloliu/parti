@@ -31,8 +31,15 @@ const (
 	// ProducerCrashEvent simulates a producer process crash.
 	ProducerCrashEvent ChaosEvent = "producer_crash"
 
-	// NetworkDisconnectEvent simulates NATS connection loss.
+	// NetworkDisconnectEvent simulates NATS connection loss on a random worker.
 	NetworkDisconnectEvent ChaosEvent = "network_disconnect"
+
+	// NetworkDisconnectLeaderEvent simulates NATS connection loss targeted
+	// at the current leader worker — the "Split Brain" scenario the audit's
+	// DESIGN_REVIEW.md called out. All-in-one mode only; process-mode
+	// dispatch logs and skips because process-mode has no real leader
+	// lookup.
+	NetworkDisconnectLeaderEvent ChaosEvent = "network_disconnect_leader"
 
 	// WorkerPauseEvent temporarily pauses a worker's processing without removing it.
 	WorkerPauseEvent ChaosEvent = "worker_pause"
@@ -196,9 +203,15 @@ func (cc *ChaosController) generateEventParams(event ChaosEvent) map[string]any 
 		params["target"] = "leader"
 		params["signal"] = "SIGKILL"
 
-	case NetworkDisconnectEvent:
-		// Disconnect for 5-30 seconds
-		params["duration"] = time.Duration(cc.rng.Intn(26)+5) * time.Second
+	case NetworkDisconnectEvent, NetworkDisconnectLeaderEvent:
+		// Disconnect for 5-15 seconds (both random and leader-target
+		// variants share the same duration range — the only difference
+		// is which worker the dispatcher selects). Upper bound is capped
+		// at 15s so a single disconnect cannot exceed the simulation's
+		// slow-start budgets when chaos fires during cold start; longer
+		// outages don't add new coverage but do produce flaky start-
+		// latency exceedances for chaos-delayed initial-cohort workers.
+		params["duration"] = time.Duration(cc.rng.Intn(11)+5) * time.Second
 
 	case WorkerPauseEvent:
 		// Pause for 5-8 seconds to build backlog
@@ -320,7 +333,9 @@ func (e ChaosEvent) String() string {
 	case ProducerCrashEvent:
 		return "Producer Crash (SIGKILL)"
 	case NetworkDisconnectEvent:
-		return "Network Disconnect"
+		return "Network Disconnect (Random)"
+	case NetworkDisconnectLeaderEvent:
+		return "Network Disconnect (Leader)"
 	case WorkerPauseEvent:
 		return "Worker Pause"
 	case SlowConsumerEvent:

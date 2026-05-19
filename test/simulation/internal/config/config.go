@@ -84,6 +84,11 @@ type WorkersConfig struct {
 	// MaxSubjects optionally overrides the WorkerConsumer subject guardrail. If unset or 0,
 	// the simulation will default this to the partition count to avoid cold-start cap errors.
 	MaxSubjects int `yaml:"max_subjects"`
+	// AckWait is the JetStream consumer AckWait for each worker. Must be strictly less than
+	// Coordinator.GapAging — otherwise JetStream's redelivery window for a crashed worker
+	// exceeds the oracle's hole-escalation window, producing false-positive gap escalations
+	// under chaos. Defaults to 30s.
+	AckWait time.Duration `yaml:"ack_wait"`
 }
 
 // ProcessingDelayConfig configures message processing delay.
@@ -124,6 +129,12 @@ type CoordinatorConfig struct {
 	// FailureReportPath defines where to write the JSON failure report.
 	// Defaults to "failure_report.json" if empty.
 	FailureReportPath string `yaml:"failure_report_path"`
+	// WorkerCacheMaxPerPartition caps the per-partition seq→worker map
+	// the tracker uses to classify ownership violations vs redeliveries.
+	// Beyond this window, duplicates fall back to the legacy duplicate
+	// counter. Default 4096 when unset; raise for very long stress runs
+	// to extend the ownership-violation detection horizon.
+	WorkerCacheMaxPerPartition int `yaml:"worker_cache_max_per_partition"`
 }
 
 // SLOConfig holds optional SLO thresholds for simulation reporting.

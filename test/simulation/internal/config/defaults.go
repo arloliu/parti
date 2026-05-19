@@ -4,7 +4,7 @@ import "time"
 
 // applyDefaults applies default values to configuration fields that are not set.
 //
-//nolint:cyclop // Complexity acceptable for comprehensive config validation
+//nolint:cyclop,gocyclo // Complexity acceptable for comprehensive config validation
 func applyDefaults(cfg *Config) {
 	// Simulation defaults
 	if cfg.Simulation.Mode == "" {
@@ -72,6 +72,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.Workers.ProcessingDelay.Max == 0 {
 		cfg.Workers.ProcessingDelay.Max = 50 * time.Millisecond
 	}
+	if cfg.Workers.AckWait == 0 {
+		cfg.Workers.AckWait = 30 * time.Second
+	}
 
 	// Coordinator defaults
 	if cfg.Coordinator.ValidationWindow == 0 {
@@ -79,6 +82,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Coordinator.GapAging == 0 {
 		cfg.Coordinator.GapAging = 45 * time.Second
+	}
+	if cfg.Coordinator.WorkerCacheMaxPerPartition == 0 {
+		cfg.Coordinator.WorkerCacheMaxPerPartition = 4096
 	}
 
 	// Chaos defaults

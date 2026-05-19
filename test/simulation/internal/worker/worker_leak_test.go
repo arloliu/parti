@@ -63,6 +63,7 @@ func TestWorker_GoroutineLeak(t *testing.T) {
 		AssignmentStrategy:  "consistent-hash",
 		ProcessingDelayMin:  1 * time.Millisecond,
 		ProcessingDelayMax:  5 * time.Millisecond,
+		AckWait:             30 * time.Second,
 		CoordinatorReportCh: make(chan coordinator.ReceivedMessage, 100),
 		MetricsCollector:    nil, // Don't use metrics to avoid registration conflicts
 	}
@@ -135,6 +136,7 @@ func TestWorker_MultipleStarts(t *testing.T) {
 		AssignmentStrategy:  "consistent-hash",
 		ProcessingDelayMin:  1 * time.Millisecond,
 		ProcessingDelayMax:  5 * time.Millisecond,
+		AckWait:             30 * time.Second,
 		CoordinatorReportCh: make(chan coordinator.ReceivedMessage, 100),
 		MetricsCollector:    nil, // Don't use metrics to avoid registration conflicts
 	}

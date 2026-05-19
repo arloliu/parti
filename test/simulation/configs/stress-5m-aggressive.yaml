@@ -32,6 +32,9 @@ workers:
   consumer_batch_size: 32
   handler_concurrency: 2
   max_subjects: 600
+  # ack_wait must be < coordinator.gap_aging (20s). 10s matches the
+  # aggressive intent: fast detection without racing JetStream redelivery.
+  ack_wait: 10s
   enforce_exclusive_consumption: true
   processing_gate:
     warmup_duration: 10s
