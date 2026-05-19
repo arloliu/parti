@@ -220,6 +220,11 @@ type stableIDClaimer interface {
 // Compile-time assertion that Manager implements StateProvider.
 var _ types.StateProvider = (*Manager)(nil)
 
+// releaseLeadershipTimeout bounds the ReleaseLeadership call in Stop so that
+// a slow KV cannot delay shutdown past the election TTL. Must be less than the
+// election bucket's TTL (default 10s). Test-overridable.
+var releaseLeadershipTimeout = 2 * time.Second
+
 // NewManager creates a new Manager instance with the provided configuration.
 //
 // The Manager coordinates workers in a distributed system using NATS for:
@@ -640,6 +645,18 @@ func (m *Manager) Stop(ctx context.Context) error {
 	// Shutdown sequence (reverse of startup)
 	var shutdownErr error
 
+	// Release leadership before any slow work. m.ctx is already cancelled so
+	// use the caller's ctx as parent. The 2s bound keeps Stop well under the
+	// election TTL even when the KV is sluggish.
+	// ErrNotLeader is benign — it means we were never the leader or already lost it.
+	releaseCtx, releaseCancel := context.WithTimeout(ctx, releaseLeadershipTimeout)
+	if err := m.election.ReleaseLeadership(releaseCtx); err != nil &&
+		!errors.Is(err, election.ErrNotLeader) {
+		m.logError("failed to release leadership on stop", "error", err)
+		shutdownErr = fmt.Errorf("leadership release failed: %w", err)
+	}
+	releaseCancel()
+
 	// Step 1: Stop calculator if running (leader only)
 	if stopped := m.stopCalculator(); stopped {
 		m.logger.Info("calculator stopped", "worker_id", m.WorkerID())
@@ -668,19 +685,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 		}
 	}
 
-	// Step 3: Release election leadership unconditionally.
-	// Always attempt release to avoid TOCTOU race where leadership flag is cleared
-	// by monitorLeadership between the check and the release call.
-	// ErrNotLeader is benign — it simply means we weren't the leader.
-	if err := m.election.ReleaseLeadership(ctx); err != nil &&
-		!errors.Is(err, election.ErrNotLeader) {
-		m.logError("failed to release leadership", "error", err)
-		if shutdownErr == nil {
-			shutdownErr = fmt.Errorf("leadership release failed: %w", err)
-		}
-	}
-
-	// Step 4: Release stable worker ID (ignore ErrNotClaimed)
+	// Step 3: Release stable worker ID (ignore ErrNotClaimed)
 	if err := m.idClaimer.Release(ctx); err != nil && !errors.Is(err, stableid.ErrNotClaimed) {
 		m.logError("failed to release worker ID", "error", err)
 		if shutdownErr == nil {
@@ -688,7 +693,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 		}
 	}
 
-	// Step 5: Wait for all background goroutines with timeout
+	// Step 4: Wait for all background goroutines with timeout
 	m.logger.Debug("waiting for goroutines to exit...", "worker_id", m.WorkerID())
 	done := make(chan struct{})
 	go func() {

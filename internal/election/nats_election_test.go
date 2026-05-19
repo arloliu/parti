@@ -1,6 +1,7 @@
 package election
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -474,4 +475,91 @@ func TestNATSElection_CheckLeadership_LiveKVRevision(t *testing.T) {
 	err = e.CheckLeadership(ctx, claimed)
 	require.True(t, errors.Is(err, types.ErrLeadershipRevisionMismatch),
 		"stale leader claim against new term must be rejected, got %v", err)
+}
+
+// TestNATSElection_RequestLeadership_CancelledRenew_PreservesLeaderStateForRelease
+// is a regression test for the indirect Stop-ordering race path: when
+// RequestLeadership's internal RenewLeadership call fails with a cancelled
+// context, the local leader state must NOT be cleared. If it were cleared, a
+// subsequent ReleaseLeadership would see isLeader=false, return ErrNotLeader,
+// and skip kv.Delete — leaving the leader key until TTL expiry.
+func TestNATSElection_RequestLeadership_CancelledRenew_PreservesLeaderStateForRelease(t *testing.T) {
+	ctx := t.Context()
+
+	_, nc := partitest.StartEmbeddedNATS(t)
+	kv := partitest.CreateJetStreamKV(t, nc, "test-election-request-cancelled")
+
+	e := NewNATSElection(kv, "leader")
+
+	// Acquire leadership so the renew-on-request path is reachable.
+	isLeader, err := e.RequestLeadership(ctx, "worker-1", 30)
+	require.NoError(t, err)
+	require.True(t, isLeader)
+
+	// Simulate Stop: cancel the context before calling RequestLeadership.
+	cancelledCtx, cancel := context.WithCancel(ctx)
+	cancel() // immediately cancelled
+
+	// RequestLeadership with a cancelled context must return an error (not
+	// silently succeed), but must NOT clear the local leader state.
+	_, err = e.RequestLeadership(cancelledCtx, "worker-1", 30)
+	require.Error(t, err, "RequestLeadership must return error on cancelled context during renew")
+
+	// Local leader state must remain intact for ReleaseLeadership to act on.
+	isLeaderLocal, _, _ := e.getLeaderState()
+	require.True(t, isLeaderLocal,
+		"local isLeader must remain true after RequestLeadership with cancelled ctx — "+
+			"Stop's ReleaseLeadership must still be able to delete the key")
+
+	// ReleaseLeadership with a fresh context must succeed and delete the key.
+	err = e.ReleaseLeadership(ctx)
+	require.NoError(t, err, "ReleaseLeadership must succeed after a cancelled-ctx RequestLeadership")
+
+	// Verify the key is actually gone from KV.
+	_, err = kv.Get(ctx, "leader")
+	require.ErrorIs(t, err, jetstream.ErrKeyNotFound,
+		"leader key must be deleted after ReleaseLeadership")
+}
+
+// TestNATSElection_RenewWithCancelledCtx_PreservesLeaderStateForRelease is a
+// regression test for the Stop-ordering race: when monitorLeadership calls
+// RenewLeadership with a context that was already cancelled (because Stop called
+// m.cancel()), the local leader state must NOT be cleared. If it were cleared,
+// Stop's subsequent ReleaseLeadership call would see isLeader=false, return
+// ErrNotLeader, and skip kv.Delete — leaving the leader key until TTL expiry.
+func TestNATSElection_RenewWithCancelledCtx_PreservesLeaderStateForRelease(t *testing.T) {
+	ctx := t.Context()
+
+	_, nc := partitest.StartEmbeddedNATS(t)
+	kv := partitest.CreateJetStreamKV(t, nc, "test-election-renew-cancelled")
+
+	e := NewNATSElection(kv, "leader")
+
+	// Acquire leadership.
+	isLeader, err := e.RequestLeadership(ctx, "worker-1", 30)
+	require.NoError(t, err)
+	require.True(t, isLeader)
+
+	// Simulate Stop: cancel the renew context (as if m.ctx was cancelled).
+	cancelledCtx, cancel := context.WithCancel(ctx)
+	cancel() // immediately cancelled
+
+	// RenewLeadership with a cancelled context must return an error...
+	err = e.RenewLeadership(cancelledCtx)
+	require.Error(t, err, "RenewLeadership must return error on cancelled context")
+
+	// ...but must NOT clear local leader state.
+	isLeaderLocal, _, _ := e.getLeaderState()
+	require.True(t, isLeaderLocal,
+		"local isLeader must remain true after RenewLeadership with cancelled ctx — "+
+			"Stop's ReleaseLeadership must still be able to delete the key")
+
+	// ReleaseLeadership with a fresh context must succeed and delete the key.
+	err = e.ReleaseLeadership(ctx)
+	require.NoError(t, err, "ReleaseLeadership must succeed after a cancelled-ctx renewal")
+
+	// Verify the key is actually gone from KV.
+	_, err = kv.Get(ctx, "leader")
+	require.ErrorIs(t, err, jetstream.ErrKeyNotFound,
+		"leader key must be deleted after ReleaseLeadership")
 }

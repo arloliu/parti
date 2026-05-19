@@ -118,7 +118,15 @@ func (e *NATSElection) RequestLeadership(ctx context.Context, workerID string, l
 		if err == nil {
 			return true, nil
 		}
-		// Leadership lost, fall through to try acquiring again
+		// Context cancellation / deadline means the caller is shutting down,
+		// not that the lease was taken by another worker. Preserve local state
+		// so that a subsequent ReleaseLeadership can still call kv.Delete.
+		// This mirrors the same exception in RenewLeadership itself.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return false, err
+		}
+		// Real leadership-loss error: clear local state and fall through to
+		// try acquiring again.
 		e.clearLeadership()
 	}
 
@@ -182,7 +190,16 @@ func (e *NATSElection) RenewLeadership(ctx context.Context) error {
 	newRevision, err := e.kv.Update(ctx, e.key, value, revision)
 	elapsed := time.Since(start)
 	if err != nil {
-		e.clearLeadership()
+		// Only clear local leadership state on real leadership-loss errors.
+		// Context cancellation / deadline means the caller is shutting down,
+		// not that the lease was taken by another worker. Clearing state on a
+		// cancelled renew would race with Stop's ReleaseLeadership: Stop
+		// cancels m.ctx, monitorLeadership may call RenewLeadership with the
+		// now-cancelled renewCtx, and if we clear here, ReleaseLeadership sees
+		// isLeader=false and skips kv.Delete — leaving the leader key until TTL.
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			e.clearLeadership()
+		}
 		if e.logger != nil {
 			e.logger.Warn("election.renew_failed", "worker_id", workerID, "key", e.key, "prev_rev", revision, "elapsed", elapsed, "error", err)
 		}
