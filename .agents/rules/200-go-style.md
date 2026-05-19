@@ -1,5 +1,9 @@
 # 200 - Coding Standards & Conventions
 
+Apply these rules when editing Go code. Do not refactor existing code solely to
+satisfy this file unless the task already touches that code or the violation is
+blocking validation.
+
 ## Go Style
 - **Idioms:** Follow [Effective Go](https://go.dev/doc/effective_go). Use `goimports`.
 - **Types:** Use `any` instead of `interface{}`.
@@ -22,18 +26,24 @@
 - **Internal pkgs:** Immediately after type definition.
 - **Public pkgs (`strategy/`, `source/`, `consumer/`):** In `_test.go` files to avoid import cycles with root `parti` package.
 
-## File Layout (STRICT)
+## File Layout
+
+Apply this order to new files, new top-level declarations, and touched regions.
+Do not reorder unrelated existing code solely to satisfy this layout.
+
 1. Package declaration
 2. Imports (stdlib, external, internal)
 3. Constants (exported first)
 4. Variables (exported first)
 5. Types (exported first)
-5.5. Interface Assertions (internal packages only)
 6. Factory Functions (`NewType`)
 7. Exported Functions
 8. Unexported Functions
 9. Exported Methods (grouped by receiver)
 10. Unexported Methods (grouped by receiver)
+
+For internal packages, place interface assertions immediately after the relevant
+type definition.
 
 ## Function Limits
 - **Max Lines:** 100 (prefer < 50).

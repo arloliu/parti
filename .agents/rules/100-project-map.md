@@ -1,10 +1,10 @@
-# 100 - Project Overview & Prime Directives
+# 100 - Project Map
 
 ## Identity
 - **Project:** Parti (NATS-based work partitioning)
 - **Module:** `github.com/arloliu/parti/v2`
 - **Language:** Go >=1.25.0
-- **Linting:** `golangci-lint` v2.5.0 (via `make lint`)
+- **Linting:** `golangci-lint` v2.11.4 (via `make lint`)
 
 ## What Parti Does
 Parti dynamically assigns work partitions across worker instances using NATS JetStream for coordination. It provides stable worker IDs, leader-based assignment, and cache-affinity-aware rebalancing.
@@ -47,14 +47,14 @@ parti/                        # Root = main public package (Manager, Config, Hoo
 - **Import cycle prevention:** The `types/` package is a leaf. Root `parti` package re-exports types via aliases (`parti.Partition`, `parti.State`, etc.). Internal packages import `types/`, never the root.
 - **Interface assertions:** Use `var _ Interface = (*Type)(nil)` in `internal/` packages only. In public packages (`strategy/`, `source/`, `consumer/`), use assertions in `_test.go` files to avoid import cycles.
 
-## Prime Directives
-1. **Plan First:** Create/update `implementation_plan.md` before architectural changes. Wait for approval.
-2. **Small Diffs:** Break work into small, verifiable chunks. Do not rewrite files unnecessarily.
-3. **Dependencies:** Check `go.mod`. Prefer stdlib. Ask before adding new deps.
-    - **Blocked dependencies** (enforced by `gomodguard` linter):
-        - `github.com/golang/protobuf` → use `google.golang.org/protobuf`
-        - `github.com/satori/go.uuid` → use `github.com/google/uuid`
-        - `github.com/gofrs/uuid` → use `github.com/google/uuid`
+## Dependency Policy
+- Check `go.mod` before adding dependencies.
+- Prefer the standard library.
+- Ask before adding a new dependency.
+- Blocked dependencies are enforced by `gomodguard`:
+    - `github.com/golang/protobuf` -> use `google.golang.org/protobuf`
+    - `github.com/satori/go.uuid` -> use `github.com/google/uuid`
+    - `github.com/gofrs/uuid` -> use `github.com/google/uuid`
 
 ## Key Dependencies
 - **NATS:** `github.com/nats-io/nats.go` (core + JetStream)

@@ -1,11 +1,19 @@
 # 400 - Documentation Standards
 
+Apply these rules when editing docs, README files, examples, or exported API.
+
 ## General
-- **Godoc:** All exported symbols MUST have doc comments.
-- **First Line:** Start with the symbol name. One-line summary.
+- **Godoc:** All exported symbols must have doc comments.
+- **First Line:** Start with the symbol name and give a one-line summary.
+- **Detail level:** Match comment detail to API complexity; simple symbols can have short comments, complex APIs need parameters, returns, edge cases, and examples where useful.
 - **README:** Keep updated with install/usage.
 
-## Godoc Template (MANDATORY)
+## Godoc Template
+
+Use this shape when it improves clarity for non-trivial exported APIs or when
+nearby docs already use this style. Prefer normal Go doc paragraphs for simple
+APIs. Prefer runnable `ExampleXxx` tests for examples that should appear on
+pkg.go.dev.
 
 ```go
 // FunctionName one-line summary.
@@ -56,6 +64,6 @@ func (c *ConsistentHash) Assign(workers []string, partitions []Partition) (map[s
 ```
 
 ## Omit When Appropriate
-- No params → Omit Parameters section.
-- No returns → Omit Returns section.
-- Simple getters → Minimal doc is OK.
+- No params -> omit Parameters section.
+- No returns -> omit Returns section.
+- Simple getters -> minimal doc is OK.

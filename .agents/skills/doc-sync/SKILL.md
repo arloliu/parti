@@ -81,7 +81,7 @@ For each finding that is STALE, MISSING, or PHANTOM:
 - **Signatures:** Match the source exactly. Parameter names, types, and variadic `...` must be verbatim.
 - **Option names:** Correct `WithX` names to match source. If an option was renamed, update all occurrences.
 - **Removed symbols:** Delete doc sections for PHANTOM symbols. If a replacement exists, add a one-line "renamed to `NewName`" note where the old section was.
-- **New symbols (MISSING):** Add a stub entry. For `docs/API_REFERENCE.md`-style files, follow the existing section format. For Godoc, add a minimal compliant comment per `400-documentation.md`.
+- **New symbols (MISSING):** Add a stub entry. For `docs/API_REFERENCE.md`-style files, follow the existing section format. For Godoc, add a minimal compliant comment per `400-docs.md`.
 - **Dates/versions:** Update "Last Updated" fields to today's date. Do not change semantic version strings unless the `go.mod` module path or a version constant in source has changed.
 - **Do not:** change prose tone, restructure sections, add new examples beyond what the source makes self-evident, or modify files in `docs/design/`.
 
@@ -121,4 +121,4 @@ Mark items as "needs attention" (rather than auto-fixing) when:
 - **Never fabricate API behavior.** If source is ambiguous, mark the finding as "needs attention" and quote both the doc claim and the source code.
 - **Minimal diffs.** Edit only the lines that are wrong. Do not touch accurate adjacent content.
 - **Internal packages are off-limits** for doc claims. If a doc says "internally uses X" and X is in `internal/`, do not update that claim based on internal code — flag it as "needs attention."
-- **Follow `400-documentation.md`** for any Godoc you write or modify.
+- **Follow `400-docs.md`** for any Godoc you write or modify.

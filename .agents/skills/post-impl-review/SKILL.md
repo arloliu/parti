@@ -103,8 +103,8 @@ Replace `<PHASE>`, `<VERSION>`, `<PLAN_PATH>`, `<SPEC_SECTIONS>`, `<IN_SCOPE_FIL
 >    <SPEC_SECTIONS>.
 > 3. The implemented code (in-scope files):
 >    <IN_SCOPE_FILES>.
-> 4. Project conventions in `.agents/rules/` (coding style, testing,
->    documentation, lint-after-write rules).
+> 4. Project conventions in `.agents/rules/` (Go style, testing,
+>    documentation, validation, and go-after-write rules).
 >
 > ## Out of scope
 >

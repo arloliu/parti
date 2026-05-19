@@ -1,65 +1,42 @@
 # Parti Agent Configuration
 
-Loaded by Claude Code (via `@AGENTS.md` in [`CLAUDE.md`](CLAUDE.md)) and by other
-coding agents that read `AGENTS.md` directly. Contains the project's ground rules;
-detailed rules and skills live in [`.agents/`](.agents/).
+This is the authoritative entrypoint for coding agents working in this
+repository. Claude Code imports this file from [`CLAUDE.md`](CLAUDE.md); other
+agents should read `AGENTS.md` directly.
 
-## Ground Rules
+Parti (`github.com/arloliu/parti/v2`) is a Go library for dynamically
+partitioning work across worker instances using NATS JetStream. Detailed project
+structure, coding rules, testing rules, documentation standards, workflow, and
+review discipline live under [`.agents/rules/`](.agents/rules/).
 
-### Rule 1 — Think Before Coding
-State assumptions explicitly. If uncertain, ask rather than guess.
-Present multiple interpretations when ambiguity exists.
-Push back when a simpler approach exists.
-Stop when confused. Name what's unclear.
+## Detailed Rules
 
-### Rule 2 — Simplicity First
-Minimum code that solves the problem. Nothing speculative.
-No features beyond what was asked. No abstractions for single-use code.
-Test: would a senior engineer say this is overcomplicated? If yes, simplify.
+Read [`.agents/rules/AGENTS.md`](.agents/rules/AGENTS.md) first. It maps task
+triggers to the rule files that apply.
 
-### Rule 3 — Surgical Changes
-Touch only what you must. Clean up only your own mess.
-Don't "improve" adjacent code, comments, or formatting.
-Don't refactor what isn't broken. Match existing style.
-
-### Rule 4 — Goal-Driven Execution
-Define success criteria. Loop until verified.
-Don't follow steps. Define success and iterate.
-Strong success criteria let you loop independently.
-
-### Rule 5 — Surface conflicts, don't average them
-If two patterns contradict, pick one (more recent / more tested).
-Explain why. Flag the other for cleanup.
-Don't blend conflicting patterns.
-
-### Rule 6 — Read before you write
-Before adding code, read exports, immediate callers, shared utilities.
-"Looks orthogonal" is dangerous. If unsure why code is structured a way, ask.
-
-### Rule 7 — Tests verify intent, not just behavior
-Tests must encode WHY behavior matters, not just WHAT it does.
-A test that can't fail when business logic changes is wrong.
-
-### Rule 8 — Checkpoint after every significant step
-Summarize what was done, what's verified, what's left.
-Don't continue from a state you can't describe back.
-If you lose track, stop and restate.
-
-### Rule 9 — Match the codebase's conventions, even if you disagree
-Conformance > taste inside the codebase.
-If you genuinely think a convention is harmful, surface it. Don't fork silently.
-
-### Rule 10 — Fail loud
-"Completed" is wrong if anything was skipped silently.
-"Tests pass" is wrong if any were skipped.
-Default to surfacing uncertainty, not hiding it.
-
-## Rules
-
-Rules are loaded in numeric order before any work begins.
-See [`.agents/rules/AGENTS.md`](.agents/rules/AGENTS.md) for the full index.
+Always follow [`.agents/rules/000-agent-contract.md`](.agents/rules/000-agent-contract.md).
+It includes the explicit rule: do not guess when source evidence, tests,
+benchmarks, docs, or grep can answer.
 
 ## Skills
 
 Skills are invocable agent capabilities in [`.agents/skills/`](.agents/skills/).
-See [CLAUDE.md → Invoking Skills](CLAUDE.md#invoking-skills) for invocation syntax and cost notes.
+
+Available skills:
+
+- `/go-api-review [package]` — Review exported API and README for DX, discoverability, and clarity. Does not read internal source.
+- `/qa-review [package]` — Review for correctness, fault tolerance, error propagation, and concurrency safety from a user perspective.
+- `/doc-sync [scope]` — Audit and fix `docs/` files and Godoc to match the current API: corrects stale signatures, removes phantom symbols, adds missing entries.
+- `/plan-review <plan-path> <short-name>` — Full architectural review of a design plan. Writes a versioned report under `tmp/`. Use after material plan rewrites.
+- `/final-plan-review <plan-path>` — Precision pass / pre-implementation sanity check on an architecturally-settled plan. Catches stale text, ambiguous pseudocode, numbering drift — does not redesign.
+- `/post-impl-review <phase> <plan-path> <vN>` — Review delivered code against a spec; runs lint/build/test validation. Designed for iterative fix-review loops until merge-clean. For lightweight passes without spec-compliance audit, use `/codex:review` or `/codex:adversarial-review` directly instead.
+
+All skills scope to Parti's public packages by default; specify a subset when
+needed (for example, `consumer/` or `docs/CONSUMERS.md`).
+
+The three external-reviewer skills (`plan-review`, `final-plan-review`,
+`post-impl-review`) dispatch an outside reviewer through the local skill
+workflow, with Copilot `gpt-5.5` as a fallback. Effort defaults vary by task:
+`plan-review` and `post-impl-review` (v1/v2) at `xhigh`;
+`final-plan-review` and `post-impl-review` v3+ at `high`. Each invocation costs
+real tokens and about 2–8 minutes wall time. Do not dispatch speculatively.

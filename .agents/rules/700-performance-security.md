@@ -1,4 +1,7 @@
-# 600 - Performance & Security
+# 700 - Performance and Security
+
+Apply these rules when editing hot paths, external input handling,
+authentication, credentials, or network-facing code.
 
 ## Performance
 Apply these in **hot paths** (inner loops, per-request code, assignment calculation):

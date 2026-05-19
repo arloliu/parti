@@ -1,36 +1,39 @@
 # Parti — Agent Rules Index
 
-> **CONTEXT**: This is a NATS-based work partitioning library (`github.com/arloliu/parti/v2`).
-> **ACTION**: Read the files below in order before beginning work.
+This is the trigger map for repository rules. Read `000-agent-contract.md` for
+every task, then read the files whose triggers match the work.
 
-## Rule Index
+## Default Load
+- For most Go implementation tasks, read `000`, `100`, `200`, `500`, and `600`.
+- Add `300` when adding or changing tests.
+- Add `400` when editing docs, examples, README content, or exported API.
+- Add `700` only for hot paths, external input, credentials, auth, or network-facing code.
+- Add `800` only for non-trivial design, plan, or review-loop work.
+- For tiny documentation-only edits, `000` plus the relevant docs or workflow rule is enough.
 
-### 1. Core Directives
-- **[100-overview.md](100-overview.md)**
-  *Identity, project structure, architecture notes, dependencies, and prime directives.*
+## Always
+- **[000-agent-contract.md](000-agent-contract.md)** — Always-on behavior: do not guess, control scope, verify claims, test intent, match conventions, and fail loud.
 
-### 2. Standards
-- **[200-coding-style.md](200-coding-style.md)**
-  *Go idioms, error handling, file layout, naming, loop patterns.*
-- **[300-testing.md](300-testing.md)**
-  *Unit/integration/stress organization, **CRITICAL** async testing rules, make targets.*
-- **[400-documentation.md](400-documentation.md)**
-  *Mandatory Godoc format with Parti-specific examples.*
+## Before Code Changes
+- **[100-project-map.md](100-project-map.md)** — Project identity, package map, architecture constraints, dependency policy.
+- **[200-go-style.md](200-go-style.md)** — Go idioms, error handling, interface assertions, file layout, naming, loop patterns.
 
-### 3. Workflow & Safety
-- **[500-workflow.md](500-workflow.md)**
-  *Git conventions, pre-commit checks, make targets reference.*
-- **[600-perf-sec.md](600-perf-sec.md)**
-  *Performance optimizations (xxh3, allocations) and security boundaries.*
-- **[700-lint-after-write.md](700-lint-after-write.md)**
-  *Automated linting workflow and common fixes.*
-- **[800-modernize-after-write.md](800-modernize-after-write.md)**
-  *Run `go fix` on touched packages; avoid repo-wide sweeps in feature commits.*
+## Before Adding or Changing Tests
+- **[300-testing.md](300-testing.md)** — Test organization, async test requirements, helper-package choice, test patterns.
 
-### 4. Design & Review
+## Before Documentation or Exported API Changes
+- **[400-docs.md](400-docs.md)** — Exported symbol docs, README/docs sync, Godoc examples.
 
-- **[900-design-and-review-loops.md](900-design-and-review-loops.md)**
-  *State invariants first; enumerate paths; design atomicity in. Lessons from multi-round Codex review loops.*
+## Before Validation, Commit, or PR Work
+- **[500-validation-and-workflow.md](500-validation-and-workflow.md)** — Git conventions, validation gates, Make targets.
 
----
-*Rules are split for readability and context optimization.*
+## After Modifying Go Files
+- **[600-go-after-write.md](600-go-after-write.md)** — `go fix` scope, lint workflow, stale linter cache handling.
+
+## For Hot Paths, External Input, or Security-Sensitive Code
+- **[700-performance-security.md](700-performance-security.md)** — Hot-path performance, allocation discipline, input validation, secrets, NATS auth.
+
+## Before Plan, Design, or Review-Loop Work
+- **[800-design-and-review-loops.md](800-design-and-review-loops.md)** — Invariants, path enumeration, atomicity, review-loop discipline.
+
+For broad or ambiguous tasks, read all rule files before editing.

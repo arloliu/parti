@@ -1,4 +1,4 @@
-# 900 - Design Discipline & Review Loops
+# 800 - Design Discipline and Review Loops
 
 Apply when drafting a non-trivial fix or design, revising a plan after review, or dispatching a reviewer
 (`/plan-review`, `/final-plan-review`, `/post-impl-review`, or `codex:codex-rescue`).
@@ -6,7 +6,20 @@ Apply when drafting a non-trivial fix or design, revising a plan after review, o
 This rule captures reusable discipline from prior multi-round review loops.
 Treat the concrete examples as reminders of failure modes, not as assumptions about the current codebase.
 
+## Quick Checklist
+
+- [ ] Invariant stated explicitly in one sentence.
+- [ ] Every "X is the only caller / path" claim verified by grep.
+- [ ] Every code path that observes or mutates the relevant state enumerated.
+- [ ] Atomicity primitive named (`sync.Mutex`, CAS, transaction, etc.) where two operations must coordinate.
+- [ ] Tests can be written against current source; missing seams or mocks are listed as prerequisites.
+- [ ] Tightly-coupled deferred issues either pulled in-scope or justified.
+- [ ] Test list numbering consistent across change log, files-changed table, and test section.
+
 ## Before Drafting
+
+For architectural changes, create or update the relevant implementation plan
+before coding and wait for approval.
 
 ### 1. State the invariant, not the symptom
 The bug is the shadow of a broken invariant. Name the invariant explicitly *before* sketching a fix.
@@ -80,17 +93,7 @@ When the user expands a goal mid-loop (e.g. "robust" instead of "fix FP-1"), pre
 ### 10. The reviewer sees what you wrote, not what you meant
 If a reviewer "refutes" a claim, the issue is usually that the plan text was ambiguous or stronger than the code supported. Tighten the language; cite file:line for every load-bearing claim.
 
-## Quick Checklist Before Dispatching a Reviewer
-
-- [ ] Invariant stated explicitly (one sentence).
-- [ ] Every "X is the only caller / path" claim verified by grep.
-- [ ] Every code path that observes or mutates the relevant state enumerated.
-- [ ] Atomicity primitive named (mutex / CAS / etc.) where two operations must coordinate.
-- [ ] Tests can be written against current source (clock seam, mocks exist or are part of the plan).
-- [ ] Tightly-coupled deferred issues either pulled in-scope or justified.
-- [ ] Test list numbering consistent across change log, files-changed table, and test section.
-
-## Examples From Prior Loops
+## Examples Appendix
 
 These are examples only. Do not assume the named fields, functions, or versions
 exist in the current task.
@@ -102,8 +105,4 @@ exist in the current task.
 
 ## Cross-References
 
-- Process skills: [CLAUDE.md → Invoking Skills](../../CLAUDE.md#invoking-skills) — `/plan-review`, `/final-plan-review`, `/post-impl-review`.
-- Memory entries:
-  - `feedback_codex_review_preferred` — route reviews through Codex first.
-  - `feedback_post_impl_review_workflow` — full spec → impl → review loop pattern.
-  - `feedback_verify_first_with_reproducer` — write the failing test before the fix.
+- Process skills: [AGENTS.md - Skills](../../AGENTS.md#skills) - `/plan-review`, `/final-plan-review`, `/post-impl-review`.
