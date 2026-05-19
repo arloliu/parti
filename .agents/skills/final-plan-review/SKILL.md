@@ -45,6 +45,8 @@ If present, use the Codex path. If absent (plugin uninstalled) or the codex run 
 
 Dispatch via the `Agent` tool using the codex rescue subagent. Pass `--wait`, `--effort high`, and `--write` as routing flags in the prompt prefix. `--write` must be explicit — the rescue subagent's default is read-only for "review" tasks, but this skill needs Codex to write the report file.
 
+The codex-rescue subagent parses these as routing controls and strips them from the task text before invoking `codex-companion.mjs` (see its agent definition: "Preserve the user's task text as-is apart from stripping routing flags"). They are intent signals to the subagent, not literal CLI args appended to the prompt.
+
 ```
 Agent({
   subagent_type: "codex:codex-rescue",
@@ -112,6 +114,9 @@ Replace `<PLAN_PATH>`, `<STRATEGY_DOC_PATH>`, `<CODE_REFS>`, and `<REPORT_PATH>`
 >
 > **Produce a review report** at `<REPORT_PATH>`.
 >
+> Write ONLY to `<REPORT_PATH>`. Do not create, modify, or delete any other
+> file.
+>
 > Format same as a standard plan review (Summary / Findings by severity /
 > Verdict), but bias toward P1 and P2 severity. A P0 here would be a
 > serious surprise; if you find one, flag it prominently in the Summary.
@@ -134,6 +139,8 @@ Replace `<PLAN_PATH>`, `<STRATEGY_DOC_PATH>`, `<CODE_REFS>`, and `<REPORT_PATH>`
 3. If P0 or P1 findings exist, propose plan edits to address them. Do not auto-apply edits to the plan without user confirmation — precision-pass findings sometimes reveal genuine architectural ambiguities the user wants to discuss.
 
 ## Loop guidance
+
+Before dispatching, confirm the plan has materially changed since the most recent `tmp/<plan-stem>_*precision*_review.md` or `tmp/<plan-stem>_*final*_review.md`. If no prior precision pass exists, proceed. If a prior pass exists and the plan looks unchanged at a glance, surface that to the user and ask whether to dispatch anyway — re-running a precision pass on an unchanged plan typically reproduces the previous findings and wastes the budget called out in "Cost notes".
 
 Typically one pass of `final-plan-review` is enough. If the plan still has open P0/P1 findings after fixes, that suggests reopening `plan-review` to address architecture, not running another precision pass.
 

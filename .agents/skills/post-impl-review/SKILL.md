@@ -47,6 +47,8 @@ If present, use the Codex path. If absent (plugin uninstalled) or the codex run 
 
 Dispatch via the `Agent` tool using the codex rescue subagent. Pass `--wait`, `--effort xhigh`, and `--write` as routing flags in the prompt prefix. `--write` must be explicit — the rescue subagent's default is read-only for "review" tasks, but this skill needs Codex to write the versioned report file.
 
+The codex-rescue subagent parses these as routing controls and strips them from the task text before invoking `codex-companion.mjs` (see its agent definition: "Preserve the user's task text as-is apart from stripping routing flags"). They are intent signals to the subagent, not literal CLI args appended to the prompt.
+
 ```
 Agent({
   subagent_type: "codex:codex-rescue",
@@ -161,6 +163,11 @@ Replace `<PHASE>`, `<VERSION>`, `<PLAN_PATH>`, `<SPEC_SECTIONS>`, `<IN_SCOPE_FIL
 >
 > Path: `<REPORT_PATH>`.
 >
+> Do not modify source files, tests, or any tracked file in the repository.
+> `<REPORT_PATH>` is your only deliverable. Running the validation commands
+> above is expected — the build/test toolchain managing its own caches under
+> `~/.cache/go-build`, `vendor/`, etc. does not count as a modification.
+>
 > Format:
 >
 > ```markdown
@@ -233,6 +240,8 @@ The post-implementation review is designed to run multiple times within one phas
 ```
 implement → post-impl-review v1 → fix findings → post-impl-review v2 → … → merge
 ```
+
+**Step 0 before dispatching v2+:** confirm the working tree actually changed since the prior review. Spot-check with `git diff --stat` and verify the diff touches the files cited in the prior round's P0/P1 findings. If the diff is empty or doesn't address the prior findings, do not dispatch — re-reviewing unchanged code reproduces the previous verdict and wastes the budget called out in "Cost notes". Surface the gap to the user instead.
 
 Each version's report should reference the prior version's findings explicitly. Use a versioned filename so the history is preserved on disk: `tmp/<plan-stem>_<phase>_post_implementation_review_v1.md`, `..._v2.md`, etc.
 
