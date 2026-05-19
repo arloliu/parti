@@ -371,3 +371,34 @@ hooks := &parti.Hooks{
 - Grace period prevents false emergencies
 
 See [Configuration Guide](CONFIGURATION.md#degraded-mode-configuration) for all options.
+
+## Watcher Delete-Event Semantics
+
+The three NATS KV watchers parti runs on each manager — assignment alias,
+commit, and heartbeat — all intentionally ignore `KeyValueDelete` operations.
+
+| Watcher | What a delete means | Why parti ignores it |
+|---|---|---|
+| Assignment alias (`assignment.<worker>`) | Legacy v2.3.0 alias removed during rolling upgrade | The commit log is now the authority; deleting the alias is not a reassignment primitive. The reconcile tick re-reads the key and treats a missing alias as a no-op. |
+| Commit log (`commit.*`) | Old commit gc'd by the leader | A deleted commit does not erase the application's view of the world; the manager already holds its last applied snapshot. The reconcile tick treats a missing commit as a no-op for the same reason. |
+| Worker heartbeat (`worker-hb.<worker>`) | Worker stopped or its lease expired | The TTL-driven absence is the load-bearing signal; the explicit delete is redundant with that path and the calculator's emergency detector already handles disappearances on the next poll. |
+
+The consequence is that "delete a key and watch parti react" is not a supported
+extension point. Operators wishing to force a reassignment should call
+`Manager.TriggerRebalance` (leader-only) or restart the affected worker.
+
+## Cold-Start Worker-Monitor Start Gap
+
+When a leader bootstraps from cold start, the calculator runs an initial
+rebalance against the workers it discovered during `discoverHighestVersion`,
+seeds `lastWorkers` from that set, and only then starts the heartbeat
+`WorkerMonitor`. The gap between the initial rebalance completing and the
+monitor's first poll is intentionally short: workers added during the gap
+are still picked up on the monitor's first poll (which fetches the fresh
+heartbeat set), so the only observable effect is a brief delay before the
+calculator notices a join that landed inside the boot window. There is no
+correctness consequence — `currentWorkers` is re-fetched on every rebalance
+trigger — but operators tracing the very first poll cycle may see one
+"planned_scale" transition after a cold start even when the cluster appears
+to have been stable. This is expected and self-resolves within one
+`PollInterval`.
