@@ -205,6 +205,11 @@ func (n *NopMetrics) RecordStaleLeaderRejected() {
 	// No-op
 }
 
+// RecordStaleSnapshotStoreDropped discards the stale-snapshot-Store gate counter.
+func (n *NopMetrics) RecordStaleSnapshotStoreDropped() {
+	// No-op
+}
+
 // RecordCommitPayloadMissing discards the malformed-commit counter.
 func (n *NopMetrics) RecordCommitPayloadMissing() {
 	// No-op

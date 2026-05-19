@@ -147,11 +147,35 @@ type Manager struct {
 	wg     sync.WaitGroup
 	mu     sync.RWMutex
 
+	// applyStoreMu serializes the (stale-check, handoff Apply, snapshot
+	// Store, LSR advance, heartbeat SetAppliedAssignment) critical section
+	// across all callers — commit watcher (handleCommitValue → applyAssignment),
+	// alias watcher (handleAssignmentEntry → applyAssignment), the
+	// scheduleApplyRetry goroutine, and the operator recovery refresh path
+	// (refreshAssignmentFromNATS → monotonicStore).
+	//
+	// Without serialization, three independent goroutines can each pass a
+	// pre-Apply gate against a stale snapshot, run handoffCoordinator.Apply
+	// concurrently, and Store in arbitrary order — losing the W15 cross-leader
+	// race and the W16 apply-retry race. See PR-2 spec
+	// docs/plans/worker-state-hardening/02-pr2-spec.md.
+	//
+	// Lock contract: applyStoreMu and m.mu are NEVER held together.
+	// Callers must not hold m.mu when entering the apply pipeline (and vice
+	// versa). The two locks protect disjoint state.
+	applyStoreMu sync.Mutex
+
 	// testHookAfterApplyStore, when non-nil, is invoked synchronously after
 	// applyAssignmentWithPrev's m.assignment.Store(newAssignment) returns.
 	// Set ONLY by tests in this package to assert the LSR-before-Store
 	// ordering invariant (v3 review P0). Production code MUST NOT set this
 	// field; it is nil-default. See TestApplyAssignment_LSRAdvancesBeforeSnapshotStore.
+	//
+	// Concurrency contract (PR-2): the hook runs INSIDE applyStoreMu. It
+	// MUST NOT call applyAssignment, applyAssignmentWithPrev,
+	// refreshAssignmentFromNATS, or any other method that acquires
+	// applyStoreMu — doing so would self-deadlock. Lock-free reads of
+	// m.assignment / m.lastSeenLeaderRevision are safe.
 	testHookAfterApplyStore func(Assignment)
 }
 

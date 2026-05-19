@@ -753,6 +753,30 @@ func (m *Manager) applyAssignment(newAssignment Assignment) error {
 	return m.applyAssignmentWithPrev(m.CurrentAssignment(), newAssignment)
 }
 
+// isApplyResultStale returns true iff the candidate is older than the live
+// snapshot in (Version, LeaderRevision) lex order. Used at the head of the
+// applyStoreMu critical section to drop loser candidates BEFORE any
+// coordinator-side side effect (W15+W16, PR-2).
+//
+// V=0 semantics:
+//   - candidate.V=0 over cur.V=0: not stale. Permits the cold-bootstrap
+//     path's idempotent re-apply over the just-initialized Assignment{}.
+//   - candidate.V=0 over cur.V>0: STALE. A V=0 retry or legacy candidate
+//     would otherwise regress a real snapshot.
+//
+// Same V same LR: not stale (idempotent reapply).
+// Same V lower LR: STALE (the W15 cross-leader case).
+// Lower V: STALE (the W16 stale-retry case).
+func isApplyResultStale(candidate, cur Assignment) bool {
+	if candidate.Version == 0 {
+		return cur.Version != 0
+	}
+	if candidate.Version != cur.Version {
+		return candidate.Version < cur.Version
+	}
+	return candidate.LeaderRevision < cur.LeaderRevision
+}
+
 // applyAssignmentWithPrev runs the apply-then-store-then-ack pipeline with an
 // explicit previous-assignment argument. The default applyAssignment path
 // reads m.CurrentAssignment() for prev; the initial-bootstrap path
@@ -760,21 +784,30 @@ func (m *Manager) applyAssignment(newAssignment Assignment) error {
 // coordinator's prepare phase sees the full new partition set as "newly
 // acquired" without touching the snapshot.
 //
-// See applyAssignment for the centralized LSR advancement contract.
+// Holds applyStoreMu across (stale-check, Apply, LSR advance, Store,
+// heartbeat SetAppliedAssignment) so concurrent apply paths (commit, alias,
+// retry, refresh) cannot interleave their Stores or heartbeat acks. See
+// applyAssignment Godoc + applyStoreMu Godoc.
 func (m *Manager) applyAssignmentWithPrev(oldAssignment, newAssignment Assignment) error {
 	workerID := m.WorkerID()
-	curAssignment := m.CurrentAssignment()
 
-	// Monotonicity gate: do not regress the snapshot when a stale retry
-	// fires after a higher-version apply already succeeded. Compare against
-	// the live in-memory snapshot, not the caller-supplied oldAssignment —
-	// the initial-bootstrap path passes Assignment{} as oldAssignment to
-	// force prepare phase to treat partitions as newly acquired, but the
-	// snapshot is already at the to-be-applied version (waitForAssignment
-	// stored it). Use strict less-than so the initial-bootstrap apply for
-	// the SAME version proceeds (re-applying is idempotent for the
-	// handoff coordinator).
-	if newAssignment.Version != 0 && newAssignment.Version < curAssignment.Version {
+	m.applyStoreMu.Lock()
+
+	// Stale gate (W15+W16, PR-2). Drops the candidate BEFORE Apply, so no
+	// coordinator-side prepare/commit/stabilize runs for a loser. Strict
+	// (V, LR) lex comparison via isApplyResultStale.
+	curAssignment := m.CurrentAssignment()
+	if isApplyResultStale(newAssignment, curAssignment) {
+		m.applyStoreMu.Unlock()
+		m.metrics.RecordStaleSnapshotStoreDropped()
+		m.logger.Info("apply dropped by (V, LR) stale gate",
+			"worker_id", workerID,
+			"candidate_version", newAssignment.Version,
+			"candidate_leader_revision", newAssignment.LeaderRevision,
+			"current_version", curAssignment.Version,
+			"current_leader_revision", curAssignment.LeaderRevision,
+		)
+
 		return nil
 	}
 
@@ -791,45 +824,32 @@ func (m *Manager) applyAssignmentWithPrev(oldAssignment, newAssignment Assignmen
 	m.reportConsumerCapabilities()
 
 	if applyErr != nil {
+		m.applyStoreMu.Unlock()
 		m.logError("handoff apply failed", "error", applyErr)
 		m.scheduleApplyRetry(newAssignment)
 		return applyErr
 	}
 
 	// 2) Advance lastSeenLeaderRevision (stale-leader fence) — single
-	//    source of truth for LSR. See applyAssignment Godoc. LSR MUST
-	//    advance BEFORE the snapshot Store, otherwise a concurrent
-	//    handleCommitValueOnce reader could observe (new snapshot, old
-	//    LSR) — the v3-review P0 dangerous interleaving where a stale
-	//    higher-Version commit (with commit.LR < newAssignment.LR)
-	//    bypasses case (b)'s stale-leader fence on a snapshot that has
-	//    already advanced past it via case (a)'s no-op gate. By
-	//    advancing LSR first, the only interleavings a concurrent
-	//    reader can observe are (old snap, old LSR), (old snap, new
-	//    LSR), and (new snap, new LSR) — all safe. The fence may briefly
-	//    reject commits with LR < newAssignment.LR against the old
-	//    snapshot, but that is correct: LSR has actually advanced.
+	//    source of truth for LSR. LSR MUST advance BEFORE the snapshot
+	//    Store, otherwise a concurrent handleCommitValueOnce reader could
+	//    observe (new snapshot, old LSR) — see commit at applyAssignment
+	//    Godoc.
 	m.updateLastSeenLeaderRevision(newAssignment.LeaderRevision)
 
-	// 3) Store the now-applied assignment in the manager snapshot. After
-	//    this point, (snapshot, LSR) pairs visible to concurrent readers
-	//    are safely ordered.
+	// 3) Store the now-applied assignment in the manager snapshot.
 	m.assignment.Store(newAssignment)
 	if hook := m.testHookAfterApplyStore; hook != nil {
 		hook(newAssignment)
 	}
 
-	m.logger.Info("assignment applied",
-		"worker_id", workerID,
-		"old_version", oldAssignment.Version,
-		"new_version", newAssignment.Version,
-		"old_partitions", len(oldAssignment.Partitions),
-		"new_partitions", len(newAssignment.Partitions),
-	)
-
-	// 4) Ack via heartbeat publisher (Phase 2/4 receipt). Failures here are
-	//    non-fatal — the next tick will publish a snapshot containing the
-	//    same AppliedVersion (monotone).
+	// 4) Update heartbeat in-memory snapshot INSIDE the lock (W15+W16
+	//    plan-review v2 P0-B fix). The heartbeat publisher's monotonicity
+	//    is V-only (internal/heartbeat/publisher.go:170-195); equal-V Acks
+	//    overwrite LeaderRevision unconditionally. If we released the lock
+	//    before SetAppliedAssignment, a slow loser path could post its
+	//    same-V/lower-LR Ack after a winner has stored, regressing the
+	//    heartbeat. PublishNow stays outside the lock (network IO).
 	appliedDigest := types.PartitionSetDigest(newAssignment.Partitions)
 	m.heartbeat.SetAppliedAssignment(heartbeat.AppliedAssignment{
 		LeaderRevision:        newAssignment.LeaderRevision,
@@ -839,15 +859,57 @@ func (m *Manager) applyAssignmentWithPrev(oldAssignment, newAssignment Assignmen
 		AppliedSourceRevKnown: newAssignment.SourceRevisionKnown,
 		AppliedAt:             time.Now(),
 	})
+
+	m.applyStoreMu.Unlock()
+
+	m.logger.Info("assignment applied",
+		"worker_id", workerID,
+		"old_version", oldAssignment.Version,
+		"new_version", newAssignment.Version,
+		"old_partitions", len(oldAssignment.Partitions),
+		"new_partitions", len(newAssignment.Partitions),
+	)
+
+	// 5) Publish heartbeat (network IO, OUTSIDE lock). Failures here are
+	//    non-fatal — the next tick will publish a snapshot containing the
+	//    same AppliedVersion (monotone).
 	if err := m.heartbeat.PublishNow(m.ctx); err != nil {
 		m.logError("heartbeat publish-now after apply failed", "error", err)
 	}
 
-	// 5) Metrics + hooks.
+	// 6) Metrics + hooks.
 	m.recordAssignmentMetrics(oldAssignment, newAssignment)
 	m.invokeAssignmentChangedHooks(workerID, oldAssignment, newAssignment)
 
 	return nil
+}
+
+// monotonicStore performs the (gate-check, LSR-advance, Store) sequence
+// under applyStoreMu. Returns true if the Store landed; false if dropped
+// as stale.
+//
+// REFRESH-PATH ONLY. Used by refreshAssignmentFromNATS to bring an
+// authoritative KV snapshot under the same (V, LR) gate as the apply
+// pipeline. NOT usable from applyAssignmentWithPrev because that function
+// must hold applyStoreMu ACROSS handoffCoordinator.Apply; inlining the
+// same primitive in both call sites is intentional.
+//
+// Callers MUST NOT hold applyStoreMu — the helper acquires and releases
+// it itself.
+func (m *Manager) monotonicStore(newAssignment Assignment) bool {
+	m.applyStoreMu.Lock()
+	defer m.applyStoreMu.Unlock()
+
+	cur := m.CurrentAssignment()
+	if isApplyResultStale(newAssignment, cur) {
+		m.metrics.RecordStaleSnapshotStoreDropped()
+		return false
+	}
+
+	m.updateLastSeenLeaderRevision(newAssignment.LeaderRevision)
+	m.assignment.Store(newAssignment)
+
+	return true
 }
 
 // invokeAssignmentChangedHooks dispatches OnAssignmentChanged and the
@@ -967,7 +1029,18 @@ func (m *Manager) refreshAssignmentFromNATS() error {
 		return fmt.Errorf("failed to unmarshal assignment: %w", err)
 	}
 
-	m.assignment.Store(curAssignment)
+	// Route the Store through monotonicStore so a refresh racing the apply
+	// pipeline cannot regress a fresher snapshot (W15+W16, PR-2 §3.4). The
+	// helper handles the (V, LR) gate, LSR advance, and Store under
+	// applyStoreMu.
+	if !m.monotonicStore(curAssignment) {
+		m.logger.Debug("refresh skipped: snapshot already at-or-newer than KV",
+			"version", curAssignment.Version,
+			"leader_revision", curAssignment.LeaderRevision,
+		)
+		return nil
+	}
+
 	m.lastAssignmentAt.Store(time.Now().UnixNano())
 	m.lastAssignment.Store(m.clonePartitions(curAssignment.Partitions))
 

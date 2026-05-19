@@ -96,6 +96,19 @@ type AuditMetrics interface {
 	// worker-side stale-leader fence (§4.5).
 	RecordStaleLeaderRejected()
 
+	// RecordStaleSnapshotStoreDropped counts assignment candidates dropped
+	// by the pre-Apply / refresh stale-snapshot gate (W15+W16, PR-2). A
+	// nonzero counter indicates concurrent apply paths racing for the
+	// same worker; small numbers are expected under churn (rolling
+	// upgrade, leader handoff).
+	//
+	// Semantics: this counter increments BEFORE handoffCoordinator.Apply
+	// runs (for applyAssignmentWithPrev's pre-Apply gate) or BEFORE the
+	// snapshot Store (for refreshAssignmentFromNATS via monotonicStore).
+	// It does NOT fire on Apply errors — those route through
+	// scheduleApplyRetry without firing this counter.
+	RecordStaleSnapshotStoreDropped()
+
 	// RecordCommitPayloadMissing counts case (c) commits where the worker
 	// appears in Workers but Payloads[worker] is missing.
 	RecordCommitPayloadMissing()

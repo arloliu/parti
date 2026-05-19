@@ -29,21 +29,25 @@ import (
 type recordingMetrics struct {
 	*metrics.NopMetrics
 
-	staleLeaderRejected    atomic.Int64
-	commitPayloadMissing   atomic.Int64
-	payloadHashMismatch    atomic.Int64
-	setDigestMismatch      atomic.Int64
-	payloadFetchError      atomic.Int64
-	payloadDecompressError atomic.Int64
-	payloadDecodeError     atomic.Int64
-	assignmentChangeCalls  atomic.Int64
+	staleLeaderRejected       atomic.Int64
+	staleSnapshotStoreDropped atomic.Int64
+	commitPayloadMissing      atomic.Int64
+	payloadHashMismatch       atomic.Int64
+	setDigestMismatch         atomic.Int64
+	payloadFetchError         atomic.Int64
+	payloadDecompressError    atomic.Int64
+	payloadDecodeError        atomic.Int64
+	assignmentChangeCalls     atomic.Int64
 }
 
 func newRecordingMetrics() *recordingMetrics {
 	return &recordingMetrics{NopMetrics: metrics.NewNop()}
 }
 
-func (r *recordingMetrics) RecordStaleLeaderRejected()    { r.staleLeaderRejected.Add(1) }
+func (r *recordingMetrics) RecordStaleLeaderRejected() { r.staleLeaderRejected.Add(1) }
+func (r *recordingMetrics) RecordStaleSnapshotStoreDropped() {
+	r.staleSnapshotStoreDropped.Add(1)
+}
 func (r *recordingMetrics) RecordCommitPayloadMissing()   { r.commitPayloadMissing.Add(1) }
 func (r *recordingMetrics) RecordPayloadHashMismatch()    { r.payloadHashMismatch.Add(1) }
 func (r *recordingMetrics) RecordSetDigestMismatch()      { r.setDigestMismatch.Add(1) }
