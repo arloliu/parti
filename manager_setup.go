@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/arloliu/parti/v2/internal/assignment/handoff"
+	"github.com/arloliu/parti/v2/internal/kvbuckets"
 	"github.com/arloliu/parti/v2/kvutil"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
@@ -145,15 +146,7 @@ func (m *Manager) ensureKVBucket(
 	ttl time.Duration,
 	storage jetstream.StorageType,
 ) (jetstream.KeyValue, error) {
-	cfg := jetstream.KeyValueConfig{
-		Bucket:  bucket,
-		History: 1, // Keep only latest value
-		Storage: storage,
-	}
-
-	if ttl > 0 {
-		cfg.TTL = ttl
-	}
+	cfg := kvbuckets.BuildKeyValueConfig(bucket, ttl, storage)
 
 	// Use retry logic to handle concurrent creation
 	const maxRetries = 5
