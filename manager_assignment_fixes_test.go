@@ -117,7 +117,7 @@ type mockKeyWatcher struct {
 
 func newMockKeyWatcher() *mockKeyWatcher {
 	ch := make(chan jetstream.KeyValueEntry)
-	close(ch) // Immediately signal watcher closed (clean exit)
+	close(ch) // Immediately signal Updates() closed → watchAssignment returns err.
 	return &mockKeyWatcher{
 		updatesCh: ch,
 		errCh:     make(chan error),
@@ -129,7 +129,8 @@ func (w *mockKeyWatcher) Updates() <-chan jetstream.KeyValueEntry { return w.upd
 func (w *mockKeyWatcher) Stop() error                             { return nil }
 func (w *mockKeyWatcher) Error() <-chan error                     { return w.errCh }
 
-// mockRetryKV fails Watch on the first call and succeeds on subsequent calls.
+// mockRetryKV fails Watch on the first call and succeeds (with a watcher
+// whose Updates() channel is immediately closed) on subsequent calls.
 type mockRetryKV struct {
 	jetstream.KeyValue
 	watchCalls atomic.Int32
@@ -143,40 +144,51 @@ func (m *mockRetryKV) Watch(_ context.Context, _ string, _ ...jetstream.WatchOpt
 	return newMockKeyWatcher(), nil
 }
 
-// TestMonitorAssignmentChanges_RetriesAfterWatcherFailure verifies that
-// monitorAssignmentChanges retries when the initial Watch call fails, rather
-// than permanently stopping the monitor.
-func TestMonitorAssignmentChanges_RetriesAfterWatcherFailure(t *testing.T) {
+// TestMonitorAssignmentChanges_RewatchesOnChannelClose verifies that
+// monitorAssignmentChanges treats both an initial Watch error and a closed
+// Updates() channel as recoverable conditions: each triggers a re-Watch via
+// the backoff loop instead of exiting permanently. The monitor only stops
+// when its context is cancelled.
+//
+// W12 / PR-1 changed `watchAssignment` to return an error on channel close
+// (previously it returned nil → clean exit). Before that change, a closed
+// channel silently terminated the monitor and any subsequent alias updates
+// (including rolling-upgrade alias.<W>) were missed until process restart.
+func TestMonitorAssignmentChanges_RewatchesOnChannelClose(t *testing.T) {
 	t.Parallel()
 
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	// Generous timeout: 2s base backoff + jitter for the first rewatch,
+	// 4s + jitter for the second.
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
 
 	kv := &mockRetryKV{}
 	m := &Manager{
 		logger: logging.NewNop(),
 	}
-	// Set workerID so the key path is non-empty
 	m.workerID.Store("worker-0")
 
-	// Run monitorAssignmentChanges in a background goroutine.
-	// The mock KV fails the first Watch call (returns error), then the second
-	// Watch call succeeds and returns a closed channel (clean exit).
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		m.monitorAssignmentChanges(ctx, kv)
 	}()
 
+	// Three Watch calls = original + two rewatches: proves the rewatch
+	// path triggers on both the initial Watch error AND on each
+	// subsequent channel-close.
+	require.Eventually(t, func() bool {
+		return kv.watchCalls.Load() >= 3
+	}, 12*time.Second, 50*time.Millisecond,
+		"monitorAssignmentChanges must rewatch after Watch error AND after channel close")
+
+	// Cancel context: goroutine must exit cleanly.
+	cancel()
 	select {
 	case <-done:
-		// goroutine exited cleanly after second Watch succeeded
-	case <-time.After(8 * time.Second):
-		t.Fatal("monitorAssignmentChanges did not complete within timeout — retry may be broken")
+	case <-time.After(3 * time.Second):
+		t.Fatal("monitorAssignmentChanges did not exit after ctx cancel")
 	}
-
-	require.GreaterOrEqual(t, kv.watchCalls.Load(), int32(2),
-		"Watch must have been called at least twice (first failure + successful retry)")
 }
 
 // ============================================================================
