@@ -49,6 +49,11 @@ Single PR must cover BOTH causes — half-fixing leaves half the symptom.
 - **Effort:** Bundle with W15. The fix shape (pre-`Store` revalidation OR shared interlock) closes both at the same site.
 - **Why P2/P3:** less reachable than W15 (requires a transient apply failure first), but should be closed by the same PR as W15.
 
+**W19 (S3)** — **Failed-Apply partial-claim orphans after stale retry drop.** Spawned from PR-2 plan-review v2 P0-A (`tmp/02-pr2-spec_pr2-w15-w16_v2_review.md`). Coordinator's `preparePhase` can create stable claims directly for partitions with no prior owner (`internal/assignment/handoff/twophase.go:251-264`); if a later Apply phase fails and the retry is later stale-dropped (under PR-2's pre-Apply gate), those stable claims are orphaned because sweep skips stable claims (`twophase.go:455-460`). Pre-existing coordinator-level concern, not introduced by PR-2 — but PR-2 makes the stale-drop deterministic where current code would re-Apply.
+- **Effort:** Coordinator-side fix. Either (a) extend sweep to optionally reclaim expired stable claims with stronger TTL semantics, or (b) have the coordinator return a list of created-during-prepare claims so the caller can `releaseClaims` on Apply error.
+- **Why P2/P3:** observable harm only when a partition is permanently removed from the source while the failed Apply's claim was stable. Under normal churn (partitions re-included in future commits), `NextPrepare` handoff resolves orphans naturally.
+- **Documented in:** PR-2 spec §10.5.
+
 ### Tier P3 — Operational / cosmetic
 
 **W7 (S3)** — **Tight `EmergencyGracePeriod` vs GC pauses.** Config validation only enforces `EmergencyGracePeriod ≤ HeartbeatTTL`; the actual hysteresis budget is the spread between TTL and grace.
