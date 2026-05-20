@@ -12,6 +12,7 @@ import (
 type planFlags struct {
 	common      commonFlags
 	file        string
+	policy      string
 	jsonOut     bool
 	failOnDrift bool
 }
@@ -22,6 +23,7 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 
 	var f planFlags
 	fs.StringVar(&f.file, "f", "", "YAML config path (required)")
+	fs.StringVar(&f.policy, "policy", "", "reconcile policy: warn, adopt, safe-update (default: warn or cfg.policy)")
 	fs.StringVar(&f.common.server, "server", defaultServer(), "NATS server URL")
 	fs.StringVar(&f.common.creds, "creds", "", "path to NATS credentials file")
 	fs.StringVar(&f.common.nkey, "nkey", "", "path to NATS nkey seed file")
@@ -31,6 +33,11 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&f.failOnDrift, "fail-on-drift", false, "exit 2 if non-informational drift is detected")
 
 	if err := fs.Parse(args); err != nil {
+		return ExitValidation
+	}
+
+	// Reject unsupported --policy values before any I/O.
+	if !validatePolicyFlag(f.policy, "plan", stderr) {
 		return ExitValidation
 	}
 
@@ -53,6 +60,11 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 
+		return ExitValidation
+	}
+
+	// Resolve flag vs YAML policy. policy: "" in YAML is treated as absent.
+	if !resolveAndStampPolicy(f.policy, "plan", f.file, &cfg, stderr) {
 		return ExitValidation
 	}
 
@@ -88,11 +100,7 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 		return classifyError(err)
 	}
 
-	if f.jsonOut {
-		_ = jsonOutput(stdout, planResult)
-	} else {
-		renderPlanText(stdout, planResult)
-	}
+	emitPlan(stdout, planResult, f.jsonOut)
 
 	if f.failOnDrift && hasDrift(planResult.Drift) {
 		return ExitDrift

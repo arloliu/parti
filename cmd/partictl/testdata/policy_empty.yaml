@@ -1,0 +1,7 @@
+# Config with explicit policy: "" — treated as absent for conflict resolution.
+apiVersion: parti.io/v1
+policy: ""
+controlPlane:
+  workerIdTtl: 75s
+  electionTimeout: 10s
+  heartbeatTtl: 15s

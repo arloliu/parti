@@ -1,0 +1,8 @@
+# Config with explicit policy: warn — used to trigger conflict when combined
+# with --policy=safe-update or --policy=adopt flags.
+apiVersion: parti.io/v1
+policy: warn
+controlPlane:
+  workerIdTtl: 75s
+  electionTimeout: 10s
+  heartbeatTtl: 15s

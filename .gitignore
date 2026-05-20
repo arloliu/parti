@@ -26,5 +26,6 @@ checkpoints/
 /*.pprof
 
 /simulation
+/partictl
 failure_report.json
 DEADJOE

@@ -1,0 +1,8 @@
+# Config with explicit policy: adopt — used to verify adopt command proceeds when YAML
+# policy matches, and to test plan --policy=adopt conflict-free paths.
+apiVersion: parti.io/v1
+policy: adopt
+controlPlane:
+  workerIdTtl: 75s
+  electionTimeout: 10s
+  heartbeatTtl: 15s
