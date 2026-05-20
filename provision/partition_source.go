@@ -25,17 +25,10 @@ import (
 //   - MaxValueSize: ps.MaxValueSize (0 = no limit)
 //   - TTL: set only when ps.TTL > 0 (matches control-plane convention)
 func buildPartitionSourceKVConfig(ps PartitionSourceConfig) jetstream.KeyValueConfig {
-	var storage jetstream.StorageType
-	if ps.Storage == "memory" {
-		storage = jetstream.MemoryStorage
-	} else {
-		storage = jetstream.FileStorage
-	}
-
 	cfg := jetstream.KeyValueConfig{
 		Bucket:       ps.Bucket,
 		History:      ps.History,
-		Storage:      storage,
+		Storage:      storageTypeFromString(ps.Storage),
 		Replicas:     ps.Replicas,
 		MaxValueSize: ps.MaxValueSize,
 	}
@@ -82,18 +75,18 @@ func planPartitionSource(ctx context.Context, js jetstream.JetStream, cfg Config
 }
 
 // classifyPartitionSourceDrift compares a live KV-bucket stream against the
-// desired partition-source config and returns one or more drift findings. v1
-// never emits update-* / delete-* actions, only findings.
+// desired partition-source config and returns drift findings.
 //
-// Mutability table (per KV field mutability rules in the plan):
-//   - Immutable: History, Storage. Replicas treated as drift-immutable
-//     conservatively in v1 (conditionally mutable; safe-update lands in Phase 2).
-//   - Mutable: Description, Metadata (managed, component, instance), MaxBytes,
-//     MaxValueSize, TTL.
+// Mutability:
+//   - Immutable: History, Storage, and the parti.io/component marker key.
+//   - Mutable: MaxValueSize, TTL, Replicas, and the parti.io/managed and
+//     parti.io/instance marker keys. The NATS server enforces cluster
+//     feasibility for Replicas changes at apply time.
+//   - Preserved-from-live (not reported as drift): Description, MaxBytes.
+//     These fields have no YAML representation and survive every update-kv
+//     unchanged.
 func classifyPartitionSourceDrift(ps *PartitionSourceConfig, info *jetstream.StreamInfo, instance string) []DriftFinding {
 	marker := ParseMarker(info.Config.Metadata)
-
-	// Unmarked bucket named by config → "adopted" drift, no action.
 	if !marker.IsManaged() {
 		return []DriftFinding{{
 			Severity: SeverityAdopted,
@@ -106,116 +99,81 @@ func classifyPartitionSourceDrift(ps *PartitionSourceConfig, info *jetstream.Str
 		}}
 	}
 
-	mutable := map[string]any{}
-	immutable := map[string]any{}
-
-	// Desired storage type.
-	var wantStorage jetstream.StorageType
-	if ps.Storage == "memory" {
-		wantStorage = jetstream.MemoryStorage
-	} else {
-		wantStorage = jetstream.FileStorage
+	live := extractLiveKVConfig(&info.Config)
+	wanted := wantedPartitionSourceKV(ps, instance, live)
+	if kvConfigsEqual(wanted, live) {
+		return []DriftFinding{{
+			Severity: SeverityInformational,
+			Kind:     KindPartitionSource,
+			Name:     ps.Bucket,
+			Detail:   map[string]any{"component": ComponentPartitionSource},
+		}}
 	}
-	if info.Config.Storage != wantStorage {
-		immutable["storage"] = map[string]any{
-			"want": storageName(wantStorage),
-			"got":  storageName(info.Config.Storage),
+
+	var mutable, immutable map[string]any
+	addImmutable := func(field string, detail map[string]any) {
+		if immutable == nil {
+			immutable = map[string]any{}
 		}
+		immutable[field] = detail
+	}
+	addMutable := func(field string, detail map[string]any) {
+		if mutable == nil {
+			mutable = map[string]any{}
+		}
+		mutable[field] = detail
 	}
 
-	// History is stored as MaxMsgsPerSubject on the underlying stream.
-	wantHistory := int64(ps.History) // already ≥ 1 after normalization
-	if info.Config.MaxMsgsPerSubject != wantHistory {
-		immutable["history"] = map[string]any{
-			"want": wantHistory,
+	if live.Storage != wanted.Storage {
+		addImmutable("storage", map[string]any{
+			"want": storageName(wanted.Storage),
+			"got":  storageName(live.Storage),
+		})
+	}
+	if live.History != wanted.History {
+		addImmutable("history", map[string]any{
+			"want": int64(wanted.History),
 			"got":  info.Config.MaxMsgsPerSubject,
-		}
+		})
 	}
-
-	// Replicas: 0 in config means "server default" which NATS normalizes to 1.
-	// Treat 0 and 1 as equivalent on the desired side to avoid spurious drift
-	// on every default-replica installation.
-	effectiveReplicas := ps.Replicas
-	if effectiveReplicas == 0 {
-		effectiveReplicas = 1
+	if normalizeReplicas(live.Replicas) != normalizeReplicas(wanted.Replicas) {
+		addMutable("replicas", map[string]any{
+			"want": normalizeReplicas(wanted.Replicas),
+			"got":  live.Replicas,
+		})
 	}
-	if info.Config.Replicas != effectiveReplicas {
-		immutable["replicas"] = map[string]any{
-			"want": effectiveReplicas,
-			"got":  info.Config.Replicas,
-		}
-	}
-
-	// Description is mutable in place (Phase 2). Desired is always empty string
-	// (we do not set a Description on partition-source buckets by default).
-	if info.Config.Description != "" {
-		mutable["description"] = map[string]any{
-			"want": "",
-			"got":  info.Config.Description,
-		}
-	}
-
-	// MaxBytes is mutable in place (Phase 2). Desired is always 0 ("no limit").
-	// NATS stores "no limit" as MaxBytes=-1 server-side; normalize -1→0 before
-	// comparing to avoid spurious drift on default installs.
-	liveMaxBytes := info.Config.MaxBytes
-	if liveMaxBytes == -1 {
-		liveMaxBytes = 0
-	}
-	if liveMaxBytes != 0 {
-		mutable["maxBytes"] = map[string]any{
-			"want": int64(0),
-			"got":  info.Config.MaxBytes,
-		}
-	}
-
-	// MaxValueSize is mutable in place (Phase 2).
-	// info.Config.MaxMsgSize is the stream-level field corresponding to KV MaxValueSize.
-	// NATS stores "no limit" as MaxMsgSize=-1 server-side; config uses 0 for the same
-	// semantic. Normalize -1→0 before comparing to avoid spurious drift on default installs.
-	liveMaxValueSize := info.Config.MaxMsgSize
-	if liveMaxValueSize == -1 {
-		liveMaxValueSize = 0
-	}
-	if liveMaxValueSize != ps.MaxValueSize {
-		mutable["maxValueSize"] = map[string]any{
-			"want": ps.MaxValueSize,
+	if normalizeMaxValueSize(live.MaxValueSize) != normalizeMaxValueSize(wanted.MaxValueSize) {
+		addMutable("maxValueSize", map[string]any{
+			"want": wanted.MaxValueSize,
 			"got":  info.Config.MaxMsgSize,
-		}
+		})
+	}
+	if live.TTL != wanted.TTL {
+		addMutable("ttl", map[string]any{
+			"want": wanted.TTL.String(),
+			"got":  live.TTL.String(),
+		})
 	}
 
-	// TTL is stored as MaxAge on the underlying stream. Mutable (Phase 2).
-	wantTTL := ps.TTL // 0 means "no expiration"
-	if info.Config.MaxAge != wantTTL {
-		mutable["ttl"] = map[string]any{
-			"want": wantTTL.String(),
-			"got":  info.Config.MaxAge.String(),
-		}
-	}
-
-	// Marker fields are mutable in place (Phase 2). Report any deviation from
-	// the expected v1 marker values as drift-mutable, including managed version
-	// and component mismatches.
 	if marker.Managed != MarkerManagedValue {
-		mutable["managed"] = map[string]any{
+		addMutable("managed", map[string]any{
 			"want": MarkerManagedValue,
 			"got":  marker.Managed,
-		}
+		})
 	}
+	// Component mismatch is immutable: a bucket stamped for a different
+	// role is a misconfiguration safe-update must not silently re-label.
 	if marker.Component != ComponentPartitionSource {
-		mutable["component"] = map[string]any{
+		addImmutable("component", map[string]any{
 			"want": ComponentPartitionSource,
 			"got":  marker.Component,
-		}
+		})
 	}
-
-	// Instance mismatch on a managed bucket is surfaced as drift-mutable
-	// since Metadata is live-editable in Phase 2.
 	if marker.Instance != instance {
-		mutable["instance"] = map[string]any{
+		addMutable("instance", map[string]any{
 			"want": instance,
 			"got":  marker.Instance,
-		}
+		})
 	}
 
 	findings := make([]DriftFinding, 0, 2)
@@ -235,16 +193,31 @@ func classifyPartitionSourceDrift(ps *PartitionSourceConfig, info *jetstream.Str
 			Detail:   mutable,
 		})
 	}
-	if len(findings) == 0 {
-		findings = append(findings, DriftFinding{
-			Severity: SeverityInformational,
-			Kind:     KindPartitionSource,
-			Name:     ps.Bucket,
-			Detail: map[string]any{
-				"component": ComponentPartitionSource,
-			},
-		})
-	}
 
 	return findings
+}
+
+// wantedPartitionSourceKV returns the KeyValueConfig the ps implies, with
+// preserved-from-live fields inherited from live.
+func wantedPartitionSourceKV(ps *PartitionSourceConfig, instance string, live jetstream.KeyValueConfig) jetstream.KeyValueConfig {
+	wanted := live
+	wanted.Storage = storageTypeFromString(ps.Storage)
+	wanted.History = ps.History
+	wanted.TTL = ps.TTL
+	wanted.Replicas = ps.Replicas
+	wanted.MaxValueSize = ps.MaxValueSize
+	wanted.Metadata = mergeMarkerMetadata(live.Metadata, ComponentPartitionSource, instance)
+
+	return wanted
+}
+
+// storageTypeFromString maps the YAML-side string ("file"/"memory") to a
+// jetstream.StorageType. Anything other than "memory" maps to FileStorage,
+// matching the runtime default for partition-source buckets.
+func storageTypeFromString(s string) jetstream.StorageType {
+	if s == "memory" {
+		return jetstream.MemoryStorage
+	}
+
+	return jetstream.FileStorage
 }

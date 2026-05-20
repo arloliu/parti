@@ -384,10 +384,11 @@ func TestPlan_PartitionSource_ImmutableStorageDrift(t *testing.T) {
 	require.True(t, found, "expected drift-immutable for storage mismatch")
 }
 
-// TestPlan_PartitionSource_MutableDescriptionDrift verifies that Plan reports
-// drift-mutable when the live bucket has a non-empty Description (desired is
-// empty — we set no Description by default).
-func TestPlan_PartitionSource_MutableDescriptionDrift(t *testing.T) {
+// TestPlan_PartitionSource_DescriptionPreservedNoSrift verifies that Plan does
+// NOT report any drift when the live bucket has a non-empty Description. Description
+// is preserved-from-live: the v2 YAML schema cannot express it, so it is never
+// drifted.
+func TestPlan_PartitionSource_DescriptionPreservedNoDrift(t *testing.T) {
 	t.Parallel()
 	js := newJS(t)
 	cfg := partitionSourceCfg()
@@ -408,25 +409,23 @@ func TestPlan_PartitionSource_MutableDescriptionDrift(t *testing.T) {
 
 	// No create-kv action.
 	for _, a := range plan.Actions {
-		require.NotEqual(t, "parti-partitions", a.Name, "no action for mutable description drift")
+		require.NotEqual(t, "parti-partitions", a.Name, "no action for description (preserved-from-live)")
 	}
 
-	// A drift-mutable finding with "description" detail must be present.
-	var found bool
+	// Description must NOT appear in any drift finding — it is preserved-from-live.
 	for _, d := range plan.Drift {
-		if d.Name == "parti-partitions" && d.Severity == provision.SeverityDriftMutable {
-			if _, ok := d.Detail["description"]; ok {
-				found = true
-			}
+		if d.Name == "parti-partitions" {
+			require.NotContains(t, d.Detail, "description",
+				"description is preserved-from-live and must not appear in drift findings")
 		}
 	}
-	require.True(t, found, "expected drift-mutable for description mismatch")
 }
 
-// TestPlan_PartitionSource_MutableMaxBytesDrift verifies that Plan reports
-// drift-mutable when the live bucket has a non-zero MaxBytes (desired is 0 —
-// no limit).
-func TestPlan_PartitionSource_MutableMaxBytesDrift(t *testing.T) {
+// TestPlan_PartitionSource_MaxBytesPreservedNoDrift verifies that Plan does NOT
+// report any drift when the live bucket has a non-zero MaxBytes. MaxBytes is
+// preserved-from-live: the v2 YAML schema cannot express it, so it is never
+// drifted.
+func TestPlan_PartitionSource_MaxBytesPreservedNoDrift(t *testing.T) {
 	t.Parallel()
 	js := newJS(t)
 	cfg := partitionSourceCfg()
@@ -447,19 +446,128 @@ func TestPlan_PartitionSource_MutableMaxBytesDrift(t *testing.T) {
 
 	// No create-kv action.
 	for _, a := range plan.Actions {
-		require.NotEqual(t, "parti-partitions", a.Name, "no action for mutable maxBytes drift")
+		require.NotEqual(t, "parti-partitions", a.Name, "no action for maxBytes (preserved-from-live)")
 	}
 
-	// A drift-mutable finding with "maxBytes" detail must be present.
-	var found bool
+	// MaxBytes must NOT appear in any drift finding — it is preserved-from-live.
 	for _, d := range plan.Drift {
-		if d.Name == "parti-partitions" && d.Severity == provision.SeverityDriftMutable {
-			if _, ok := d.Detail["maxBytes"]; ok {
-				found = true
-			}
+		if d.Name == "parti-partitions" {
+			require.NotContains(t, d.Detail, "maxBytes",
+				"maxBytes is preserved-from-live and must not appear in drift findings")
 		}
 	}
-	require.True(t, found, "expected drift-mutable for maxBytes mismatch")
+}
+
+// TestPlan_PartitionSource_MutableReplicasDrift verifies that Plan reports
+// drift-mutable (NOT drift-immutable) when the live bucket's Replicas count
+// differs from the desired count. Replicas is reclassified from drift-immutable
+// (Phase 1) to drift-mutable (Phase 2).
+func TestPlan_PartitionSource_ReplicasNormalization_NoDrift(t *testing.T) {
+	t.Parallel()
+	js := newJS(t)
+
+	cfg := provision.Config{
+		APIVersion: provision.APIVersionV1,
+		Instance:   "prod",
+		PartitionSource: &provision.PartitionSourceConfig{
+			Bucket:   "parti-partitions",
+			Key:      "partitions/v1",
+			Storage:  "file",
+			History:  1,
+			Replicas: 1, // desired
+		},
+	}
+
+	// Pre-create a marked bucket with default replicas (1 == desired).
+	// NATS single-server normalizes Replicas to 1 on creation; we can only
+	// verify the normalization equivalence (0↔1) path here.
+	// Positive Replicas drift-mutable classification is tested in the unit
+	// tests (classify_drift_test.go) using synthetic StreamInfo.
+	cfgZeroReplicas := provision.Config{
+		APIVersion: provision.APIVersionV1,
+		Instance:   "prod",
+		PartitionSource: &provision.PartitionSourceConfig{
+			Bucket:   "parti-partitions",
+			Key:      "partitions/v1",
+			Storage:  "file",
+			History:  1,
+			Replicas: 0, // 0 normalizes to 1 — must not drift against live Replicas=1
+		},
+	}
+
+	createKV(t, js, jetstream.KeyValueConfig{
+		Bucket:   "parti-partitions",
+		History:  1,
+		Storage:  jetstream.FileStorage,
+		Replicas: 1,
+		Metadata: provision.BuildMarker(provision.ComponentPartitionSource, "prod"),
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Config Replicas=0 (== 1) vs live Replicas=1 → no replicas drift.
+	plan, err := provision.Plan(ctx, js, cfgZeroReplicas)
+	require.NoError(t, err)
+	for _, d := range plan.Drift {
+		if d.Name == "parti-partitions" {
+			require.NotContains(t, d.Detail, "replicas",
+				"Replicas=0 and live Replicas=1 are equivalent; no replicas drift expected")
+		}
+	}
+
+	// Config Replicas=1 vs live Replicas=1 → no replicas drift.
+	plan2, err := provision.Plan(ctx, js, cfg)
+	require.NoError(t, err)
+	for _, d := range plan2.Drift {
+		if d.Name == "parti-partitions" {
+			require.NotContains(t, d.Detail, "replicas",
+				"Replicas=1 matches live; no replicas drift expected")
+		}
+	}
+}
+
+// TestPlan_PartitionSource_ReplicasDefaultMatch_Informational verifies that
+// when both config and live have the default replica count (1), Plan reports
+// no drift finding for replicas. The positive drift-mutable path is exercised
+// in classify_drift_test.go using synthetic StreamInfo (single-server NATS
+// always normalizes Replicas to 1, making positive-drift integration tests
+// impractical).
+func TestPlan_PartitionSource_ReplicasDefaultMatch_Informational(t *testing.T) {
+	t.Parallel()
+	js := newJS(t)
+
+	cfg := provision.Config{
+		APIVersion: provision.APIVersionV1,
+		Instance:   "prod",
+		PartitionSource: &provision.PartitionSourceConfig{
+			Bucket:   "parti-partitions-r2",
+			Key:      "partitions/v1",
+			Storage:  "file",
+			History:  1,
+			Replicas: 0, // server default (1); live will also be 1
+		},
+	}
+
+	createKV(t, js, jetstream.KeyValueConfig{
+		Bucket:   "parti-partitions-r2",
+		History:  1,
+		Storage:  jetstream.FileStorage,
+		Metadata: provision.BuildMarker(provision.ComponentPartitionSource, "prod"),
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	plan, err := provision.Plan(ctx, js, cfg)
+	require.NoError(t, err)
+
+	// The key invariant: no drift-immutable finding with "replicas".
+	for _, d := range plan.Drift {
+		if d.Name == "parti-partitions-r2" && d.Severity == provision.SeverityDriftImmutable {
+			require.NotContains(t, d.Detail, "replicas",
+				"Replicas must be classified as drift-mutable (not drift-immutable)")
+		}
+	}
 }
 
 // TestPlan_PartitionSource_MutableMarkerDrift verifies that Plan reports

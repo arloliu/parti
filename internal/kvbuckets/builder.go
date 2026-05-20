@@ -21,15 +21,16 @@ import (
 //	    // TTL set only when ttl > 0
 //	}
 //
-// This equivalence is a hard contract: the forthcoming provision package builds
-// its KeyValueConfig by calling this function and then appending metadata. Any
-// deviation from the historical literal would silently break the byte-equality
-// invariant between live Manager buckets and provision-managed buckets.
+// This equivalence is a hard contract: the runtime manager and the
+// provision plan emitter must produce the same KeyValueConfig from the
+// same inputs. The provision package may stamp a Replicas value on the
+// returned config when its operator-supplied control-plane Replicas is
+// non-zero; that is the only field permitted to deviate.
 //
 // Rules:
 //   - Bucket, History (always 1), and Storage are always set.
 //   - TTL is set only when ttl > 0; zero and negative values leave cfg.TTL unset.
-//   - Replicas is intentionally left zero — nats.go normalizes it to 1 server-side.
+//   - Replicas is left zero — nats.go normalizes it to 1 server-side.
 //   - This function performs no I/O.
 func BuildKeyValueConfig(bucket string, ttl time.Duration, storage jetstream.StorageType) jetstream.KeyValueConfig {
 	cfg := jetstream.KeyValueConfig{

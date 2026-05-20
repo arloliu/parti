@@ -60,12 +60,18 @@ func TestValidate_TableDriven(t *testing.T) {
 			errSubstr: "apiVersion",
 		},
 		{
-			name: "policy_safe_update_rejected",
+			name: "policy_safe_update_accepted",
 			mutate: func(c *provision.Config) {
-				c.Policy = "safe-update"
+				c.Policy = provision.PolicySafeUpdate
 			},
-			wantErr:   true,
-			errSubstr: "safe-update",
+			wantErr: false,
+		},
+		{
+			name: "policy_adopt_accepted",
+			mutate: func(c *provision.Config) {
+				c.Policy = provision.PolicyAdopt
+			},
+			wantErr: false,
 		},
 		{
 			name: "policy_force_rejected",
@@ -89,6 +95,28 @@ func TestValidate_TableDriven(t *testing.T) {
 				c.Policy = provision.PolicyWarn
 			},
 			wantErr: false,
+		},
+		{
+			name: "control_plane_replicas_zero_accepted",
+			mutate: func(c *provision.Config) {
+				c.ControlPlane.Replicas = 0
+			},
+			wantErr: false,
+		},
+		{
+			name: "control_plane_replicas_positive_accepted",
+			mutate: func(c *provision.Config) {
+				c.ControlPlane.Replicas = 3
+			},
+			wantErr: false,
+		},
+		{
+			name: "control_plane_replicas_negative_rejected",
+			mutate: func(c *provision.Config) {
+				c.ControlPlane.Replicas = -1
+			},
+			wantErr:   true,
+			errSubstr: "controlPlane.replicas",
 		},
 		{
 			name: "zero_workerid_ttl_rejected",

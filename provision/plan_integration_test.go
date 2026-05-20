@@ -294,6 +294,48 @@ func TestPlan_CancelledContext(t *testing.T) {
 	require.Zero(t, plan)
 }
 
+// TestPlan_ControlPlane_ReplicasNormalization_NoDrift verifies that
+// Replicas=0 in config (normalized to 1) against a live bucket with
+// server-default Replicas=1 produces no replicas drift. The positive
+// drift-mutable path (mismatched Replicas) is covered in classify_drift_test.go
+// using synthetic StreamInfo; single-server NATS always normalizes to 1.
+func TestPlan_ControlPlane_ReplicasNormalization_NoDrift(t *testing.T) {
+	t.Parallel()
+	js := newJS(t)
+
+	// Create a config with Replicas=0 (default) and a live bucket with
+	// Replicas=1 (server default). These must compare equal (0↔1 normalization).
+	cfg := planTestConfig()
+	cfg.ControlPlane.Replicas = 0
+
+	// Pre-create parti-election with correct config and marker.
+	liveElection := kvbuckets.BuildKeyValueConfig("parti-election", 10*time.Second, jetstream.MemoryStorage)
+	liveElection.Metadata = provision.BuildMarker(provision.ComponentControlPlaneElection, "prod")
+	createKV(t, js, liveElection)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	plan, err := provision.Plan(ctx, js, cfg)
+	require.NoError(t, err)
+
+	// Replicas=0 (config) and Replicas=1 (live server default) are equivalent.
+	// No replicas drift expected.
+	for _, d := range plan.Drift {
+		if d.Name == "parti-election" {
+			require.NotContains(t, d.Detail, "replicas",
+				"Replicas=0 and live Replicas=1 must be treated as equivalent (no drift)")
+		}
+	}
+
+	// Replicas must NOT appear in a drift-immutable finding (it is mutable).
+	for _, d := range plan.Drift {
+		if d.Name == "parti-election" && d.Severity == provision.SeverityDriftImmutable {
+			require.NotContains(t, d.Detail, "replicas",
+				"Replicas must be classified as drift-mutable, not drift-immutable")
+		}
+	}
+}
+
 func TestPlan_DifferentNameBucketStillGetsCreateKV(t *testing.T) {
 	t.Parallel()
 	js := newJS(t)
