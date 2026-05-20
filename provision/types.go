@@ -18,11 +18,11 @@ type Snapshot struct {
 	ObservedAt      time.Time       `json:"observedAt"`
 	ControlPlane    []KVBucketState `json:"controlPlane"`
 	PartitionSource []KVBucketState `json:"partitionSource"`
-	// DynamicConsumers is reserved for Phase 5 (dynamic-consumer
-	// precreation). In v1 it is always empty: alignment-check is the
-	// only dynamic-consumer surface and it does not produce ConsumerState
-	// entries because v1 does not stamp the ownership marker on
-	// dynamic consumers.
+	// DynamicConsumers is always empty in the current release: alignment-check
+	// is the only dynamic-consumer surface, and it does not produce
+	// ConsumerState entries because the SDK does not yet stamp the ownership
+	// marker on dynamic consumers. Dynamic consumer precreation is not yet
+	// supported.
 	DynamicConsumers []ConsumerState `json:"dynamicConsumers"`
 }
 
@@ -55,7 +55,9 @@ type KVBucketState struct {
 	MaxValueSize int32 `json:"maxValueSize,omitempty"`
 }
 
-// ConsumerState is a placeholder; populated in W4 (dynamic-consumer alignment).
+// ConsumerState is a placeholder. Dynamic-consumer alignment is not yet
+// populated in the current release; the struct exists so the Snapshot shape
+// is stable for future use.
 type ConsumerState struct {
 	StreamName string `json:"streamName,omitempty"`
 	Durable    string `json:"durable,omitempty"`
@@ -80,10 +82,14 @@ type PlanResult struct {
 	Drift      []DriftFinding  `json:"drift"`
 }
 
-// PlannedAction is one operation Apply would perform. In v1, Kind is always
-// "create-kv" (update-* lands in Phase 2; consumer-create in Phase 5;
-// delete-* in Phase 6). The Resource field carries the would-be NATS config
-// — for "create-kv" this is a jetstream.KeyValueConfig value.
+// PlannedAction is one operation Apply would perform. Kind is one of the
+// ActionCreateKV, ActionUpdateKV, or ActionStampMarker constants. The Resource
+// field carries the would-be NATS config: for "create-kv" this is a
+// jetstream.KeyValueConfig value; for "update-kv" it is *UpdateKVResource;
+// for "stamp-marker" it is *StampMarkerResource.
+//
+// Consumer precreation and destructive repair (delete/recreate) are not yet
+// supported.
 type PlannedAction struct {
 	Kind     string `json:"kind"`
 	Name     string `json:"name"`
@@ -149,14 +155,15 @@ type StampMarkerResource struct {
 }
 
 // DriftFinding describes how a live resource differs from the desired state,
-// or that an existing resource is unmarked ("adopted"). v1 emits drift
-// findings but never emits update-* / delete-* actions.
+// or that an existing resource is unmarked ("adopted").
 //
 // Severity values:
-//   - "informational": resource exists and matches; no action needed.
-//   - "drift-mutable": fields differ but would be safe to live-edit (v2).
-//   - "drift-immutable": fields differ and require delete/recreate (v6).
-//   - "adopted": resource exists without the Parti marker; reported only.
+//   - "informational": resource exists and matches desired state; no action needed.
+//   - "drift-mutable": fields differ but can be reconciled in place (see
+//     PolicySafeUpdate and the ActionUpdateKV action kind).
+//   - "drift-immutable": fields differ and require delete/recreate to repair;
+//     destructive repair is not yet supported.
+//   - "adopted": resource exists without the Parti marker; see PolicyAdopt.
 type DriftFinding struct {
 	Severity string         `json:"severity"`
 	Kind     string         `json:"kind"`
@@ -180,8 +187,6 @@ const (
 )
 
 // Report is the result of Apply: what executed, what was skipped, what failed.
-// v1 never emits Apply, but the type is part of the load-bearing W1 surface
-// so later phases inherit it verbatim.
 type Report struct {
 	APIVersion string           `json:"apiVersion"`
 	Kind       string           `json:"kind"`
@@ -209,7 +214,7 @@ type ExecutedAction struct {
 
 // SkippedAction is a PlannedAction Apply did not run.
 //
-// Reason values (W2+):
+// Reason values:
 //   - "context-cancelled": ctx was cancelled before this action started.
 //   - "prior-error": an earlier action errored; Apply is fail-fast.
 type SkippedAction struct {
@@ -232,9 +237,9 @@ type ResourceError struct {
 	Error string `json:"error"`
 }
 
-// PlannedConsumer is the W4 dynamic-consumer alignment output type. The
-// struct lives here so the Plan surface is stable across phases; v1 never
-// populates dynamic-consumer entries (alignment-check ships in W4).
+// PlannedConsumer is the dynamic-consumer alignment output type. The struct
+// exists so the Plan surface is stable; dynamic-consumer entries are not
+// yet populated through Plan (use PlanDynamicConsumers directly).
 type PlannedConsumer struct {
 	StreamName string                   `json:"streamName"`
 	Subject    string                   `json:"subject"`

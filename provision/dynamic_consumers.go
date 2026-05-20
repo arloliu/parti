@@ -18,16 +18,16 @@ import (
 //
 // The builder produces the same per-subject jetstream.ConsumerConfig that
 // the runtime consumer.Dynamic would create (modulo runtime-tunable fields
-// supplied via Dynamic options — see the W4 sub-spec §2 for the enumerated
-// equality subset).
+// supplied via Dynamic options; the equality subset is documented in the
+// corresponding integration test).
 //
-// In v1 the builder hard-codes:
+// The builder hard-codes:
 //   - AckPolicy = jetstream.AckExplicitPolicy
 //   - DeliverPolicy = jetstream.DeliverAllPolicy
 //
 // All other ConsumerConfig fields are populated from the zero values of
 // dynamicbuild.Defaults; runtime equivalents are tunable through consumer
-// options that the v1 builder does not accept. The runtime-defaults
+// options that this builder does not accept. The runtime-defaults
 // roundtrip test (provision/dynamic_consumers_test.go) pins the equality
 // subset against durable.WorkerConsumerConfig.SetDefaults().
 //
@@ -86,8 +86,8 @@ func PlanDynamicConsumers(
 
 	defaults := dynamicbuild.Defaults{
 		AckPolicy: jetstream.AckExplicitPolicy,
-		// Remaining tunables left at their Go zero values; the v1 equality
-		// subset does not assert them. See sub-spec §2.
+		// Remaining tunables left at their Go zero values; the equality
+		// subset tested by the roundtrip test does not assert them.
 	}
 
 	out := make([]PlannedConsumer, 0, len(subjects))
@@ -109,12 +109,13 @@ func PlanDynamicConsumers(
 // check that runtime consumer.Dynamic.Update would perform on first update,
 // for each configured dynamic-consumer alignment target.
 //
-// v1 always passes consumer.RecoveryDisabled as the strategy, mirroring
-// what consumer.Dynamic would produce when no WithRecoveryStrategy option
-// is set. Both RecoveryDisabled and RecoverFromBeginning unconditionally
-// pass the check (see consumer.CheckWorkQueueRecoveryCompat), so v1
-// alignment never raises a false positive against a WorkQueuePolicy
-// stream. Phase 5 (precreation) reintroduces a configurable strategy.
+// ValidateLiveDynamicConsumers always passes consumer.RecoveryDisabled as
+// the strategy, mirroring what consumer.Dynamic would produce when no
+// WithRecoveryStrategy option is set. Both RecoveryDisabled and
+// RecoverFromBeginning unconditionally pass the check (see
+// consumer.CheckWorkQueueRecoveryCompat), so alignment never raises a
+// false positive against a WorkQueuePolicy stream. A configurable strategy
+// is not yet supported for this check.
 //
 // Errors:
 //   - Returns the first error encountered (fail-fast), wrapped with the

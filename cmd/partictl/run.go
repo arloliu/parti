@@ -67,7 +67,7 @@ Common flags (accepted by all commands):
   -instance <name>      Filter by parti.io/instance (view without -f; validate)
   -policy   <policy>    Reconcile policy for plan/apply: warn, adopt, safe-update (default: warn)
 
-Deferred commands (not yet available in v1):
+Deferred commands (not yet supported):
   partitions plan/apply, stream view/plan/apply, init, emit
 
 Exit codes:

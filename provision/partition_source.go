@@ -11,7 +11,7 @@ import (
 // buildPartitionSourceKVConfig returns a jetstream.KeyValueConfig for the
 // partition-source bucket described by ps.
 //
-// This builder is intentionally separate from the W0 control-plane builder
+// This builder is intentionally separate from the control-plane builder
 // (internal/kvbuckets.BuildKeyValueConfig) because partition-source has a
 // different shape: Storage, History, Replicas, and MaxValueSize are all
 // configurable by the operator, whereas control-plane buckets have fixed

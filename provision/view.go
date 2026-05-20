@@ -15,7 +15,7 @@ const kvStreamPrefix = "KV_"
 // View returns a Snapshot of every Parti-marked NATS resource visible to js,
 // filtered by scope.
 //
-// In v1 the implementation walks $JS.API.STREAM.LIST (via jetstream.ListStreams)
+// The implementation walks $JS.API.STREAM.LIST (via jetstream.ListStreams)
 // once, filters for KV streams (Name starts with "KV_"), and reads
 // stream.Config.Metadata to decide which buckets are Parti-managed. Unmarked
 // buckets are excluded from default View output.
@@ -35,8 +35,8 @@ func View(ctx context.Context, js jetstream.JetStream, scope Scope) (Snapshot, e
 		DynamicConsumers: []ConsumerState{},
 	}
 
-	// Short-circuit: nothing to do if no KV kinds are requested. (The
-	// W1 scope never has DynamicConsumers populated; that lands in W4.)
+	// Short-circuit: nothing to do if no KV kinds are requested.
+	// DynamicConsumers is not yet populated by View.
 	if !scope.ControlPlane && !scope.PartitionSource {
 		return snap, nil
 	}
@@ -67,8 +67,7 @@ func View(ctx context.Context, js jetstream.JetStream, scope Scope) (Snapshot, e
 		// and unknown forward-compat values both surface under
 		// ControlPlane (operators don't lose visibility of new
 		// components). PartitionSource has its own slot. Anything else
-		// (dynamic-consumer, future categories) is dropped in W1 and
-		// will land in its own switch case in W4.
+		// (dynamic-consumer, future categories) is silently dropped.
 		switch state.Component {
 		case ComponentPartitionSource:
 			if scope.PartitionSource {

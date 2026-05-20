@@ -22,11 +22,11 @@ import (
 //   - Each desired bucket is looked up by exact NATS name (KV_<bucket>);
 //     marker presence is never used to authorize or skip the lookup.
 //   - The partition-source key is NOT probed in Plan (that is a ValidateLive
-//     concern, landing in W2).
+//     concern).
 //
-// Partition-source create-kv emission and drift classification are implemented
-// (W3). Dynamic-consumer alignment lands in W4. The PlanResult struct supports
-// those slots already.
+// Partition-source create-kv emission and drift classification are
+// implemented. Dynamic-consumer alignment entries are not yet populated
+// through Plan; use PlanDynamicConsumers directly.
 //
 // Cancellation: ctx cancellation returns a zero-value PlanResult plus
 // ctx.Err().
@@ -67,8 +67,8 @@ func Plan(ctx context.Context, js jetstream.JetStream, cfg Config) (PlanResult, 
 		}
 	}
 
-	// DynamicConsumers Plan output is intentionally empty in W1/W3. The
-	// slot exists so W4 inherits a stable shape.
+	// DynamicConsumers Plan output is intentionally empty. The slot exists
+	// so the PlanResult shape is stable for future use.
 
 	sortActions(out.Actions)
 	sortDrift(out.Drift)
