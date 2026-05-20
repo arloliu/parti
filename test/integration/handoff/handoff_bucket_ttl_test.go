@@ -56,8 +56,8 @@ func TestHandoffBucketHasNoMaxAge(t *testing.T) {
 	require.Equal(t, time.Duration(0), bs.StreamInfo().Config.MaxAge,
 		"handoff bucket must be created with no MaxAge so stable claims never expire")
 
-	// Stable claims are written and still carry a positive advisory TTLSeconds
-	// so the coordinator sweep can recover stuck in-flight handoffs.
+	// Stable claims are written and still carry the exact advisory TTLSeconds
+	// from HandoffTTL so the coordinator sweep can recover stuck in-flight handoffs.
 	require.Eventually(t, func() bool {
 		claims, e := mgr.InspectHandoffClaims(ctx)
 		return e == nil && len(claims) > 0
@@ -66,8 +66,9 @@ func TestHandoffBucketHasNoMaxAge(t *testing.T) {
 	claims, err := mgr.InspectHandoffClaims(ctx)
 	require.NoError(t, err)
 	require.NotEmpty(t, claims)
+	wantTTLSeconds := int64(cfg.KVBuckets.HandoffTTL.Seconds())
 	for _, c := range claims {
-		require.Positive(t, c.TTLSeconds,
-			"claim %s must carry a positive advisory TTLSeconds for the sweep", c.PartitionID)
+		require.Equal(t, wantTTLSeconds, c.TTLSeconds,
+			"claim %s must carry HandoffTTL as its advisory TTLSeconds for the sweep", c.PartitionID)
 	}
 }
