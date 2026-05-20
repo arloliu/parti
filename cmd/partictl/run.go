@@ -30,6 +30,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdPlan(rest, stdout, stderr)
 	case "apply":
 		return cmdApply(rest, stdout, stderr)
+	case "adopt":
+		return cmdAdopt(rest, stdout, stderr)
 	case "help", "-help", "--help", "-h":
 		printUsage(stdout)
 		return ExitOK
@@ -52,6 +54,7 @@ Commands:
   validate  Validate a config file (static; -live adds NATS preflight)
   plan      Compute desired-vs-live drift and proposed actions (PlanResult)
   apply     Create missing resources; -dry-run emits the same output as plan
+  adopt     Stamp Parti ownership marker on unmarked resources (shorthand for apply --policy=adopt)
 
 Common flags (accepted by all commands):
   -server   <url>       NATS server URL (default: $NATS_URL or nats://127.0.0.1:4222)
@@ -59,12 +62,13 @@ Common flags (accepted by all commands):
   -nkey     <path>      Path to NATS nkey seed file
   -token    <string>    NATS token
   -timeout  <duration>  Operation timeout (default: 30s)
-  -f        <path>      YAML config file (required for validate/plan/apply; optional for view)
+  -f        <path>      YAML config file (required for validate/plan/apply/adopt; optional for view)
   -json                 Emit machine-readable JSON output
   -instance <name>      Filter by parti.io/instance (view without -f; validate)
+  -policy   <policy>    Reconcile policy for plan/apply: warn, adopt, safe-update (default: warn)
 
 Deferred commands (not yet available in v1):
-  partitions plan/apply, adopt, stream view/plan/apply, init, emit
+  partitions plan/apply, stream view/plan/apply, init, emit
 
 Exit codes:
   0  success

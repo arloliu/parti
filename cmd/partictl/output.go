@@ -108,6 +108,15 @@ func renderPlanText(w io.Writer, plan provision.PlanResult) {
 	}
 }
 
+// emitPlan writes plan to w as JSON or as the human-readable table.
+func emitPlan(w io.Writer, plan provision.PlanResult, jsonOut bool) {
+	if jsonOut {
+		_ = jsonOutput(w, plan)
+	} else {
+		renderPlanText(w, plan)
+	}
+}
+
 func fmtDriftDetail(detail map[string]any) string {
 	if len(detail) == 0 {
 		return ""
@@ -177,6 +186,15 @@ func renderReportText(w io.Writer, report provision.Report) {
 			fmt.Fprintf(tw, "  %s\t%s\t%s\n", e.Kind, e.Name, e.Error)
 		}
 		fmt.Fprintln(tw)
+	}
+}
+
+// emitReport writes report to w as JSON or as the human-readable table.
+func emitReport(w io.Writer, report provision.Report, jsonOut bool) {
+	if jsonOut {
+		_ = jsonOutput(w, report)
+	} else {
+		renderReportText(w, report)
 	}
 }
 
