@@ -139,7 +139,7 @@ func applyPlan(ctx context.Context, js jetstream.JetStream, cfg Config, plan Pla
 				appendSkipped(&report, plan.Actions[i:], SkipReasonContextCancelled)
 				return report, err
 			default:
-				// Non-cancellation failure: fail-fast (sub-spec §2.C).
+				// Non-cancellation failure: fail-fast.
 				report.Errors = append(report.Errors, ResourceError{
 					Kind: action.Kind, Name: action.Name, Error: err.Error(),
 				})
@@ -159,7 +159,27 @@ func applyPlan(ctx context.Context, js jetstream.JetStream, cfg Config, plan Pla
 				appendSkipped(&report, plan.Actions[i:], SkipReasonContextCancelled)
 				return report, err
 			default:
-				// Non-cancellation failure: fail-fast (sub-spec §2.C).
+				// Non-cancellation failure: fail-fast.
+				report.Errors = append(report.Errors, ResourceError{
+					Kind: action.Kind, Name: action.Name, Error: err.Error(),
+				})
+				appendSkipped(&report, plan.Actions[i+1:], SkipReasonPriorError)
+				return report, fmt.Errorf("provision: apply %s %q: %w",
+					action.Kind, action.Name, err)
+			}
+
+		case ActionStampMarker:
+			executed, err := applyStampMarkerAction(ctx, reader, updater, cfg, cpSpecs, action)
+			switch {
+			case err == nil:
+				report.Executed = append(report.Executed, executed)
+			case errors.Is(err, context.Canceled),
+				errors.Is(err, context.DeadlineExceeded):
+				report.Aborted = true
+				appendSkipped(&report, plan.Actions[i:], SkipReasonContextCancelled)
+				return report, err
+			default:
+				// Non-cancellation failure: fail-fast.
 				report.Errors = append(report.Errors, ResourceError{
 					Kind: action.Kind, Name: action.Name, Error: err.Error(),
 				})
@@ -169,8 +189,9 @@ func applyPlan(ctx context.Context, js jetstream.JetStream, cfg Config, plan Pla
 			}
 
 		default:
-			// v1 only emits "create-kv". Defensive: surface as a
-			// fail-fast resource error so operators see what was rejected.
+			// Plan emits only create-kv, update-kv, and stamp-marker.
+			// Defensive: surface an unknown kind as a fail-fast resource
+			// error so operators see what was rejected.
 			err := fmt.Errorf("provision: apply: unsupported action kind %q (resource %q)",
 				action.Kind, action.Name)
 			report.Errors = append(report.Errors, ResourceError{

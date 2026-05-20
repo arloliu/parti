@@ -120,6 +120,14 @@ func planControlPlane(ctx context.Context, js jetstream.JetStream, cfg Config, o
 		streamName := kvStreamPrefix + spec.bucket
 		stream, err := js.Stream(ctx, streamName)
 		if errors.Is(err, jetstream.ErrStreamNotFound) {
+			// adopt does not create missing buckets: it emits no action
+			// but records an informational finding so the missing bucket
+			// is not silently absent from the plan. warn / safe-update
+			// keep their create-kv emission.
+			if cfg.Policy == PolicyAdopt {
+				out.Drift = append(out.Drift, missingUnderAdoptFinding(KindControlPlaneKV, spec.bucket))
+				continue
+			}
 			out.Actions = append(out.Actions, newCreateKVAction(spec, cfg.Instance))
 			continue
 		}
@@ -135,11 +143,13 @@ func planControlPlane(ctx context.Context, js jetstream.JetStream, cfg Config, o
 		findings := classifyControlPlaneDrift(spec, info, cfg.Instance)
 		out.Drift = append(out.Drift, findings...)
 
+		marked := ParseMarker(info.Config.Metadata).IsManaged()
+
 		// Under safe-update, a Parti-marked bucket with operator-
 		// expressible drift also gets an update-kv action. Drift
 		// findings and the action coexist; the classifier above still
 		// populates out.Drift in every policy.
-		if cfg.Policy == PolicySafeUpdate && ParseMarker(info.Config.Metadata).IsManaged() {
+		if cfg.Policy == PolicySafeUpdate && marked {
 			before := cloneKVConfig(streamConfigToKVConfig(info.Config))
 			after := buildControlPlaneUpdateTarget(spec, cfg.Instance, before)
 			if !kvConfigsEqual(before, after) {
@@ -150,9 +160,80 @@ func planControlPlane(ctx context.Context, js jetstream.JetStream, cfg Config, o
 				})
 			}
 		}
+
+		// Under adopt, an unmarked bucket gets a stamp-marker action.
+		// The classifier's "adopted" finding above still surfaces; the
+		// action and the finding coexist. A marked bucket is already
+		// adopted, so no stamp-marker is emitted.
+		if cfg.Policy == PolicyAdopt && !marked {
+			out.Actions = append(out.Actions,
+				newStampMarkerAction(spec.bucket, spec.component, cfg.Instance, info.Config))
+		}
 	}
 
 	return nil
+}
+
+// missingUnderAdoptFinding builds the informational drift finding emitted
+// for a config-named bucket that does not exist live when the policy is
+// adopt. adopt does not create buckets, so the bucket would otherwise
+// vanish silently from the plan; this finding keeps it visible.
+func missingUnderAdoptFinding(kind, bucket string) DriftFinding {
+	return DriftFinding{
+		Severity: SeverityInformational,
+		Kind:     kind,
+		Name:     bucket,
+		Detail: map[string]any{
+			"reason": "bucket missing; adopt does not create — run apply with warn or safe-update",
+		},
+	}
+}
+
+// newStampMarkerAction builds the stamp-marker PlannedAction for one
+// unmarked bucket. The merged metadata is computed from the live
+// snapshot so non-Parti keys are preserved; PartiKeys lists exactly the
+// keys the action adds or changes for operator review.
+func newStampMarkerAction(bucket, component, instance string, live jetstream.StreamConfig) PlannedAction {
+	liveKV := streamConfigToKVConfig(live)
+	merged := mergeMarkerMetadata(liveKV.Metadata, component, instance)
+
+	return PlannedAction{
+		Kind: ActionStampMarker,
+		Name: bucket,
+		Resource: &StampMarkerResource{
+			Bucket:         bucket,
+			MergedMetadata: merged,
+			PartiKeys:      keysAddedOrChanged(liveKV.Metadata, merged),
+		},
+	}
+}
+
+// keysAddedOrChanged returns the sorted list of metadata keys whose value
+// differs between live and merged, in either direction: keys added to
+// merged, keys whose value changed, and keys removed from live (present
+// in live but absent from merged). A removal is a real change an
+// operator must see — an unmarked bucket carrying a stray
+// parti.io/instance adopted under an empty cfg.Instance has that key
+// deleted by mergeMarkerMetadata.
+func keysAddedOrChanged(live, merged map[string]string) []string {
+	changed := map[string]struct{}{}
+	for k, mv := range merged {
+		if lv, ok := live[k]; !ok || lv != mv {
+			changed[k] = struct{}{}
+		}
+	}
+	for k := range live {
+		if _, ok := merged[k]; !ok {
+			changed[k] = struct{}{}
+		}
+	}
+	keys := make([]string, 0, len(changed))
+	for k := range changed {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+
+	return keys
 }
 
 // newCreateKVAction builds the create-kv PlannedAction for one control-plane
