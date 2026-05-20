@@ -66,12 +66,16 @@ func Apply(ctx context.Context, js jetstream.JetStream, cfg Config) (Report, err
 		return Report{}, err
 	}
 
-	return applyPlan(ctx, js, planResult)
+	return applyPlan(ctx, js, resolved, planResult)
 }
 
 // applyPlan executes a pre-computed plan against js, applying the W2
 // semantics laid out in the package-level Apply docstring.
-func applyPlan(ctx context.Context, js jetstream.JetStream, plan PlanResult) (Report, error) {
+//
+// cfg is the resolved Config. The update-kv path needs it to re-derive
+// the desired spec for a named bucket and rebuild the write target from
+// a fresh re-read of live state (the create-kv path does not consult it).
+func applyPlan(ctx context.Context, js jetstream.JetStream, cfg Config, plan PlanResult) (Report, error) {
 	report := Report{
 		APIVersion: APIVersionProvisionV1,
 		Kind:       KindReport,
@@ -79,6 +83,21 @@ func applyPlan(ctx context.Context, js jetstream.JetStream, plan PlanResult) (Re
 		Skipped:    []SkippedAction{},
 		Errors:     []ResourceError{},
 	}
+
+	// Resolve bucket name -> desired control-plane spec once so the
+	// update-kv path can rebuild a write target from a fresh re-read.
+	// Built from the same buildControlPlaneSpecs helper Plan uses, so
+	// Plan and Apply stay in lockstep.
+	cpSpecs := map[string]controlPlaneSpec{}
+	if cfg.ControlPlane != nil {
+		for _, spec := range buildControlPlaneSpecs(*cfg.ControlPlane) {
+			cpSpecs[spec.bucket] = spec
+		}
+	}
+	// Production seam adapters wrap js; tests inject fakes directly into
+	// applyUpdateKVAction.
+	reader := jsStreamReader{js: js}
+	updater := jsKVUpdater{js: js}
 
 	for i, action := range plan.Actions {
 		// Pre-mutation / between-iteration cancellation check.
@@ -114,6 +133,26 @@ func applyPlan(ctx context.Context, js jetstream.JetStream, plan PlanResult) (Re
 				report.Executed = append(report.Executed, ExecutedAction{
 					Kind: action.Kind, Name: action.Name, Raced: true,
 				})
+			case errors.Is(err, context.Canceled),
+				errors.Is(err, context.DeadlineExceeded):
+				report.Aborted = true
+				appendSkipped(&report, plan.Actions[i:], SkipReasonContextCancelled)
+				return report, err
+			default:
+				// Non-cancellation failure: fail-fast (sub-spec §2.C).
+				report.Errors = append(report.Errors, ResourceError{
+					Kind: action.Kind, Name: action.Name, Error: err.Error(),
+				})
+				appendSkipped(&report, plan.Actions[i+1:], SkipReasonPriorError)
+				return report, fmt.Errorf("provision: apply %s %q: %w",
+					action.Kind, action.Name, err)
+			}
+
+		case ActionUpdateKV:
+			executed, err := applyUpdateKVAction(ctx, reader, updater, cfg, cpSpecs, action)
+			switch {
+			case err == nil:
+				report.Executed = append(report.Executed, executed)
 			case errors.Is(err, context.Canceled),
 				errors.Is(err, context.DeadlineExceeded):
 				report.Aborted = true

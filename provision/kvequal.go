@@ -2,6 +2,7 @@ package provision
 
 import (
 	"maps"
+	"strings"
 
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -67,21 +68,46 @@ func normalizeMaxValueSize(s int32) int32 {
 	return s
 }
 
-// extractLiveKVConfig projects a live jetstream.StreamConfig onto the
-// subset of KeyValueConfig fields kvConfigsEqual compares. Fields outside
-// that subset (Bucket, Description, MaxBytes, Placement, RePublish,
-// Mirror, Sources, Compression, LimitMarkerTTL) are omitted because the
-// equality contract excludes them; the returned value is suitable as
-// input to kvConfigsEqual but not for round-tripping to UpdateKeyValue.
-func extractLiveKVConfig(sc *jetstream.StreamConfig) jetstream.KeyValueConfig {
+// streamConfigToKVConfig projects a live jetstream.StreamConfig onto a
+// jetstream.KeyValueConfig covering every field nats.go's KeyValueConfig
+// exposes, so a round-trip through UpdateKeyValue preserves
+// preserved-from-live fields. This is the full projection; the
+// comparison-subset-only callers (drift classifiers) consume it through
+// extractLiveKVConfig, for which the extra fields are inert.
+//
+// LimitMarkerTTL is backed by StreamConfig.SubjectDeleteMarkerTTL in
+// nats.go v1.50.0 (confirmed via KeyValueBucketStatus.LimitMarkerTTL,
+// jetstream/kv.go:840). Compression is the StoreCompression enum on the
+// stream side and a bool on the KeyValueConfig side.
+func streamConfigToKVConfig(sc jetstream.StreamConfig) jetstream.KeyValueConfig {
 	return jetstream.KeyValueConfig{
-		TTL:          sc.MaxAge,
-		MaxValueSize: sc.MaxMsgSize,
-		Replicas:     sc.Replicas,
-		Storage:      sc.Storage,
-		History:      historyFromStream(sc.MaxMsgsPerSubject),
-		Metadata:     sc.Metadata,
+		Bucket:         strings.TrimPrefix(sc.Name, kvStreamPrefix),
+		Description:    sc.Description,
+		MaxValueSize:   sc.MaxMsgSize,
+		History:        historyFromStream(sc.MaxMsgsPerSubject),
+		TTL:            sc.MaxAge,
+		MaxBytes:       sc.MaxBytes,
+		Storage:        sc.Storage,
+		Replicas:       sc.Replicas,
+		Placement:      sc.Placement,
+		RePublish:      sc.RePublish,
+		Mirror:         sc.Mirror,
+		Sources:        sc.Sources,
+		Compression:    sc.Compression != jetstream.NoCompression,
+		LimitMarkerTTL: sc.SubjectDeleteMarkerTTL,
+		Metadata:       sc.Metadata,
 	}
+}
+
+// extractLiveKVConfig projects a live jetstream.StreamConfig onto a
+// jetstream.KeyValueConfig for drift comparison. It delegates to
+// streamConfigToKVConfig: the classifiers feed the result only to
+// kvConfigsEqual and the wantedControlPlaneKV / wantedPartitionSourceKV
+// builders, all of which read the comparison-subset fields only, so the
+// extra preserved-from-live fields the full projection populates are
+// inert here. The delegation removes a duplicate projection.
+func extractLiveKVConfig(sc *jetstream.StreamConfig) jetstream.KeyValueConfig {
+	return streamConfigToKVConfig(*sc)
 }
 
 // historyFromStream clamps the stream-side MaxMsgsPerSubject to the

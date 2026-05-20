@@ -93,7 +93,31 @@ type PlannedAction struct {
 // Action kind constants.
 const (
 	ActionCreateKV = "create-kv"
+
+	// ActionUpdateKV is emitted by Plan under PolicySafeUpdate when a
+	// Parti-marked KV bucket has at least one operator-expressible field
+	// (Metadata, TTL, MaxValueSize, Replicas) that differs from the
+	// desired config. Apply re-reads live state, verifies it still
+	// matches the plan-time Before, rebuilds the target from the re-read
+	// snapshot, and calls js.UpdateKeyValue. Resource is *UpdateKVResource.
+	ActionUpdateKV = "update-kv"
 )
+
+// UpdateKVResource is the Resource carried by an ActionUpdateKV
+// PlannedAction. Before is the live KeyValueConfig observed at plan
+// time; After is the desired target. Both are deep clones (see
+// cloneKVConfig) so the Plan output is immutable regardless of later
+// Apply or nats.go mutation.
+//
+// Apply does not write Resource.After verbatim — it re-reads live
+// state and rebuilds the target from the re-read snapshot (see the
+// Apply algorithm). Resource.Before / Resource.After are the audit
+// surface: JSON consumers diff them to render exactly which fields
+// change.
+type UpdateKVResource struct {
+	Before jetstream.KeyValueConfig `json:"before"`
+	After  jetstream.KeyValueConfig `json:"after"`
+}
 
 // DriftFinding describes how a live resource differs from the desired state,
 // or that an existing resource is unmarked ("adopted"). v1 emits drift
