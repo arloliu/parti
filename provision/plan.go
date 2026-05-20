@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"time"
 
@@ -83,14 +84,15 @@ type controlPlaneSpec struct {
 	bucket    string
 	ttl       time.Duration
 	storage   jetstream.StorageType
+	replicas  int // 0 = server default (nats.go normalizes to 1)
 }
 
 func buildControlPlaneSpecs(cp ControlPlaneConfig) []controlPlaneSpec {
 	specs := []controlPlaneSpec{
-		{ComponentControlPlaneID, cp.StableIDBucket, cp.WorkerIDTTL, jetstream.FileStorage},
-		{ComponentControlPlaneElection, cp.ElectionBucket, cp.ElectionTimeout, jetstream.MemoryStorage},
-		{ComponentControlPlaneHeartbeat, cp.HeartbeatBucket, cp.HeartbeatTTL, jetstream.MemoryStorage},
-		{ComponentControlPlaneAssignment, cp.AssignmentBucket, cp.AssignmentTTL, jetstream.FileStorage},
+		{ComponentControlPlaneID, cp.StableIDBucket, cp.WorkerIDTTL, jetstream.FileStorage, cp.Replicas},
+		{ComponentControlPlaneElection, cp.ElectionBucket, cp.ElectionTimeout, jetstream.MemoryStorage, cp.Replicas},
+		{ComponentControlPlaneHeartbeat, cp.HeartbeatBucket, cp.HeartbeatTTL, jetstream.MemoryStorage, cp.Replicas},
+		{ComponentControlPlaneAssignment, cp.AssignmentBucket, cp.AssignmentTTL, jetstream.FileStorage, cp.Replicas},
 	}
 	if cp.EnableTwoPhaseHandoff {
 		// The handoff bucket is created with no MaxAge (ttl: 0). A bucket-level
@@ -102,6 +104,7 @@ func buildControlPlaneSpecs(cp ControlPlaneConfig) []controlPlaneSpec {
 			bucket:    cp.HandoffBucket,
 			ttl:       0,
 			storage:   jetstream.FileStorage,
+			replicas:  cp.Replicas,
 		})
 	}
 
@@ -137,11 +140,16 @@ func planControlPlane(ctx context.Context, js jetstream.JetStream, cfg Config, o
 }
 
 // newCreateKVAction builds the create-kv PlannedAction for one control-plane
-// bucket. The KeyValueConfig is built by the shared kvbuckets builder and
-// then stamped with the Parti ownership marker; nothing else may construct
-// the KeyValueConfig (this preserves the byte-equivalence invariant).
+// bucket. The KeyValueConfig is built by the shared kvbuckets builder
+// and then stamped with the Parti ownership marker; nothing else may
+// construct the KeyValueConfig (this preserves byte-equivalence with
+// the runtime manager). Replicas is the only field stamped on top of
+// the builder output, and only when explicitly set in config.
 func newCreateKVAction(spec controlPlaneSpec, instance string) PlannedAction {
 	kv := kvbuckets.BuildKeyValueConfig(spec.bucket, spec.ttl, spec.storage)
+	if spec.replicas > 0 {
+		kv.Replicas = spec.replicas
+	}
 	kv.Metadata = BuildMarker(spec.component, instance)
 	return PlannedAction{
 		Kind:     ActionCreateKV,
@@ -151,12 +159,10 @@ func newCreateKVAction(spec controlPlaneSpec, instance string) PlannedAction {
 }
 
 // classifyControlPlaneDrift compares a live KV-bucket stream against the
-// desired spec and returns one or more drift findings. v1 never emits
+// desired spec and returns one or more drift findings. Never emits
 // update-* / delete-* actions, only findings.
 func classifyControlPlaneDrift(spec controlPlaneSpec, info *jetstream.StreamInfo, instance string) []DriftFinding {
 	marker := ParseMarker(info.Config.Metadata)
-
-	// Unmarked bucket named by config → "adopted" drift, no action.
 	if !marker.IsManaged() {
 		return []DriftFinding{{
 			Severity: SeverityAdopted,
@@ -169,47 +175,73 @@ func classifyControlPlaneDrift(spec controlPlaneSpec, info *jetstream.StreamInfo
 		}}
 	}
 
-	mutable := map[string]any{}
-	immutable := map[string]any{}
+	live := extractLiveKVConfig(&info.Config)
+	wanted := wantedControlPlaneKV(spec, instance, live)
+	if kvConfigsEqual(wanted, live) {
+		return []DriftFinding{{
+			Severity: SeverityInformational,
+			Kind:     KindControlPlaneKV,
+			Name:     spec.bucket,
+			Detail:   map[string]any{"component": spec.component},
+		}}
+	}
 
-	if info.Config.Storage != spec.storage {
-		immutable["storage"] = map[string]any{
-			"want": storageName(spec.storage),
-			"got":  storageName(info.Config.Storage),
+	var mutable, immutable map[string]any
+	addImmutable := func(field string, detail map[string]any) {
+		if immutable == nil {
+			immutable = map[string]any{}
 		}
+		immutable[field] = detail
 	}
-	// KV History is stored on the underlying stream as MaxMsgsPerSubject.
-	// The shared builder always sets History=1, so any non-1 value is
-	// immutable drift.
-	if info.Config.MaxMsgsPerSubject != 1 {
-		immutable["history"] = map[string]any{
-			"want": int64(1),
+	addMutable := func(field string, detail map[string]any) {
+		if mutable == nil {
+			mutable = map[string]any{}
+		}
+		mutable[field] = detail
+	}
+
+	if live.Storage != wanted.Storage {
+		addImmutable("storage", map[string]any{
+			"want": storageName(wanted.Storage),
+			"got":  storageName(live.Storage),
+		})
+	}
+	if live.History != wanted.History {
+		addImmutable("history", map[string]any{
+			"want": int64(wanted.History),
 			"got":  info.Config.MaxMsgsPerSubject,
-		}
+		})
 	}
-	// KV TTL is stored on the underlying stream as MaxAge.
-	if info.Config.MaxAge != spec.ttl {
-		mutable["ttl"] = map[string]any{
-			"want": spec.ttl.String(),
-			"got":  info.Config.MaxAge.String(),
-		}
+	if live.TTL != wanted.TTL {
+		addMutable("ttl", map[string]any{
+			"want": wanted.TTL.String(),
+			"got":  live.TTL.String(),
+		})
 	}
-	// Instance mismatch on a managed bucket is surfaced as drift-mutable
-	// since Metadata is live-editable in Phase 2.
+	if normalizeReplicas(live.Replicas) != normalizeReplicas(wanted.Replicas) {
+		addMutable("replicas", map[string]any{
+			"want": normalizeReplicas(wanted.Replicas),
+			"got":  live.Replicas,
+		})
+	}
+	if marker.Managed != MarkerManagedValue {
+		addMutable("managed", map[string]any{
+			"want": MarkerManagedValue,
+			"got":  marker.Managed,
+		})
+	}
 	if marker.Instance != instance {
-		mutable["instance"] = map[string]any{
+		addMutable("instance", map[string]any{
 			"want": instance,
 			"got":  marker.Instance,
-		}
+		})
 	}
-	// Component mismatch: a bucket marked as one Parti component but named
-	// in config under a different role. Treat as immutable drift — the
-	// safe remediation is operator-driven.
+	// Component mismatch is immutable: the safe remediation is operator-driven.
 	if marker.Component != spec.component {
-		immutable["component"] = map[string]any{
+		addImmutable("component", map[string]any{
 			"want": spec.component,
 			"got":  marker.Component,
-		}
+		})
 	}
 
 	findings := make([]DriftFinding, 0, 2)
@@ -229,18 +261,42 @@ func classifyControlPlaneDrift(spec controlPlaneSpec, info *jetstream.StreamInfo
 			Detail:   mutable,
 		})
 	}
-	if len(findings) == 0 {
-		findings = append(findings, DriftFinding{
-			Severity: SeverityInformational,
-			Kind:     KindControlPlaneKV,
-			Name:     spec.bucket,
-			Detail: map[string]any{
-				"component": spec.component,
-			},
-		})
-	}
 
 	return findings
+}
+
+// wantedControlPlaneKV returns the KeyValueConfig the spec implies, with
+// preserved-from-live fields inherited from live. The returned value is
+// suitable as input to kvConfigsEqual against live.
+func wantedControlPlaneKV(spec controlPlaneSpec, instance string, live jetstream.KeyValueConfig) jetstream.KeyValueConfig {
+	wanted := live
+	wanted.Storage = spec.storage
+	wanted.History = 1
+	wanted.TTL = spec.ttl
+	wanted.Replicas = spec.replicas
+	wanted.Metadata = mergeMarkerMetadata(live.Metadata, spec.component, instance)
+
+	return wanted
+}
+
+// mergeMarkerMetadata returns a fresh metadata map with the Parti marker
+// keys overlaid on a clone of live so non-Parti keys are preserved. When
+// instance is empty the parti.io/instance key is removed, so a config
+// that clears the instance label produces metadata that genuinely
+// differs from a live bucket still carrying one.
+func mergeMarkerMetadata(live map[string]string, component, instance string) map[string]string {
+	merged := maps.Clone(live)
+	if merged == nil {
+		merged = map[string]string{}
+	}
+	for k, v := range BuildMarker(component, instance) {
+		merged[k] = v
+	}
+	if instance == "" {
+		delete(merged, MarkerInstanceKey)
+	}
+
+	return merged
 }
 
 func sortActions(s []PlannedAction) {

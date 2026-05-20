@@ -50,6 +50,16 @@ type ControlPlaneConfig struct {
 	// EnableTwoPhaseHandoff gates the optional handoff KV bucket. When true,
 	// HandoffTTL must be > 0.
 	EnableTwoPhaseHandoff bool `yaml:"enableTwoPhaseHandoff" json:"enableTwoPhaseHandoff"`
+
+	// Replicas is the desired number of NATS stream replicas for every
+	// control-plane KV bucket. 0 (the default) leaves the underlying
+	// KeyValueConfig.Replicas field unset; nats.go normalizes that to 1
+	// server-side. Non-zero values are drift-mutable under safe-update;
+	// the NATS server enforces cluster-peer feasibility at apply time.
+	//
+	// Applies uniformly to every control-plane bucket; per-bucket
+	// replica overrides are not supported.
+	Replicas int `yaml:"replicas,omitempty" json:"replicas,omitempty"`
 }
 
 // PartitionSourceConfig declares the NATS KV bucket that holds the partition

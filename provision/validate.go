@@ -17,8 +17,9 @@ var ErrInvalidConfig = errors.New("provision: invalid config")
 // spec):
 //
 //   - APIVersion must equal APIVersionV1.
-//   - Policy defaults to PolicyWarn when empty; "safe-update" and "force"
-//     are rejected as not-supported-in-v1.
+//   - Policy defaults to PolicyWarn when empty; PolicyWarn, PolicyAdopt,
+//     and PolicySafeUpdate are accepted. "force" is rejected as not yet
+//     supported.
 //   - ControlPlane bucket name fields default to runtime defaults; any
 //     bucket name still empty after defaulting is rejected.
 //   - ControlPlane.WorkerIDTTL, .ElectionTimeout, .HeartbeatTTL must be > 0.
@@ -26,6 +27,9 @@ var ErrInvalidConfig = errors.New("provision: invalid config")
 //   - When ControlPlane.EnableTwoPhaseHandoff is true, HandoffTTL must be > 0.
 //     This keeps the coordinator's advisory sweep TTL positive; it does NOT set
 //     the handoff bucket's MaxAge (the handoff bucket is provisioned with none).
+//   - ControlPlane.Replicas must be >= 0. Zero means server default;
+//     non-zero values are drift-mutable under safe-update and the server
+//     enforces feasibility at apply time.
 //
 // PartitionSource static validation is active (W3): Bucket, Key, Storage,
 // Replicas, MaxValueSize, and TTL are all validated. DynamicConsumers deeper
@@ -111,20 +115,15 @@ func normalize(cfg Config) (Config, error) {
 }
 
 func validateResolved(cfg Config) error {
-	// Policy: reject reserved-future values by string match; anything else
-	// not PolicyWarn is also rejected.
 	switch string(cfg.Policy) {
-	case string(PolicyWarn):
+	case string(PolicyWarn), string(PolicyAdopt), string(PolicySafeUpdate):
 		// ok
-	case reservedPolicySafeUpdate:
-		return fmt.Errorf("%w: policy %q is not supported in v1 (lands in Phase 2)",
-			ErrInvalidConfig, reservedPolicySafeUpdate)
 	case reservedPolicyForce:
-		return fmt.Errorf("%w: policy %q is not supported in v1 (lands in Phase 6)",
+		return fmt.Errorf("%w: policy %q is not yet supported",
 			ErrInvalidConfig, reservedPolicyForce)
 	default:
-		return fmt.Errorf("%w: policy %q is not recognized (v1 supports only %q)",
-			ErrInvalidConfig, cfg.Policy, PolicyWarn)
+		return fmt.Errorf("%w: policy %q is not recognized (supported: %q, %q, %q)",
+			ErrInvalidConfig, cfg.Policy, PolicyWarn, PolicyAdopt, PolicySafeUpdate)
 	}
 
 	if cfg.ControlPlane != nil {
@@ -210,6 +209,11 @@ func validateControlPlane(cp ControlPlaneConfig) error {
 	if cp.EnableTwoPhaseHandoff && cp.HandoffTTL <= 0 {
 		return fmt.Errorf("%w: controlPlane.handoffTtl must be > 0 when enableTwoPhaseHandoff is true",
 			ErrInvalidConfig)
+	}
+	// Replicas: 0 means "server default" (nats.go normalizes to 1); negative
+	// values are rejected. No upper bound here — the server enforces feasibility.
+	if cp.Replicas < 0 {
+		return fmt.Errorf("%w: controlPlane.replicas must be >= 0", ErrInvalidConfig)
 	}
 
 	return nil
