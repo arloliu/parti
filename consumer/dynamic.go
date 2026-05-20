@@ -73,6 +73,8 @@ type DynamicConfig struct {
 	// When enabled, the WorkerConsumer uses a distributed lock (via KV) to ensure
 	// that it is the *only* active processor for its assigned partitions.
 	// This prevents split-brain processing during rebalances.
+	//
+	// Default: nil (processing gate disabled).
 	ProcessingGate *ProcessingGateConfig
 
 	// Resolver configures the ownership resolver used when ProcessingGate is enabled.
@@ -95,6 +97,8 @@ type DynamicConfig struct {
 	//
 	// When true, the consumer will stop pulling new messages but finish processing
 	// buffered messages before shutting down the partition consumer.
+	//
+	// Default: false.
 	DrainOnRemove bool
 
 	// DrainOnRemoveTimeout caps the time spent draining a revoked partition.
@@ -107,6 +111,8 @@ type DynamicConfig struct {
 	//
 	// If the manager assigns more partitions than this limit, excess partitions
 	// will be ignored (and logged/warned).
+	//
+	// Default: 0 (no cap).
 	MaxConcurrentSubjects int `validate:"gte=0"`
 
 	// AllowWorkerIDChange controls whether the worker's identity can change during runtime.
@@ -146,6 +152,8 @@ type DynamicConfig struct {
 	IteratorFactory func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error)
 
 	// RecoveryStrategy defines how a recreated consumer resumes after an unexpected deletion.
+	//
+	// Default: RecoveryDisabled (no auto-recovery).
 	//
 	// All strategies are supported. [RecoverFromLastProcessed] works with both
 	// ManualAck=false (checkpoint advances automatically) and ManualAck=true

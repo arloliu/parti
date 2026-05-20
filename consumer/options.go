@@ -321,6 +321,8 @@ func WithAckWait(d time.Duration) Option {
 }
 
 // WithMaxDeliver sets the maximum redelivery attempts.
+//
+// Default: -1 (unlimited redelivery).
 func WithMaxDeliver(n int) Option {
 	return universalOpt(func(o *options) {
 		if n >= -1 {
@@ -345,6 +347,8 @@ func WithBatchSize(n int) Option {
 }
 
 // WithFetchTimeout sets the max time to wait when pulling a batch.
+//
+// Default: 5s. Values <= 0 are ignored.
 func WithFetchTimeout(d time.Duration) Option {
 	return universalOpt(func(o *options) {
 		if d > 0 {
@@ -354,6 +358,8 @@ func WithFetchTimeout(d time.Duration) Option {
 }
 
 // WithMaxWaiting caps outstanding pull requests.
+//
+// Default: 2. Values <= 0 are ignored.
 func WithMaxWaiting(n int) Option {
 	return universalOpt(func(o *options) {
 		if n > 0 {
@@ -363,6 +369,8 @@ func WithMaxWaiting(n int) Option {
 }
 
 // WithMaxAckPending limits in-flight unacknowledged messages.
+//
+// Default: 0 (use the server's consumer default). Negative values are ignored.
 func WithMaxAckPending(n int) Option {
 	return universalOpt(func(o *options) {
 		if n >= 0 {
@@ -372,6 +380,8 @@ func WithMaxAckPending(n int) Option {
 }
 
 // WithInactiveThreshold sets how long an idle consumer is kept before cleanup.
+//
+// Default: 24h. Values <= 0 are ignored.
 func WithInactiveThreshold(d time.Duration) Option {
 	return universalOpt(func(o *options) {
 		if d > 0 {
@@ -381,6 +391,8 @@ func WithInactiveThreshold(d time.Duration) Option {
 }
 
 // WithAckPolicy sets the JetStream ack policy.
+//
+// Default: AckExplicitPolicy.
 func WithAckPolicy(p jetstream.AckPolicy) Option {
 	return universalOpt(func(o *options) {
 		o.ackPolicy = p
@@ -428,6 +440,7 @@ func WithRecoveryStrategy(strategy RecoveryStrategy) Option {
 //
 // Supported by: Queue, Broadcast, Dynamic.
 // Static consumers use a fixed internal retry and ignore this option.
+// Unset fields in cfg fall back to RetryConfig's per-field defaults.
 func WithRetry(cfg RetryConfig) interface {
 	QueueOption
 	BroadcastOption
@@ -534,6 +547,8 @@ func WithConsumerReplicas(n int) Option {
 // Only supported by Dynamic consumers. The escalation mechanism uses a
 // sliding window to detect bursts of iterator failures and triggers
 // consumer recreation when the threshold is exceeded.
+//
+// Default: 60s window, 3 failures. Non-positive arguments are ignored.
 func WithIteratorEscalation(window time.Duration, threshold int) DynamicOption {
 	return dynamicOpt(func(o *options) {
 		if window > 0 {
@@ -655,6 +670,8 @@ func WithKeyExtractor(fn func(msg jetstream.Msg) string) StaticOption {
 // -- Dynamic specific --
 
 // WithProcessingGate enables processing gate with given config.
+//
+// Default: nil (processing gate disabled).
 func WithProcessingGate(cfg *ProcessingGateConfig) DynamicOption {
 	return dynamicOpt(func(o *options) {
 		o.processingGate = cfg
@@ -662,6 +679,8 @@ func WithProcessingGate(cfg *ProcessingGateConfig) DynamicOption {
 }
 
 // WithResolver configures the ownership resolver.
+//
+// Unset fields in cfg fall back to ResolverConfig's per-field defaults.
 func WithResolver(cfg ResolverConfig) DynamicOption {
 	return dynamicOpt(func(o *options) {
 		o.resolver = cfg
@@ -692,6 +711,8 @@ func WithPullGating(enabled bool) DynamicOption {
 // When enabled, revoked partitions will finish processing buffered messages
 // before shutting down. The timeout caps the drain duration.
 //
+// Default: disabled; the drain timeout defaults to 10s when timeout <= 0.
+//
 // Parameters:
 //   - enabled: Whether to enable graceful draining
 //   - timeout: Maximum time to wait for draining (ignored if <= 0)
@@ -705,6 +726,8 @@ func WithDrainOnRemove(enabled bool, timeout time.Duration) DynamicOption {
 }
 
 // WithMaxConcurrentSubjects caps concurrent per-subject consumers.
+//
+// Default: 0 (no cap). Values <= 0 are ignored.
 func WithMaxConcurrentSubjects(n int) DynamicOption {
 	return dynamicOpt(func(o *options) {
 		if n > 0 {
@@ -714,6 +737,8 @@ func WithMaxConcurrentSubjects(n int) DynamicOption {
 }
 
 // WithAllowWorkerIDChange enables worker ID mutability (advanced).
+//
+// Default: false (worker ID immutable once set).
 func WithAllowWorkerIDChange(enabled bool) DynamicOption {
 	return dynamicOpt(func(o *options) {
 		o.allowWorkerIDChange = enabled
@@ -721,6 +746,8 @@ func WithAllowWorkerIDChange(enabled bool) DynamicOption {
 }
 
 // WithPartitionRefreshMinInterval sets the min interval for partition refresh.
+//
+// Default: 500ms. Values <= 0 are ignored.
 func WithPartitionRefreshMinInterval(d time.Duration) DynamicOption {
 	return dynamicOpt(func(o *options) {
 		if d > 0 {

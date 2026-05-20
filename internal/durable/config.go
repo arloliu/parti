@@ -147,6 +147,8 @@ type WorkerConsumerConfig struct {
 	// exclusivity is required. Without this, ownership transitions may be "loose",
 	// resulting in brief periods where a partition is processed by a worker that
 	// is no longer the assigned owner (though duplicates are rare).
+	//
+	// Default: nil (processing gate disabled).
 	ProcessingGate *ProcessingGateConfig `validate:"omitempty"`
 
 	// Resolver configures the ownership resolver when ProcessingGate is enabled.
@@ -211,6 +213,7 @@ type WorkerConsumerConfig struct {
 	// kept in memory rather than inheriting the stream's storage type.
 	// See consumer.WithConsumerMemoryStorage for full semantics and the
 	// non-live-editable caveat.
+	// Default: false (inherit stream storage type).
 	ConsumerMemoryStorage bool
 
 	// ConsumerReplicas overrides jetstream.ConsumerConfig.Replicas on
@@ -222,6 +225,7 @@ type WorkerConsumerConfig struct {
 
 	// MaxConcurrentSubjects caps the total number of per-subject consumers/loops.
 	// When exceeded, additional subjects are skipped with a warning and metric increment.
+	// Default: 0 (no cap).
 	MaxConcurrentSubjects int `validate:"gte=0"`
 
 	// AckPolicy controls JetStream ack policy. Defaults to AckExplicitPolicy.
@@ -241,12 +245,12 @@ type WorkerConsumerConfig struct {
 
 	// IteratorEscalationWindow defines the sliding time window used to aggregate
 	// iterator failures for escalation detection. If zero, defaults to
-	// DefaultIteratorEscalationWindow.
+	// DefaultIteratorEscalationWindow (60s).
 	IteratorEscalationWindow time.Duration `default:"60s" validate:"gt=0"`
 
 	// IteratorEscalationThreshold is the number of iterator failures within the
 	// escalation window that triggers a single escalation (consumer refresh).
-	// If zero, defaults to DefaultIteratorEscalationThreshold.
+	// If zero, defaults to DefaultIteratorEscalationThreshold (3).
 	IteratorEscalationThreshold int `default:"3" validate:"gt=0"`
 
 	// AllowWorkerIDChange controls whether workerID changes are allowed after initialization.
