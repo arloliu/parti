@@ -22,22 +22,22 @@ import (
 //  4. Iterate Plan.Actions and call js.CreateKeyValue for each create-kv,
 //     mapping the result onto Report.{Executed, Skipped, Errors, Aborted}.
 //
-// Cancellation semantics (see sub-spec §2.D):
+// Cancellation semantics:
 //   - Pre-mutation cancel → Report{Aborted: true, Skipped: every-action
 //     with reason "context-cancelled"}, error = ctx.Err(); CLI exit 4.
 //   - Mid-mutation cancel → partial Report with Aborted=true, Executed
-//     holds completed creates, current+remaining go to Skipped with
+//     holds completed actions, current+remaining go to Skipped with
 //     reason "context-cancelled"; error = ctx.Err(); CLI exit 4.
 //
-// Non-cancellation failure (sub-spec §2.C) is fail-fast: the failing
-// action goes to Errors once, remaining go to Skipped with reason
-// "prior-error", Aborted stays false; CLI exit 1.
+// Non-cancellation failure is fail-fast: the failing action goes to Errors
+// once, remaining go to Skipped with reason "prior-error", Aborted stays
+// false; CLI exit 1.
 //
-// Plan→Apply race (sub-spec §2.E): if js.CreateKeyValue returns
-// ErrBucketExists / ErrStreamNameAlreadyInUse, Apply treats the outcome
-// as success and marks the ExecutedAction with Raced=true. Apply does NOT
-// re-read live state to drift-check the racing bucket; the next `plan`
-// run reports any adopted drift.
+// Plan→Apply race: if js.CreateKeyValue returns ErrBucketExists /
+// ErrStreamNameAlreadyInUse, Apply treats the outcome as success and marks
+// the ExecutedAction with Raced=true. Apply does NOT re-read live state to
+// drift-check the racing bucket; the next `plan` run reports any adopted
+// drift.
 //
 // Apply does NOT echo Plan.Drift into the returned Report. Drift findings
 // are a Plan concern; the CLI reads plan.Drift separately from apply
@@ -55,7 +55,7 @@ func Apply(ctx context.Context, js jetstream.JetStream, cfg Config) (Report, err
 
 	// Step 2: live validation. Return Report{} (zero value) on failure:
 	// no mutation has been attempted yet, so a populated Report would
-	// misleadingly resemble a mutation-outcome Report (sub-spec §2.A).
+	// misleadingly resemble a mutation-outcome Report.
 	if _, err := ValidateLive(ctx, js, resolved); err != nil {
 		return Report{}, err
 	}
@@ -69,8 +69,8 @@ func Apply(ctx context.Context, js jetstream.JetStream, cfg Config) (Report, err
 	return applyPlan(ctx, js, resolved, planResult)
 }
 
-// applyPlan executes a pre-computed plan against js, applying the W2
-// semantics laid out in the package-level Apply docstring.
+// applyPlan executes a pre-computed plan against js per the semantics laid
+// out in the package-level Apply docstring.
 //
 // cfg is the resolved Config. The update-kv path needs it to re-derive
 // the desired spec for a named bucket and rebuild the write target from
@@ -129,7 +129,7 @@ func applyPlan(ctx context.Context, js jetstream.JetStream, cfg Config, plan Pla
 				})
 			case errors.Is(err, jetstream.ErrBucketExists),
 				errors.Is(err, jetstream.ErrStreamNameAlreadyInUse):
-				// Plan→Apply race (sub-spec §2.E): treat as success.
+				// Plan→Apply race: treat as success.
 				report.Executed = append(report.Executed, ExecutedAction{
 					Kind: action.Kind, Name: action.Name, Raced: true,
 				})

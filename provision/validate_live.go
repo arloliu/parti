@@ -71,8 +71,7 @@ func ValidateLive(ctx context.Context, js jetstream.JetStream, cfg Config) (Repo
 		return liveErrorReport("reachability", "$JS.API.INFO", err), fmt.Errorf("provision: validatelive: reachability: %w", err)
 	}
 
-	// Step 1.C: per-bucket info probes (control-plane block; W3 adds
-	// partition-source bucket info probe in this slot).
+	// Step 1.C: per-bucket info probes (control-plane and partition-source).
 	if cfg.ControlPlane != nil {
 		specs := buildControlPlaneSpecs(*cfg.ControlPlane)
 		for _, spec := range specs {
@@ -98,9 +97,9 @@ func ValidateLive(ctx context.Context, js jetstream.JetStream, cfg Config) (Repo
 		}
 	}
 
-	// Step 4 (W4) — dynamic-consumer live checks. Only runs when the caller
-	// declared one or more dynamic-consumer alignment targets. A failure here
-	// is a config-mismatch (WorkQueuePolicy + incompatible recovery strategy),
+	// Dynamic-consumer live checks. Only runs when the caller declared one or
+	// more dynamic-consumer alignment targets. A failure here is a
+	// config-mismatch (WorkQueuePolicy + incompatible recovery strategy),
 	// so it's surfaced under ErrLiveValidation (CLI exit code 3).
 	if len(cfg.DynamicConsumers) > 0 {
 		if err := ValidateLiveDynamicConsumers(ctx, js, cfg.DynamicConsumers); err != nil {
@@ -121,9 +120,9 @@ func ValidateLive(ctx context.Context, js jetstream.JetStream, cfg Config) (Repo
 	}, nil
 }
 
-// probeBucketInfo runs the per-bucket info probe described in sub-spec §1.C.
-// Returns nil on success or on ErrStreamNotFound (the bucket is creatable);
-// otherwise classifies the error per §1.E.
+// probeBucketInfo probes live stream info for the named KV bucket.
+// Returns nil on success or on ErrStreamNotFound (bucket is creatable);
+// otherwise classifies the error via classifyLiveError.
 func probeBucketInfo(ctx context.Context, js jetstream.JetStream, bucket string) error {
 	stream, err := js.Stream(ctx, kvStreamPrefix+bucket)
 	if err != nil {
@@ -151,7 +150,7 @@ func probePartitionSourceKey(ctx context.Context, js jetstream.JetStream, ps Par
 	if err != nil {
 		if errors.Is(err, jetstream.ErrStreamNotFound) {
 			// Bucket does not exist live; the key probe is vacuously OK.
-			// (Apply or W3 will create the bucket.)
+			// Apply will create the bucket.
 			return nil
 		}
 		return classifyLiveError(ctx, err)

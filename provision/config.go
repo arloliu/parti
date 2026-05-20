@@ -15,7 +15,7 @@ type Config struct {
 	ControlPlane     *ControlPlaneConfig    `yaml:"controlPlane,omitempty"      json:"controlPlane,omitempty"`
 	PartitionSource  *PartitionSourceConfig `yaml:"partitionSource,omitempty"   json:"partitionSource,omitempty"`
 	DynamicConsumers []DynamicConsumerCfg   `yaml:"dynamicConsumers,omitempty"  json:"dynamicConsumers,omitempty"`
-	// Streams is intentionally absent in v1 (see Non-Goals in plan).
+	// Streams is intentionally absent; application stream management is not yet supported.
 }
 
 // ControlPlaneConfig mirrors the parti runtime fields that drive control-plane
@@ -63,8 +63,9 @@ type ControlPlaneConfig struct {
 }
 
 // PartitionSourceConfig declares the NATS KV bucket that holds the partition
-// definition record. v1 provisions the bucket only; partition record contents
-// are written by Phase 3 (Partition Records).
+// definition record. The SDK provisions the bucket; partition record contents
+// (the actual partition definitions) are managed separately and are not yet
+// part of this SDK.
 type PartitionSourceConfig struct {
 	Bucket   string `yaml:"bucket"                 json:"bucket"`
 	Key      string `yaml:"key"                    json:"key"`
@@ -80,8 +81,9 @@ type PartitionSourceConfig struct {
 	TTL          time.Duration `yaml:"ttl,omitempty"          json:"ttl,omitempty"`
 }
 
-// DynamicConsumerCfg describes one dynamic-consumer alignment target. v1
-// performs alignment-check only; consumer pre-creation lands in Phase 5.
+// DynamicConsumerCfg describes one dynamic-consumer alignment target.
+// The current implementation performs alignment-check only; consumer
+// precreation is not yet supported.
 type DynamicConsumerCfg struct {
 	StreamName      string `yaml:"streamName"              json:"streamName"`
 	ConsumerPrefix  string `yaml:"consumerPrefix"          json:"consumerPrefix"`

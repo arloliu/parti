@@ -58,6 +58,7 @@ mgr.Start(context.Background())
 | [Reference](REFERENCE.md)         | Hooks, error handling, best practices, glossary |
 | [API Reference](API_REFERENCE.md) | Detailed API documentation                      |
 | [Operations Guide](OPERATIONS.md) | Deployment, monitoring, troubleshooting         |
+| [Provision Guide](PROVISION.md)   | provision SDK and partictl CLI for NATS resource management |
 
 ---
 

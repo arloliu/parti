@@ -31,9 +31,9 @@ var ErrInvalidConfig = errors.New("provision: invalid config")
 //     non-zero values are drift-mutable under safe-update and the server
 //     enforces feasibility at apply time.
 //
-// PartitionSource static validation is active (W3): Bucket, Key, Storage,
-// Replicas, MaxValueSize, and TTL are all validated. DynamicConsumers deeper
-// validation lands in W4.
+// PartitionSource static validation covers Bucket, Key, Storage, Replicas,
+// MaxValueSize, and TTL. DynamicConsumers deeper static validation is not yet
+// implemented.
 func Validate(cfg Config) error {
 	resolved, err := normalize(cfg)
 	if err != nil {
@@ -138,7 +138,7 @@ func validateResolved(cfg Config) error {
 		}
 	}
 
-	// DynamicConsumers: deeper validation lands in W4.
+	// DynamicConsumers: deeper static validation is not yet implemented.
 	return nil
 }
 
