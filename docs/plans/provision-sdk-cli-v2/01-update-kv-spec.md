@@ -22,8 +22,9 @@ In scope:
 - `mergeUpdateKVMetadata` helper (distinct from W0's `mergeMarkerMetadata`).
 - `update-kv` emission in `planControlPlane` / `planPartitionSource`,
   gated on `cfg.Policy == PolicySafeUpdate`.
-- `update-kv` execution in `applyPlan`: re-read, stale-before check,
-  rebuild-after-from-reread, `js.UpdateKeyValue`, fail-fast classes.
+- `update-kv` execution in `applyPlan`: re-read, rebuild-after-from-reread,
+  no-op short-circuit, stale-before check, `js.UpdateKeyValue`,
+  fail-fast classes.
 - Testability seam (`streamReader` / `kvUpdater`) for deterministic
   apply tests.
 

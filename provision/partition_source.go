@@ -49,6 +49,15 @@ func planPartitionSource(ctx context.Context, js jetstream.JetStream, cfg Config
 
 	stream, err := js.Stream(ctx, streamName)
 	if errors.Is(err, jetstream.ErrStreamNotFound) {
+		// adopt does not create missing buckets: it emits no action but
+		// records an informational finding so the missing bucket is not
+		// silently absent from the plan. warn / safe-update keep their
+		// create-kv emission.
+		if cfg.Policy == PolicyAdopt {
+			out.Drift = append(out.Drift, missingUnderAdoptFinding(KindPartitionSource, ps.Bucket))
+
+			return nil
+		}
 		kv := buildPartitionSourceKVConfig(*ps)
 		kv.Metadata = BuildMarker(ComponentPartitionSource, cfg.Instance)
 		out.Actions = append(out.Actions, PlannedAction{
@@ -71,11 +80,13 @@ func planPartitionSource(ctx context.Context, js jetstream.JetStream, cfg Config
 	findings := classifyPartitionSourceDrift(ps, info, cfg.Instance)
 	out.Drift = append(out.Drift, findings...)
 
+	marked := ParseMarker(info.Config.Metadata).IsManaged()
+
 	// Under safe-update, a Parti-marked bucket with operator-
 	// expressible drift also gets an update-kv action. Drift findings
 	// and the action coexist; the classifier above still populates
 	// out.Drift in every policy.
-	if cfg.Policy == PolicySafeUpdate && ParseMarker(info.Config.Metadata).IsManaged() {
+	if cfg.Policy == PolicySafeUpdate && marked {
 		before := cloneKVConfig(streamConfigToKVConfig(info.Config))
 		after := buildPartitionSourceUpdateTarget(ps, cfg.Instance, before)
 		if !kvConfigsEqual(before, after) {
@@ -85,6 +96,15 @@ func planPartitionSource(ctx context.Context, js jetstream.JetStream, cfg Config
 				Resource: &UpdateKVResource{Before: before, After: after},
 			})
 		}
+	}
+
+	// Under adopt, an unmarked bucket gets a stamp-marker action. The
+	// classifier's "adopted" finding above still surfaces; the action
+	// and the finding coexist. A marked bucket is already adopted, so
+	// no stamp-marker is emitted.
+	if cfg.Policy == PolicyAdopt && !marked {
+		out.Actions = append(out.Actions,
+			newStampMarkerAction(ps.Bucket, ComponentPartitionSource, cfg.Instance, info.Config))
 	}
 
 	return nil

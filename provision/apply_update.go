@@ -148,6 +148,123 @@ func bucketMissingBeforeUpdate(bucket string) error {
 	return fmt.Errorf("bucket-missing-before-update: %s%s no longer exists", kvStreamPrefix, bucket)
 }
 
+// bucketMissingBeforeStamp is the fail-fast error for a bucket that
+// existed at plan time but is gone when Apply re-reads or writes it on
+// the stamp-marker path. Both the re-read miss and the write-time
+// ErrBucketNotFound surface the same operator-facing message class.
+func bucketMissingBeforeStamp(bucket string) error {
+	return fmt.Errorf("bucket-missing-before-stamp: %s%s no longer exists", kvStreamPrefix, bucket)
+}
+
+// applyStampMarkerAction executes one ActionStampMarker. It re-reads
+// live state, recomputes the merged metadata against the re-read
+// snapshot, short-circuits when the merge is already a no-op, and
+// otherwise writes the re-read snapshot back with only Metadata
+// changed.
+//
+// Unlike applyUpdateKVAction, stamp-marker has no stale-before check:
+// it carries no plan-time expectation of the bucket's non-metadata
+// fields. It re-reads live and writes that snapshot back with the
+// marker merged, so a concurrent change to a non-metadata field
+// between plan and apply is simply picked up by the re-read. The one
+// race it cannot close is a concurrent change landing between its own
+// re-read and write — a documented best-effort cross-policy contract.
+//
+// Return contract mirrors applyUpdateKVAction:
+//   - nil error → the returned ExecutedAction is recorded as-is. Raced
+//     is true when the bucket already carries an equivalent marker on
+//     re-read (concurrently adopted or never needed stamping).
+//   - context.Canceled / context.DeadlineExceeded (or an error that
+//     wraps one) → the caller treats it as a mid-mutation cancellation.
+//   - any other error → fail-fast resource error; the caller records
+//     err.Error() verbatim into ResourceError.Error.
+func applyStampMarkerAction(
+	ctx context.Context,
+	reader streamReader,
+	updater kvUpdater,
+	cfg Config,
+	cpSpecs map[string]controlPlaneSpec,
+	action PlannedAction,
+) (ExecutedAction, error) {
+	if _, ok := action.Resource.(*StampMarkerResource); !ok {
+		// Defensive guard: Plan should never emit this.
+		return ExecutedAction{}, fmt.Errorf(
+			"stamp-marker action %q has wrong Resource type %T", action.Name, action.Resource)
+	}
+
+	// Re-derive the component from the resolved config the same way the
+	// update-kv path re-derives its spec. A bucket Plan emitted a
+	// stamp-marker for but Config no longer describes is a defensive
+	// wiring error, not a runtime race.
+	component, err := stampMarkerComponent(cfg, cpSpecs, action.Name)
+	if err != nil {
+		return ExecutedAction{}, err
+	}
+
+	// Step 1: re-read live state.
+	info, err := reader.StreamInfo(ctx, action.Name)
+	if errors.Is(err, jetstream.ErrStreamNotFound) {
+		return ExecutedAction{}, bucketMissingBeforeStamp(action.Name)
+	}
+	if err != nil {
+		// Cancellation surfaces here too; the caller distinguishes it
+		// via errors.Is. Other errors fail-fast wrapped.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return ExecutedAction{}, err
+		}
+
+		return ExecutedAction{}, fmt.Errorf("re-read %s%s: %w", kvStreamPrefix, action.Name, err)
+	}
+	live := streamConfigToKVConfig(info.Config)
+
+	// Step 2: recompute the merge against the re-read metadata. A
+	// non-Parti key added between plan and apply flows into the written
+	// map — stamp-marker preserves the current non-Parti keys.
+	merged := mergeMarkerMetadata(live.Metadata, component, cfg.Instance)
+
+	// Step 3: no-op short-circuit. The target is the re-read snapshot
+	// with only Metadata replaced. If it already equals live, the
+	// bucket was concurrently adopted or already carries an equivalent
+	// marker — recorded as a raced success with no write.
+	target := cloneKVConfig(live)
+	target.Metadata = merged
+	if kvConfigsEqual(live, target) {
+		return ExecutedAction{Kind: action.Kind, Name: action.Name, Raced: true}, nil
+	}
+
+	// Step 4: write.
+	if err := updater.UpdateKeyValue(ctx, target); err != nil {
+		switch {
+		case errors.Is(err, jetstream.ErrBucketNotFound):
+			// nats.go maps a mid-write stream disappearance onto
+			// ErrBucketNotFound; treat it the same as a missing re-read.
+			return ExecutedAction{}, bucketMissingBeforeStamp(action.Name)
+		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			return ExecutedAction{}, err
+		default:
+			return ExecutedAction{}, fmt.Errorf("stamp %s%s: %w", kvStreamPrefix, action.Name, err)
+		}
+	}
+
+	return ExecutedAction{Kind: action.Kind, Name: action.Name}, nil
+}
+
+// stampMarkerComponent re-derives the Parti component for a stamp-marker
+// target from the resolved config: a control-plane spec when the bucket
+// is one, ComponentPartitionSource when it is the partition-source
+// bucket. A bucket described by neither is a defensive wiring error,
+// exactly parallel to buildUpdateKVTargetForBucket.
+func stampMarkerComponent(cfg Config, cpSpecs map[string]controlPlaneSpec, bucket string) (string, error) {
+	if spec, ok := cpSpecs[bucket]; ok {
+		return spec.component, nil
+	}
+	if cfg.PartitionSource != nil && cfg.PartitionSource.Bucket == bucket {
+		return ComponentPartitionSource, nil
+	}
+
+	return "", fmt.Errorf("stamp-marker target %q is not described by the resolved config", bucket)
+}
+
 // buildUpdateKVTargetForBucket re-derives the desired update-kv target
 // for the named bucket from the just-re-read live config. It looks the
 // bucket up among the control-plane specs first, then the

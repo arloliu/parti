@@ -101,6 +101,15 @@ const (
 	// matches the plan-time Before, rebuilds the target from the re-read
 	// snapshot, and calls js.UpdateKeyValue. Resource is *UpdateKVResource.
 	ActionUpdateKV = "update-kv"
+
+	// ActionStampMarker is emitted by Plan under PolicyAdopt for a KV
+	// bucket named by config that exists live and carries no Parti
+	// ownership marker. Apply re-reads live state, recomputes the
+	// merged metadata (live keys plus the Parti marker keys),
+	// short-circuits when the merge is already a no-op, otherwise
+	// writes the re-read snapshot back with only Metadata changed.
+	// Resource is *StampMarkerResource.
+	ActionStampMarker = "stamp-marker"
 )
 
 // UpdateKVResource is the Resource carried by an ActionUpdateKV
@@ -117,6 +126,26 @@ const (
 type UpdateKVResource struct {
 	Before jetstream.KeyValueConfig `json:"before"`
 	After  jetstream.KeyValueConfig `json:"after"`
+}
+
+// StampMarkerResource is the Resource carried by an ActionStampMarker
+// PlannedAction. MergedMetadata is the full Metadata map the action
+// will write: the union of the live bucket's existing keys and the
+// Parti marker keys (parti.io/managed, parti.io/component, and
+// parti.io/instance when the instance is non-empty).
+//
+// PartiKeys lists exactly the metadata keys the action adds or
+// changes relative to the live bucket, so operator review can verify
+// that no non-Parti key is being modified.
+//
+// Apply does not write MergedMetadata verbatim — it re-reads live
+// state and recomputes the merge against the re-read metadata (see
+// the Apply algorithm). MergedMetadata / PartiKeys are the audit
+// surface for plan / apply -dry-run output.
+type StampMarkerResource struct {
+	Bucket         string            `json:"bucket"`
+	MergedMetadata map[string]string `json:"mergedMetadata"`
+	PartiKeys      []string          `json:"partiKeys"`
 }
 
 // DriftFinding describes how a live resource differs from the desired state,
