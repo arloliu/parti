@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v2.4.1] - 2026-05-20
+
+This patch release fixes two-phase handoff ownership claims silently
+disappearing under pull gating — both an identity-keying mismatch for
+multi-key partitions and a KV bucket TTL that expired stable claims —
+which could permanently suppress consumer delivery. It also corrects
+`Manager.State()` / `OnStateChanged` reporting for partition-lifecycle
+rebalances.
+
 ### Fixed
 
 - Two-phase handoff ownership claims are now keyed by the partition's dot-joined
