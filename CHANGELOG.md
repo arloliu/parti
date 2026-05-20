@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Two-phase handoff ownership claims are now keyed by the partition's dot-joined
+  subject identity (`Partition.SubjectKey()`), matching the identity the
+  consumer's pull gating and processing gate resolve ownership by. Previously
+  claims were keyed by the dash-joined `Partition.ID()`, so for any partition
+  with more than one key the consumer's claim resolver could not find the claim
+  and pull gating permanently suppressed delivery (`pull gating resolve failed:
+  partition not found`). Single-key partitions were unaffected.
+- The two-phase handoff KV bucket is no longer created with a `MaxAge` TTL.
+  Previously the bucket inherited `KVBuckets.HandoffTTL` (default `2m`) as its
+  `MaxAge`, so the stable ownership claims that two-phase handoff writes once and
+  never refreshes aged out of the bucket. A pull-gated consumer's claim resolver
+  then lost every claim and permanently suppressed delivery
+  (`pull gating resolve failed: partition not found`). Stable claims now persist;
+  `HandoffTTL` is the coordinator's advisory sweep TTL for stuck in-flight
+  handoffs only. A handoff bucket created by an older parti version is healed
+  automatically on Manager start — its `MaxAge` is cleared — or, if the NATS user
+  lacks stream-update permission, `Manager.Start` fails loudly with remediation
+  guidance instead of continuing into a delayed silent outage.
 - `Manager.State()` and `OnStateChanged` now correctly reflect partition-lifecycle
   rebalances (previously, partition-source changes ran a rebalance without
   entering `StateRebalancing`). A low-frequency reconcile in

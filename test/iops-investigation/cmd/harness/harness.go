@@ -184,11 +184,16 @@ func PartiBuckets(cfg parti.Config, kvStorage jetstream.StorageType, twoPhase bo
 		{bucket: cfg.KVBuckets.AssignmentBucket, stream: kvStreamName(cfg.KVBuckets.AssignmentBucket), storage: kvStorage, ttl: cfg.KVBuckets.AssignmentTTL},
 	}
 	if twoPhase {
+		// The handoff bucket carries no MaxAge: a bucket-level TTL would age out
+		// stable ownership claims and suppress pull-gated consumers. Matches the
+		// runtime Manager / provision behavior. cfg.KVBuckets.HandoffTTL is the
+		// coordinator's advisory sweep TTL, not a bucket TTL.
 		specs = append(specs, streamSpec{
 			bucket: cfg.KVBuckets.HandoffBucket, stream: kvStreamName(cfg.KVBuckets.HandoffBucket),
-			storage: kvStorage, ttl: cfg.KVBuckets.HandoffTTL,
+			storage: kvStorage, ttl: 0,
 		})
 	}
+
 	return specs
 }
 

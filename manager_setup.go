@@ -94,12 +94,25 @@ func (m *Manager) ensureCoreKVBuckets( //nolint:revive
 func (m *Manager) setupHandoff(startupCtx context.Context, js jetstream.JetStream) error {
 	bctx, bcancel := context.WithTimeout(startupCtx, m.cfg.OperationTimeout)
 	start := time.Now()
-	handoffKV, err := m.ensureKVBucket(bctx, js, m.cfg.KVBuckets.HandoffBucket, m.cfg.KVBuckets.HandoffTTL, jetstream.FileStorage)
+	// The handoff bucket must NOT carry a MaxAge. Stable ownership claims are
+	// written once and never refreshed; a bucket-level TTL would age them out
+	// and permanently suppress pull-gated consumers. HandoffTTL governs only
+	// the coordinator's advisory sweep TTL (handoff.Config.TTL, set below).
+	handoffKV, err := m.ensureKVBucket(bctx, js, m.cfg.KVBuckets.HandoffBucket, 0, jetstream.FileStorage)
 	bcancel()
 	if err != nil {
 		return fmt.Errorf("failed to create handoff KV: %w", err)
 	}
-	m.logger.Debug("startup: ensured KV bucket", "bucket", m.cfg.KVBuckets.HandoffBucket, "ttl", m.cfg.KVBuckets.HandoffTTL, "elapsed", time.Since(start))
+	m.logger.Debug("startup: ensured KV bucket", "bucket", m.cfg.KVBuckets.HandoffBucket, "elapsed", time.Since(start))
+
+	// Heal a handoff bucket created by an older parti version (or other tooling)
+	// that still carries a MaxAge — clear it so stable claims never expire.
+	rctx, rcancel := context.WithTimeout(startupCtx, m.cfg.OperationTimeout)
+	rErr := reconcileHandoffBucketMaxAge(rctx, js, handoffKV, m.cfg.KVBuckets.HandoffBucket, m.logger)
+	rcancel()
+	if rErr != nil {
+		return rErr
+	}
 
 	store := handoff.NewNATSClaimStore(handoffKV, "claims/")
 	m.handoffCoordinator = handoff.New(handoff.Config{
@@ -160,6 +173,90 @@ func (m *Manager) ensureKVBucket(
 	return kv, nil
 }
 
+// handoffStreamUpdate applies a JetStream stream config update. It is a
+// package-level indirection so reconcileHandoffBucketMaxAge's fail-loud branch
+// is unit-testable without configuring NATS account permissions. Production
+// code never reassigns it.
+var handoffStreamUpdate = func(ctx context.Context, js jetstream.JetStream, cfg jetstream.StreamConfig) error {
+	_, err := js.UpdateStream(ctx, cfg)
+	return err
+}
+
+// kvStreamConfig returns the JetStream stream config backing a KV bucket. It
+// returns an error when the bucket status cannot be read or introspected.
+func kvStreamConfig(ctx context.Context, kv jetstream.KeyValue) (jetstream.StreamConfig, error) {
+	status, err := kv.Status(ctx)
+	if err != nil {
+		return jetstream.StreamConfig{}, fmt.Errorf("read KV bucket status: %w", err)
+	}
+	bs, ok := status.(*jetstream.KeyValueBucketStatus)
+	if !ok || bs.StreamInfo() == nil {
+		return jetstream.StreamConfig{}, fmt.Errorf("KV bucket status %T is not introspectable", status)
+	}
+
+	return bs.StreamInfo().Config, nil
+}
+
+// reconcileHandoffBucketMaxAge clears a non-zero MaxAge on an already-existing
+// handoff KV bucket. A handoff bucket created by an older parti version carries
+// MaxAge == HandoffTTL, which expires stable ownership claims and permanently
+// suppresses pull-gated consumers. Bucket creation is get-first, so opening
+// such a bucket does not fix it — this does.
+//
+// It returns nil only when the bucket is positively confirmed to carry no
+// MaxAge — either it already had none, or the update to clear it succeeded.
+// It returns an actionable error (so Manager.Start fails loudly rather than
+// continuing into a delayed, silent outage) when the bucket's MaxAge cannot be
+// verified, or when a non-zero MaxAge cannot be cleared (e.g. a least-privilege
+// NATS user without stream-update permission).
+func reconcileHandoffBucketMaxAge(
+	ctx context.Context,
+	js jetstream.JetStream,
+	kv jetstream.KeyValue,
+	bucket string,
+	logger types.Logger,
+) error {
+	cfg, err := kvStreamConfig(ctx, kv)
+	if err != nil {
+		// The bucket was just opened, so a status failure here is unexpected.
+		// Fail loud rather than silently skip: an unverified bucket may still
+		// carry a MaxAge that expires stable claims.
+		return fmt.Errorf(
+			"handoff KV bucket %q: cannot verify MaxAge: %w — a non-zero MaxAge "+
+				"expires partition ownership claims and permanently suppresses "+
+				"pull-gated consumers; retry startup, or verify the bucket has no TTL",
+			bucket, err,
+		)
+	}
+	if cfg.MaxAge == 0 {
+		return nil
+	}
+
+	next := cfg
+	next.MaxAge = 0
+	if uerr := handoffStreamUpdate(ctx, js, next); uerr != nil {
+		// A concurrent worker may have reconciled the bucket already.
+		if cur, rerr := kvStreamConfig(ctx, kv); rerr == nil && cur.MaxAge == 0 {
+			return nil
+		}
+
+		return fmt.Errorf(
+			"handoff KV bucket %q has MaxAge=%v, which expires partition ownership "+
+				"claims and permanently suppresses pull-gated consumers; parti could "+
+				"not clear it: %w — recreate the bucket with no TTL (e.g. via "+
+				"partictl) or grant this NATS user stream-update permission",
+			bucket, cfg.MaxAge, uerr,
+		)
+	}
+
+	if logger != nil {
+		logger.Info("cleared stale MaxAge on handoff KV bucket",
+			"bucket", bucket, "previous_max_age", cfg.MaxAge)
+	}
+
+	return nil
+}
+
 // warnOnStorageMismatch logs a warning if the existing bucket's storage type
 // differs from the type parti would have created. This catches the silent
 // non-upgrade path where a pre-existing file-backed bucket continues to
@@ -170,15 +267,11 @@ func (m *Manager) warnOnStorageMismatch(
 	bucket string,
 	want jetstream.StorageType,
 ) {
-	status, err := kv.Status(ctx)
+	cfg, err := kvStreamConfig(ctx, kv)
 	if err != nil {
 		return
 	}
-	bs, ok := status.(*jetstream.KeyValueBucketStatus)
-	if !ok || bs.StreamInfo() == nil {
-		return
-	}
-	got := bs.StreamInfo().Config.Storage
+	got := cfg.Storage
 	if got == want {
 		return
 	}

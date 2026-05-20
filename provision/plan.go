@@ -93,10 +93,14 @@ func buildControlPlaneSpecs(cp ControlPlaneConfig) []controlPlaneSpec {
 		{ComponentControlPlaneAssignment, cp.AssignmentBucket, cp.AssignmentTTL, jetstream.FileStorage},
 	}
 	if cp.EnableTwoPhaseHandoff {
+		// The handoff bucket is created with no MaxAge (ttl: 0). A bucket-level
+		// TTL would age out stable ownership claims — which are written once and
+		// never refreshed — and permanently suppress pull-gated consumers.
+		// cp.HandoffTTL is the coordinator's advisory sweep TTL, not a bucket TTL.
 		specs = append(specs, controlPlaneSpec{
 			component: ComponentControlPlaneHandoff,
 			bucket:    cp.HandoffBucket,
-			ttl:       cp.HandoffTTL,
+			ttl:       0,
 			storage:   jetstream.FileStorage,
 		})
 	}

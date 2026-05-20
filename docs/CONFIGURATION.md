@@ -176,8 +176,8 @@ cfg := &parti.Config{
         AssignmentTTL:    0,                  // 0 = no expiration
 
         // Two-phase handoff (optional)
-        HandoffBucket: "parti-handoff",       // Handoff claims
-        HandoffTTL:    2 * time.Minute,       // Claim validity
+        HandoffBucket: "parti-handoff",       // Handoff claims (bucket has no TTL)
+        HandoffTTL:    2 * time.Minute,       // Stuck-handoff sweep TTL, not a bucket TTL
     },
 }
 ```

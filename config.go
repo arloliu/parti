@@ -36,12 +36,19 @@ type KVBucketConfig struct {
 	// Recommended: distinct bucket to isolate churn from stable assignment data.
 	HandoffBucket string `yaml:"handoffBucket" default:"parti-handoff"`
 
-	// HandoffTTL is how long a handoff claim remains valid in KV after last
-	// update. A short TTL bounds stale claim accumulation if a leader crashes
-	// mid-handoff; surviving leaders can safely recreate missing claims. Must be
-	// longer than expected multi-phase handoff duration (including retries) but
-	// significantly shorter than AssignmentTTL to permit natural cleanup.
-	// Recommended: 2-5 minutes in production; fast tests may use seconds.
+	// HandoffTTL is the advisory staleness threshold the two-phase handoff
+	// coordinator uses to recover a STUCK in-flight handoff: the periodic claim
+	// sweep resets a prepare/commit claim back to stable once it has gone
+	// untouched for longer than HandoffTTL.
+	//
+	// It is NOT a KV bucket TTL. The handoff bucket is created with no MaxAge —
+	// a bucket-level TTL would also age out healthy stable ownership claims
+	// (which are written once and never refreshed), permanently suppressing
+	// pull-gated consumers. Stable claims therefore never expire.
+	//
+	// Must be longer than the expected multi-phase handoff duration (including
+	// retries). Recommended: 2-5 minutes in production; fast tests may use
+	// seconds.
 	HandoffTTL time.Duration `yaml:"handoffTtl" default:"2m"`
 }
 
@@ -456,10 +463,11 @@ func SetDefaults(cfg *Config) error {
 //    Recommendation: 0 (infinite) or very long (1h+) for production
 
 // 4. HandoffTTL (Default: 2m)
-//    Purpose: Ephemeral lifetime for two-phase handoff claims (prepare/commit/stable)
-//    Renewal: Updated during each phase transition; expires to auto-clean stale claims
-//    Expiry Impact: Stale in-progress claims are garbage-collected; safe to recreate
-//    Recommendation: Short (2-5m) to bound accumulation; tests may use seconds
+//    Purpose: Advisory staleness threshold for the two-phase handoff claim sweep
+//    Renewal: The sweep resets a stuck prepare/commit claim to stable after this
+//    Expiry Impact: NOT a KV bucket TTL — the handoff bucket has no MaxAge and
+//                   stable ownership claims never expire
+//    Recommendation: Longer than a multi-phase handoff (2-5m); tests may use seconds
 //
 // Constraint Hierarchy:
 //   WorkerIDTTL >= HeartbeatTTL >= 2 * HeartbeatInterval

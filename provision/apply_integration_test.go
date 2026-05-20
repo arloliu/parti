@@ -74,6 +74,14 @@ func TestApply_EmptyServer_CreatesAllControlPlaneBuckets(t *testing.T) {
 			"bucket %s must be stamped as parti-managed", name)
 		require.NotEmpty(t, marker.Component)
 		require.Equal(t, "prod", marker.Instance)
+
+		// The handoff bucket must be provisioned with no MaxAge: a bucket-level
+		// TTL would age out stable ownership claims and suppress pull-gated
+		// consumers. ControlPlane.HandoffTTL is the advisory sweep TTL only.
+		if name == "parti-handoff" {
+			require.Equal(t, time.Duration(0), info.Config.MaxAge,
+				"handoff bucket must be provisioned with no MaxAge")
+		}
 	}
 }
 

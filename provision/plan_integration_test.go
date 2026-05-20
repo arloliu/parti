@@ -56,7 +56,10 @@ func TestPlan_EmptyServer_EmitsCreateKVForAllControlPlaneBuckets(t *testing.T) {
 	}{
 		{"parti-assignment", 0, jetstream.FileStorage, provision.ComponentControlPlaneAssignment},
 		{"parti-election", 10 * time.Second, jetstream.MemoryStorage, provision.ComponentControlPlaneElection},
-		{"parti-handoff", 2 * time.Minute, jetstream.FileStorage, provision.ComponentControlPlaneHandoff},
+		// The handoff bucket is provisioned with no MaxAge (ttl 0) even though
+		// ControlPlane.HandoffTTL is 2m — HandoffTTL is the coordinator's
+		// advisory sweep TTL, not the bucket's MaxAge.
+		{"parti-handoff", 0, jetstream.FileStorage, provision.ComponentControlPlaneHandoff},
 		{"parti-heartbeat", 15 * time.Second, jetstream.MemoryStorage, provision.ComponentControlPlaneHeartbeat},
 		{"parti-stableid", 75 * time.Second, jetstream.FileStorage, provision.ComponentControlPlaneID},
 	}

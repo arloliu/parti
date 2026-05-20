@@ -237,8 +237,13 @@ func (t *twoPhaseCoordinator) preparePhase(ctx context.Context, workerID string,
 
 	for _, p := range toPrepare {
 		g.Go(func() error {
-			// Create or transition claim for new partition.
-			pid := p.ID()
+			// Create or transition claim for new partition. The claim is keyed
+			// by SubjectKey() (dot-joined) — the same partition identity the
+			// consumer's pull gating and processing gate derive from the
+			// partition subject. Keying by ID() (dash-joined) would not match
+			// for partitions with more than one key, leaving GetOwner unable to
+			// resolve the claim.
+			pid := p.SubjectKey()
 			// didReset is captured by the transform closure so we can emit
 			// the IncClaimStaleHandoffReset metric exactly once, AFTER
 			// updateClaim's CAS succeeds. The transform may be invoked
@@ -340,7 +345,9 @@ func (t *twoPhaseCoordinator) commitPhase(ctx context.Context, workerID string, 
 
 	for _, p := range next.Partitions {
 		g.Go(func() error {
-			pid := p.ID()
+			// Keyed by SubjectKey() to match the claim written in preparePhase
+			// and the partition identity the consumer resolves ownership by.
+			pid := p.SubjectKey()
 			return t.updateClaim(gCtx, pid, func(cur *Claim) (*Claim, error) {
 				if cur == nil {
 					return nil, nil
@@ -392,7 +399,9 @@ func (t *twoPhaseCoordinator) stabilizePhase(ctx context.Context, workerID strin
 
 	for _, p := range next.Partitions {
 		g.Go(func() error {
-			pid := p.ID()
+			// Keyed by SubjectKey() to match the claim written in preparePhase
+			// and the partition identity the consumer resolves ownership by.
+			pid := p.SubjectKey()
 			return t.updateClaim(gCtx, pid, func(cur *Claim) (*Claim, error) {
 				if cur == nil {
 					return nil, nil

@@ -182,3 +182,35 @@ func TestTwoPhaseRetryCAS_ExhaustsRetries(t *testing.T) {
 	require.Error(t, err)
 	require.GreaterOrEqual(t, store.calls, 3) // initial + 2 retries
 }
+
+// TestTwoPhase_MultiKeyPartition_ClaimKeyedBySubjectKey verifies the coordinator
+// keys ownership claims by Partition.SubjectKey() (dot-joined) — the identity
+// the consumer's pull gating and processing gate resolve ownership by — and not
+// Partition.ID() (dash-joined), which would not match for a multi-key partition.
+func TestTwoPhase_MultiKeyPartition_ClaimKeyedBySubjectKey(t *testing.T) {
+	t.Parallel()
+
+	store := newMemStore()
+	coord := New(Config{Store: store, ConsumerUpdater: nopUpdater{}, TTL: time.Minute}, true)
+
+	p := types.Partition{Keys: []string{"region", "us-east"}}
+	require.NotEqual(t, p.ID(), p.SubjectKey(),
+		"test requires a partition whose ID() differs from SubjectKey()")
+
+	err := coord.Apply(context.Background(), "w1",
+		types.Assignment{}, types.Assignment{Version: 1, Partitions: []types.Partition{p}})
+	require.NoError(t, err)
+
+	// The claim must exist keyed by SubjectKey(), owned and stable.
+	claim, rev, err := store.Get(context.Background(), p.SubjectKey())
+	require.NoError(t, err)
+	require.NotZero(t, rev, "claim must exist keyed by SubjectKey() %q", p.SubjectKey())
+	require.Equal(t, p.SubjectKey(), claim.PartitionID)
+	require.Equal(t, "w1", claim.Owner)
+	require.Equal(t, ClaimStateStable, claim.State)
+
+	// It must NOT be keyed by ID() — that is the bug this guards against.
+	_, revByID, err := store.Get(context.Background(), p.ID())
+	require.NoError(t, err)
+	require.Zero(t, revByID, "claim must not be keyed by ID() %q", p.ID())
+}

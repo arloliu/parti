@@ -292,6 +292,25 @@ func TestBuildPartiConfig_AppliesFlagOverrides(t *testing.T) {
 	require.Equal(t, 13*time.Second, cfg.ElectionTimeout)
 }
 
+// TestPartiBuckets_HandoffHasNoTTL verifies the harness pre-creates the handoff
+// KV bucket with no MaxAge. A bucket-level TTL would age out the stable
+// ownership claims two-phase handoff writes once, suppressing pull-gated
+// consumers — the harness must match the runtime Manager / provision behavior.
+func TestPartiBuckets_HandoffHasNoTTL(t *testing.T) {
+	cfg := BuildPartiConfig(Options{TwoPhase: true})
+	specs := PartiBuckets(cfg, jetstream.FileStorage, true)
+
+	var found bool
+	for _, s := range specs {
+		if s.bucket == cfg.KVBuckets.HandoffBucket {
+			found = true
+			require.Equal(t, time.Duration(0), s.ttl,
+				"handoff bucket spec must have no TTL; a bucket-level TTL ages out stable claims")
+		}
+	}
+	require.True(t, found, "handoff bucket spec must be present when twoPhase=true")
+}
+
 // TestSmoke_RunHarness drives the full harness lifecycle against an
 // in-process NATS. Validates:
 //   - manifest.yaml is written with the expected fields,

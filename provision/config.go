@@ -39,7 +39,13 @@ type ControlPlaneConfig struct {
 	ElectionTimeout time.Duration `yaml:"electionTimeout" json:"electionTimeout"`
 	HeartbeatTTL    time.Duration `yaml:"heartbeatTtl"    json:"heartbeatTtl"`
 	AssignmentTTL   time.Duration `yaml:"assignmentTtl"   json:"assignmentTtl"` // 0 = no expiration
-	HandoffTTL      time.Duration `yaml:"handoffTtl"      json:"handoffTtl"`
+
+	// HandoffTTL is the two-phase handoff coordinator's advisory sweep TTL for
+	// recovering STUCK in-flight handoff claims. It does NOT set the handoff
+	// bucket's MaxAge: the handoff bucket is provisioned with no TTL so stable
+	// ownership claims never expire (a bucket-level TTL would age them out and
+	// permanently suppress pull-gated consumers).
+	HandoffTTL time.Duration `yaml:"handoffTtl" json:"handoffTtl"`
 
 	// EnableTwoPhaseHandoff gates the optional handoff KV bucket. When true,
 	// HandoffTTL must be > 0.

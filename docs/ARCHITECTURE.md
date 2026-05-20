@@ -213,7 +213,7 @@ Parti uses four (optionally five) KV buckets:
 | `parti-election`   | Leader lease             | `leader`               | Lease-based   |
 | `parti-heartbeat`  | Worker health signals    | `worker-0`, etc.       | HeartbeatTTL  |
 | `parti-assignment` | Partition assignments    | `worker-0`, etc.       | AssignmentTTL |
-| `parti-handoff`    | Two-phase handoff claims | `claims/partition-id`  | HandoffTTL    |
+| `parti-handoff`    | Two-phase handoff claims | `claims/partition-id`  | None          |
 
 ### Bucket Interactions
 

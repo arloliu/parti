@@ -24,6 +24,8 @@ var ErrInvalidConfig = errors.New("provision: invalid config")
 //   - ControlPlane.WorkerIDTTL, .ElectionTimeout, .HeartbeatTTL must be > 0.
 //   - ControlPlane.AssignmentTTL may be 0 (runtime default: no expiration).
 //   - When ControlPlane.EnableTwoPhaseHandoff is true, HandoffTTL must be > 0.
+//     This keeps the coordinator's advisory sweep TTL positive; it does NOT set
+//     the handoff bucket's MaxAge (the handoff bucket is provisioned with none).
 //
 // PartitionSource static validation is active (W3): Bucket, Key, Storage,
 // Replicas, MaxValueSize, and TTL are all validated. DynamicConsumers deeper
