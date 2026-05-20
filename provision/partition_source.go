@@ -71,7 +71,40 @@ func planPartitionSource(ctx context.Context, js jetstream.JetStream, cfg Config
 	findings := classifyPartitionSourceDrift(ps, info, cfg.Instance)
 	out.Drift = append(out.Drift, findings...)
 
+	// Under safe-update, a Parti-marked bucket with operator-
+	// expressible drift also gets an update-kv action. Drift findings
+	// and the action coexist; the classifier above still populates
+	// out.Drift in every policy.
+	if cfg.Policy == PolicySafeUpdate && ParseMarker(info.Config.Metadata).IsManaged() {
+		before := cloneKVConfig(streamConfigToKVConfig(info.Config))
+		after := buildPartitionSourceUpdateTarget(ps, cfg.Instance, before)
+		if !kvConfigsEqual(before, after) {
+			out.Actions = append(out.Actions, PlannedAction{
+				Kind:     ActionUpdateKV,
+				Name:     ps.Bucket,
+				Resource: &UpdateKVResource{Before: before, After: after},
+			})
+		}
+	}
+
 	return nil
+}
+
+// buildPartitionSourceUpdateTarget returns the desired update-kv target
+// for a partition-source bucket: a deep clone of before with only the
+// operator-expressible fields overwritten. Every other field —
+// drift-detection-only (History, Storage), preserved-from-live
+// (Description, MaxBytes, Placement, RePublish, Mirror, Sources,
+// Compression, LimitMarkerTTL), and Bucket — is inherited from before
+// verbatim.
+func buildPartitionSourceUpdateTarget(ps *PartitionSourceConfig, instance string, before jetstream.KeyValueConfig) jetstream.KeyValueConfig {
+	after := cloneKVConfig(before)
+	after.TTL = ps.TTL
+	after.Replicas = ps.Replicas
+	after.MaxValueSize = ps.MaxValueSize
+	after.Metadata = mergeUpdateKVMetadata(before.Metadata, instance)
+
+	return after
 }
 
 // classifyPartitionSourceDrift compares a live KV-bucket stream against the

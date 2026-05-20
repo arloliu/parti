@@ -134,6 +134,22 @@ func planControlPlane(ctx context.Context, js jetstream.JetStream, cfg Config, o
 
 		findings := classifyControlPlaneDrift(spec, info, cfg.Instance)
 		out.Drift = append(out.Drift, findings...)
+
+		// Under safe-update, a Parti-marked bucket with operator-
+		// expressible drift also gets an update-kv action. Drift
+		// findings and the action coexist; the classifier above still
+		// populates out.Drift in every policy.
+		if cfg.Policy == PolicySafeUpdate && ParseMarker(info.Config.Metadata).IsManaged() {
+			before := cloneKVConfig(streamConfigToKVConfig(info.Config))
+			after := buildControlPlaneUpdateTarget(spec, cfg.Instance, before)
+			if !kvConfigsEqual(before, after) {
+				out.Actions = append(out.Actions, PlannedAction{
+					Kind:     ActionUpdateKV,
+					Name:     spec.bucket,
+					Resource: &UpdateKVResource{Before: before, After: after},
+				})
+			}
+		}
 	}
 
 	return nil
@@ -284,6 +300,11 @@ func wantedControlPlaneKV(spec controlPlaneSpec, instance string, live jetstream
 // instance is empty the parti.io/instance key is removed, so a config
 // that clears the instance label produces metadata that genuinely
 // differs from a live bucket still carrying one.
+//
+// This helper sets parti.io/component to the desired value so the drift
+// classifier gate detects a component mismatch. It is intentionally
+// distinct from mergeUpdateKVMetadata, which PRESERVES the live
+// component — do not consolidate the two helpers.
 func mergeMarkerMetadata(live map[string]string, component, instance string) map[string]string {
 	merged := maps.Clone(live)
 	if merged == nil {
@@ -297,6 +318,51 @@ func mergeMarkerMetadata(live map[string]string, component, instance string) map
 	}
 
 	return merged
+}
+
+// mergeUpdateKVMetadata returns the Metadata map for an update-kv
+// target. It clones live, forces parti.io/managed to the current schema
+// value, sets or removes parti.io/instance per the desired instance,
+// and PRESERVES parti.io/component verbatim from live — component is
+// drift-immutable and update-kv never re-labels a bucket's role.
+// Non-Parti keys are preserved.
+//
+// This helper is intentionally distinct from mergeMarkerMetadata, which
+// rewrites parti.io/component to the desired value for classifier drift
+// detection. Do not consolidate the two helpers: doing so reintroduces
+// the silent component-rewrite bug, where safe-update would re-label a
+// bucket stamped for a different role instead of flagging it.
+func mergeUpdateKVMetadata(live map[string]string, instance string) map[string]string {
+	merged := maps.Clone(live)
+	if merged == nil {
+		merged = map[string]string{}
+	}
+	merged[MarkerManagedKey] = MarkerManagedValue
+	if instance != "" {
+		merged[MarkerInstanceKey] = instance
+	} else {
+		delete(merged, MarkerInstanceKey)
+	}
+	// parti.io/component is left exactly as cloned from live.
+
+	return merged
+}
+
+// buildControlPlaneUpdateTarget returns the desired update-kv target for
+// a control-plane bucket: a deep clone of before with only the
+// operator-expressible fields overwritten. Every other field —
+// drift-detection-only (History, Storage), preserved-from-live
+// (Description, MaxBytes, MaxValueSize, Placement, RePublish, Mirror,
+// Sources, Compression, LimitMarkerTTL), and Bucket — is inherited from
+// before verbatim. Control-plane has no MaxValueSize config field, so
+// that field is preserved-from-live here.
+func buildControlPlaneUpdateTarget(spec controlPlaneSpec, instance string, before jetstream.KeyValueConfig) jetstream.KeyValueConfig {
+	after := cloneKVConfig(before)
+	after.TTL = spec.ttl
+	after.Replicas = spec.replicas
+	after.Metadata = mergeUpdateKVMetadata(before.Metadata, instance)
+
+	return after
 }
 
 func sortActions(s []PlannedAction) {
