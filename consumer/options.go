@@ -171,9 +171,12 @@ type options struct {
 	keyExtractor     func(msg jetstream.Msg) string
 
 	// Dynamic specific
-	processingGate              *ProcessingGateConfig
-	resolver                    ResolverConfig
-	pullGatingEnabled           bool
+	processingGate *ProcessingGateConfig
+	resolver       ResolverConfig
+	// pullGatingEnabled is tri-state: nil means the caller never called
+	// WithPullGating (defaulting may auto-enable it); a non-nil pointer is an
+	// explicit caller choice that must be honored. Mirrors dispatchByKey.
+	pullGatingEnabled           *bool
 	drainOnRemove               bool
 	drainOnRemoveTimeout        time.Duration
 	maxConcurrentSubjects       int
@@ -665,10 +668,22 @@ func WithResolver(cfg ResolverConfig) DynamicOption {
 	})
 }
 
-// WithPullGating enables pre-pull ownership checks.
+// WithPullGating sets whether pre-pull ownership/state checks are enabled.
+//
+// When the processing gate is enabled, pull gating defaults to on, because
+// suppressing pulls for partitions this worker does not own reduces NAK churn
+// during handoffs. Calling WithPullGating overrides that default in either
+// direction, and the choice is honored even when the processing gate is on.
+//
+// WithPullGating(false) is an explicit opt-in to the lower-prepull-gating
+// mode: messages may be pulled and then NAKed by the processing gate, which
+// remains the in-handler ownership/state safety layer. WithPullGating(true)
+// forces pull gating on. When WithPullGating is never called, the
+// processing-gate-driven default applies.
 func WithPullGating(enabled bool) DynamicOption {
 	return dynamicOpt(func(o *options) {
-		o.pullGatingEnabled = enabled
+		v := enabled
+		o.pullGatingEnabled = &v
 	})
 }
 

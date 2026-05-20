@@ -208,3 +208,29 @@ func TestWithConsumerReplicas(t *testing.T) {
 		t.Errorf("after WithConsumerReplicas(-1), got %d, want 5 (unchanged)", o.consumerReplicas)
 	}
 }
+
+// TestOptions_WithPullGatingTracksExplicitFalse verifies that WithPullGating
+// records an explicit false as a configured intent, distinct from "unset".
+// The defaulting layer relies on this to honor an explicit disable instead of
+// re-enabling pull gating when the processing gate is on.
+func TestOptions_WithPullGatingTracksExplicitFalse(t *testing.T) {
+	o := defaultOptions()
+	require.Nil(t, o.pullGatingEnabled, "pull gating must be unset by default")
+
+	WithPullGating(false).apply(&o)
+
+	require.NotNil(t, o.pullGatingEnabled, "WithPullGating(false) must record configured intent")
+	require.False(t, *o.pullGatingEnabled, "WithPullGating(false) must store false")
+}
+
+// TestOptions_WithPullGatingTracksExplicitTrue verifies that WithPullGating
+// records an explicit true as a configured intent.
+func TestOptions_WithPullGatingTracksExplicitTrue(t *testing.T) {
+	o := defaultOptions()
+	require.Nil(t, o.pullGatingEnabled, "pull gating must be unset by default")
+
+	WithPullGating(true).apply(&o)
+
+	require.NotNil(t, o.pullGatingEnabled, "WithPullGating(true) must record configured intent")
+	require.True(t, *o.pullGatingEnabled, "WithPullGating(true) must store true")
+}

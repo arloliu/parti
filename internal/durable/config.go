@@ -152,10 +152,22 @@ type WorkerConsumerConfig struct {
 	// Resolver configures the ownership resolver when ProcessingGate is enabled.
 	Resolver ResolverConfig
 
-	// PullGatingEnabled enables pre-pull ownership/state gating for per-subject consumers.
-	// When true, pulls are suppressed (not issued) if the current worker is not the owner or
-	// the handoff state is not Commit/Stable. Reduces NAK churn during handoffs.
+	// PullGatingEnabled is the resolved decision for pre-pull ownership/state
+	// gating on per-subject consumers. When true, pulls are suppressed (not
+	// issued) if the current worker is not the owner or the handoff state is
+	// not Commit/Stable, which reduces NAK churn during handoffs. SetDefaults
+	// may auto-enable this when the processing gate is on; see
+	// PullGatingConfigured.
 	PullGatingEnabled bool
+
+	// PullGatingConfigured records whether PullGatingEnabled reflects an
+	// explicit caller choice. When false (the zero value), SetDefaults treats
+	// pull gating as "not configured" and auto-enables it if the processing
+	// gate is enabled. When true, SetDefaults preserves PullGatingEnabled as
+	// given, so an explicit disable survives. A direct constructor that wants
+	// pull gating off under an enabled processing gate must therefore set this
+	// to true alongside PullGatingEnabled: false.
+	PullGatingConfigured bool
 
 	// DrainOnRemove enables a graceful per-subject drain when a subject is removed
 	// from the worker's assignment. When true, the consumer helper will stop issuing
@@ -298,9 +310,13 @@ func (c *WorkerConsumerConfig) SetDefaults() error {
 			return err
 		}
 
-		// Enable pull gating by default to ensure exclusivity with per-subject durables,
-		// regardless of resolver type, unless explicitly disabled by the caller.
-		if c.ProcessingGate.Enabled && !c.PullGatingEnabled {
+		// Enable pull gating by default to ensure exclusivity with per-subject
+		// durables, regardless of resolver type. Only an unconfigured
+		// pull-gating setting is auto-enabled here, so a deliberate disable
+		// survives. The rule is idempotent: PullGatingConfigured is never
+		// cleared, so the repeated SetDefaults call from Validate preserves
+		// this decision.
+		if c.ProcessingGate.Enabled && !c.PullGatingConfigured {
 			c.PullGatingEnabled = true
 		}
 	}
