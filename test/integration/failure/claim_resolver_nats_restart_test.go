@@ -75,7 +75,7 @@ func TestClaimResolver_RecoversAfterNATSRestart(t *testing.T) {
 	// client port and StoreDir so JetStream stream + KV state survives.
 	// Cleanup is registered inside the helper so the live (possibly
 	// restarted) server is the one that gets shut down.
-	_, nc, restart := startEmbeddedNATSWithRestart(t)
+	nc, restart := startEmbeddedNATSWithRestart(t)
 
 	js, err := jetstream.New(nc)
 	require.NoError(t, err)
@@ -463,16 +463,16 @@ func totalConsumed(stacks []*workerStack, pid string) int32 {
 }
 
 // startEmbeddedNATSWithRestart starts an embedded NATS server with JetStream
-// enabled and returns the server, a connected client, and a helper that
-// shuts down the current server and brings up a new one on the same client
-// port and StoreDir. JetStream streams and KV buckets backed by FileStorage
-// therefore survive the restart.
+// enabled and returns a connected client and a helper that shuts down the
+// current server and brings up a new one on the same client port and StoreDir.
+// JetStream streams and KV buckets backed by FileStorage therefore survive the
+// restart.
 //
 // The client is configured with nats.MaxReconnects(-1) (unlimited) and a
 // short ReconnectWait so it transparently rejoins the new server. Without
 // these, a single restart can permanently disconnect the client and mask the
 // behavior under test.
-func startEmbeddedNATSWithRestart(t *testing.T) (*server.Server, *nats.Conn, func(t *testing.T)) {
+func startEmbeddedNATSWithRestart(t *testing.T) (*nats.Conn, func(t *testing.T)) {
 	t.Helper()
 
 	port, err := getFreePortForRestart()
@@ -544,7 +544,7 @@ func startEmbeddedNATSWithRestart(t *testing.T) (*server.Server, *nats.Conn, fun
 	}
 
 	// Expose the live server pointer to the cleanup hook via closure.
-	return nsPtr.srv, nc, restart
+	return nc, restart
 }
 
 // serverHolder lets the restart closure swap the live *server.Server while

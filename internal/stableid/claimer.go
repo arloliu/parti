@@ -211,8 +211,34 @@ func (c *Claimer) Claim(ctx context.Context) (string, error) {
 			// Another worker won the Create retry - try next ID
 			c.logger.Debug("Create retry lost race, trying next ID", "worker_id", workerID, "next_id", id+1)
 		} else {
-			// Key exists and is valid - skip to next ID
-			c.logger.Debug("stable ID actively claimed by another worker", "worker_id", workerID, "revision", entry.Revision(), "next_id", id+1)
+			// Key exists. If it has not been renewed within the stale
+			// threshold its holder is presumed dead — atomically take it over
+			// with a revision-checked Update so two reclaiming workers cannot
+			// both win the same ID.
+			if c.isStale(entry) {
+				staleAge := time.Since(entry.Created())
+				revision, upErr := c.kv.Update(ctx, key, []byte(value), entry.Revision())
+				if upErr == nil {
+					c.mu.Lock()
+					c.workerID = workerID
+					c.mu.Unlock()
+					c.lastRevision.Store(revision)
+					c.logger.Warn("stable ID reclaimed from stale holder",
+						"worker_id", workerID, "key", key, "revision", revision, "stale_age", staleAge)
+
+					return workerID, nil
+				}
+				if !errors.Is(upErr, jetstream.ErrKeyExists) {
+					c.logger.Error("stable ID takeover failed with unexpected error", "worker_id", workerID, "error", upErr)
+					return "", fmt.Errorf("failed to take over ID %s: %w", workerID, upErr)
+				}
+				// Revision moved between Get and Update — another worker
+				// renewed or took over. Skip to the next ID.
+				c.logger.Debug("stable ID takeover lost race, trying next ID", "worker_id", workerID, "next_id", id+1)
+			} else {
+				// Key exists and is fresh - skip to next ID
+				c.logger.Debug("stable ID actively claimed by another worker", "worker_id", workerID, "revision", entry.Revision(), "next_id", id+1)
+			}
 		}
 	}
 
@@ -440,4 +466,25 @@ const minRenewInterval = 100 * time.Millisecond
 // one third of ttl, floored at minRenewInterval.
 func (c *Claimer) renewInterval() time.Duration {
 	return max(c.ttl/3, minRenewInterval)
+}
+
+// staleThreshold is the age past which a claimed ID's key is presumed
+// abandoned and may be taken over. It is three renewal intervals: a healthy
+// holder renews every renewInterval, so its key must miss roughly three
+// consecutive renewals before another worker may reclaim it.
+func (c *Claimer) staleThreshold() time.Duration {
+	return 3 * c.renewInterval()
+}
+
+// isStale reports whether a claimed ID's key has not been renewed within the
+// stale threshold and may therefore be taken over.
+//
+// The reference timestamp is entry.Created() — the NATS server's timestamp of
+// the latest revision — so the decision does not depend on the previous
+// holder's wall clock; only this worker's clock skew against the NATS server
+// matters. A healthy holder renews every renewInterval and the threshold is
+// 3×renewInterval, so a false takeover requires this worker's clock to run
+// more than 2×renewInterval ahead of the server.
+func (c *Claimer) isStale(entry jetstream.KeyValueEntry) bool {
+	return time.Since(entry.Created()) > c.staleThreshold()
 }
