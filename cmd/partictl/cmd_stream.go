@@ -176,6 +176,12 @@ func runStreamView(p streamViewParams, stdout, stderr io.Writer) int {
 		return ExitValidation
 	}
 
+	// Create the operation context before scope derivation so a config load
+	// and static validation count against -timeout (see cmdView for why this
+	// command opens the connection itself rather than fusing it).
+	ctx, stop := makeContext(timeoutDur)
+	defer stop()
+
 	// Build the stream-only scope: always Streams: true.
 	var scope provision.Scope
 	if p.file != "" {
@@ -202,15 +208,20 @@ func runStreamView(p streamViewParams, stdout, stderr io.Writer) int {
 		scope = provision.Scope{Streams: true, Instance: p.instance}
 	}
 
-	conn, code := connectWithTimeout(timeoutDur, p.common, stderr)
-	if code != ExitOK {
+	conn, code, err := connectNATS(ctx, p.common)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		if ctxDead(ctx) {
+			return ExitNATS
+		}
+
 		return code
 	}
 	defer conn.close()
 
-	snap, err := provision.View(conn.ctx, conn.js, scope)
+	snap, err := provision.View(ctx, conn.js, scope)
 	if err != nil {
-		if ctxDead(conn.ctx) {
+		if ctxDead(ctx) {
 			return ExitNATS
 		}
 		fmt.Fprintln(stderr, "partictl stream view:", err)
