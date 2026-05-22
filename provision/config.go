@@ -19,7 +19,7 @@ type Config struct {
 	ControlPlane     *ControlPlaneConfig    `yaml:"controlPlane,omitempty"      json:"controlPlane,omitempty"`
 	PartitionSource  *PartitionSourceConfig `yaml:"partitionSource,omitempty"   json:"partitionSource,omitempty"`
 	DynamicConsumers []DynamicConsumerCfg   `yaml:"dynamicConsumers,omitempty"  json:"dynamicConsumers,omitempty"`
-	// Streams is intentionally absent; application stream management is not yet supported.
+	Streams          []StreamCfg            `yaml:"streams,omitempty"           json:"streams,omitempty"`
 }
 
 // ControlPlaneConfig mirrors the parti runtime fields that drive control-plane
@@ -95,6 +95,23 @@ type PartitionSourceConfig struct {
 	// to the runtime struct — any field added there becomes part of
 	// parti.io/v1.
 	Partitions []types.Partition `yaml:"partitions,omitempty" json:"partitions,omitempty"`
+}
+
+// StreamCfg declares one application JetStream stream provision manages.
+// It exposes a deliberately small subset of jetstream.StreamConfig; every
+// other live-stream field is preserved-from-live by update-stream and never
+// drift-classified (see the Phase 4 Non-Goals in the implementation plan).
+type StreamCfg struct {
+	Name        string        `yaml:"name"                  json:"name"`
+	Subjects    []string      `yaml:"subjects"              json:"subjects"`
+	Retention   string        `yaml:"retention,omitempty"   json:"retention,omitempty"` // "limits" | "workqueue" | "interest"; default "limits"
+	Storage     string        `yaml:"storage,omitempty"     json:"storage,omitempty"`   // "file" | "memory"; default "file"
+	Discard     string        `yaml:"discard,omitempty"     json:"discard,omitempty"`   // "old" | "new"; default "old"
+	Replicas    int           `yaml:"replicas,omitempty"    json:"replicas,omitempty"`  // 0 = server default (1)
+	MaxAge      time.Duration `yaml:"maxAge,omitempty"      json:"maxAge,omitempty"`    // 0 = unlimited
+	MaxBytes    int64         `yaml:"maxBytes,omitempty"    json:"maxBytes,omitempty"`  // 0 = unlimited (NATS stores as -1)
+	MaxMsgs     int64         `yaml:"maxMsgs,omitempty"     json:"maxMsgs,omitempty"`   // 0 = unlimited (NATS stores as -1)
+	Description string        `yaml:"description,omitempty" json:"description,omitempty"`
 }
 
 // DynamicConsumerCfg describes one dynamic-consumer alignment target.

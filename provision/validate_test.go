@@ -495,3 +495,327 @@ func TestApplyDefaults_PartitionSource(t *testing.T) {
 	require.Equal(t, "", ps.Storage, "caller struct must not be mutated")
 	require.Equal(t, uint8(0), ps.History, "caller struct must not be mutated")
 }
+
+// validStream returns a fully-specified StreamCfg that passes Validate.
+func validStream() provision.StreamCfg {
+	return provision.StreamCfg{
+		Name:      "orders",
+		Subjects:  []string{"orders.>"},
+		Retention: "limits",
+		Storage:   "file",
+		Discard:   "old",
+	}
+}
+
+// TestValidate_Streams_YAML_RoundTrip marshals and unmarshals a Config with a
+// streams block and verifies every StreamCfg field is populated via its yaml tag.
+func TestValidate_Streams_YAML_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	yamlInput := `
+apiVersion: parti.io/v1
+streams:
+  - name: orders
+    subjects:
+      - orders.>
+      - orders.legacy.>
+    retention: workqueue
+    storage: memory
+    discard: new
+    replicas: 3
+    maxAge: 1h
+    maxBytes: 1073741824
+    maxMsgs: 100000
+    description: order processing stream
+`
+	var cfg provision.Config
+	require.NoError(t, yaml.Unmarshal([]byte(yamlInput), &cfg))
+	require.Len(t, cfg.Streams, 1)
+
+	s := cfg.Streams[0]
+	require.Equal(t, "orders", s.Name)
+	require.Equal(t, []string{"orders.>", "orders.legacy.>"}, s.Subjects)
+	require.Equal(t, "workqueue", s.Retention)
+	require.Equal(t, "memory", s.Storage)
+	require.Equal(t, "new", s.Discard)
+	require.Equal(t, 3, s.Replicas)
+	require.Equal(t, time.Hour, s.MaxAge)
+	require.Equal(t, int64(1073741824), s.MaxBytes)
+	require.Equal(t, int64(100000), s.MaxMsgs)
+	require.Equal(t, "order processing stream", s.Description)
+
+	require.NoError(t, provision.Validate(cfg))
+}
+
+// TestValidate_Streams_NoStreams_OK verifies that a config omitting streams:
+// still passes validation without any cross-contamination.
+func TestValidate_Streams_NoStreams_OK(t *testing.T) {
+	t.Parallel()
+	cfg := provision.Config{APIVersion: provision.APIVersionV1}
+	require.NoError(t, provision.Validate(cfg))
+}
+
+// TestApplyDefaults_Streams_Defaults verifies that normalize defaults
+// retention/storage/discard and does NOT mutate the caller's slice.
+func TestApplyDefaults_Streams_Defaults(t *testing.T) {
+	t.Parallel()
+
+	callerStream := provision.StreamCfg{
+		Name:     "events",
+		Subjects: []string{"events.>"},
+		// Retention, Storage, Discard intentionally empty to trigger defaults.
+	}
+	cfg := provision.Config{
+		APIVersion: provision.APIVersionV1,
+		Streams:    []provision.StreamCfg{callerStream},
+	}
+
+	got, err := provision.ApplyDefaults(cfg)
+	require.NoError(t, err)
+
+	// Defaults applied on the copy.
+	require.Len(t, got.Streams, 1)
+	require.Equal(t, "limits", got.Streams[0].Retention)
+	require.Equal(t, "file", got.Streams[0].Storage)
+	require.Equal(t, "old", got.Streams[0].Discard)
+
+	// Caller's slice entry must not be mutated.
+	require.Equal(t, "", cfg.Streams[0].Retention, "caller's Retention must not be mutated")
+	require.Equal(t, "", cfg.Streams[0].Storage, "caller's Storage must not be mutated")
+	require.Equal(t, "", cfg.Streams[0].Discard, "caller's Discard must not be mutated")
+
+	// The defaulted Config must not alias the caller's Subjects backing
+	// array: mutating the returned slice must not reach back to the caller.
+	require.NotSame(t, &cfg.Streams[0].Subjects[0], &got.Streams[0].Subjects[0],
+		"defaulted Subjects must be a distinct backing array")
+	got.Streams[0].Subjects[0] = "mutated.>"
+	require.Equal(t, "events.>", cfg.Streams[0].Subjects[0],
+		"caller's Subjects must not be mutated through the defaulted Config")
+}
+
+// TestValidate_Streams_TableDriven covers all rejection cases specified in W1.
+func TestValidate_Streams_TableDriven(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		mutate    func(*provision.StreamCfg)
+		wantErr   bool
+		errSubstr string
+	}{
+		{
+			name:    "valid_minimal_stream",
+			mutate:  func(*provision.StreamCfg) {},
+			wantErr: false,
+		},
+		{
+			name: "empty_name_rejected",
+			mutate: func(s *provision.StreamCfg) {
+				s.Name = ""
+			},
+			wantErr:   true,
+			errSubstr: "streams[0].name",
+		},
+		{
+			name: "empty_subjects_rejected",
+			mutate: func(s *provision.StreamCfg) {
+				s.Subjects = []string{}
+			},
+			wantErr:   true,
+			errSubstr: "streams[0].subjects",
+		},
+		{
+			name: "nil_subjects_rejected",
+			mutate: func(s *provision.StreamCfg) {
+				s.Subjects = nil
+			},
+			wantErr:   true,
+			errSubstr: "streams[0].subjects",
+		},
+		{
+			name: "empty_subject_entry_rejected",
+			mutate: func(s *provision.StreamCfg) {
+				s.Subjects = []string{""}
+			},
+			wantErr:   true,
+			errSubstr: "streams[0].subjects[0]",
+		},
+		{
+			name: "whitespace_subject_rejected",
+			mutate: func(s *provision.StreamCfg) {
+				s.Subjects = []string{"orders .>"}
+			},
+			wantErr:   true,
+			errSubstr: "streams[0].subjects[0]",
+		},
+		{
+			name: "tab_in_subject_rejected",
+			mutate: func(s *provision.StreamCfg) {
+				s.Subjects = []string{"orders\t.>"}
+			},
+			wantErr:   true,
+			errSubstr: "streams[0].subjects[0]",
+		},
+		{
+			// Non-space, non-tab whitespace must also be rejected — the
+			// check uses unicode.IsSpace, not a fixed " \t\n\r" set.
+			name: "vertical_tab_in_subject_rejected",
+			mutate: func(s *provision.StreamCfg) {
+				s.Subjects = []string{"orders\v.>"}
+			},
+			wantErr:   true,
+			errSubstr: "streams[0].subjects[0]",
+		},
+		{
+			name: "bad_retention_rejected",
+			mutate: func(s *provision.StreamCfg) {
+				s.Retention = "fifo"
+			},
+			wantErr:   true,
+			errSubstr: "streams[0].retention",
+		},
+		{
+			name: "bad_storage_rejected",
+			mutate: func(s *provision.StreamCfg) {
+				s.Storage = "disk"
+			},
+			wantErr:   true,
+			errSubstr: "streams[0].storage",
+		},
+		{
+			name: "bad_discard_rejected",
+			mutate: func(s *provision.StreamCfg) {
+				s.Discard = "drop"
+			},
+			wantErr:   true,
+			errSubstr: "streams[0].discard",
+		},
+		{
+			name: "negative_replicas_rejected",
+			mutate: func(s *provision.StreamCfg) {
+				s.Replicas = -1
+			},
+			wantErr:   true,
+			errSubstr: "streams[0].replicas",
+		},
+		{
+			name: "zero_replicas_accepted",
+			mutate: func(s *provision.StreamCfg) {
+				s.Replicas = 0
+			},
+			wantErr: false,
+		},
+		{
+			name: "negative_max_age_rejected",
+			mutate: func(s *provision.StreamCfg) {
+				s.MaxAge = -1
+			},
+			wantErr:   true,
+			errSubstr: "streams[0].maxAge",
+		},
+		{
+			name: "zero_max_age_accepted",
+			mutate: func(s *provision.StreamCfg) {
+				s.MaxAge = 0
+			},
+			wantErr: false,
+		},
+		{
+			name: "negative_max_bytes_rejected",
+			mutate: func(s *provision.StreamCfg) {
+				s.MaxBytes = -1
+			},
+			wantErr:   true,
+			errSubstr: "streams[0].maxBytes",
+		},
+		{
+			name: "zero_max_bytes_accepted",
+			mutate: func(s *provision.StreamCfg) {
+				s.MaxBytes = 0
+			},
+			wantErr: false,
+		},
+		{
+			name: "negative_max_msgs_rejected",
+			mutate: func(s *provision.StreamCfg) {
+				s.MaxMsgs = -1
+			},
+			wantErr:   true,
+			errSubstr: "streams[0].maxMsgs",
+		},
+		{
+			name: "zero_max_msgs_accepted",
+			mutate: func(s *provision.StreamCfg) {
+				s.MaxMsgs = 0
+			},
+			wantErr: false,
+		},
+		{
+			name: "retention_workqueue_accepted",
+			mutate: func(s *provision.StreamCfg) {
+				s.Retention = "workqueue"
+			},
+			wantErr: false,
+		},
+		{
+			name: "retention_interest_accepted",
+			mutate: func(s *provision.StreamCfg) {
+				s.Retention = "interest"
+			},
+			wantErr: false,
+		},
+		{
+			name: "storage_memory_accepted",
+			mutate: func(s *provision.StreamCfg) {
+				s.Storage = "memory"
+			},
+			wantErr: false,
+		},
+		{
+			name: "discard_new_accepted",
+			mutate: func(s *provision.StreamCfg) {
+				s.Discard = "new"
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := validStream()
+			tc.mutate(&s)
+			cfg := provision.Config{
+				APIVersion: provision.APIVersionV1,
+				Streams:    []provision.StreamCfg{s},
+			}
+			err := provision.Validate(cfg)
+			if tc.wantErr {
+				require.Error(t, err)
+				require.ErrorIs(t, err, provision.ErrInvalidConfig)
+				if tc.errSubstr != "" {
+					require.Contains(t, err.Error(), tc.errSubstr)
+				}
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestValidate_Streams_DuplicateName verifies that duplicate stream names are
+// rejected with ErrInvalidConfig.
+func TestValidate_Streams_DuplicateName(t *testing.T) {
+	t.Parallel()
+	cfg := provision.Config{
+		APIVersion: provision.APIVersionV1,
+		Streams: []provision.StreamCfg{
+			{Name: "orders", Subjects: []string{"orders.>"}, Retention: "limits", Storage: "file", Discard: "old"},
+			{Name: "orders", Subjects: []string{"events.>"}, Retention: "limits", Storage: "file", Discard: "old"},
+		},
+	}
+	err := provision.Validate(cfg)
+	require.Error(t, err)
+	require.ErrorIs(t, err, provision.ErrInvalidConfig)
+	require.Contains(t, err.Error(), "duplicate")
+}

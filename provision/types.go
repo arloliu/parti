@@ -25,6 +25,44 @@ type Snapshot struct {
 	// marker on dynamic consumers. Dynamic consumer precreation is not yet
 	// supported.
 	DynamicConsumers []ConsumerState `json:"dynamicConsumers"`
+	// Streams holds the live view of every Parti-marked application JetStream
+	// stream visible to the account, filtered by Scope. Always non-nil (empty
+	// slice when none are present) so the JSON envelope shape is stable.
+	Streams []StreamState `json:"streams"`
+}
+
+// StreamState is the live view of a Parti-marked application JetStream stream
+// returned by View. Fields mirror the operator-expressible subset of
+// jetstream.StreamConfig; unlabelled or non-stream-component resources are
+// excluded by View.
+type StreamState struct {
+	// Stream is the NATS stream name (the resource identity; no prefix).
+	Stream string `json:"stream"`
+	// Component is the parti.io/component value; always "stream" for a
+	// StreamState entry.
+	Component string `json:"component,omitempty"`
+	// Instance is the parti.io/instance value; empty if absent.
+	Instance string `json:"instance,omitempty"`
+	// Managed is the raw parti.io/managed value.
+	Managed string `json:"managed,omitempty"`
+	// Subjects is the list of subject patterns the stream captures.
+	Subjects []string `json:"subjects,omitempty"`
+	// Retention is "limits", "workqueue", or "interest".
+	Retention string `json:"retention,omitempty"`
+	// Storage is "file" or "memory".
+	Storage string `json:"storage,omitempty"`
+	// Discard is "old" or "new".
+	Discard string `json:"discard,omitempty"`
+	// Replicas is the number of stream replicas reported by NATS.
+	Replicas int `json:"replicas,omitempty"`
+	// MaxAge is the maximum message age; zero means unlimited.
+	MaxAge time.Duration `json:"maxAge,omitempty"`
+	// MaxBytes is the maximum stream size in bytes; zero means unlimited
+	// (live -1 is normalised to 0).
+	MaxBytes int64 `json:"maxBytes,omitempty"`
+	// MaxMsgs is the maximum number of messages; zero means unlimited
+	// (live -1 is normalised to 0).
+	MaxMsgs int64 `json:"maxMsgs,omitempty"`
 }
 
 // KVBucketState is the live view of a NATS KV bucket relevant to provision.
@@ -84,11 +122,16 @@ type PlanResult struct {
 }
 
 // PlannedAction is one operation Apply would perform. Kind is one of the
-// ActionCreateKV, ActionUpdateKV, ActionStampMarker, or ActionWritePartitions
-// constants. The Resource field carries the would-be NATS config: for
-// "create-kv" this is a jetstream.KeyValueConfig value; for "update-kv" it is
-// *UpdateKVResource; for "stamp-marker" it is *StampMarkerResource; for
-// "write-partitions" it is *WritePartitionsResource.
+// ActionCreateKV, ActionUpdateKV, ActionStampMarker, ActionWritePartitions,
+// ActionCreateStream, ActionUpdateStream, or ActionStampStreamMarker constants.
+// The Resource field carries the would-be NATS config:
+//   - "create-kv": jetstream.KeyValueConfig value
+//   - "update-kv": *UpdateKVResource
+//   - "stamp-marker": *StampMarkerResource
+//   - "write-partitions": *WritePartitionsResource
+//   - "create-stream": jetstream.StreamConfig value
+//   - "update-stream": *UpdateStreamResource
+//   - "stamp-stream-marker": *StreamStampMarkerResource
 //
 // Consumer precreation and destructive repair (delete/recreate) are not yet
 // supported.
@@ -127,6 +170,29 @@ const (
 	// short-circuits a no-op, and CAS-writes. Resource is
 	// *WritePartitionsResource.
 	ActionWritePartitions = "write-partitions"
+
+	// ActionCreateStream is emitted by Plan under PolicyWarn or PolicySafeUpdate
+	// when a stream named by config does not exist live. Apply calls
+	// js.CreateStream. Resource is a jetstream.StreamConfig value (the
+	// desired config, including the Parti ownership marker).
+	ActionCreateStream = "create-stream"
+
+	// ActionUpdateStream is emitted by Plan under PolicySafeUpdate when a
+	// Parti-marked stream has at least one operator-expressible mutable field
+	// (Subjects, Discard, Replicas, MaxAge, MaxBytes, MaxMsgs, Description,
+	// Metadata) that differs from the desired config. Apply re-reads live state,
+	// verifies it still matches the plan-time Before, rebuilds the target from
+	// the re-read snapshot, and calls js.UpdateStream. Resource is
+	// *UpdateStreamResource.
+	ActionUpdateStream = "update-stream"
+
+	// ActionStampStreamMarker is emitted by Plan under PolicyAdopt for an
+	// application stream named by config that exists live and carries no Parti
+	// ownership marker. Apply re-reads live state, recomputes the merged
+	// metadata (live keys plus the Parti marker keys), short-circuits when the
+	// merge is already a no-op, otherwise writes the re-read snapshot back with
+	// only Metadata changed. Resource is *StreamStampMarkerResource.
+	ActionStampStreamMarker = "stamp-stream-marker"
 )
 
 // UpdateKVResource is the Resource carried by an ActionUpdateKV
@@ -185,6 +251,35 @@ type WritePartitionsResource struct {
 	After   []types.Partition       `json:"after"`
 }
 
+// UpdateStreamResource is the Resource carried by an ActionUpdateStream
+// PlannedAction. Before is the live StreamConfig observed at plan time; After
+// is the desired target. Both are deep clones so the Plan output is immutable
+// regardless of later Apply or nats.go mutation.
+//
+// Apply does not write Resource.After verbatim — it re-reads live state and
+// rebuilds the target from the re-read snapshot (see the Apply algorithm).
+// Resource.Before / Resource.After are the audit surface: JSON consumers diff
+// them to render exactly which fields change.
+type UpdateStreamResource struct {
+	Before jetstream.StreamConfig `json:"before"`
+	After  jetstream.StreamConfig `json:"after"`
+}
+
+// StreamStampMarkerResource is the Resource carried by an
+// ActionStampStreamMarker PlannedAction. Stream is the NATS stream name,
+// MergedMetadata is the full Metadata map the action will write, and
+// PartiKeys lists exactly the metadata keys the action adds or changes
+// relative to the live stream, for operator review.
+//
+// Apply does not write MergedMetadata verbatim — it re-reads live state and
+// recomputes the merge against the re-read metadata. MergedMetadata /
+// PartiKeys are the audit surface for plan / apply -dry-run output.
+type StreamStampMarkerResource struct {
+	Stream         string            `json:"stream"`
+	MergedMetadata map[string]string `json:"mergedMetadata"`
+	PartiKeys      []string          `json:"partiKeys"`
+}
+
 // PartitionWeightChange records a partition present in both the live and
 // declared tables whose Weight differs. Keys identifies the partition (it is
 // unchanged — a different key set is a different partition, i.e. an add plus
@@ -231,6 +326,10 @@ const (
 	// It is distinct from KindPartitionSource, which tags drift in the
 	// partition-source bucket *config*.
 	KindPartitionRecords = "partition-records"
+
+	// KindApplicationStream tags drift findings and informational findings
+	// for application JetStream streams managed by provision (see planStreams).
+	KindApplicationStream = "application-stream"
 )
 
 // Report is the result of Apply: what executed, what was skipped, what failed.

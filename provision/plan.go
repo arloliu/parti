@@ -67,6 +67,15 @@ func Plan(ctx context.Context, js jetstream.JetStream, cfg Config) (PlanResult, 
 		}
 	}
 
+	if len(resolved.Streams) > 0 {
+		if err := planStreams(ctx, js, resolved, &out); err != nil {
+			if ctx.Err() != nil {
+				return PlanResult{}, ctx.Err()
+			}
+			return PlanResult{}, err
+		}
+	}
+
 	// DynamicConsumers Plan output is intentionally empty. The slot exists
 	// so the PlanResult shape is stable for future use.
 
@@ -125,7 +134,7 @@ func planControlPlane(ctx context.Context, js jetstream.JetStream, cfg Config, o
 			// is not silently absent from the plan. warn / safe-update
 			// keep their create-kv emission.
 			if cfg.Policy == PolicyAdopt {
-				out.Drift = append(out.Drift, missingUnderAdoptFinding(KindControlPlaneKV, spec.bucket))
+				out.Drift = append(out.Drift, missingUnderAdoptFinding(KindControlPlaneKV, spec.bucket, "bucket"))
 				continue
 			}
 			out.Actions = append(out.Actions, newCreateKVAction(spec, cfg.Instance))
@@ -175,16 +184,17 @@ func planControlPlane(ctx context.Context, js jetstream.JetStream, cfg Config, o
 }
 
 // missingUnderAdoptFinding builds the informational drift finding emitted
-// for a config-named bucket that does not exist live when the policy is
-// adopt. adopt does not create buckets, so the bucket would otherwise
-// vanish silently from the plan; this finding keeps it visible.
-func missingUnderAdoptFinding(kind, bucket string) DriftFinding {
+// for a config-named resource that does not exist live when the policy is
+// adopt. adopt does not create resources, so the resource would otherwise
+// vanish silently from the plan; this finding keeps it visible. noun is the
+// resource kind word used in the reason message ("bucket" or "stream").
+func missingUnderAdoptFinding(kind, name, noun string) DriftFinding {
 	return DriftFinding{
 		Severity: SeverityInformational,
 		Kind:     kind,
-		Name:     bucket,
+		Name:     name,
 		Detail: map[string]any{
-			"reason": "bucket missing; adopt does not create — run apply with warn or safe-update",
+			"reason": noun + " missing; adopt does not create — run apply with warn or safe-update",
 		},
 	}
 }

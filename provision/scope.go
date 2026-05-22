@@ -6,6 +6,8 @@ type Scope struct {
 	ControlPlane     bool
 	PartitionSource  bool
 	DynamicConsumers bool
+	// Streams enables inventory of Parti-marked application JetStream streams.
+	Streams bool
 
 	// Instance optionally restricts results to resources whose
 	// parti.io/instance metadata equals this value. Empty means "all
@@ -20,6 +22,7 @@ func ScopeAll() Scope {
 		ControlPlane:     true,
 		PartitionSource:  true,
 		DynamicConsumers: true,
+		Streams:          true,
 		Instance:         "",
 	}
 }
@@ -27,13 +30,14 @@ func ScopeAll() Scope {
 // ScopeFromConfig returns a Scope that enables every resource kind present in
 // cfg, and sets Instance from cfg.Instance.
 //
-// "Present" means: ControlPlane != nil, PartitionSource != nil, and
-// len(DynamicConsumers) > 0 respectively.
+// "Present" means: ControlPlane != nil, PartitionSource != nil,
+// len(DynamicConsumers) > 0, and len(Streams) > 0 respectively.
 func ScopeFromConfig(cfg Config) Scope {
 	return Scope{
 		ControlPlane:     cfg.ControlPlane != nil,
 		PartitionSource:  cfg.PartitionSource != nil,
 		DynamicConsumers: len(cfg.DynamicConsumers) > 0,
+		Streams:          len(cfg.Streams) > 0,
 		Instance:         cfg.Instance,
 	}
 }

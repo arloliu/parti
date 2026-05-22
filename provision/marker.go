@@ -31,6 +31,8 @@ const (
 	ComponentControlPlaneHandoff    = "control-plane:handoff"
 	ComponentPartitionSource        = "partition-source"
 	ComponentDynamicConsumer        = "dynamic-consumer"
+	// ComponentStream marks an application JetStream stream provision manages.
+	ComponentStream = "stream"
 	// ComponentUnknown is reported by View/Plan when a resource carries the
 	// Parti managed marker but a component value outside the enumerated set
 	// above (forward-compat).
@@ -67,7 +69,8 @@ func (m MarkerInfo) ClassifyComponent() string {
 		ComponentControlPlaneAssignment,
 		ComponentControlPlaneHandoff,
 		ComponentPartitionSource,
-		ComponentDynamicConsumer:
+		ComponentDynamicConsumer,
+		ComponentStream:
 		return m.Component
 	default:
 		return ComponentUnknown
@@ -113,7 +116,8 @@ func ParseMarker(metadata map[string]string) MarkerInfo {
 			ComponentControlPlaneAssignment,
 			ComponentControlPlaneHandoff,
 			ComponentPartitionSource,
-			ComponentDynamicConsumer:
+			ComponentDynamicConsumer,
+			ComponentStream:
 			component = metadata[MarkerComponentKey]
 		default:
 			component = ComponentUnknown

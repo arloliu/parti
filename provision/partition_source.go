@@ -54,7 +54,7 @@ func planPartitionSource(ctx context.Context, js jetstream.JetStream, cfg Config
 		// silently absent from the plan. warn / safe-update keep their
 		// create-kv emission.
 		if cfg.Policy == PolicyAdopt {
-			out.Drift = append(out.Drift, missingUnderAdoptFinding(KindPartitionSource, ps.Bucket))
+			out.Drift = append(out.Drift, missingUnderAdoptFinding(KindPartitionSource, ps.Bucket, "bucket"))
 
 			return nil
 		}

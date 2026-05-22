@@ -21,6 +21,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   table inline in `parti-env.yaml`. The bucket-provisioning commands
   (`plan` / `apply` / `adopt`) ignore the field, so existing config files are
   unaffected.
+- `partictl stream view|plan|apply` provides a stream-scoped surface over the
+  same provision SDK. `stream view` (with or without `-f`) is an
+  instance-scoped inventory that lists every Parti-marked application stream in
+  the account; `-f` is optional for `view` and required for `plan` / `apply`.
+  `stream plan` and `stream apply` accept `-policy`, `-fail-on-drift`, and
+  `-dry-run` identically to the top-level commands and emit the same JSON
+  envelope (`apiVersion: parti.io/provision/v1`). The existing `partictl plan`
+  / `apply` / `adopt` / `view` commands provision and report streams
+  automatically when the config has a `streams:` block; no config change is
+  needed for configs that omit `streams:`. New action kinds: `create-stream`,
+  `update-stream`, `stamp-stream-marker`. New drift kind: `application-stream`.
+- `provision.Config.Streams []StreamCfg` declares application JetStream streams
+  inline in `parti-env.yaml` under a `streams:` block. `StreamCfg` exposes the
+  common operational knobs (`name`, `subjects`, `retention`, `storage`,
+  `discard`, `replicas`, `maxAge`, `maxBytes`, `maxMsgs`, `description`).
+  `maxBytes` and `maxMsgs` use `0` for "unlimited" in config (the NATS server
+  stores these as -1; `plan` normalises the two representations as equivalent).
+  `Storage` and `Retention` divergences classify as `drift-immutable` and are
+  never auto-reconciled, including `limits` ↔ `interest` retention changes
+  (conservative policy; `force` / delete-recreate is a future phase). Subject
+  coverage against `dynamicConsumers:` entries is not validated in this release;
+  cross-check support is planned for Phase 5 (Dynamic Precreate).
 
 ## [v2.4.1] - 2026-05-20
 

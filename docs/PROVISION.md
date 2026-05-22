@@ -18,7 +18,8 @@
 5. [Brownfield Adoption Playbook](#brownfield-adoption-playbook)
 6. [Safety Contracts](#safety-contracts)
 7. [Partition Records](#partition-records)
-8. [Example Configuration](#example-configuration)
+8. [Application Streams](#application-streams)
+9. [Example Configuration](#example-configuration)
 
 ---
 
@@ -33,8 +34,9 @@ Parti's runtime manager depends on:
 - **The partition-source bucket** — the KV bucket that holds the
   partition definition record read by the runtime source.
 
-`provision` never manages application streams, dynamic consumers, or
-partition record contents directly. It provides:
+`provision` manages application streams via a `streams:` block in the
+config file. It does not manage dynamic consumers (alignment-check only)
+or partition record contents directly. It provides:
 
 - **Read-only inspection** — `view` lists all Parti-marked resources
   in the NATS account; `validate` checks a config file for static or
@@ -449,6 +451,151 @@ is bounded by the bucket's maximum value size. For a large table whose
 lifecycle differs from the infrastructure config, keep the `partitions:`
 list in its own file and assemble `parti-env.yaml` with a YAML include or a
 templating step before invoking `partictl partitions`.
+
+---
+
+## Application Streams
+
+The `streams:` block in `parti-env.yaml` declares the application
+JetStream streams Parti's partition-aware consumers read from. The
+bucket-provisioning commands (`plan`, `apply`, `adopt`) provision and
+report these streams alongside the control-plane and partition-source
+buckets — no extra command is needed when the config already runs
+`partictl plan` / `apply`.
+
+### Declaring the stream set
+
+Add a `streams:` list to `parti-env.yaml`. Each entry maps to one
+JetStream stream:
+
+```yaml
+streams:
+  - name: orders
+    subjects:
+      - orders.>
+    retention:    limits      # "limits" | "workqueue" | "interest"; default "limits"
+    storage:      file        # "file" | "memory"; default "file"
+    discard:      old         # "old" | "new"; default "old"
+    replicas:     3           # 0 = server default (1)
+    maxAge:       24h         # 0 = unlimited
+    maxBytes:     0           # 0 = unlimited (stored as -1 by NATS)
+    maxMsgs:      0           # 0 = unlimited (stored as -1 by NATS)
+    description:  "Order work messages"
+```
+
+**`StreamCfg` fields:**
+
+| Field         | Type            | Default    | Notes                                                            |
+|---------------|-----------------|------------|------------------------------------------------------------------|
+| `name`        | string          | required   | NATS stream name; must be unique within the config              |
+| `subjects`    | []string        | required   | Subject patterns the stream captures; at least one required     |
+| `retention`   | string          | `limits`   | `limits`, `workqueue`, or `interest`                            |
+| `storage`     | string          | `file`     | `file` or `memory`                                              |
+| `discard`     | string          | `old`      | `old` or `new`                                                  |
+| `replicas`    | int             | 0          | 0 lets the NATS server choose (normalised to 1)                 |
+| `maxAge`      | duration        | 0          | 0 means unlimited; negative values are rejected                 |
+| `maxBytes`    | int64           | 0          | 0 means unlimited; NATS stores unlimited as -1 (normalized)    |
+| `maxMsgs`     | int64           | 0          | 0 means unlimited; NATS stores unlimited as -1 (normalized)    |
+| `description` | string          | ""         | Optional operator label                                          |
+
+**`0` vs `-1` convention:** `maxBytes` and `maxMsgs` use `0` for
+"unlimited" in config; the NATS server rewrites those zeros to `-1` in
+the live stream. `plan` normalises `config 0` and `live -1` as
+equivalent, so they never produce spurious drift. `maxAge` is different:
+the server keeps `0` as the unlimited value and rejects negative
+durations, so `maxAge: 0` maps directly to live `0` with no rewrite.
+
+A config that omits `streams:` behaves identically to today — the field
+is purely additive.
+
+### plan / apply / adopt
+
+The existing `partictl plan` / `apply` / `adopt` commands process
+`streams:` entries automatically — no separate stream-specific command
+is needed for the full-config workflow.
+
+**`plan`** computes:
+- A `create-stream` action for each declared stream that does not exist live.
+- An `update-stream` action (under `safe-update`) for each Parti-marked
+  stream whose mutable fields diverge from config.
+- A `stamp-stream-marker` action (under `adopt`) for each declared stream
+  that exists live without the Parti ownership marker.
+- `application-stream` drift findings for every declared stream.
+
+**`apply`** executes the plan actions: creates missing streams (under
+`warn` and `safe-update`), reconciles mutable fields in place on
+Parti-marked streams (under `safe-update`), and stamps the marker on
+unmarked streams (under `adopt`).
+
+**`adopt`** works the same as for KV buckets: it stamps the Parti
+ownership marker on any declared stream that exists live and is
+currently unmarked. It does not create missing streams or update fields.
+
+**`view`** lists every Parti-marked application stream in the account
+alongside the control-plane and partition-source buckets. Stream entries
+appear in the `streams` array of the `Snapshot` output.
+
+### partictl stream
+
+`partictl stream` is a stream-scoped surface over the same SDK — useful
+when an operator owns the application streams but not the control plane,
+or wants to plan streams in isolation.
+
+```
+partictl stream view  [-f <config>] [-json] [-instance <name>]
+partictl stream plan   -f <config>  [-json] [-fail-on-drift] [-policy <p>]
+partictl stream apply  -f <config>  [-json] [-dry-run] [-policy <p>]
+```
+
+**`stream view`** — `-f` is optional. Without `-f`: inventory mode — the
+instance filter comes from the `-instance` flag. With `-f`: the instance
+filter comes from `cfg.Instance` (`-instance` is ignored). Either way
+it lists every Parti-marked application stream in the instance —
+`stream view` is an **instance-scoped inventory**, not a per-stream
+lookup by config name. A config that names only some of the account's
+marked application streams still sees all marked streams in the instance.
+
+**`stream plan`** and **`stream apply`** — `-f` is required. Flags and
+exit codes mirror the top-level `plan` / `apply` commands. `stream apply
+-dry-run` aliases `stream plan`.
+
+When `-f` is given, `stream` commands validate the full config file
+(including any `controlPlane:` and `partitionSource:` sections) before
+operating on the stream-only view, so a malformed non-stream section is
+rejected with exit 3 rather than silently tolerated.
+
+### Drift-immutable fields
+
+`Storage` and `Retention` divergences classify as `drift-immutable` and
+are never auto-reconciled, even under `safe-update`. The NATS server
+rejects `file` ↔ `memory` storage changes on `UpdateStream`. Retention
+is treated conservatively: Phase 4 classifies **every** retention
+divergence as immutable — including `limits` ↔ `interest`, which the
+server would accept — because retention is a fundamental stream property
+and the `limits` ↔ `interest` update is consumer-replica-coupled (it can
+fail until bound consumers are adjusted). The safe remediation for either
+divergence is operator-driven delete/recreate, which is not yet
+supported (`force` is reserved). Plan reports these as `drift-immutable`;
+apply leaves them untouched.
+
+The mutable fields `safe-update` reconciles in place: `Subjects`,
+`Discard`, `Replicas`, `MaxAge`, `MaxBytes`, `MaxMsgs`, `Description`,
+and the `managed` / `instance` marker fields. The NATS server is the
+final authority — an update it rejects (e.g. a `Replicas` change on a
+single-node cluster) surfaces as a `ResourceError` at apply time.
+
+Fields not in the `StreamCfg` set (mirror, source, republish,
+placement, per-subject limits) are preserved verbatim from the live
+stream by `update-stream` and are never drift-classified.
+
+### Subject coverage (Phase 4 limitation)
+
+Phase 4 provisions a stream with exactly the `subjects` declared in
+config. It does **not** cross-check that those subjects cover the
+partition subjects a `dynamicConsumers:` entry would need — that check
+requires resolving `partitionsRef` against partition data and is the
+home of **Phase 5 (Dynamic Precreate)**. Misconfigured subject coverage
+is not detected until the consumer binds at runtime.
 
 ---
 
