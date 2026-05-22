@@ -41,8 +41,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Storage` and `Retention` divergences classify as `drift-immutable` and are
   never auto-reconciled, including `limits` ↔ `interest` retention changes
   (conservative policy; `force` / delete-recreate is a future phase). Subject
-  coverage against `dynamicConsumers:` entries is not validated in this release;
-  cross-check support is planned for Phase 5 (Dynamic Precreate).
+  coverage against `dynamicConsumers:` entries is not validated in this release.
+- `partictl consumers plan` and `partictl consumers apply` precreate the
+  per-partition durable consumers that a `dynamicConsumers:` target with a
+  non-empty `partitionsRef` describes. `plan` reports which consumers are
+  missing (`create-consumer` actions + `drift-mutable` findings) and which
+  already exist (`informational` findings); `apply` creates the missing ones.
+  A target with an empty `partitionsRef` keeps its Phase 1 alignment-check-only
+  behavior and is unaffected. The `provision` SDK exposes the same surface as
+  `PlanConsumers` and `ApplyConsumers`.
+- `DynamicConsumerCfg.PartitionsRef` — setting this field to the
+  partition-source bucket name opts a `dynamicConsumers:` target into
+  precreation. Must equal `partitionSource.bucket`; validated statically before
+  any NATS I/O (`ErrInvalidConfig`, exit 3). Empty means alignment-check only
+  (unchanged from Phase 1).
+- `provision.ValidateConsumerSet(cfg Config) error` performs static validation
+  for consumer precreation: at least one opted-in target, non-empty partition
+  set, valid `PartitionsRef`, and valid `StreamName` / `ConsumerPrefix` /
+  `SubjectTemplate` on every opted-in target. All errors wrap `ErrInvalidConfig`.
+- `provision.ErrConsumerStreamMissing` — returned by `PlanConsumers` when the
+  application stream a precreation-opted target names does not exist live. Wraps
+  `ErrLiveValidation` (CLI exit 3). Mirrors Phase 3's `ErrPartitionBucketMissing`.
+- New `PlannedAction` kind `"create-consumer"` (`ActionCreateConsumer`): emitted
+  by `PlanConsumers` for each missing per-partition durable consumer; executed by
+  `ApplyConsumers` via `js.CreateConsumer`. A `ErrConsumerExists` create-race
+  re-reads the colliding consumer and verifies its identity / immutable fields
+  before recording a raced success, so a hand-created consumer squatting the
+  deterministic durable name is surfaced as a fail-fast error rather than silently
+  accepted.
+- **Identity-only / runtime-owns model.** Precreation creates consumers from
+  `dynamicbuild.DefaultDynamicDefaults()` — the runtime defaults for the
+  NATS-immutable fields (`AckPolicy = AckExplicitPolicy`, `MaxWaiting = 2`,
+  `MemoryStorage = false`). The runtime's `CreateOrUpdateConsumer` on worker
+  start overwrites the mutable tunables (`AckWait`, `MaxDeliver`, etc.) freely.
+  No ownership marker is stamped on consumers (stamping would oscillate against
+  the runtime's unconditional overwrite). Consumer tunables are not managed by
+  provision; `consumer.Dynamic` options remain the sole source of truth for them.
 
 ## [v2.4.1] - 2026-05-20
 

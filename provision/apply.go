@@ -77,13 +77,7 @@ func Apply(ctx context.Context, js jetstream.JetStream, cfg Config) (Report, err
 // the desired spec for a named bucket and rebuild the write target from
 // a fresh re-read of live state (the create-kv path does not consult it).
 func applyPlan(ctx context.Context, js jetstream.JetStream, cfg Config, plan PlanResult) (Report, error) {
-	report := Report{
-		APIVersion: APIVersionProvisionV1,
-		Kind:       KindReport,
-		Executed:   []ExecutedAction{},
-		Skipped:    []SkippedAction{},
-		Errors:     []ResourceError{},
-	}
+	report := newReport()
 
 	// Resolve bucket name -> desired control-plane spec once so the
 	// update-kv path can rebuild a write target from a fresh re-read.
@@ -244,6 +238,20 @@ func foldActionResult(
 		})
 		appendSkipped(report, actions[i+1:], SkipReasonPriorError)
 		return true, fmt.Errorf("provision: apply %s %q: %w", action.Kind, action.Name, err)
+	}
+}
+
+// newReport returns a Report with the inherited envelope fields set and
+// non-nil (empty) Executed / Skipped / Errors slices, so every Apply-path
+// return honors the parti.io/provision/v1 output schema — "empty Report"
+// never means a zero-value struct.
+func newReport() Report {
+	return Report{
+		APIVersion: APIVersionProvisionV1,
+		Kind:       KindReport,
+		Executed:   []ExecutedAction{},
+		Skipped:    []SkippedAction{},
+		Errors:     []ResourceError{},
 	}
 }
 

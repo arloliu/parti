@@ -122,11 +122,11 @@ func openPartitionKV(ctx context.Context, js jetstream.JetStream, bucket, key st
 func ApplyPartitions(ctx context.Context, js jetstream.JetStream, plan PlanResult, prune bool) (Report, error) {
 	res, err := extractWritePartitionsAction(plan)
 	if err != nil {
-		return newPartitionReport(), err
+		return newReport(), err
 	}
 	if res == nil {
 		// No write-partitions action: nothing to do (e.g. an empty-diff plan).
-		return newPartitionReport(), nil
+		return newReport(), nil
 	}
 
 	// Apply-boundary validation: deep-copy After first, then validate the
@@ -135,20 +135,20 @@ func ApplyPartitions(ctx context.Context, js jetstream.JetStream, plan PlanResul
 	// validated is exactly what gets encoded and written.
 	target := clonePartitions(res.After)
 	if err := ValidatePartitionSet(target); err != nil {
-		return newPartitionReport(), err
+		return newReport(), err
 	}
 
 	pkv, err := openPartitionKV(ctx, js, res.Bucket, res.Key)
 	if err != nil {
 		if ctx.Err() != nil {
-			report := newPartitionReport()
+			report := newReport()
 			report.Aborted = true
 			report.Skipped = append(report.Skipped, skippedWritePartitions(res))
 
 			return report, ctx.Err()
 		}
 
-		return newPartitionReport(), err
+		return newReport(), err
 	}
 
 	return applyWritePartitionsAction(ctx, pkv, res, target, prune)
@@ -219,7 +219,7 @@ func applyWritePartitionsAction(
 	// write, not the plan's history. Raced is true when a concurrent writer
 	// converged the table since plan time.
 	if partitionTablesEqual(current, target) {
-		report := newPartitionReport()
+		report := newReport()
 		report.Executed = append(report.Executed, ExecutedAction{
 			Kind:  ActionWritePartitions,
 			Name:  res.Bucket,
@@ -271,7 +271,7 @@ func applyWritePartitionsAction(
 	}
 
 	// Step 9: success.
-	report := newPartitionReport()
+	report := newReport()
 	report.Executed = append(report.Executed, ExecutedAction{
 		Kind: ActionWritePartitions,
 		Name: res.Bucket,
@@ -280,24 +280,11 @@ func applyWritePartitionsAction(
 	return report, nil
 }
 
-// newPartitionReport returns a Report with the inherited envelope fields set
-// and non-nil (empty) action slices, so every ApplyPartitions return path
-// honors the parti.io/provision/v1 output schema.
-func newPartitionReport() Report {
-	return Report{
-		APIVersion: APIVersionProvisionV1,
-		Kind:       KindReport,
-		Executed:   []ExecutedAction{},
-		Skipped:    []SkippedAction{},
-		Errors:     []ResourceError{},
-	}
-}
-
 // partitionResourceError builds the resource-level-failure return: an envelope
 // Report carrying one ResourceError, plus a non-nil non-sentinel error so the
 // CLI lands on exit 1.
 func partitionResourceError(res *WritePartitionsResource, msg string) (Report, error) {
-	report := newPartitionReport()
+	report := newReport()
 	report.Errors = append(report.Errors, ResourceError{
 		Kind:  ActionWritePartitions,
 		Name:  res.Bucket,
@@ -310,7 +297,7 @@ func partitionResourceError(res *WritePartitionsResource, msg string) (Report, e
 // cancelledPartitionReport builds the cancellation return: an envelope Report
 // with Aborted set and the write-partitions action in Skipped, plus ctx.Err().
 func cancelledPartitionReport(res *WritePartitionsResource, ctxErr error) (Report, error) {
-	report := newPartitionReport()
+	report := newReport()
 	report.Aborted = true
 	report.Skipped = append(report.Skipped, skippedWritePartitions(res))
 

@@ -61,6 +61,30 @@ type Defaults struct {
 	ConsumerReplicas      int
 }
 
+// DefaultDynamicDefaults returns the Defaults a default-configured
+// consumer.Dynamic uses. The values mirror consumer.defaultOptions()
+// (consumer/options.go) — the dynamic-consumer option defaults.
+//
+// The provision SDK's PlanDynamicConsumers builds its expected
+// jetstream.ConsumerConfig from these so a consumer it precreates carries the
+// same NATS-immutable fields (AckPolicy, MaxWaiting, MemoryStorage) the
+// runtime will use. Those three cannot be changed by a later
+// CreateOrUpdateConsumer (NATS rejects the update), so a precreated consumer
+// must match the runtime on them or runtime startup fails. The mutable fields
+// are included for completeness; the runtime overwrites them freely on start.
+func DefaultDynamicDefaults() Defaults {
+	return Defaults{
+		AckPolicy:             jetstream.AckExplicitPolicy,
+		AckWait:               30 * time.Second,
+		MaxDeliver:            -1,
+		InactiveThreshold:     24 * time.Hour,
+		MaxWaiting:            2,
+		MaxAckPending:         0,
+		ConsumerMemoryStorage: false,
+		ConsumerReplicas:      0,
+	}
+}
+
 // ConsumerConfig builds the per-subject jetstream.ConsumerConfig used by
 // both the runtime (internal/durable.WorkerConsumer.ensurePerSubjectConsumer)
 // and the provision SDK's PlanDynamicConsumers.

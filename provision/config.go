@@ -114,9 +114,13 @@ type StreamCfg struct {
 	Description string        `yaml:"description,omitempty" json:"description,omitempty"`
 }
 
-// DynamicConsumerCfg describes one dynamic-consumer alignment target.
-// The current implementation performs alignment-check only; consumer
-// precreation is not yet supported.
+// DynamicConsumerCfg describes one dynamic-consumer target.
+//
+// A target with an empty PartitionsRef is alignment-check only (the
+// ValidateLive surface). Setting PartitionsRef to the partition-source
+// bucket name opts the target into precreation: PlanConsumers / ApplyConsumers
+// (the `partictl consumers` subcommand) then precreate the per-partition
+// durable consumers for the declared partition set.
 type DynamicConsumerCfg struct {
 	StreamName      string `yaml:"streamName"              json:"streamName"`
 	ConsumerPrefix  string `yaml:"consumerPrefix"          json:"consumerPrefix"`
