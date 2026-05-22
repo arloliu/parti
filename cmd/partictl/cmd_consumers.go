@@ -130,11 +130,7 @@ func cmdConsumersApply(args []string, stdout, stderr io.Writer) int {
 func bindConsumersCommonFlags(fs *flag.FlagSet, f *consumerParams) {
 	fs.StringVar(&f.file, "f", "", "YAML config path (required)")
 	fs.StringVar(&f.policy, "policy", "", "reconcile policy: force enables consumer recreate (default: warn or cfg.policy)")
-	fs.StringVar(&f.common.server, "server", defaultServer(), "NATS server URL")
-	fs.StringVar(&f.common.creds, "creds", "", "path to NATS credentials file")
-	fs.StringVar(&f.common.nkey, "nkey", "", "path to NATS nkey seed file")
-	fs.StringVar(&f.common.token, "token", "", "NATS token")
-	fs.StringVar(&f.common.timeout, "timeout", "30s", "operation timeout (e.g. 30s, 1m)")
+	bindCommonFlags(fs, &f.common)
 	fs.BoolVar(&f.jsonOut, "json", false, "emit JSON output")
 }
 
@@ -196,23 +192,15 @@ func runConsumers(p consumerParams, stdout, stderr io.Writer) int {
 		return ExitValidation
 	}
 
-	ctx, stop, exitIfTimeout := makeContext(timeoutDur, stderr)
-	defer stop()
-
-	conn, code, err := connectNATS(ctx, p.common)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		if exitIfTimeout(ctx) {
-			return ExitNATS
-		}
-
+	conn, code := connectWithTimeout(timeoutDur, p.common, stderr)
+	if code != ExitOK {
 		return code
 	}
 	defer conn.close()
 
-	planResult, err := provision.PlanConsumers(ctx, conn.js, cfg)
+	planResult, err := provision.PlanConsumers(conn.ctx, conn.js, cfg)
 	if err != nil {
-		if exitIfTimeout(ctx) {
+		if ctxDead(conn.ctx) {
 			return ExitNATS
 		}
 		fmt.Fprintf(stderr, "partictl %s: %v\n", p.subcmd, err)
@@ -230,10 +218,10 @@ func runConsumers(p consumerParams, stdout, stderr io.Writer) int {
 		return ExitOK
 	}
 
-	report, err := provision.ApplyConsumers(ctx, conn.js, planResult)
+	report, err := provision.ApplyConsumers(conn.ctx, conn.js, planResult)
 	emitReport(stdout, report, p.jsonOut)
 	if err != nil {
-		if exitIfTimeout(ctx) {
+		if ctxDead(conn.ctx) {
 			return ExitNATS
 		}
 

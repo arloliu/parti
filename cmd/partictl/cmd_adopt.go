@@ -28,11 +28,7 @@ func cmdAdopt(args []string, stdout, stderr io.Writer) int {
 
 	var f adoptFlags
 	fs.StringVar(&f.file, "f", "", "YAML config path (required)")
-	fs.StringVar(&f.common.server, "server", defaultServer(), "NATS server URL")
-	fs.StringVar(&f.common.creds, "creds", "", "path to NATS credentials file")
-	fs.StringVar(&f.common.nkey, "nkey", "", "path to NATS nkey seed file")
-	fs.StringVar(&f.common.token, "token", "", "NATS token")
-	fs.StringVar(&f.common.timeout, "timeout", "30s", "operation timeout (e.g. 30s, 1m)")
+	bindCommonFlags(fs, &f.common)
 	fs.BoolVar(&f.dryRun, "dry-run", false, "plan only — emit the same output as plan --policy=adopt")
 	fs.BoolVar(&f.jsonOut, "json", false, "emit JSON output (PlanResult for -dry-run, Report otherwise)")
 

@@ -89,11 +89,7 @@ func cmdStreamView(args []string, stdout, stderr io.Writer) int {
 
 	var p streamViewParams
 	fs.StringVar(&p.file, "f", "", "YAML config path (optional; scopes view to config instance)")
-	fs.StringVar(&p.common.server, "server", defaultServer(), "NATS server URL")
-	fs.StringVar(&p.common.creds, "creds", "", "path to NATS credentials file")
-	fs.StringVar(&p.common.nkey, "nkey", "", "path to NATS nkey seed file")
-	fs.StringVar(&p.common.token, "token", "", "NATS token")
-	fs.StringVar(&p.common.timeout, "timeout", "30s", "operation timeout (e.g. 30s, 1m)")
+	bindCommonFlags(fs, &p.common)
 	fs.BoolVar(&p.jsonOut, "json", false, "emit JSON output (Snapshot)")
 	fs.StringVar(&p.instance, "instance", "", "restrict results to resources with matching parti.io/instance")
 
@@ -164,11 +160,7 @@ func cmdStreamApply(args []string, stdout, stderr io.Writer) int {
 func bindStreamPlanApplyFlags(fs *flag.FlagSet, p *streamPlanApplyParams) {
 	fs.StringVar(&p.file, "f", "", "YAML config path (required)")
 	fs.StringVar(&p.policy, "policy", "", "reconcile policy: warn, adopt, safe-update, force (default: warn or cfg.policy)")
-	fs.StringVar(&p.common.server, "server", defaultServer(), "NATS server URL")
-	fs.StringVar(&p.common.creds, "creds", "", "path to NATS credentials file")
-	fs.StringVar(&p.common.nkey, "nkey", "", "path to NATS nkey seed file")
-	fs.StringVar(&p.common.token, "token", "", "NATS token")
-	fs.StringVar(&p.common.timeout, "timeout", "30s", "operation timeout (e.g. 30s, 1m)")
+	bindCommonFlags(fs, &p.common)
 	fs.BoolVar(&p.jsonOut, "json", false, "emit JSON output")
 }
 
@@ -183,9 +175,6 @@ func runStreamView(p streamViewParams, stdout, stderr io.Writer) int {
 
 		return ExitValidation
 	}
-
-	ctx, stop, exitIfTimeout := makeContext(timeoutDur, stderr)
-	defer stop()
 
 	// Build the stream-only scope: always Streams: true.
 	var scope provision.Scope
@@ -213,20 +202,15 @@ func runStreamView(p streamViewParams, stdout, stderr io.Writer) int {
 		scope = provision.Scope{Streams: true, Instance: p.instance}
 	}
 
-	conn, code, err := connectNATS(ctx, p.common)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		if exitIfTimeout(ctx) {
-			return ExitNATS
-		}
-
+	conn, code := connectWithTimeout(timeoutDur, p.common, stderr)
+	if code != ExitOK {
 		return code
 	}
 	defer conn.close()
 
-	snap, err := provision.View(ctx, conn.js, scope)
+	snap, err := provision.View(conn.ctx, conn.js, scope)
 	if err != nil {
-		if exitIfTimeout(ctx) {
+		if ctxDead(conn.ctx) {
 			return ExitNATS
 		}
 		fmt.Fprintln(stderr, "partictl stream view:", err)
@@ -287,26 +271,18 @@ func runStreamPlanApply(p streamPlanApplyParams, stdout, stderr io.Writer) int {
 	streamOnly.PartitionSource = nil
 	streamOnly.DynamicConsumers = nil
 
-	ctx, stop, exitIfTimeout := makeContext(timeoutDur, stderr)
-	defer stop()
-
 	// Step 5: connect to NATS and run provision.Plan or provision.Apply.
-	conn, code, err := connectNATS(ctx, p.common)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		if exitIfTimeout(ctx) {
-			return ExitNATS
-		}
-
+	conn, code := connectWithTimeout(timeoutDur, p.common, stderr)
+	if code != ExitOK {
 		return code
 	}
 	defer conn.close()
 
 	// plan, or apply -dry-run: emit the plan and write nothing.
 	if !p.apply || p.dryRun {
-		planResult, err := provision.Plan(ctx, conn.js, streamOnly)
+		planResult, err := provision.Plan(conn.ctx, conn.js, streamOnly)
 		if err != nil {
-			if exitIfTimeout(ctx) {
+			if ctxDead(conn.ctx) {
 				return ExitNATS
 			}
 			fmt.Fprintf(stderr, "partictl %s: %v\n", p.subcmd, err)
@@ -322,10 +298,10 @@ func runStreamPlanApply(p streamPlanApplyParams, stdout, stderr io.Writer) int {
 		return ExitOK
 	}
 
-	report, err := provision.Apply(ctx, conn.js, streamOnly)
+	report, err := provision.Apply(conn.ctx, conn.js, streamOnly)
 	emitReport(stdout, report, p.jsonOut)
 	if err != nil {
-		if exitIfTimeout(ctx) {
+		if ctxDead(conn.ctx) {
 			return ExitNATS
 		}
 
