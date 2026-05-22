@@ -48,10 +48,33 @@ func planStreams(ctx context.Context, js jetstream.JetStream, cfg Config, out *P
 
 		marked := ParseMarker(info.Config.Metadata).IsManaged()
 
-		// Under safe-update, a Parti-marked stream with mutable drift also gets
-		// an update-stream action. Drift findings and the action coexist; the
-		// classifier above still populates out.Drift in every policy.
-		if cfg.Policy == PolicySafeUpdate && marked {
+		// Recreate gate: force + ownership-proven + immutable drift +
+		// AllowDeleteRecreate. Emits exactly ONE recreate-stream; the
+		// update-stream gate is skipped for this resource. Drift findings coexist.
+		immutableDrift, hasImmutable := immutableFindingDetail(findings)
+		recreateOK := policyRecreatesImmutable(cfg.Policy) &&
+			marked &&
+			streamCfg.AllowDeleteRecreate
+		if hasImmutable && recreateOK {
+			before := cloneStreamConfig(info.Config)
+			after := buildStreamConfig(streamCfg, cfg.Instance)
+			out.Actions = append(out.Actions, PlannedAction{
+				Kind: ActionRecreateStream,
+				Name: streamCfg.Name,
+				Resource: &RecreateStreamResource{
+					Before:         before,
+					After:          after,
+					ImmutableDrift: immutableDrift,
+				},
+			})
+
+			continue
+		}
+
+		// Under safe-update or force, a Parti-marked stream with mutable drift
+		// also gets an update-stream action. Drift findings and the action coexist;
+		// the classifier above still populates out.Drift in every policy.
+		if policyReconcilesMutable(cfg.Policy) && marked {
 			target := buildStreamUpdateTarget(streamCfg, cfg.Instance, info.Config)
 			if !streamConfigsEqual(info.Config, target) {
 				out.Actions = append(out.Actions, PlannedAction{

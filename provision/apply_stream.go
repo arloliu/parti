@@ -22,6 +22,10 @@ type streamManager interface {
 	// UpdateStream updates an existing stream. A vanished stream surfaces as
 	// jetstream.ErrStreamNotFound.
 	UpdateStream(ctx context.Context, cfg jetstream.StreamConfig) error
+	// DeleteStream deletes a stream, all its messages, and (cascade) every
+	// consumer bound to it. Used by the recreate-stream apply path. A missing
+	// stream surfaces as jetstream.ErrStreamNotFound.
+	DeleteStream(ctx context.Context, name string) error
 }
 
 // jsStreamManager adapts a jetstream.JetStream to streamManager. Application
@@ -49,6 +53,10 @@ func (m jsStreamManager) UpdateStream(ctx context.Context, cfg jetstream.StreamC
 	_, err := m.js.UpdateStream(ctx, cfg)
 
 	return err
+}
+
+func (m jsStreamManager) DeleteStream(ctx context.Context, name string) error {
+	return m.js.DeleteStream(ctx, name)
 }
 
 // streamMissingBeforeUpdate is the fail-fast error for a stream that existed

@@ -533,6 +533,196 @@ func TestPlanConsumers_PrecreateAndReadBack(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// recreate-consumer plan emission (W2)
+// ---------------------------------------------------------------------------
+
+// crForceCfg returns a force-policy version of crConfig with AllowDeleteRecreate
+// enabled on the sole dynamic-consumer target.
+func crForceCfg(parts ...types.Partition) provision.Config {
+	cfg := crConfig(parts...)
+	cfg.Policy = provision.PolicyForce
+	cfg.DynamicConsumers[0].AllowDeleteRecreate = true
+
+	return cfg
+}
+
+// TestPlanConsumers_Recreate_Force_ImmutableOnly_EmitsRecreate is the primary
+// gate test: force + AllowDeleteRecreate:true + config-derived + immutable-only
+// drift → exactly one recreate-consumer, drift-immutable finding in Drift.
+func TestPlanConsumers_Recreate_Force_ImmutableOnly_EmitsRecreate(t *testing.T) {
+	js := newJS(t)
+	createOrdersStream(t, js)
+
+	parts := crPartitions("a")
+	durable := durableName()
+	subject := "orders.a"
+
+	// Create with a wrong FilterSubject (immutable drift).
+	createConsumer(t, js, dynamicbuild.ConsumerConfig(durable, "orders.WRONG", dynamicbuild.DefaultDynamicDefaults()))
+
+	plan, err := provision.PlanConsumers(t.Context(), js, crForceCfg(parts...))
+	require.NoError(t, err)
+
+	// Exactly one recreate-consumer action.
+	var recreates []provision.PlannedAction
+	for _, a := range plan.Actions {
+		if a.Kind == provision.ActionRecreateConsumer {
+			recreates = append(recreates, a)
+		}
+	}
+	require.Len(t, recreates, 1, "exactly one recreate-consumer expected")
+	require.Equal(t, durable, recreates[0].Name)
+
+	res, ok := recreates[0].Resource.(*provision.RecreateConsumerResource)
+	require.True(t, ok, "Resource must be *RecreateConsumerResource")
+	require.NotNil(t, res.ImmutableDrift)
+	require.Contains(t, res.ImmutableDrift, "filterSubject")
+	// Before must capture the live config (wrong subject).
+	require.Equal(t, "orders.WRONG", res.Before.FilterSubject)
+	// After must carry the desired subject.
+	require.Equal(t, subject, res.After.Subject)
+
+	// Drift-immutable finding must coexist.
+	var hasImmutableDrift bool
+	for _, d := range plan.Drift {
+		if d.Name == durable && d.Severity == provision.SeverityDriftImmutable {
+			hasImmutableDrift = true
+			require.Equal(t, res.ImmutableDrift, d.Detail,
+				"RecreateConsumerResource.ImmutableDrift must equal drift-immutable finding's Detail")
+		}
+	}
+	require.True(t, hasImmutableDrift, "drift-immutable finding must coexist with recreate-consumer")
+
+	// No create-consumer action (consumer exists, it needs recreate, not create).
+	for _, a := range plan.Actions {
+		require.NotEqual(t, provision.ActionCreateConsumer, a.Kind,
+			"must not emit create-consumer when recreate-consumer is planned")
+	}
+}
+
+// TestPlanConsumers_Recreate_Force_AllowDRFalse_NoRecreate verifies that
+// AllowDeleteRecreate:false suppresses recreate-consumer even under force + immutable drift.
+func TestPlanConsumers_Recreate_Force_AllowDRFalse_NoRecreate(t *testing.T) {
+	js := newJS(t)
+	createOrdersStream(t, js)
+
+	parts := crPartitions("a")
+	durable := durableName()
+
+	// Create with wrong FilterSubject (immutable drift).
+	createConsumer(t, js, dynamicbuild.ConsumerConfig(durable, "orders.WRONG", dynamicbuild.DefaultDynamicDefaults()))
+
+	// Force policy but AllowDeleteRecreate defaults to false.
+	cfg := crConfig(parts...)
+	cfg.Policy = provision.PolicyForce
+
+	plan, err := provision.PlanConsumers(t.Context(), js, cfg)
+	require.NoError(t, err)
+
+	for _, a := range plan.Actions {
+		require.NotEqual(t, provision.ActionRecreateConsumer, a.Kind,
+			"AllowDeleteRecreate:false must suppress recreate-consumer")
+	}
+
+	// Drift-immutable finding must surface.
+	var hasImmutableDrift bool
+	for _, d := range plan.Drift {
+		if d.Name == durable && d.Severity == provision.SeverityDriftImmutable {
+			hasImmutableDrift = true
+		}
+	}
+	require.True(t, hasImmutableDrift, "drift-immutable finding must surface even without recreate-consumer")
+}
+
+// TestPlanConsumers_Recreate_SafeUpdate_NoRecreate verifies that safe-update
+// suppresses recreate-consumer even with AllowDeleteRecreate:true + immutable drift.
+func TestPlanConsumers_Recreate_SafeUpdate_NoRecreate(t *testing.T) {
+	js := newJS(t)
+	createOrdersStream(t, js)
+
+	parts := crPartitions("a")
+	durable := durableName()
+
+	// Create with wrong FilterSubject (immutable drift).
+	createConsumer(t, js, dynamicbuild.ConsumerConfig(durable, "orders.WRONG", dynamicbuild.DefaultDynamicDefaults()))
+
+	cfg := crConfig(parts...)
+	cfg.Policy = provision.PolicySafeUpdate
+	cfg.DynamicConsumers[0].AllowDeleteRecreate = true
+
+	plan, err := provision.PlanConsumers(t.Context(), js, cfg)
+	require.NoError(t, err)
+
+	for _, a := range plan.Actions {
+		require.NotEqual(t, provision.ActionRecreateConsumer, a.Kind,
+			"safe-update must not emit recreate-consumer")
+	}
+
+	var hasImmutableDrift bool
+	for _, d := range plan.Drift {
+		if d.Name == durable && d.Severity == provision.SeverityDriftImmutable {
+			hasImmutableDrift = true
+		}
+	}
+	require.True(t, hasImmutableDrift, "drift-immutable finding must surface under safe-update")
+}
+
+// TestPlanConsumers_Recreate_Force_MutableOnlyDrift_NoRecreate verifies that
+// force + AllowDeleteRecreate:true with only mutable drift → zero recreate-consumer.
+// Consumers have no update-consumer action (mutable fields are runtime-owned),
+// so the invariant is simply: no recreate-consumer when no immutable drift.
+func TestPlanConsumers_Recreate_Force_MutableOnlyDrift_NoRecreate(t *testing.T) {
+	js := newJS(t)
+	createOrdersStream(t, js)
+
+	parts := crPartitions("a")
+
+	// Create the consumer with matching identity fields (no immutable drift) but
+	// different mutable tunables (AckWait). PlanConsumers reports informational —
+	// mutable fields are runtime-owned and not checked for immutable drift.
+	pre, suf, _ := dynamicbuild.ParseSubjectTemplateParts(crTemplate)
+	subject := "orders.a"
+	durable := dynamicbuild.PerSubjectDurableName(crPrefix, subject, pre, suf)
+	defaults := dynamicbuild.DefaultDynamicDefaults()
+	defaults.AckWait = 99 * time.Second // mutable, not an identity field
+	createConsumer(t, js, dynamicbuild.ConsumerConfig(durable, subject, defaults))
+
+	plan, err := provision.PlanConsumers(t.Context(), js, crForceCfg(parts...))
+	require.NoError(t, err)
+
+	for _, a := range plan.Actions {
+		require.NotEqual(t, provision.ActionRecreateConsumer, a.Kind,
+			"mutable-only drift must not emit recreate-consumer")
+	}
+
+	// Must be informational (identity fields match).
+	require.Len(t, plan.Drift, 1)
+	require.Equal(t, provision.SeverityInformational, plan.Drift[0].Severity)
+}
+
+// TestPlanConsumers_Recreate_Determinism verifies that two identical
+// PlanConsumers calls produce byte-equal PlanResults.
+func TestPlanConsumers_Recreate_Determinism(t *testing.T) {
+	js := newJS(t)
+	createOrdersStream(t, js)
+
+	parts := crPartitions("a", "b")
+	durable := durableName()
+
+	// Create "a" with immutable drift; "b" missing.
+	createConsumer(t, js, dynamicbuild.ConsumerConfig(durable, "orders.WRONG", dynamicbuild.DefaultDynamicDefaults()))
+
+	cfg := crForceCfg(parts...)
+	plan1, err := provision.PlanConsumers(t.Context(), js, cfg)
+	require.NoError(t, err)
+	plan2, err := provision.PlanConsumers(t.Context(), js, cfg)
+	require.NoError(t, err)
+
+	require.Equal(t, plan1.Actions, plan2.Actions, "action list must be deterministic")
+	require.Equal(t, plan1.Drift, plan2.Drift, "drift list must be deterministic")
+}
+
+// ---------------------------------------------------------------------------
 // Live partition mismatch (honest scope)
 // ---------------------------------------------------------------------------
 

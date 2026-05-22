@@ -21,8 +21,8 @@ var ErrInvalidConfig = errors.New("provision: invalid config")
 //
 //   - APIVersion must equal APIVersionV1.
 //   - Policy defaults to PolicyWarn when empty; PolicyWarn, PolicyAdopt,
-//     and PolicySafeUpdate are accepted. "force" is rejected as not yet
-//     supported.
+//     PolicySafeUpdate, and PolicyForce are all accepted. Unknown values are
+//     rejected.
 //   - ControlPlane bucket name fields default to runtime defaults; any
 //     bucket name still empty after defaulting is rejected.
 //   - ControlPlane.WorkerIDTTL, .ElectionTimeout, .HeartbeatTTL must be > 0.
@@ -144,14 +144,11 @@ func normalize(cfg Config) (Config, error) {
 
 func validateResolved(cfg Config) error {
 	switch string(cfg.Policy) {
-	case string(PolicyWarn), string(PolicyAdopt), string(PolicySafeUpdate):
+	case string(PolicyWarn), string(PolicyAdopt), string(PolicySafeUpdate), string(PolicyForce):
 		// ok
-	case reservedPolicyForce:
-		return fmt.Errorf("%w: policy %q is not yet supported",
-			ErrInvalidConfig, reservedPolicyForce)
 	default:
-		return fmt.Errorf("%w: policy %q is not recognized (supported: %q, %q, %q)",
-			ErrInvalidConfig, cfg.Policy, PolicyWarn, PolicyAdopt, PolicySafeUpdate)
+		return fmt.Errorf("%w: policy %q is not recognized (supported: %q, %q, %q, %q)",
+			ErrInvalidConfig, cfg.Policy, PolicyWarn, PolicyAdopt, PolicySafeUpdate, PolicyForce)
 	}
 
 	if cfg.ControlPlane != nil {

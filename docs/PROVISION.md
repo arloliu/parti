@@ -20,7 +20,8 @@
 7. [Partition Records](#partition-records)
 8. [Application Streams](#application-streams)
 9. [Dynamic Consumer Precreation](#dynamic-consumer-precreation)
-10. [Example Configuration](#example-configuration)
+10. [Force + Repair](#force--repair)
+11. [Example Configuration](#example-configuration)
 
 ---
 
@@ -83,7 +84,7 @@ resources.
 | `warn`        | yes            | no           | no                    | no                 |
 | `adopt`       | no             | yes          | no                    | no                 |
 | `safe-update` | yes            | no           | yes (marked only)     | no                 |
-| `force`       | —              | —            | —                     | not yet supported  |
+| `force`       | yes            | no           | yes (marked only)     | yes (gated)        |
 
 ### `warn` (default)
 
@@ -121,9 +122,10 @@ drift-mutable fields in place on **Parti-marked** buckets via
 
 Fields `safe-update` **never** changes:
 
-- `History` and `Storage` — changing these requires delete/recreate
-  (destructive repair is not yet supported). Plan reports them as
-  `drift-immutable`.
+- `History` and `Storage` — changing these requires delete/recreate.
+  Plan reports them as `drift-immutable`; repairing them requires
+  `-policy force` with `allowDeleteRecreate: true` on the resource
+  (see [Force + Repair](#force--repair)).
 - `Description` and `MaxBytes` — no YAML field exists for these; they
   are preserved verbatim from the live bucket regardless of any other
   change in the same Apply.
@@ -134,7 +136,18 @@ first, then re-run `apply --policy=safe-update`.
 
 ### `force`
 
-Reserved. Not yet supported.
+`force` is a strict superset of `safe-update`: it create-misses and
+reconciles drift-mutable fields in place on Parti-marked resources
+exactly as `safe-update` does, and additionally repairs a
+drift-immutable resource by delete/recreate — but only when
+**both** of the following are true:
+
+1. The effective policy is `force`.
+2. The resource's config sets `allowDeleteRecreate: true`.
+
+Either condition alone leaves immutable drift reported but not
+repaired. For detailed semantics, data-loss consequences, and operator
+checklist, see [Force + Repair](#force--repair).
 
 ---
 
@@ -306,7 +319,8 @@ partictl plan -f parti-env.yaml --policy=safe-update
 After adoption, `plan --policy=safe-update` sees marked buckets and
 reveals any field-level drift that was hidden under the `adopted`
 finding — including `drift-immutable` findings for History or Storage
-mismatches that require destructive repair (not yet supported).
+mismatches repairable under `-policy force` with `allowDeleteRecreate`
+(see [Force + Repair](#force--repair)).
 
 **Step 4 — Reconcile mutable drift:**
 
@@ -363,8 +377,9 @@ same Apply. Operators who set those fields out-of-band keep them.
 `safe-update` reconciles drift-mutable fields: `Metadata`, `TTL`,
 `MaxValueSize` (partition-source only), and `Replicas`. It does **not**
 attempt to change `History` or `Storage` — those fields require
-delete/recreate and are reported as `drift-immutable`. Destructive
-repair is not yet supported.
+delete/recreate and are reported as `drift-immutable`. Repairing them
+requires `-policy force` with `allowDeleteRecreate: true` on the
+resource (see [Force + Repair](#force--repair)).
 
 ### Replicas changes are conditional on cluster size
 
@@ -593,9 +608,10 @@ divergence as immutable — including `limits` ↔ `interest`, which the
 server would accept — because retention is a fundamental stream property
 and the `limits` ↔ `interest` update is consumer-replica-coupled (it can
 fail until bound consumers are adjusted). The safe remediation for either
-divergence is operator-driven delete/recreate, which is not yet
-supported (`force` is reserved). Plan reports these as `drift-immutable`;
-apply leaves them untouched.
+divergence is operator-driven delete/recreate via `-policy force` with
+`allowDeleteRecreate: true` on the stream (see
+[Force + Repair](#force--repair)). Plan reports these as
+`drift-immutable`; apply leaves them untouched under any other policy.
 
 The mutable fields `safe-update` reconciles in place: `Subjects`,
 `Discard`, `Replicas`, `MaxAge`, `MaxBytes`, `MaxMsgs`, `Description`,
@@ -763,6 +779,110 @@ Run `partitions apply` first when live-table readiness is needed; then
 application stream. Run `partictl apply -f parti-env.yaml` to provision both
 before running `consumers plan` / `apply`. A missing stream exits 3 with a
 message pointing back at `partictl apply`.
+
+---
+
+## Force + Repair
+
+The `force` policy enables destructive repair of drift-immutable resources
+(those where `plan` reports `drift-immutable` drift). The repair path is
+deliberately gated at two independent layers — both must opt in before any
+delete/recreate occurs.
+
+### The two-layer gate
+
+**Layer 1 — policy.** The effective reconcile policy must be `force`. Pass
+`-policy force` on the CLI or set `policy: force` in `parti-env.yaml`.
+
+**Layer 2 — per-resource opt-in.** Each resource struct has an
+`allowDeleteRecreate` boolean. Delete/recreate of that resource happens only
+when this field is `true`.
+
+Both layers must opt in. Either layer alone — `force` policy with
+`allowDeleteRecreate` omitted, or `allowDeleteRecreate: true` under any
+other policy — leaves immutable drift reported but not repaired.
+
+**Example: repair a partition-source bucket with a wrong `History` value:**
+
+```yaml
+# parti-env.yaml
+policy: force
+
+partitionSource:
+  bucket: my-partitions
+  key:    partitions
+  history: 5            # desired — diverges from the live bucket's history: 1
+  allowDeleteRecreate: true   # Layer 2: opt this bucket into delete/recreate
+```
+
+```bash
+partictl plan  -f parti-env.yaml -policy force   # emits recreate-kv action
+partictl apply -f parti-env.yaml -policy force   # deletes + recreates the bucket
+```
+
+`allowDeleteRecreate` is inert under any other policy (`warn`, `adopt`,
+`safe-update`): adding it to the YAML never causes a delete unless the policy
+is simultaneously `force`.
+
+### Destructive consequences
+
+> **Warning: the following operations are irreversible.**
+>
+> - **`recreate-kv`** deletes the KV bucket and **all entries it holds**.
+>   For a partition-source bucket this means the live partition table is
+>   erased; run `partictl partitions apply` afterwards to restore it.
+>   For a control-plane bucket, all five control-plane buckets are treated
+>   as a unit: if any one carries immutable drift and `allowDeleteRecreate`
+>   is set on `controlPlane`, all five are deleted and recreated.
+> - **`recreate-stream`** deletes the stream and **all messages it holds**.
+>   JetStream **cascade-deletes every durable consumer bound to the stream**
+>   — including consumers provision did not create.
+> - **`recreate-consumer`** deletes the durable consumer and its
+>   delivery/ack cursor — the recreated consumer starts with no position.
+>   On the Parti runtime's next worker bind, the consumer's configured
+>   `RecoveryStrategy` determines delivery resumption; `RecoverFromNew`
+>   (skip messages published during the gap) is the strategy whose
+>   semantics align with the recreate. The operator selects the strategy
+>   on the `consumer.Dynamic` call — provision does not control it.
+
+### Quiesce workers before running `apply -policy force`
+
+`provision` does **not** check for a running cluster or live workers. It
+will delete a resource out from under active consumers. Stop or quiesce
+the workers that consume the affected resources before running
+`apply -policy force`.
+
+### Stale-plan safety — honest scope
+
+At apply time, each `recreate-*` action re-reads the live state and
+re-classifies the resource before deleting it. If the resource no longer
+carries the immutable drift the plan recorded — a concurrent operator
+already repaired it, or the live config now matches — the recreate is
+skipped (`Raced: true` in the report) without deleting anything. This
+re-read closes the realistic staleness window: a `force` plan minutes or
+hours old that is re-applied after the environment has converged produces
+no destructive action.
+
+However, NATS exposes no compare-and-delete primitive — `DeleteKeyValue`,
+`DeleteStream`, and `DeleteConsumer` are unconditional name-based
+operations. The re-read cannot make the operation perfectly race-free:
+**running two concurrent `force` applies against the same environment is
+unsupported and an operator error.** Serialize apply runs.
+
+### Interrupted-recreate recovery
+
+A recreate proceeds as: re-read → re-classify → delete → create. The
+**delete is the point of no return**. If the create step fails (a
+permissions error, a quota limit, a context cancellation, an invalid
+desired config), the resource is gone and the desired resource was not
+created. The apply report records a `ResourceError` containing the sentinel
+`ErrRecreateInterrupted`, and apply exits 1.
+
+Recovery is to fix the persistent cause of the create failure and re-run
+`apply`. Re-running is safe: a fresh `plan` sees the resource missing and
+emits an ordinary `create-*` action — no `recreate-*`, no re-deletion. A
+blind re-run will not fix a persistent cause (bad config, missing
+permissions, quota exhaustion) — address those first.
 
 ---
 

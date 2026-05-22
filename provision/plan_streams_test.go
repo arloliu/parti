@@ -647,9 +647,10 @@ func TestClassifyStreamDrift_SafeUpdate_MutableDrift_UpdateStreamEmittedExternal
 func TestSortActions_StreamKindsOrderedCorrectly(t *testing.T) {
 	t.Parallel()
 
-	// Verify that the new stream action kinds sort correctly among the existing
-	// kinds. Expected ASCII order:
-	// create-kv < create-stream < stamp-marker < stamp-stream-marker < update-kv < update-stream
+	// Verify that all action kinds — including the recreate-* kinds added in
+	// W2 — sort correctly by (Kind, Name). Expected ASCII order:
+	// create-kv < create-stream < recreate-consumer < recreate-kv < recreate-stream
+	//   < stamp-marker < stamp-stream-marker < update-kv < update-stream
 	actions := []PlannedAction{
 		{Kind: ActionUpdateStream, Name: "b"},
 		{Kind: ActionCreateKV, Name: "a"},
@@ -657,6 +658,9 @@ func TestSortActions_StreamKindsOrderedCorrectly(t *testing.T) {
 		{Kind: ActionCreateStream, Name: "a"},
 		{Kind: ActionUpdateKV, Name: "a"},
 		{Kind: ActionStampMarker, Name: "a"},
+		{Kind: ActionRecreateKV, Name: "a"},
+		{Kind: ActionRecreateStream, Name: "a"},
+		{Kind: ActionRecreateConsumer, Name: "a"},
 	}
 
 	sortActions(actions)
@@ -669,6 +673,9 @@ func TestSortActions_StreamKindsOrderedCorrectly(t *testing.T) {
 	require.Equal(t, []string{
 		ActionCreateKV,
 		ActionCreateStream,
+		ActionRecreateConsumer,
+		ActionRecreateKV,
+		ActionRecreateStream,
 		ActionStampMarker,
 		ActionStampStreamMarker,
 		ActionUpdateKV,
@@ -765,4 +772,247 @@ func TestNormalizeStreamLimit(t *testing.T) {
 	require.Equal(t, int64(-1), normalizeStreamLimit(-1))
 	require.Equal(t, int64(1024), normalizeStreamLimit(1024))
 	require.Equal(t, int64(512), normalizeStreamLimit(512))
+}
+
+// --------------------------------------------------------------------------
+// recreate-stream plan emission (W2)
+// --------------------------------------------------------------------------
+
+func recreateStreamActions(p PlanResult) []PlannedAction {
+	var out []PlannedAction
+	for _, a := range p.Actions {
+		if a.Kind == ActionRecreateStream {
+			out = append(out, a)
+		}
+	}
+
+	return out
+}
+
+func updateStreamActions(p PlanResult) []PlannedAction {
+	var out []PlannedAction
+	for _, a := range p.Actions {
+		if a.Kind == ActionUpdateStream {
+			out = append(out, a)
+		}
+	}
+
+	return out
+}
+
+// streamForceCfg returns a force-policy Config with one stream that has
+// AllowDeleteRecreate enabled.
+func streamForceCfg(allowDR bool) Config {
+	return Config{
+		APIVersion: APIVersionV1,
+		Instance:   "prod",
+		Policy:     PolicyForce,
+		Streams: []StreamCfg{{
+			Name:                "my-stream",
+			Subjects:            []string{"work.my-stream.>"},
+			Retention:           "limits",
+			Storage:             "file",
+			Discard:             "old",
+			AllowDeleteRecreate: allowDR,
+		}},
+	}
+}
+
+// buildLiveStreamWithImmutableDrift returns a fakeJS streams map with a
+// marked my-stream that has storage drift (immutable).
+func buildLiveStreamWithImmutableDrift() map[string]jetstream.StreamConfig {
+	return map[string]jetstream.StreamConfig{
+		"my-stream": {
+			Name:     "my-stream",
+			Subjects: []string{"work.my-stream.>"},
+			Storage:  jetstream.MemoryStorage, // want "file" → immutable drift
+			Metadata: BuildMarker(ComponentStream, "prod"),
+		},
+	}
+}
+
+// TestRecreateStream_Force_Marked_ImmutableOnly_EmitsRecreate verifies the
+// primary gate: force + AllowDeleteRecreate:true + marked + immutable-only drift
+// → exactly one recreate-stream, zero update-stream, drift-immutable in Drift.
+func TestRecreateStream_Force_Marked_ImmutableOnly_EmitsRecreate(t *testing.T) {
+	t.Parallel()
+
+	cfg := streamForceCfg(true)
+	plan := planWith(t, cfg, buildLiveStreamWithImmutableDrift())
+
+	recreates := recreateStreamActions(plan)
+	require.Len(t, recreates, 1, "exactly one recreate-stream expected")
+	require.Equal(t, "my-stream", recreates[0].Name)
+
+	res, ok := recreates[0].Resource.(*RecreateStreamResource)
+	require.True(t, ok, "Resource must be *RecreateStreamResource")
+	require.NotNil(t, res.ImmutableDrift)
+	require.Contains(t, res.ImmutableDrift, "storage")
+
+	// Drift finding must still coexist.
+	var hasImmutableDrift bool
+	for _, d := range plan.Drift {
+		if d.Name == "my-stream" && d.Severity == SeverityDriftImmutable {
+			hasImmutableDrift = true
+			require.Equal(t, res.ImmutableDrift, d.Detail,
+				"RecreateStreamResource.ImmutableDrift must equal drift-immutable finding's Detail")
+		}
+	}
+	require.True(t, hasImmutableDrift, "drift-immutable finding must coexist with recreate-stream")
+	require.Empty(t, updateStreamActions(plan), "recreate-stream and update-stream must be mutually exclusive")
+}
+
+// TestRecreateStream_Force_Marked_BothDrifts_RecreateExcludesUpdate verifies
+// mutual exclusion when both immutable AND mutable drift are present.
+func TestRecreateStream_Force_Marked_BothDrifts_RecreateExcludesUpdate(t *testing.T) {
+	t.Parallel()
+
+	cfg := streamForceCfg(true)
+	// Live has storage drift (immutable) and different subjects (mutable).
+	streams := map[string]jetstream.StreamConfig{
+		"my-stream": {
+			Name:     "my-stream",
+			Subjects: []string{"work.old.>"},  // mutable drift
+			Storage:  jetstream.MemoryStorage, // immutable drift
+			Metadata: BuildMarker(ComponentStream, "prod"),
+		},
+	}
+	plan := planWith(t, cfg, streams)
+
+	require.Len(t, recreateStreamActions(plan), 1, "exactly one recreate-stream despite both drift types")
+	require.Empty(t, updateStreamActions(plan), "recreate-stream must suppress update-stream (mutual exclusion)")
+
+	var hasImmutable, hasMutable bool
+	for _, d := range plan.Drift {
+		if d.Name == "my-stream" {
+			switch d.Severity {
+			case SeverityDriftImmutable:
+				hasImmutable = true
+			case SeverityDriftMutable:
+				hasMutable = true
+			}
+		}
+	}
+	require.True(t, hasImmutable, "drift-immutable finding must coexist")
+	require.True(t, hasMutable, "drift-mutable finding must coexist")
+}
+
+// TestRecreateStream_Force_AllowDRFalse_NoRecreate verifies AllowDeleteRecreate:false
+// suppresses recreate-stream even under force + immutable drift.
+func TestRecreateStream_Force_AllowDRFalse_NoRecreate(t *testing.T) {
+	t.Parallel()
+
+	cfg := streamForceCfg(false) // AllowDeleteRecreate:false
+	plan := planWith(t, cfg, buildLiveStreamWithImmutableDrift())
+
+	require.Empty(t, recreateStreamActions(plan), "AllowDeleteRecreate:false must suppress recreate-stream")
+
+	var hasImmutableDrift bool
+	for _, d := range plan.Drift {
+		if d.Name == "my-stream" && d.Severity == SeverityDriftImmutable {
+			hasImmutableDrift = true
+		}
+	}
+	require.True(t, hasImmutableDrift, "drift-immutable finding must surface even without recreate-stream")
+}
+
+// TestRecreateStream_SafeUpdate_NoRecreate verifies that safe-update policy
+// suppresses recreate-stream even with AllowDeleteRecreate:true + immutable drift.
+func TestRecreateStream_SafeUpdate_NoRecreate(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{
+		APIVersion: APIVersionV1,
+		Instance:   "prod",
+		Policy:     PolicySafeUpdate,
+		Streams: []StreamCfg{{
+			Name:                "my-stream",
+			Subjects:            []string{"work.my-stream.>"},
+			Storage:             "file",
+			AllowDeleteRecreate: true,
+		}},
+	}
+	plan := planWith(t, cfg, buildLiveStreamWithImmutableDrift())
+
+	require.Empty(t, recreateStreamActions(plan), "safe-update must not emit recreate-stream")
+
+	var hasImmutableDrift bool
+	for _, d := range plan.Drift {
+		if d.Name == "my-stream" && d.Severity == SeverityDriftImmutable {
+			hasImmutableDrift = true
+		}
+	}
+	require.True(t, hasImmutableDrift, "drift-immutable finding must surface under safe-update")
+}
+
+// TestRecreateStream_Force_Unmarked_NoRecreate verifies that an unmarked stream
+// does not trigger recreate-stream (ownership not proven).
+func TestRecreateStream_Force_Unmarked_NoRecreate(t *testing.T) {
+	t.Parallel()
+
+	cfg := streamForceCfg(true)
+	streams := map[string]jetstream.StreamConfig{
+		"my-stream": {
+			Name:     "my-stream",
+			Subjects: []string{"work.my-stream.>"},
+			Storage:  jetstream.MemoryStorage, // immutable drift but ownership not proven
+			// Metadata: nil → unmarked
+		},
+	}
+	plan := planWith(t, cfg, streams)
+
+	require.Empty(t, recreateStreamActions(plan), "unmarked stream must not trigger recreate-stream")
+
+	var hasAdopted bool
+	for _, d := range plan.Drift {
+		if d.Name == "my-stream" && d.Severity == SeverityAdopted {
+			hasAdopted = true
+		}
+	}
+	require.True(t, hasAdopted, "unmarked stream must surface adopted drift")
+}
+
+// TestRecreateStream_Force_MutableOnlyDrift_EmitsUpdateStream verifies that
+// force + AllowDeleteRecreate:true + only mutable drift → update-stream, no recreate-stream.
+// This is the "force ⊇ safe-update" invariant.
+func TestRecreateStream_Force_MutableOnlyDrift_EmitsUpdateStream(t *testing.T) {
+	t.Parallel()
+
+	cfg := streamForceCfg(true)
+	// Live stream has different subjects (mutable) but same storage (no immutable drift).
+	streams := map[string]jetstream.StreamConfig{
+		"my-stream": {
+			Name:     "my-stream",
+			Subjects: []string{"work.old.>"}, // mutable drift
+			Storage:  jetstream.FileStorage,  // matches config → no immutable drift
+			Metadata: BuildMarker(ComponentStream, "prod"),
+		},
+	}
+	plan := planWith(t, cfg, streams)
+
+	require.Empty(t, recreateStreamActions(plan), "mutable-only drift must not emit recreate-stream")
+	require.NotEmpty(t, updateStreamActions(plan), "mutable drift under force must emit update-stream")
+}
+
+// TestRecreateStream_Determinism verifies that two identical planWith calls
+// produce byte-equal PlanResults.
+func TestRecreateStream_Determinism(t *testing.T) {
+	t.Parallel()
+
+	cfg := streamForceCfg(true)
+	cfg.Instance = "staging" // mutable drift too
+	streams := map[string]jetstream.StreamConfig{
+		"my-stream": {
+			Name:     "my-stream",
+			Subjects: []string{"work.my-stream.>"},
+			Storage:  jetstream.MemoryStorage, // immutable drift
+			Metadata: BuildMarker(ComponentStream, "staging"),
+		},
+	}
+
+	plan1 := planWith(t, cfg, streams)
+	plan2 := planWith(t, cfg, streams)
+
+	require.Equal(t, plan1.Actions, plan2.Actions, "action list must be deterministic")
+	require.Equal(t, plan1.Drift, plan2.Drift, "drift list must be deterministic")
 }

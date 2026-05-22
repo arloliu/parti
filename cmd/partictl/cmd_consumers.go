@@ -18,7 +18,8 @@ type consumerParams struct {
 	apply       bool   // false = plan, true = apply
 	dryRun      bool   // apply only
 	jsonOut     bool
-	failOnDrift bool // plan, or apply -dry-run
+	failOnDrift bool   // plan, or apply -dry-run
+	policy      string // reconcile policy flag value; force enables consumer recreate
 }
 
 // cmdConsumers dispatches the `consumers` sub-subcommands. The consumers
@@ -65,12 +66,14 @@ Subcommands:
 
 Flags:
   -f <path>       YAML config file (required)
+  -policy <p>     Reconcile policy: warn or force (default: warn or cfg.policy).
+                  Precreation of missing consumers is policy-independent; -policy force
+                  additionally enables delete/recreate repair of consumers with immutable drift.
   -json           Emit machine-readable JSON output
   -fail-on-drift  plan / apply -dry-run: exit 2 if non-informational drift is detected
   -dry-run        apply: compute the plan only — write nothing
   -server, -creds, -nkey, -token, -timeout   NATS connection flags
 
-The reconcile policy does not govern consumers; precreation is policy-independent.
 A dynamicConsumers target must set partitionsRef to opt into precreation.
 `)
 }
@@ -122,11 +125,11 @@ func cmdConsumersApply(args []string, stdout, stderr io.Writer) int {
 }
 
 // bindConsumersCommonFlags registers the flags shared by both consumers
-// sub-subcommands. Note -policy is intentionally absent: precreation is
-// policy-independent (a consumer either exists or is created; there is no
-// warn/safe-update/adopt distinction for it).
+// sub-subcommands. force is the only policy that changes consumer behavior
+// (it enables delete/recreate repair of consumers with immutable drift).
 func bindConsumersCommonFlags(fs *flag.FlagSet, f *consumerParams) {
 	fs.StringVar(&f.file, "f", "", "YAML config path (required)")
+	fs.StringVar(&f.policy, "policy", "", "reconcile policy: force enables consumer recreate (default: warn or cfg.policy)")
 	fs.StringVar(&f.common.server, "server", defaultServer(), "NATS server URL")
 	fs.StringVar(&f.common.creds, "creds", "", "path to NATS credentials file")
 	fs.StringVar(&f.common.nkey, "nkey", "", "path to NATS nkey seed file")
@@ -139,6 +142,12 @@ func bindConsumersCommonFlags(fs *flag.FlagSet, f *consumerParams) {
 // either a consumer plan or a consumer apply. It is the shared body of the
 // consumers plan and apply sub-subcommands.
 func runConsumers(p consumerParams, stdout, stderr io.Writer) int {
+	// Validate the -policy flag before any I/O (mirrors how cmdPlan rejects a
+	// bad -policy before any network I/O).
+	if !validatePolicyFlag(p.policy, p.subcmd, stderr) {
+		return ExitValidation
+	}
+
 	timeoutDur, err := parseTimeout(p.common.timeout)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -149,6 +158,24 @@ func runConsumers(p consumerParams, stdout, stderr io.Writer) int {
 	cfg, err := loadConfig(p.file)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
+
+		return ExitValidation
+	}
+
+	// Resolve the -policy flag against any YAML policy: field and stamp the
+	// effective value into cfg.Policy before Validate (which defaults it).
+	if !resolveAndStampPolicy(p.policy, p.subcmd, p.file, &cfg, stderr) {
+		return ExitValidation
+	}
+
+	// consumers accepts only warn or force. adopt and safe-update are
+	// meaningless for consumer precreation; reject them with a clear message.
+	switch cfg.Policy {
+	case provision.PolicyWarn, provision.PolicyForce:
+		// accepted
+	case provision.PolicyAdopt, provision.PolicySafeUpdate:
+		fmt.Fprintf(stderr, "partictl %s: consumers accepts only warn or force for -policy; got %q\n",
+			p.subcmd, cfg.Policy)
 
 		return ExitValidation
 	}

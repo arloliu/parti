@@ -152,3 +152,52 @@ func TestCloneStreamSource_NilSrc(t *testing.T) {
 	t.Parallel()
 	require.Nil(t, cloneStreamSource(nil))
 }
+
+// --- cloneConsumerConfig ---------------------------------------------------
+
+// TestCloneConsumerConfig_Independence verifies that mutating the clone's
+// BackOff, FilterSubjects, and Metadata does not affect the source.
+func TestCloneConsumerConfig_Independence(t *testing.T) {
+	t.Parallel()
+
+	src := jetstream.ConsumerConfig{
+		Name:           "test-consumer",
+		FilterSubject:  "work.a",
+		BackOff:        []time.Duration{time.Second, 2 * time.Second},
+		FilterSubjects: []string{"work.a", "work.b"},
+		Metadata:       map[string]string{"k": "v"},
+	}
+	clone := cloneConsumerConfig(src)
+
+	// Verify deep equality.
+	require.True(t, reflect.DeepEqual(src, clone),
+		"clone must be deeply equal to src\nsrc:   %#v\nclone: %#v", src, clone)
+
+	// Mutate every slice and map on the clone.
+	clone.BackOff[0] = 99 * time.Second
+	clone.FilterSubjects[0] = "work.mutated"
+	clone.Metadata["k"] = "mutated"
+
+	// src must be unchanged.
+	require.Equal(t, time.Second, src.BackOff[0], "src.BackOff must not be mutated")
+	require.Equal(t, "work.a", src.FilterSubjects[0], "src.FilterSubjects must not be mutated")
+	require.Equal(t, "v", src.Metadata["k"], "src.Metadata must not be mutated")
+}
+
+// TestCloneConsumerConfig_NilSlicesAndMap verifies that cloneConsumerConfig
+// handles nil BackOff, FilterSubjects, and Metadata without panicking.
+func TestCloneConsumerConfig_NilSlicesAndMap(t *testing.T) {
+	t.Parallel()
+
+	src := jetstream.ConsumerConfig{
+		Name:          "simple",
+		FilterSubject: "work.x",
+	}
+
+	require.NotPanics(t, func() {
+		clone := cloneConsumerConfig(src)
+		require.Nil(t, clone.BackOff)
+		require.Nil(t, clone.FilterSubjects)
+		require.Nil(t, clone.Metadata)
+	})
+}

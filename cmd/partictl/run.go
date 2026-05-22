@@ -74,8 +74,9 @@ Common flags (accepted by all commands):
   -f        <path>      YAML config file (required for validate/plan/apply/adopt/partitions/consumers; optional for view)
   -json                 Emit machine-readable JSON output
   -instance <name>      Filter by parti.io/instance (view without -f; validate)
-  -policy   <policy>    Reconcile policy for plan/apply/adopt/stream: warn, adopt, safe-update (default: warn).
-                        Not accepted by partitions or consumers — they are policy-independent.
+  -policy   <policy>    Reconcile policy for plan/apply/adopt/stream/consumers: warn, adopt, safe-update, force (default: warn).
+                        force is the destructive policy — it can delete/recreate resources.
+                        partitions does not accept -policy; consumers accepts only warn or force.
 
 Deferred commands (not yet supported):
   init, emit

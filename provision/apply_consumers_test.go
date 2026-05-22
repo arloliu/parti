@@ -17,10 +17,22 @@ import (
 
 // --- fake consumerManager seam ----------------------------------------------
 
+// consumerInfoStep is one queued ConsumerInfo result. A test that needs the
+// step-1 re-read and a later verify re-read to differ queues a step per call.
+type consumerInfoStep struct {
+	cfg jetstream.ConsumerConfig
+	err error
+}
+
 // fakeConsumerManager drives the consumer apply helpers deterministically.
 // createErr forces CreateConsumer to fail; infoCfg / infoErr drive the
-// ConsumerInfo re-read. created records whether CreateConsumer ran and the
-// (stream, cfg) it was handed.
+// ConsumerInfo re-read; deleteErr forces DeleteConsumer to fail. created /
+// deleted record whether the methods ran and the (stream, cfg) created.
+//
+// infoSeq, when non-empty, takes precedence: each ConsumerInfo call consumes
+// the next queued step, so a test can make successive re-reads return
+// different state. Calls past the end of infoSeq fall back to infoCfg /
+// infoErr.
 type fakeConsumerManager struct {
 	createErr error
 	created   bool
@@ -30,6 +42,10 @@ type fakeConsumerManager struct {
 	infoCfg jetstream.ConsumerConfig
 	infoErr error
 	infoGot bool
+	infoSeq []consumerInfoStep
+
+	deleteErr error
+	deleted   bool
 }
 
 func (m *fakeConsumerManager) CreateConsumer(_ context.Context, stream string, cfg jetstream.ConsumerConfig) error {
@@ -42,11 +58,26 @@ func (m *fakeConsumerManager) CreateConsumer(_ context.Context, stream string, c
 
 func (m *fakeConsumerManager) ConsumerInfo(_ context.Context, _, _ string) (*jetstream.ConsumerInfo, error) {
 	m.infoGot = true
+	if len(m.infoSeq) > 0 {
+		step := m.infoSeq[0]
+		m.infoSeq = m.infoSeq[1:]
+		if step.err != nil {
+			return nil, step.err
+		}
+
+		return &jetstream.ConsumerInfo{Config: step.cfg}, nil
+	}
 	if m.infoErr != nil {
 		return nil, m.infoErr
 	}
 
 	return &jetstream.ConsumerInfo{Config: m.infoCfg}, nil
+}
+
+func (m *fakeConsumerManager) DeleteConsumer(_ context.Context, _, _ string) error {
+	m.deleted = true
+
+	return m.deleteErr
 }
 
 // plannedConsumer returns a synthetic PlannedConsumer built from the shared
@@ -270,12 +301,16 @@ func TestApplyCreateConsumer_ServerRejected_FailsFast(t *testing.T) {
 // --- ApplyConsumers loop wiring ---------------------------------------------
 
 // applyConsumersJS is a fake jetstream.JetStream covering exactly the methods
-// ApplyConsumers needs via jsConsumerManager: CreateConsumer and Consumer.
-// createErr forces every create to fail; createdNames records what ran.
+// ApplyConsumers needs via jsConsumerManager: CreateConsumer, Consumer, and
+// DeleteConsumer. createErr forces every create to fail; consumerInfo seeds the
+// recreate re-read. createdNames / deletedNames record what ran.
 type applyConsumersJS struct {
 	jetstream.JetStream
 	createErr    error
 	createdNames []string
+
+	consumerInfo map[string]jetstream.ConsumerConfig
+	deletedNames []string
 }
 
 func (j *applyConsumersJS) CreateConsumer(
@@ -287,6 +322,35 @@ func (j *applyConsumersJS) CreateConsumer(
 	j.createdNames = append(j.createdNames, cfg.Durable)
 
 	return nil, nil //nolint:nilnil // fake: ApplyConsumers discards the Consumer.
+}
+
+func (j *applyConsumersJS) Consumer(
+	_ context.Context, _, durable string,
+) (jetstream.Consumer, error) {
+	cfg, ok := j.consumerInfo[durable]
+	if !ok {
+		return nil, jetstream.ErrConsumerNotFound
+	}
+
+	return &fakeConsumer{cfg: cfg}, nil
+}
+
+func (j *applyConsumersJS) DeleteConsumer(_ context.Context, _, durable string) error {
+	j.deletedNames = append(j.deletedNames, durable)
+	delete(j.consumerInfo, durable)
+
+	return nil
+}
+
+// fakeConsumer is a minimal jetstream.Consumer whose Info returns a seeded
+// config — enough for the jsConsumerManager.ConsumerInfo re-read.
+type fakeConsumer struct {
+	jetstream.Consumer
+	cfg jetstream.ConsumerConfig
+}
+
+func (c *fakeConsumer) Info(_ context.Context) (*jetstream.ConsumerInfo, error) {
+	return &jetstream.ConsumerInfo{Config: c.cfg}, nil
 }
 
 func TestApplyConsumers_NoAction_EnvelopeReport(t *testing.T) {

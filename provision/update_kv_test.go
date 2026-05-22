@@ -688,3 +688,513 @@ func TestApplyUpdateKV_CancelledReread_PropagatesCancellation(t *testing.T) {
 		cpSpecsFor(t, cfg), electionUpdateAction(before))
 	require.True(t, errors.Is(err, context.Canceled))
 }
+
+// --- recreate-kv plan emission (W2) ------------------------------------------
+
+func recreateKVActions(p PlanResult) []PlannedAction {
+	var out []PlannedAction
+	for _, a := range p.Actions {
+		if a.Kind == ActionRecreateKV {
+			out = append(out, a)
+		}
+	}
+
+	return out
+}
+
+// cpForceCfg returns a force-policy Config for the election bucket.
+func cpForceCfg() Config {
+	cfg := cpUpdateCfg(PolicyForce)
+	cfg.ControlPlane.AllowDeleteRecreate = true
+
+	return cfg
+}
+
+// electionStreamImmutable returns an election stream config with immutable
+// drift (History=3, which is != 1 in config) and the correct marker.
+func electionStreamImmutable() jetstream.StreamConfig {
+	return electionStream(func(c *jetstream.StreamConfig) {
+		c.MaxMsgsPerSubject = 3 // History drift — immutable
+	})
+}
+
+// TestRecreateKV_ControlPlane_Force_Marked_ImmutableOnly_EmitsRecreate is the
+// primary gate test: force + AllowDeleteRecreate:true + marked + immutable-only
+// drift → exactly one recreate-kv, zero update-kv, drift-immutable finding in Drift.
+func TestRecreateKV_ControlPlane_Force_Marked_ImmutableOnly_EmitsRecreate(t *testing.T) {
+	t.Parallel()
+
+	cfg := cpForceCfg()
+	streams := map[string]jetstream.StreamConfig{
+		"KV_parti-election": electionStreamImmutable(),
+	}
+	plan := planWith(t, cfg, streams)
+
+	recreates := recreateKVActions(plan)
+	require.Len(t, recreates, 1, "exactly one recreate-kv expected")
+	require.Equal(t, "parti-election", recreates[0].Name)
+
+	res, ok := recreates[0].Resource.(*RecreateKVResource)
+	require.True(t, ok, "Resource must be *RecreateKVResource")
+	require.NotNil(t, res.ImmutableDrift)
+	require.Contains(t, res.ImmutableDrift, "history")
+
+	// Drift finding must still surface.
+	var hasImmutableDrift bool
+	for _, d := range plan.Drift {
+		if d.Name == "parti-election" && d.Severity == SeverityDriftImmutable {
+			hasImmutableDrift = true
+			require.Equal(t, res.ImmutableDrift, d.Detail,
+				"RecreateKVResource.ImmutableDrift must equal the drift-immutable finding's Detail")
+		}
+	}
+	require.True(t, hasImmutableDrift, "drift-immutable finding must coexist with recreate-kv action")
+
+	// Mutual exclusion: no update-kv for the same bucket.
+	require.Empty(t, updateKVActions(plan), "recreate-kv and update-kv must be mutually exclusive")
+}
+
+// TestRecreateKV_ControlPlane_Force_Marked_BothDrifts_RecreateExcludesUpdate
+// verifies mutual exclusion when both immutable AND mutable drift are present:
+// exactly one recreate-kv, zero update-kv. This is the load-bearing invariant.
+func TestRecreateKV_ControlPlane_Force_Marked_BothDrifts_RecreateExcludesUpdate(t *testing.T) {
+	t.Parallel()
+
+	cfg := cpForceCfg()
+	cfg.Instance = "staging" // mutable instance drift
+	streams := map[string]jetstream.StreamConfig{
+		"KV_parti-election": electionStreamImmutable(), // also has immutable drift
+	}
+	plan := planWith(t, cfg, streams)
+
+	recreates := recreateKVActions(plan)
+	require.Len(t, recreates, 1, "exactly one recreate-kv despite both drift types")
+	require.Empty(t, updateKVActions(plan), "recreate-kv must suppress update-kv (mutual exclusion)")
+
+	// Both findings must coexist in Drift.
+	var hasImmutable, hasMutable bool
+	for _, d := range plan.Drift {
+		if d.Name == "parti-election" {
+			switch d.Severity {
+			case SeverityDriftImmutable:
+				hasImmutable = true
+			case SeverityDriftMutable:
+				hasMutable = true
+			}
+		}
+	}
+	require.True(t, hasImmutable, "drift-immutable finding must coexist")
+	require.True(t, hasMutable, "drift-mutable finding must coexist (both drift types)")
+}
+
+// TestRecreateKV_ControlPlane_Force_AllowDRFalse_NoRecreate verifies that
+// AllowDeleteRecreate:false suppresses recreate-kv even under force + immutable drift.
+func TestRecreateKV_ControlPlane_Force_AllowDRFalse_NoRecreate(t *testing.T) {
+	t.Parallel()
+
+	cfg := cpUpdateCfg(PolicyForce) // AllowDeleteRecreate defaults to false
+	streams := map[string]jetstream.StreamConfig{
+		"KV_parti-election": electionStreamImmutable(),
+	}
+	plan := planWith(t, cfg, streams)
+
+	require.Empty(t, recreateKVActions(plan), "AllowDeleteRecreate:false must suppress recreate-kv")
+
+	// Drift finding must still surface.
+	var hasImmutableDrift bool
+	for _, d := range plan.Drift {
+		if d.Name == "parti-election" && d.Severity == SeverityDriftImmutable {
+			hasImmutableDrift = true
+		}
+	}
+	require.True(t, hasImmutableDrift, "drift-immutable finding must surface even without recreate-kv")
+}
+
+// TestRecreateKV_ControlPlane_SafeUpdate_NoRecreate verifies that safe-update
+// policy suppresses recreate-kv even with AllowDeleteRecreate:true + immutable drift.
+func TestRecreateKV_ControlPlane_SafeUpdate_NoRecreate(t *testing.T) {
+	t.Parallel()
+
+	cfg := cpUpdateCfg(PolicySafeUpdate)
+	cfg.ControlPlane.AllowDeleteRecreate = true
+	streams := map[string]jetstream.StreamConfig{
+		"KV_parti-election": electionStreamImmutable(),
+	}
+	plan := planWith(t, cfg, streams)
+
+	require.Empty(t, recreateKVActions(plan), "safe-update must not emit recreate-kv")
+
+	var hasImmutableDrift bool
+	for _, d := range plan.Drift {
+		if d.Name == "parti-election" && d.Severity == SeverityDriftImmutable {
+			hasImmutableDrift = true
+		}
+	}
+	require.True(t, hasImmutableDrift, "drift-immutable finding must surface under safe-update")
+}
+
+// TestRecreateKV_ControlPlane_Force_Unmarked_NoRecreate verifies that an
+// unmarked bucket does not trigger recreate-kv (ownership not proven).
+func TestRecreateKV_ControlPlane_Force_Unmarked_NoRecreate(t *testing.T) {
+	t.Parallel()
+
+	cfg := cpForceCfg()
+	streams := map[string]jetstream.StreamConfig{
+		"KV_parti-election": electionStream(func(c *jetstream.StreamConfig) {
+			c.Metadata = nil        // unmarked
+			c.MaxMsgsPerSubject = 3 // immutable drift (but ownership not proven)
+		}),
+	}
+	plan := planWith(t, cfg, streams)
+
+	require.Empty(t, recreateKVActions(plan), "unmarked bucket must not trigger recreate-kv")
+
+	// Must have adopted drift instead.
+	var hasAdopted bool
+	for _, d := range plan.Drift {
+		if d.Name == "parti-election" && d.Severity == SeverityAdopted {
+			hasAdopted = true
+		}
+	}
+	require.True(t, hasAdopted, "unmarked bucket must surface adopted drift")
+}
+
+// TestRecreateKV_ControlPlane_Force_MutableOnlyDrift_EmitsUpdateKV verifies
+// that force + AllowDeleteRecreate:true + only mutable drift → update-kv, no recreate-kv.
+// This is the "force ⊇ safe-update" invariant.
+func TestRecreateKV_ControlPlane_Force_MutableOnlyDrift_EmitsUpdateKV(t *testing.T) {
+	t.Parallel()
+
+	cfg := cpForceCfg()
+	cfg.ControlPlane.ElectionTimeout = 99 * time.Second // mutable TTL drift
+	streams := map[string]jetstream.StreamConfig{
+		"KV_parti-election": electionStream(), // marked, in-sync History — only TTL drifts
+	}
+	plan := planWith(t, cfg, streams)
+
+	require.Empty(t, recreateKVActions(plan), "mutable-only drift must not emit recreate-kv")
+	require.NotEmpty(t, updateKVActions(plan), "mutable drift under force must emit update-kv")
+}
+
+// TestRecreateKV_PartitionSource_Force_Marked_ImmutableOnly_EmitsRecreate verifies
+// that partition-source immutable history drift under force + AllowDeleteRecreate
+// emits exactly one recreate-kv and zero update-kv.
+func TestRecreateKV_PartitionSource_Force_Marked_ImmutableOnly_EmitsRecreate(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{
+		APIVersion: APIVersionV1,
+		Instance:   "prod",
+		Policy:     PolicyForce,
+		PartitionSource: &PartitionSourceConfig{
+			Bucket:              "parti-partitions",
+			Key:                 "partitions/v1",
+			Storage:             "file",
+			History:             1,
+			Replicas:            1,
+			AllowDeleteRecreate: true,
+		},
+	}
+	// Live bucket has History=3 (immutable drift).
+	streams := map[string]jetstream.StreamConfig{
+		"KV_parti-partitions": {
+			Name:              "KV_parti-partitions",
+			Storage:           jetstream.FileStorage,
+			MaxMsgsPerSubject: 3, // History=3, want 1
+			Replicas:          1,
+			Metadata:          BuildMarker(ComponentPartitionSource, "prod"),
+		},
+	}
+	plan := planWith(t, cfg, streams)
+
+	recreates := recreateKVActions(plan)
+	require.Len(t, recreates, 1, "exactly one recreate-kv for partition-source")
+	require.Equal(t, "parti-partitions", recreates[0].Name)
+
+	res, ok := recreates[0].Resource.(*RecreateKVResource)
+	require.True(t, ok, "Resource must be *RecreateKVResource")
+	require.Contains(t, res.ImmutableDrift, "history")
+
+	// Drift finding must coexist.
+	var hasImmutableDrift bool
+	for _, d := range plan.Drift {
+		if d.Name == "parti-partitions" && d.Severity == SeverityDriftImmutable {
+			hasImmutableDrift = true
+			require.Equal(t, res.ImmutableDrift, d.Detail,
+				"ImmutableDrift must equal drift-immutable finding's Detail")
+		}
+	}
+	require.True(t, hasImmutableDrift, "drift-immutable finding must coexist with recreate-kv")
+	require.Empty(t, updateKVActions(plan), "recreate-kv and update-kv must be mutually exclusive")
+}
+
+// TestRecreateKV_PartitionSource_Force_Marked_BothDrifts_RecreateExcludesUpdate
+// verifies mutual exclusion for partition-source with both immutable AND mutable drift.
+func TestRecreateKV_PartitionSource_Force_Marked_BothDrifts_RecreateExcludesUpdate(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{
+		APIVersion: APIVersionV1,
+		Instance:   "prod",
+		Policy:     PolicyForce,
+		PartitionSource: &PartitionSourceConfig{
+			Bucket:              "parti-partitions",
+			Key:                 "partitions/v1",
+			Storage:             "file",
+			History:             1,
+			Replicas:            3, // desired 3 → mutable drift against live 1
+			AllowDeleteRecreate: true,
+		},
+	}
+	// Live has History=5 (immutable) and Replicas=1 (mutable drift against desired 3).
+	streams := map[string]jetstream.StreamConfig{
+		"KV_parti-partitions": {
+			Name:              "KV_parti-partitions",
+			Storage:           jetstream.FileStorage,
+			MaxMsgsPerSubject: 5, // History=5, want 1 → immutable
+			Replicas:          1, // want 3 → mutable
+			Metadata:          BuildMarker(ComponentPartitionSource, "prod"),
+		},
+	}
+	plan := planWith(t, cfg, streams)
+
+	require.Len(t, recreateKVActions(plan), 1, "exactly one recreate-kv despite both drift types")
+	require.Empty(t, updateKVActions(plan), "recreate-kv must suppress update-kv (mutual exclusion)")
+}
+
+// TestRecreateKV_PartitionSource_Force_AllowDRFalse_NoRecreate verifies that
+// AllowDeleteRecreate:false suppresses recreate-kv for partition-source.
+func TestRecreateKV_PartitionSource_Force_AllowDRFalse_NoRecreate(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{
+		APIVersion: APIVersionV1,
+		Instance:   "prod",
+		Policy:     PolicyForce,
+		PartitionSource: &PartitionSourceConfig{
+			Bucket:  "parti-partitions",
+			Key:     "partitions/v1",
+			Storage: "file",
+			History: 1,
+			// AllowDeleteRecreate defaults to false
+		},
+	}
+	streams := map[string]jetstream.StreamConfig{
+		"KV_parti-partitions": {
+			Name:              "KV_parti-partitions",
+			Storage:           jetstream.FileStorage,
+			MaxMsgsPerSubject: 3, // immutable drift
+			Metadata:          BuildMarker(ComponentPartitionSource, "prod"),
+		},
+	}
+	plan := planWith(t, cfg, streams)
+
+	require.Empty(t, recreateKVActions(plan), "AllowDeleteRecreate:false must suppress recreate-kv")
+
+	var hasImmutableDrift bool
+	for _, d := range plan.Drift {
+		if d.Name == "parti-partitions" && d.Severity == SeverityDriftImmutable {
+			hasImmutableDrift = true
+		}
+	}
+	require.True(t, hasImmutableDrift, "drift-immutable finding must surface even without recreate-kv")
+}
+
+// TestRecreateKV_PartitionSource_SafeUpdate_NoRecreate verifies that a
+// non-force policy (safe-update) suppresses recreate-kv for partition-source
+// even when AllowDeleteRecreate:true and immutable drift is present.
+// The drift-immutable finding must still surface.
+func TestRecreateKV_PartitionSource_SafeUpdate_NoRecreate(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{
+		APIVersion: APIVersionV1,
+		Instance:   "prod",
+		Policy:     PolicySafeUpdate,
+		PartitionSource: &PartitionSourceConfig{
+			Bucket:              "parti-partitions",
+			Key:                 "partitions/v1",
+			Storage:             "file",
+			History:             1,
+			Replicas:            1,
+			AllowDeleteRecreate: true,
+		},
+	}
+	// Live bucket has History=3 (immutable drift).
+	streams := map[string]jetstream.StreamConfig{
+		"KV_parti-partitions": {
+			Name:              "KV_parti-partitions",
+			Storage:           jetstream.FileStorage,
+			MaxMsgsPerSubject: 3, // History=3, want 1 → immutable drift
+			Replicas:          1,
+			Metadata:          BuildMarker(ComponentPartitionSource, "prod"),
+		},
+	}
+	plan := planWith(t, cfg, streams)
+
+	require.Empty(t, recreateKVActions(plan), "safe-update must not emit recreate-kv for partition-source")
+
+	var hasImmutableDrift bool
+	for _, d := range plan.Drift {
+		if d.Name == "parti-partitions" && d.Severity == SeverityDriftImmutable {
+			hasImmutableDrift = true
+		}
+	}
+	require.True(t, hasImmutableDrift, "drift-immutable finding must surface under safe-update")
+}
+
+// TestRecreateKV_PartitionSource_Force_Unmarked_NoRecreate verifies that an
+// unmarked partition-source bucket does not trigger recreate-kv (ownership not
+// proven). The marker gate applies even under force + AllowDeleteRecreate:true.
+func TestRecreateKV_PartitionSource_Force_Unmarked_NoRecreate(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{
+		APIVersion: APIVersionV1,
+		Instance:   "prod",
+		Policy:     PolicyForce,
+		PartitionSource: &PartitionSourceConfig{
+			Bucket:              "parti-partitions",
+			Key:                 "partitions/v1",
+			Storage:             "file",
+			History:             1,
+			Replicas:            1,
+			AllowDeleteRecreate: true,
+		},
+	}
+	// Unmarked bucket with immutable drift — ownership not proven.
+	streams := map[string]jetstream.StreamConfig{
+		"KV_parti-partitions": {
+			Name:              "KV_parti-partitions",
+			Storage:           jetstream.FileStorage,
+			MaxMsgsPerSubject: 3, // History=3 (immutable drift — but ownership not proven)
+			Replicas:          1,
+			// Metadata: nil → unmarked
+		},
+	}
+	plan := planWith(t, cfg, streams)
+
+	require.Empty(t, recreateKVActions(plan), "unmarked partition-source bucket must not trigger recreate-kv")
+
+	// Must have adopted drift (not immutable drift) for unmarked bucket.
+	var hasAdopted bool
+	for _, d := range plan.Drift {
+		if d.Name == "parti-partitions" && d.Severity == SeverityAdopted {
+			hasAdopted = true
+		}
+	}
+	require.True(t, hasAdopted, "unmarked partition-source bucket must surface adopted drift")
+}
+
+// TestRecreateKV_PartitionSource_Force_MutableOnlyDrift_EmitsUpdateKV verifies
+// that force + AllowDeleteRecreate:true + only mutable drift → update-kv, no
+// recreate-kv. This is the "force ⊇ safe-update" invariant for partition-source.
+func TestRecreateKV_PartitionSource_Force_MutableOnlyDrift_EmitsUpdateKV(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{
+		APIVersion: APIVersionV1,
+		Instance:   "prod",
+		Policy:     PolicyForce,
+		PartitionSource: &PartitionSourceConfig{
+			Bucket:              "parti-partitions",
+			Key:                 "partitions/v1",
+			Storage:             "file",
+			History:             1,
+			Replicas:            1,
+			MaxValueSize:        65536, // desired — live has no limit (MaxValueSize=0)
+			AllowDeleteRecreate: true,
+		},
+	}
+	// Live bucket has matching History=1 and Storage=file (no immutable drift),
+	// but MaxValueSize=0 when config wants 65536 (mutable drift only).
+	streams := map[string]jetstream.StreamConfig{
+		"KV_parti-partitions": {
+			Name:              "KV_parti-partitions",
+			Storage:           jetstream.FileStorage,
+			MaxMsgsPerSubject: 1, // History=1 matches config → no immutable drift
+			Replicas:          1,
+			// MaxMsgSize=0 → mutable drift against config's MaxValueSize=65536
+			Metadata: BuildMarker(ComponentPartitionSource, "prod"),
+		},
+	}
+	plan := planWith(t, cfg, streams)
+
+	require.Empty(t, recreateKVActions(plan), "mutable-only drift must not emit recreate-kv for partition-source")
+	require.NotEmpty(t, updateKVActions(plan), "mutable drift under force must emit update-kv for partition-source")
+}
+
+// TestRecreateKV_PartitionSource_Force_After_PreservesOperatorFields verifies
+// that when a partition-source recreate-kv is emitted, its
+// RecreateKVResource.After carries all operator-configurable fields
+// (Storage / History / Replicas / MaxValueSize / TTL) from the
+// PartitionSourceConfig. This is the regression guard that recreate-kv uses
+// buildPartitionSourceKVConfig (not the control-plane builder which would lose
+// those fields).
+func TestRecreateKV_PartitionSource_Force_After_PreservesOperatorFields(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{
+		APIVersion: APIVersionV1,
+		Instance:   "prod",
+		Policy:     PolicyForce,
+		PartitionSource: &PartitionSourceConfig{
+			Bucket:              "parti-partitions",
+			Key:                 "partitions/v1",
+			Storage:             "memory",        // distinctive: not the file default
+			History:             5,               // distinctive: not 1
+			Replicas:            3,               // distinctive: not 1
+			MaxValueSize:        65536,           // distinctive: not 0
+			TTL:                 2 * time.Minute, // distinctive: not 0
+			AllowDeleteRecreate: true,
+		},
+	}
+	// Live bucket has FileStorage (immutable drift vs config "memory") and
+	// History=1 (immutable drift vs config History=5) → triggers recreate-kv.
+	streams := map[string]jetstream.StreamConfig{
+		"KV_parti-partitions": {
+			Name:              "KV_parti-partitions",
+			Storage:           jetstream.FileStorage, // want memory → immutable drift
+			MaxMsgsPerSubject: 1,                     // History=1, want 5 → immutable drift
+			Replicas:          1,
+			Metadata:          BuildMarker(ComponentPartitionSource, "prod"),
+		},
+	}
+	plan := planWith(t, cfg, streams)
+
+	recreates := recreateKVActions(plan)
+	require.Len(t, recreates, 1, "exactly one recreate-kv expected")
+
+	res, ok := recreates[0].Resource.(*RecreateKVResource)
+	require.True(t, ok, "Resource must be *RecreateKVResource")
+
+	// Assert each operator-configurable field appears in After.
+	require.Equal(t, jetstream.MemoryStorage, res.After.Storage,
+		"After.Storage must carry operator-configured value (memory)")
+	require.Equal(t, uint8(5), res.After.History,
+		"After.History must carry operator-configured value (5)")
+	require.Equal(t, 3, res.After.Replicas,
+		"After.Replicas must carry operator-configured value (3)")
+	require.Equal(t, int32(65536), res.After.MaxValueSize,
+		"After.MaxValueSize must carry operator-configured value (65536)")
+	require.Equal(t, 2*time.Minute, res.After.TTL,
+		"After.TTL must carry operator-configured value (2m)")
+}
+
+// TestRecreateKV_Determinism verifies that two identical planWith calls
+// produce byte-equal PlanResults (no map iteration non-determinism in actions or drift).
+func TestRecreateKV_Determinism(t *testing.T) {
+	t.Parallel()
+
+	cfg := cpForceCfg()
+	cfg.Instance = "staging" // mutable instance drift too
+	streams := map[string]jetstream.StreamConfig{
+		"KV_parti-election": electionStreamImmutable(),
+	}
+
+	plan1 := planWith(t, cfg, streams)
+	plan2 := planWith(t, cfg, streams)
+
+	require.Equal(t, plan1.Actions, plan2.Actions, "action list must be deterministic")
+	require.Equal(t, plan1.Drift, plan2.Drift, "drift list must be deterministic")
+}

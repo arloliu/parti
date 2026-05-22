@@ -19,9 +19,9 @@ import (
 // --- fake streamManager seam -------------------------------------------------
 
 // fakeStreamManager drives the stream apply helpers deterministically. infoCfg
-// is the StreamConfig StreamInfo returns; infoErr / createErr / updateErr force
-// the corresponding seam method to fail. created / updated record whether the
-// write methods ran and the config they were handed.
+// is the StreamConfig StreamInfo returns; infoErr / createErr / updateErr /
+// deleteErr force the corresponding seam method to fail. created / updated /
+// deleted record whether the methods ran and the config they were handed.
 type fakeStreamManager struct {
 	infoCfg jetstream.StreamConfig
 	infoErr error
@@ -33,6 +33,9 @@ type fakeStreamManager struct {
 	updateErr error
 	updated   bool
 	updateGot jetstream.StreamConfig
+
+	deleteErr error
+	deleted   bool
 }
 
 func (m *fakeStreamManager) StreamInfo(_ context.Context, _ string) (*jetstream.StreamInfo, error) {
@@ -55,6 +58,12 @@ func (m *fakeStreamManager) UpdateStream(_ context.Context, cfg jetstream.Stream
 	m.updateGot = cfg
 
 	return m.updateErr
+}
+
+func (m *fakeStreamManager) DeleteStream(_ context.Context, _ string) error {
+	m.deleted = true
+
+	return m.deleteErr
 }
 
 // markedAppStream returns a synthetic Parti-marked application stream config.
@@ -454,18 +463,21 @@ func TestApplyStampStreamMarker_ServerRejected_FailsFast(t *testing.T) {
 // --- applyPlan loop wiring ---------------------------------------------------
 
 // applyPlanJS is a fake jetstream.JetStream covering exactly the methods
-// applyPlan needs for a stream-only plan: Stream, CreateStream, UpdateStream.
-// streamInfo seeds StreamInfo re-reads; createErr / updateErr force the
-// corresponding write to fail. createdNames / updatedNames record what ran.
+// applyPlan needs for a stream-only plan: Stream, CreateStream, UpdateStream,
+// DeleteStream. streamInfo seeds StreamInfo re-reads; createErr / updateErr /
+// deleteErr force the corresponding write to fail. createdNames / updatedNames /
+// deletedNames record what ran.
 type applyPlanJS struct {
 	jetstream.JetStream
 	streamInfo map[string]jetstream.StreamConfig
 
 	createErr error
 	updateErr error
+	deleteErr error
 
 	createdNames []string
 	updatedNames []string
+	deletedNames []string
 }
 
 func (j *applyPlanJS) Stream(_ context.Context, name string) (jetstream.Stream, error) {
@@ -493,6 +505,16 @@ func (j *applyPlanJS) UpdateStream(_ context.Context, cfg jetstream.StreamConfig
 	j.updatedNames = append(j.updatedNames, cfg.Name)
 
 	return &fakeStream{cfg: cfg}, nil
+}
+
+func (j *applyPlanJS) DeleteStream(_ context.Context, name string) error {
+	if j.deleteErr != nil {
+		return j.deleteErr
+	}
+	j.deletedNames = append(j.deletedNames, name)
+	delete(j.streamInfo, name)
+
+	return nil
 }
 
 // streamApplyCfg returns a resolved Config declaring the given streams.

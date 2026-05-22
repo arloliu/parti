@@ -23,6 +23,10 @@ type consumerManager interface {
 	// missing consumer surfaces as jetstream.ErrConsumerNotFound. Used to
 	// verify identity on a create-race.
 	ConsumerInfo(ctx context.Context, stream, durable string) (*jetstream.ConsumerInfo, error)
+	// DeleteConsumer deletes a consumer and its delivery / ack cursor. Used by
+	// the recreate-consumer apply path. A missing consumer surfaces as
+	// jetstream.ErrConsumerNotFound.
+	DeleteConsumer(ctx context.Context, stream, durable string) error
 }
 
 // jsConsumerManager adapts a jetstream.JetStream to consumerManager. Dynamic
@@ -47,6 +51,10 @@ func (m jsConsumerManager) ConsumerInfo(ctx context.Context, stream, durable str
 	return consumer.Info(ctx)
 }
 
+func (m jsConsumerManager) DeleteConsumer(ctx context.Context, stream, durable string) error {
+	return m.js.DeleteConsumer(ctx, stream, durable)
+}
+
 // consumerStreamMissingBeforeCreate is the fail-fast error for an application
 // stream that existed at plan time but is gone when ApplyConsumers calls
 // CreateConsumer — the analogue of streamMissingBeforeUpdate on the
@@ -56,8 +64,10 @@ func consumerStreamMissingBeforeCreate(stream string) error {
 		"consumer-stream-missing: stream %s no longer exists; run `partictl apply` to provision it first", stream)
 }
 
-// ApplyConsumers executes every create-consumer action in plan against js. It
-// precreates the per-partition durable consumers PlanConsumers found missing.
+// ApplyConsumers executes every create-consumer and recreate-consumer action in
+// plan against js. It precreates the per-partition durable consumers
+// PlanConsumers found missing, and (under PolicyForce) delete/recreates those
+// with drift-immutable drift.
 //
 // Consumer creation is idempotent on identity: a consumer that already exists
 // with the same identity / immutable fields is the desired outcome, so there
@@ -105,10 +115,16 @@ func ApplyConsumers(ctx context.Context, js jetstream.JetStream, plan PlanResult
 				return report, ferr
 			}
 
+		case ActionRecreateConsumer:
+			executed, err := applyRecreateConsumerAction(ctx, mgr, action)
+			if done, ferr := foldActionResult(&report, plan.Actions, i, action, executed, err); done {
+				return report, ferr
+			}
+
 		default:
-			// PlanConsumers emits only create-consumer. Defensive: surface an
-			// unknown kind as a fail-fast resource error so operators see what
-			// was rejected.
+			// PlanConsumers emits only create-consumer and recreate-consumer.
+			// Defensive: surface an unknown kind as a fail-fast resource error
+			// so operators see what was rejected.
 			err := fmt.Errorf("provision: apply consumers: unsupported action kind %q (resource %q)",
 				action.Kind, action.Name)
 			report.Errors = append(report.Errors, ResourceError{
@@ -193,7 +209,7 @@ func applyCreateConsumerAction(
 //     runtime-owned mutable tunables → raced success (Raced: true).
 //   - Any identity / immutable field differs → fail-fast ResourceError naming
 //     the offending field(s) — an identity divergence the operator resolves
-//     via the Phase 6 repair path.
+//     via the force-policy delete/recreate repair path.
 //   - The re-read itself returns ErrConsumerNotFound (the consumer was deleted
 //     between the failed create and the re-read) → fail-fast error.
 //   - The re-read is cancelled → cancellation surfaced to the caller.

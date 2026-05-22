@@ -77,6 +77,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   No ownership marker is stamped on consumers (stamping would oscillate against
   the runtime's unconditional overwrite). Consumer tunables are not managed by
   provision; `consumer.Dynamic` options remain the sole source of truth for them.
+- **`force` reconcile policy** — `provision.PolicyForce` (`"force"`, accepted by
+  `partictl plan`, `apply`, `stream plan/apply`, and `consumers plan/apply`). A
+  strict superset of `safe-update`: it create-misses and reconciles drift-mutable
+  fields in place as `safe-update` does, and additionally repairs a
+  drift-immutable resource by delete/recreate — but only when the resource's
+  config also sets `allowDeleteRecreate: true` (the two-layer gate). Under any
+  other policy, or for a resource without `allowDeleteRecreate: true`, immutable
+  drift is still reported but never repaired.
+- **Per-resource `allowDeleteRecreate` opt-in** — a new boolean field on each of
+  the four config structs (`controlPlane`, `partitionSource`, each `streams`
+  entry, each `dynamicConsumers` entry). When `true` and the policy is `force`,
+  Apply deletes and recreates the resource to repair drift-immutable divergences.
+  When omitted (the default, `false`), the resource is never deleted by provision
+  regardless of policy.
+- **`recreate-kv` / `recreate-stream` / `recreate-consumer` actions** — new
+  `PlannedAction` kinds (`ActionRecreateKV`, `ActionRecreateStream`,
+  `ActionRecreateConsumer`) emitted by `Plan` / `PlanConsumers` under `force`
+  when both gate layers opt in. `Apply` / `ApplyConsumers` execute the
+  five-step re-read → re-classify → delete → create sequence. A stale plan is
+  handled gracefully: the re-classify step skips the delete when the live state
+  no longer carries the immutable divergence the plan recorded. A post-delete
+  create failure returns a fail-fast error wrapping `provision.ErrRecreateInterrupted`;
+  re-running `apply` after fixing the persistent cause is safe (a fresh plan
+  emits an ordinary `create-*` action, no re-deletion).
 
 ## [v2.4.1] - 2026-05-20
 
