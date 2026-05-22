@@ -83,18 +83,13 @@ func applyUpdateKVAction(
 	}
 
 	// Step 1: re-read live state.
-	info, err := reader.StreamInfo(ctx, action.Name)
-	if errors.Is(err, jetstream.ErrStreamNotFound) {
-		return ExecutedAction{}, bucketMissingBeforeUpdate(action.Name)
-	}
+	info, err := reReadForUpdate(
+		func() (*jetstream.StreamInfo, error) { return reader.StreamInfo(ctx, action.Name) },
+		bucketMissingBeforeUpdate(action.Name),
+		func(e error) error { return fmt.Errorf("re-read %s%s: %w", kvStreamPrefix, action.Name, e) },
+	)
 	if err != nil {
-		// Cancellation surfaces here too; the caller distinguishes it
-		// via errors.Is. Other errors fail-fast wrapped.
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return ExecutedAction{}, err
-		}
-
-		return ExecutedAction{}, fmt.Errorf("re-read %s%s: %w", kvStreamPrefix, action.Name, err)
+		return ExecutedAction{}, err
 	}
 	live := streamConfigToKVConfig(info.Config)
 
@@ -202,18 +197,13 @@ func applyStampMarkerAction(
 	}
 
 	// Step 1: re-read live state.
-	info, err := reader.StreamInfo(ctx, action.Name)
-	if errors.Is(err, jetstream.ErrStreamNotFound) {
-		return ExecutedAction{}, bucketMissingBeforeStamp(action.Name)
-	}
+	info, err := reReadForUpdate(
+		func() (*jetstream.StreamInfo, error) { return reader.StreamInfo(ctx, action.Name) },
+		bucketMissingBeforeStamp(action.Name),
+		func(e error) error { return fmt.Errorf("re-read %s%s: %w", kvStreamPrefix, action.Name, e) },
+	)
 	if err != nil {
-		// Cancellation surfaces here too; the caller distinguishes it
-		// via errors.Is. Other errors fail-fast wrapped.
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return ExecutedAction{}, err
-		}
-
-		return ExecutedAction{}, fmt.Errorf("re-read %s%s: %w", kvStreamPrefix, action.Name, err)
+		return ExecutedAction{}, err
 	}
 	live := streamConfigToKVConfig(info.Config)
 

@@ -64,33 +64,6 @@ func TestStreamConfigToKVConfig_NoCompression_MapsToFalse(t *testing.T) {
 	require.False(t, kv.Compression)
 }
 
-// TestExtractLiveKVConfig_DelegationIsBehaviorPreserving guards that
-// extractLiveKVConfig, now delegating to streamConfigToKVConfig, still
-// yields the same comparison-subset values kvConfigsEqual reads.
-func TestExtractLiveKVConfig_DelegationIsBehaviorPreserving(t *testing.T) {
-	t.Parallel()
-
-	sc := jetstream.StreamConfig{
-		Name:              "KV_b",
-		MaxMsgSize:        2048,
-		MaxMsgsPerSubject: 1,
-		MaxAge:            time.Minute,
-		Storage:           jetstream.MemoryStorage,
-		Replicas:          1,
-		Metadata:          map[string]string{"x": "y"},
-	}
-	live := extractLiveKVConfig(&sc)
-
-	require.True(t, kvConfigsEqual(live, jetstream.KeyValueConfig{
-		MaxValueSize: 2048,
-		History:      1,
-		TTL:          time.Minute,
-		Storage:      jetstream.MemoryStorage,
-		Replicas:     1,
-		Metadata:     map[string]string{"x": "y"},
-	}))
-}
-
 // --- mergeUpdateKVMetadata ---------------------------------------------------
 
 func TestMergeUpdateKVMetadata_ForcesManagedAndSetsInstance(t *testing.T) {

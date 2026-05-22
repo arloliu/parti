@@ -263,45 +263,15 @@ func classifyStreamDrift(streamCfg StreamCfg, info *jetstream.StreamInfo, instan
 		}}
 	}
 
-	var mutable, immutable map[string]any
-	addImmutable := func(field string, detail map[string]any) {
-		if immutable == nil {
-			immutable = map[string]any{}
-		}
-		immutable[field] = detail
-	}
-	addMutable := func(field string, detail map[string]any) {
-		if mutable == nil {
-			mutable = map[string]any{}
-		}
-		mutable[field] = detail
-	}
+	var b driftBuilder
+	routeStreamFieldDrift(live, wanted, marker, instance, &b)
 
-	routeStreamFieldDrift(live, wanted, marker, instance, addMutable, addImmutable)
-
-	findings := make([]DriftFinding, 0, 2)
-	if len(immutable) > 0 {
-		findings = append(findings, DriftFinding{
-			Severity: SeverityDriftImmutable,
-			Kind:     KindApplicationStream,
-			Name:     streamCfg.Name,
-			Detail:   immutable,
-		})
-	}
-	if len(mutable) > 0 {
-		findings = append(findings, DriftFinding{
-			Severity: SeverityDriftMutable,
-			Kind:     KindApplicationStream,
-			Name:     streamCfg.Name,
-			Detail:   mutable,
-		})
-	}
-
-	return findings
+	return b.findings(KindApplicationStream, streamCfg.Name)
 }
 
 // routeStreamFieldDrift compares individual provision-managed fields of live and
-// wanted, routing each differing field to either addImmutable or addMutable.
+// wanted, routing each differing field to the driftBuilder as immutable or
+// mutable drift.
 //
 // Immutable: Storage, Retention, parti.io/component mismatch.
 // Mutable: Subjects, Discard, Replicas, MaxAge, MaxBytes, MaxMsgs, Description,
@@ -310,11 +280,10 @@ func routeStreamFieldDrift(
 	live, wanted jetstream.StreamConfig,
 	marker MarkerInfo,
 	instance string,
-	addMutable func(string, map[string]any),
-	addImmutable func(string, map[string]any),
+	b *driftBuilder,
 ) {
 	if live.Storage != wanted.Storage {
-		addImmutable("storage", map[string]any{
+		b.addImmutable("storage", map[string]any{
 			"want": storageName(wanted.Storage),
 			"got":  storageName(live.Storage),
 		})
@@ -323,7 +292,7 @@ func routeStreamFieldDrift(
 	// policy, since NATS accepts limits<->interest but rejects workqueue
 	// transitions and couples the update to consumer-replica state.
 	if live.Retention != wanted.Retention {
-		addImmutable("retention", map[string]any{
+		b.addImmutable("retention", map[string]any{
 			"want": retentionName(wanted.Retention),
 			"got":  retentionName(live.Retention),
 		})
@@ -334,43 +303,43 @@ func routeStreamFieldDrift(
 	slices.Sort(liveSubs)
 	slices.Sort(wantedSubs)
 	if !slices.Equal(liveSubs, wantedSubs) {
-		addMutable("subjects", map[string]any{
+		b.addMutable("subjects", map[string]any{
 			"want": wanted.Subjects,
 			"got":  live.Subjects,
 		})
 	}
 	if live.Discard != wanted.Discard {
-		addMutable("discard", map[string]any{
+		b.addMutable("discard", map[string]any{
 			"want": discardName(wanted.Discard),
 			"got":  discardName(live.Discard),
 		})
 	}
 	if normalizeReplicas(live.Replicas) != normalizeReplicas(wanted.Replicas) {
-		addMutable("replicas", map[string]any{
+		b.addMutable("replicas", map[string]any{
 			"want": normalizeReplicas(wanted.Replicas),
 			"got":  live.Replicas,
 		})
 	}
 	if live.MaxAge != wanted.MaxAge {
-		addMutable("maxAge", map[string]any{
+		b.addMutable("maxAge", map[string]any{
 			"want": wanted.MaxAge.String(),
 			"got":  live.MaxAge.String(),
 		})
 	}
 	if normalizeStreamLimit(live.MaxBytes) != normalizeStreamLimit(wanted.MaxBytes) {
-		addMutable("maxBytes", map[string]any{
+		b.addMutable("maxBytes", map[string]any{
 			"want": wanted.MaxBytes,
 			"got":  live.MaxBytes,
 		})
 	}
 	if normalizeStreamLimit(live.MaxMsgs) != normalizeStreamLimit(wanted.MaxMsgs) {
-		addMutable("maxMsgs", map[string]any{
+		b.addMutable("maxMsgs", map[string]any{
 			"want": wanted.MaxMsgs,
 			"got":  live.MaxMsgs,
 		})
 	}
 	if live.Description != wanted.Description {
-		addMutable("description", map[string]any{
+		b.addMutable("description", map[string]any{
 			"want": wanted.Description,
 			"got":  live.Description,
 		})
@@ -378,20 +347,20 @@ func routeStreamFieldDrift(
 
 	// Marker field drift.
 	if marker.Managed != MarkerManagedValue {
-		addMutable("managed", map[string]any{
+		b.addMutable("managed", map[string]any{
 			"want": MarkerManagedValue,
 			"got":  marker.Managed,
 		})
 	}
 	if marker.Instance != instance {
-		addMutable("instance", map[string]any{
+		b.addMutable("instance", map[string]any{
 			"want": instance,
 			"got":  marker.Instance,
 		})
 	}
 	// Component mismatch is immutable: the safe remediation is operator-driven.
 	if marker.Component != ComponentStream {
-		addImmutable("component", map[string]any{
+		b.addImmutable("component", map[string]any{
 			"want": ComponentStream,
 			"got":  marker.Component,
 		})

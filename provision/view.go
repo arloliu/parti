@@ -143,7 +143,7 @@ func kvBucketStateFromStreamInfo(info *jetstream.StreamInfo) (KVBucketState, boo
 		Managed:      marker.Managed,
 		Component:    marker.ClassifyComponent(),
 		Instance:     marker.Instance,
-		History:      uint8MaxClamp(info.Config.MaxMsgsPerSubject),
+		History:      historyFromStream(info.Config.MaxMsgsPerSubject),
 		Storage:      storageName(info.Config.Storage),
 		TTL:          info.Config.MaxAge,
 		Replicas:     info.Config.Replicas,
@@ -152,20 +152,6 @@ func kvBucketStateFromStreamInfo(info *jetstream.StreamInfo) (KVBucketState, boo
 	}
 
 	return state, true
-}
-
-// uint8MaxClamp converts a JetStream history-equivalent int64 to a uint8.
-// nats.go stores KV "History" via MaxMsgsPerSubject (always 1..64 for KV);
-// values outside that window indicate the stream was not created by nats.go
-// as a KV bucket, but we still want a sensible report.
-func uint8MaxClamp(v int64) uint8 {
-	if v <= 0 {
-		return 0
-	}
-	if v > 255 {
-		return 255
-	}
-	return uint8(v)
 }
 
 func storageName(s jetstream.StorageType) string {
@@ -181,11 +167,11 @@ func storageName(s jetstream.StorageType) string {
 
 func sortBucketStates(s []KVBucketState) {
 	slices.SortStableFunc(s, func(a, b KVBucketState) int {
-		if c := stringsCmp(a.Component, b.Component); c != 0 {
+		if c := strings.Compare(a.Component, b.Component); c != 0 {
 			return c
 		}
 
-		return stringsCmp(a.Bucket, b.Bucket)
+		return strings.Compare(a.Bucket, b.Bucket)
 	})
 }
 
@@ -261,6 +247,6 @@ func discardName(d jetstream.DiscardPolicy) string {
 
 func sortStreamStates(s []StreamState) {
 	slices.SortStableFunc(s, func(a, b StreamState) int {
-		return stringsCmp(a.Stream, b.Stream)
+		return strings.Compare(a.Stream, b.Stream)
 	})
 }

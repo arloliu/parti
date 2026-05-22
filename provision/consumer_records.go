@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/arloliu/parti/v2/internal/dynamicbuild"
-	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -91,16 +90,6 @@ func ValidateConsumerSet(cfg Config) error {
 	return nil
 }
 
-// resolveConsumerPartitions returns the declared partition set from cfg. It is
-// a thin indirection over cfg.PartitionSource.Partitions so a future phase can
-// swap in a live-read path without touching callers.
-//
-// Precondition: ValidateConsumerSet has already verified cfg.PartitionSource
-// is non-nil and Partitions is non-empty.
-func resolveConsumerPartitions(cfg Config) []types.Partition {
-	return cfg.PartitionSource.Partitions
-}
-
 // PlanConsumers computes the per-partition consumer diff between the declared
 // DynamicConsumerCfg entries that have opted into precreation (non-empty
 // PartitionsRef) and the live NATS state. It is read-only — it never mutates
@@ -143,7 +132,9 @@ func PlanConsumers(ctx context.Context, js jetstream.JetStream, cfg Config) (Pla
 		Drift:      []DriftFinding{},
 	}
 
-	partitions := resolveConsumerPartitions(cfg)
+	// ValidateConsumerSet has verified cfg.PartitionSource is non-nil and
+	// its Partitions slice is non-empty.
+	partitions := cfg.PartitionSource.Partitions
 
 	for _, dc := range cfg.DynamicConsumers {
 		if dc.PartitionsRef == "" {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/arloliu/parti/v2/internal/kvbuckets"
@@ -49,29 +50,35 @@ func Plan(ctx context.Context, js jetstream.JetStream, cfg Config) (PlanResult, 
 		Drift:      []DriftFinding{},
 	}
 
-	if resolved.ControlPlane != nil {
-		if err := planControlPlane(ctx, js, resolved, &out); err != nil {
-			if ctx.Err() != nil {
-				return PlanResult{}, ctx.Err()
+	// runPlanStep runs one plan step and normalizes its error: a cancelled
+	// ctx always wins, so a step that failed for any reason while ctx was
+	// cancelled is reported as a clean ctx.Err() rather than the inner error.
+	runPlanStep := func(step func() error) error {
+		if err := step(); err != nil {
+			if cerr := ctx.Err(); cerr != nil {
+				return cerr
 			}
+
+			return err
+		}
+
+		return nil
+	}
+
+	if resolved.ControlPlane != nil {
+		if err := runPlanStep(func() error { return planControlPlane(ctx, js, resolved, &out) }); err != nil {
 			return PlanResult{}, err
 		}
 	}
 
 	if resolved.PartitionSource != nil {
-		if err := planPartitionSource(ctx, js, resolved, &out); err != nil {
-			if ctx.Err() != nil {
-				return PlanResult{}, ctx.Err()
-			}
+		if err := runPlanStep(func() error { return planPartitionSource(ctx, js, resolved, &out) }); err != nil {
 			return PlanResult{}, err
 		}
 	}
 
 	if len(resolved.Streams) > 0 {
-		if err := planStreams(ctx, js, resolved, &out); err != nil {
-			if ctx.Err() != nil {
-				return PlanResult{}, ctx.Err()
-			}
+		if err := runPlanStep(func() error { return planStreams(ctx, js, resolved, &out) }); err != nil {
 			return PlanResult{}, err
 		}
 	}
@@ -318,7 +325,7 @@ func classifyControlPlaneDrift(spec controlPlaneSpec, info *jetstream.StreamInfo
 		}}
 	}
 
-	live := extractLiveKVConfig(&info.Config)
+	live := streamConfigToKVConfig(info.Config)
 	wanted := wantedControlPlaneKV(spec, instance, live)
 	if kvConfigsEqual(wanted, live) {
 		return []DriftFinding{{
@@ -329,83 +336,53 @@ func classifyControlPlaneDrift(spec controlPlaneSpec, info *jetstream.StreamInfo
 		}}
 	}
 
-	var mutable, immutable map[string]any
-	addImmutable := func(field string, detail map[string]any) {
-		if immutable == nil {
-			immutable = map[string]any{}
-		}
-		immutable[field] = detail
-	}
-	addMutable := func(field string, detail map[string]any) {
-		if mutable == nil {
-			mutable = map[string]any{}
-		}
-		mutable[field] = detail
-	}
+	var b driftBuilder
 
 	if live.Storage != wanted.Storage {
-		addImmutable("storage", map[string]any{
+		b.addImmutable("storage", map[string]any{
 			"want": storageName(wanted.Storage),
 			"got":  storageName(live.Storage),
 		})
 	}
 	if live.History != wanted.History {
-		addImmutable("history", map[string]any{
+		b.addImmutable("history", map[string]any{
 			"want": int64(wanted.History),
 			"got":  info.Config.MaxMsgsPerSubject,
 		})
 	}
 	if live.TTL != wanted.TTL {
-		addMutable("ttl", map[string]any{
+		b.addMutable("ttl", map[string]any{
 			"want": wanted.TTL.String(),
 			"got":  live.TTL.String(),
 		})
 	}
 	if normalizeReplicas(live.Replicas) != normalizeReplicas(wanted.Replicas) {
-		addMutable("replicas", map[string]any{
+		b.addMutable("replicas", map[string]any{
 			"want": normalizeReplicas(wanted.Replicas),
 			"got":  live.Replicas,
 		})
 	}
 	if marker.Managed != MarkerManagedValue {
-		addMutable("managed", map[string]any{
+		b.addMutable("managed", map[string]any{
 			"want": MarkerManagedValue,
 			"got":  marker.Managed,
 		})
 	}
 	if marker.Instance != instance {
-		addMutable("instance", map[string]any{
+		b.addMutable("instance", map[string]any{
 			"want": instance,
 			"got":  marker.Instance,
 		})
 	}
 	// Component mismatch is immutable: the safe remediation is operator-driven.
 	if marker.Component != spec.component {
-		addImmutable("component", map[string]any{
+		b.addImmutable("component", map[string]any{
 			"want": spec.component,
 			"got":  marker.Component,
 		})
 	}
 
-	findings := make([]DriftFinding, 0, 2)
-	if len(immutable) > 0 {
-		findings = append(findings, DriftFinding{
-			Severity: SeverityDriftImmutable,
-			Kind:     KindControlPlaneKV,
-			Name:     spec.bucket,
-			Detail:   immutable,
-		})
-	}
-	if len(mutable) > 0 {
-		findings = append(findings, DriftFinding{
-			Severity: SeverityDriftMutable,
-			Kind:     KindControlPlaneKV,
-			Name:     spec.bucket,
-			Detail:   mutable,
-		})
-	}
-
-	return findings
+	return b.findings(KindControlPlaneKV, spec.bucket)
 }
 
 // wantedControlPlaneKV returns the KeyValueConfig the spec implies, with
@@ -494,32 +471,20 @@ func buildControlPlaneUpdateTarget(spec controlPlaneSpec, instance string, befor
 
 func sortActions(s []PlannedAction) {
 	slices.SortStableFunc(s, func(a, b PlannedAction) int {
-		if c := stringsCmp(a.Kind, b.Kind); c != 0 {
+		if c := strings.Compare(a.Kind, b.Kind); c != 0 {
 			return c
 		}
 
-		return stringsCmp(a.Name, b.Name)
+		return strings.Compare(a.Name, b.Name)
 	})
 }
 
 func sortDrift(s []DriftFinding) {
 	slices.SortStableFunc(s, func(a, b DriftFinding) int {
-		if c := stringsCmp(a.Kind, b.Kind); c != 0 {
+		if c := strings.Compare(a.Kind, b.Kind); c != 0 {
 			return c
 		}
 
-		return stringsCmp(a.Name, b.Name)
+		return strings.Compare(a.Name, b.Name)
 	})
-}
-
-// stringsCmp returns -1/0/1 to satisfy slices.SortStableFunc's int contract.
-func stringsCmp(a, b string) int {
-	switch {
-	case a < b:
-		return -1
-	case a > b:
-		return 1
-	default:
-		return 0
-	}
 }

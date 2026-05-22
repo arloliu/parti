@@ -72,8 +72,8 @@ func normalizeMaxValueSize(s int32) int32 {
 // jetstream.KeyValueConfig covering every field nats.go's KeyValueConfig
 // exposes, so a round-trip through UpdateKeyValue preserves
 // preserved-from-live fields. This is the full projection; the
-// comparison-subset-only callers (drift classifiers) consume it through
-// extractLiveKVConfig, for which the extra fields are inert.
+// comparison-subset-only callers (drift classifiers) read only the
+// comparison-subset fields, for which the extra fields are inert.
 //
 // LimitMarkerTTL is backed by StreamConfig.SubjectDeleteMarkerTTL in
 // nats.go v1.50.0 (confirmed via KeyValueBucketStatus.LimitMarkerTTL,
@@ -97,17 +97,6 @@ func streamConfigToKVConfig(sc jetstream.StreamConfig) jetstream.KeyValueConfig 
 		LimitMarkerTTL: sc.SubjectDeleteMarkerTTL,
 		Metadata:       sc.Metadata,
 	}
-}
-
-// extractLiveKVConfig projects a live jetstream.StreamConfig onto a
-// jetstream.KeyValueConfig for drift comparison. It delegates to
-// streamConfigToKVConfig: the classifiers feed the result only to
-// kvConfigsEqual and the wantedControlPlaneKV / wantedPartitionSourceKV
-// builders, all of which read the comparison-subset fields only, so the
-// extra preserved-from-live fields the full projection populates are
-// inert here. The delegation removes a duplicate projection.
-func extractLiveKVConfig(sc *jetstream.StreamConfig) jetstream.KeyValueConfig {
-	return streamConfigToKVConfig(*sc)
 }
 
 // historyFromStream clamps the stream-side MaxMsgsPerSubject to the
