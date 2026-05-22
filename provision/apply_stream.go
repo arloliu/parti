@@ -147,18 +147,13 @@ func applyUpdateStreamAction(
 	}
 
 	// Step 1: re-read live state.
-	info, err := mgr.StreamInfo(ctx, action.Name)
-	if errors.Is(err, jetstream.ErrStreamNotFound) {
-		return ExecutedAction{}, streamMissingBeforeUpdate(action.Name)
-	}
+	info, err := reReadForUpdate(
+		func() (*jetstream.StreamInfo, error) { return mgr.StreamInfo(ctx, action.Name) },
+		streamMissingBeforeUpdate(action.Name),
+		func(e error) error { return fmt.Errorf("re-read %s: %w", action.Name, e) },
+	)
 	if err != nil {
-		// Cancellation surfaces here too; the caller distinguishes it via
-		// errors.Is. Other errors fail-fast wrapped.
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return ExecutedAction{}, err
-		}
-
-		return ExecutedAction{}, fmt.Errorf("re-read %s: %w", action.Name, err)
+		return ExecutedAction{}, err
 	}
 	live := info.Config
 
@@ -232,18 +227,13 @@ func applyStampStreamMarkerAction(
 	}
 
 	// Step 1: re-read live state.
-	info, err := mgr.StreamInfo(ctx, action.Name)
-	if errors.Is(err, jetstream.ErrStreamNotFound) {
-		return ExecutedAction{}, streamMissingBeforeStamp(action.Name)
-	}
+	info, err := reReadForUpdate(
+		func() (*jetstream.StreamInfo, error) { return mgr.StreamInfo(ctx, action.Name) },
+		streamMissingBeforeStamp(action.Name),
+		func(e error) error { return fmt.Errorf("re-read %s: %w", action.Name, e) },
+	)
 	if err != nil {
-		// Cancellation surfaces here too; the caller distinguishes it via
-		// errors.Is. Other errors fail-fast wrapped.
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return ExecutedAction{}, err
-		}
-
-		return ExecutedAction{}, fmt.Errorf("re-read %s: %w", action.Name, err)
+		return ExecutedAction{}, err
 	}
 	live := info.Config
 

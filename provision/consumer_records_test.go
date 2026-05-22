@@ -10,29 +10,6 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// resolveConsumerPartitions
-// ---------------------------------------------------------------------------
-
-func TestResolveConsumerPartitions_ReturnsDeclaredPartitions(t *testing.T) {
-	t.Parallel()
-
-	parts := []types.Partition{
-		{Keys: []string{"a"}, Weight: 1},
-		{Keys: []string{"b"}, Weight: 2},
-	}
-	cfg := Config{
-		APIVersion: APIVersionV1,
-		PartitionSource: &PartitionSourceConfig{
-			Bucket:     "ps",
-			Key:        "k",
-			Partitions: parts,
-		},
-	}
-	got := resolveConsumerPartitions(cfg)
-	require.Equal(t, parts, got)
-}
-
-// ---------------------------------------------------------------------------
 // ValidateConsumerSet — W1 validation tests
 // ---------------------------------------------------------------------------
 

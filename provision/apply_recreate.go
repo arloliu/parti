@@ -103,14 +103,13 @@ func applyRecreateKVAction(
 	}
 
 	// Step 1: re-read live state.
-	info, err := seam.StreamInfo(ctx, action.Name)
-	gone := errors.Is(err, jetstream.ErrStreamNotFound) || errors.Is(err, jetstream.ErrBucketNotFound)
-	if err != nil && !gone {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return ExecutedAction{}, err
-		}
-
-		return ExecutedAction{}, fmt.Errorf("re-read %s%s: %w", kvStreamPrefix, action.Name, err)
+	info, gone, err := reReadForRecreate(
+		func() (*jetstream.StreamInfo, error) { return seam.StreamInfo(ctx, action.Name) },
+		[]error{jetstream.ErrStreamNotFound, jetstream.ErrBucketNotFound},
+		func(e error) error { return fmt.Errorf("re-read %s%s: %w", kvStreamPrefix, action.Name, e) },
+	)
+	if err != nil {
+		return ExecutedAction{}, err
 	}
 
 	// Steps 2-3: when the bucket is still present, re-classify and delete. A
@@ -172,14 +171,13 @@ func applyRecreateStreamAction(
 	}
 
 	// Step 1: re-read live state.
-	info, err := mgr.StreamInfo(ctx, action.Name)
-	gone := errors.Is(err, jetstream.ErrStreamNotFound)
-	if err != nil && !gone {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return ExecutedAction{}, err
-		}
-
-		return ExecutedAction{}, fmt.Errorf("re-read %s: %w", action.Name, err)
+	info, gone, err := reReadForRecreate(
+		func() (*jetstream.StreamInfo, error) { return mgr.StreamInfo(ctx, action.Name) },
+		[]error{jetstream.ErrStreamNotFound},
+		func(e error) error { return fmt.Errorf("re-read %s: %w", action.Name, e) },
+	)
+	if err != nil {
+		return ExecutedAction{}, err
 	}
 
 	// Steps 2-3: when the stream is still present, re-classify and delete.
@@ -238,15 +236,15 @@ func applyRecreateConsumerAction(
 	durable := res.After.Durable
 
 	// Step 1: re-read live state.
-	info, err := mgr.ConsumerInfo(ctx, stream, durable)
-	gone := errors.Is(err, jetstream.ErrConsumerNotFound)
-	if err != nil && !gone {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return ExecutedAction{}, err
-		}
-
-		return ExecutedAction{}, fmt.Errorf(
-			"re-read consumer %q on stream %q: %w", durable, stream, err)
+	info, gone, err := reReadForRecreate(
+		func() (*jetstream.ConsumerInfo, error) { return mgr.ConsumerInfo(ctx, stream, durable) },
+		[]error{jetstream.ErrConsumerNotFound},
+		func(e error) error {
+			return fmt.Errorf("re-read consumer %q on stream %q: %w", durable, stream, e)
+		},
+	)
+	if err != nil {
+		return ExecutedAction{}, err
 	}
 
 	// Steps 2-3: when the consumer is still present, re-classify and delete.

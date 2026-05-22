@@ -172,7 +172,7 @@ func classifyPartitionSourceDrift(ps *PartitionSourceConfig, info *jetstream.Str
 		}}
 	}
 
-	live := extractLiveKVConfig(&info.Config)
+	live := streamConfigToKVConfig(info.Config)
 	wanted := wantedPartitionSourceKV(ps, instance, live)
 	if kvConfigsEqual(wanted, live) {
 		return []DriftFinding{{
@@ -183,53 +183,41 @@ func classifyPartitionSourceDrift(ps *PartitionSourceConfig, info *jetstream.Str
 		}}
 	}
 
-	var mutable, immutable map[string]any
-	addImmutable := func(field string, detail map[string]any) {
-		if immutable == nil {
-			immutable = map[string]any{}
-		}
-		immutable[field] = detail
-	}
-	addMutable := func(field string, detail map[string]any) {
-		if mutable == nil {
-			mutable = map[string]any{}
-		}
-		mutable[field] = detail
-	}
+	var b driftBuilder
 
 	if live.Storage != wanted.Storage {
-		addImmutable("storage", map[string]any{
+		b.addImmutable("storage", map[string]any{
 			"want": storageName(wanted.Storage),
 			"got":  storageName(live.Storage),
 		})
 	}
 	if live.History != wanted.History {
-		addImmutable("history", map[string]any{
+		b.addImmutable("history", map[string]any{
 			"want": int64(wanted.History),
 			"got":  info.Config.MaxMsgsPerSubject,
 		})
 	}
 	if normalizeReplicas(live.Replicas) != normalizeReplicas(wanted.Replicas) {
-		addMutable("replicas", map[string]any{
+		b.addMutable("replicas", map[string]any{
 			"want": normalizeReplicas(wanted.Replicas),
 			"got":  live.Replicas,
 		})
 	}
 	if normalizeMaxValueSize(live.MaxValueSize) != normalizeMaxValueSize(wanted.MaxValueSize) {
-		addMutable("maxValueSize", map[string]any{
+		b.addMutable("maxValueSize", map[string]any{
 			"want": wanted.MaxValueSize,
 			"got":  info.Config.MaxMsgSize,
 		})
 	}
 	if live.TTL != wanted.TTL {
-		addMutable("ttl", map[string]any{
+		b.addMutable("ttl", map[string]any{
 			"want": wanted.TTL.String(),
 			"got":  live.TTL.String(),
 		})
 	}
 
 	if marker.Managed != MarkerManagedValue {
-		addMutable("managed", map[string]any{
+		b.addMutable("managed", map[string]any{
 			"want": MarkerManagedValue,
 			"got":  marker.Managed,
 		})
@@ -237,37 +225,19 @@ func classifyPartitionSourceDrift(ps *PartitionSourceConfig, info *jetstream.Str
 	// Component mismatch is immutable: a bucket stamped for a different
 	// role is a misconfiguration safe-update must not silently re-label.
 	if marker.Component != ComponentPartitionSource {
-		addImmutable("component", map[string]any{
+		b.addImmutable("component", map[string]any{
 			"want": ComponentPartitionSource,
 			"got":  marker.Component,
 		})
 	}
 	if marker.Instance != instance {
-		addMutable("instance", map[string]any{
+		b.addMutable("instance", map[string]any{
 			"want": instance,
 			"got":  marker.Instance,
 		})
 	}
 
-	findings := make([]DriftFinding, 0, 2)
-	if len(immutable) > 0 {
-		findings = append(findings, DriftFinding{
-			Severity: SeverityDriftImmutable,
-			Kind:     KindPartitionSource,
-			Name:     ps.Bucket,
-			Detail:   immutable,
-		})
-	}
-	if len(mutable) > 0 {
-		findings = append(findings, DriftFinding{
-			Severity: SeverityDriftMutable,
-			Kind:     KindPartitionSource,
-			Name:     ps.Bucket,
-			Detail:   mutable,
-		})
-	}
-
-	return findings
+	return b.findings(KindPartitionSource, ps.Bucket)
 }
 
 // wantedPartitionSourceKV returns the KeyValueConfig the ps implies, with
