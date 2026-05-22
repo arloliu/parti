@@ -140,11 +140,11 @@ func TestReconcileHandoffBucketMaxAge_FailLoudWhenUpdateDenied(t *testing.T) {
 	require.NoError(t, err)
 
 	// Simulate a NATS user without stream-update permission.
-	orig := handoffStreamUpdate
-	handoffStreamUpdate = func(_ context.Context, _ jetstream.JetStream, _ jetstream.StreamConfig) error {
+	orig := kvStreamUpdate
+	kvStreamUpdate = func(_ context.Context, _ jetstream.JetStream, _ jetstream.StreamConfig) error {
 		return errors.New("nats: permissions violation for stream update")
 	}
-	defer func() { handoffStreamUpdate = orig }()
+	defer func() { kvStreamUpdate = orig }()
 
 	cfg := twoPhaseHandoffConfig(bucket)
 	mgr, err := NewManager(&cfg, js, source.NewStatic([]Partition{{Keys: []string{"p1"}}}), strategy.NewConsistentHash())
@@ -175,12 +175,12 @@ func TestReconcileHandoffBucketMaxAge_LeastPrivilegeHappyPath(t *testing.T) {
 	require.NoError(t, err)
 
 	// Any stream update would be a bug — fail the test if reconcile calls it.
-	orig := handoffStreamUpdate
-	handoffStreamUpdate = func(_ context.Context, _ jetstream.JetStream, _ jetstream.StreamConfig) error {
+	orig := kvStreamUpdate
+	kvStreamUpdate = func(_ context.Context, _ jetstream.JetStream, _ jetstream.StreamConfig) error {
 		t.Error("reconcile must not attempt a stream update when MaxAge is already 0")
 		return errors.New("unexpected stream update")
 	}
-	defer func() { handoffStreamUpdate = orig }()
+	defer func() { kvStreamUpdate = orig }()
 
 	cfg := twoPhaseHandoffConfig(bucket)
 	mgr, err := NewManager(&cfg, js, source.NewStatic([]Partition{{Keys: []string{"p1"}}}), strategy.NewConsistentHash())

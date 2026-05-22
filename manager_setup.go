@@ -31,12 +31,24 @@ func (m *Manager) prepareStart(ctx context.Context) (context.Context, context.Ca
 	return ctx, func() {}, nil
 }
 
-// ensureStableIDKV ensures the StableID KV bucket exists.
+// ensureStableIDKV ensures the StableID KV bucket exists and that its MaxAge
+// matches WorkerIDTTL. The bucket relies entirely on MaxAge to expire
+// abandoned claims; an operator-created bucket with a divergent MaxAge (most
+// dangerously 0) is reconciled here, since ensureKVBucket is get-first and
+// does not correct an existing bucket's config.
 func (m *Manager) ensureStableIDKV(ctx context.Context, js jetstream.JetStream) (jetstream.KeyValue, error) {
 	kv, err := m.ensureKVBucket(ctx, js, m.cfg.KVBuckets.StableIDBucket, m.cfg.WorkerIDTTL, jetstream.FileStorage)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create stable ID KV: %w", err)
 	}
+
+	rctx, rcancel := context.WithTimeout(ctx, m.cfg.OperationTimeout)
+	rErr := reconcileStableIDBucketMaxAge(rctx, js, kv, m.cfg.KVBuckets.StableIDBucket, m.cfg.WorkerIDTTL, m.logger)
+	rcancel()
+	if rErr != nil {
+		return nil, rErr
+	}
+
 	return kv, nil
 }
 
@@ -173,11 +185,11 @@ func (m *Manager) ensureKVBucket(
 	return kv, nil
 }
 
-// handoffStreamUpdate applies a JetStream stream config update. It is a
-// package-level indirection so reconcileHandoffBucketMaxAge's fail-loud branch
-// is unit-testable without configuring NATS account permissions. Production
-// code never reassigns it.
-var handoffStreamUpdate = func(ctx context.Context, js jetstream.JetStream, cfg jetstream.StreamConfig) error {
+// kvStreamUpdate applies a JetStream stream config update. It is a
+// package-level indirection so the MaxAge reconcilers' fail-loud branches are
+// unit-testable without configuring NATS account permissions. Production code
+// never reassigns it.
+var kvStreamUpdate = func(ctx context.Context, js jetstream.JetStream, cfg jetstream.StreamConfig) error {
 	_, err := js.UpdateStream(ctx, cfg)
 	return err
 }
@@ -234,7 +246,7 @@ func reconcileHandoffBucketMaxAge(
 
 	next := cfg
 	next.MaxAge = 0
-	if uerr := handoffStreamUpdate(ctx, js, next); uerr != nil {
+	if uerr := kvStreamUpdate(ctx, js, next); uerr != nil {
 		// A concurrent worker may have reconciled the bucket already.
 		if cur, rerr := kvStreamConfig(ctx, kv); rerr == nil && cur.MaxAge == 0 {
 			return nil
@@ -252,6 +264,85 @@ func reconcileHandoffBucketMaxAge(
 	if logger != nil {
 		logger.Info("cleared stale MaxAge on handoff KV bucket",
 			"bucket", bucket, "previous_max_age", cfg.MaxAge)
+	}
+
+	return nil
+}
+
+// reconcileStableIDBucketMaxAge aligns an already-existing stableID KV bucket's
+// MaxAge to wantMaxAge (the configured WorkerIDTTL). The stableID bucket relies
+// entirely on MaxAge to expire abandoned claims: a worker that crashes without
+// releasing leaves its key behind, and only the bucket TTL frees the ID for
+// reuse. An operator-created bucket with MaxAge=0 (unlimited) silently disables
+// that — every ungraceful restart then leaks a worker ID until the pool is
+// exhausted. Bucket creation is get-first, so opening such a bucket does not
+// fix it — this does.
+//
+// The update also clamps the backing stream's Duplicates window to wantMaxAge
+// when it would otherwise exceed it — JetStream rejects an UpdateStream whose
+// Duplicates window is larger than MaxAge.
+//
+// It returns nil only when the bucket is positively confirmed to carry
+// MaxAge == wantMaxAge — either it already did, or the update to align it
+// succeeded. It returns an actionable error (so Manager.Start fails loudly
+// rather than continuing into a delayed worker-ID leak) when the bucket's
+// MaxAge cannot be verified, or when a divergent MaxAge cannot be corrected
+// (e.g. a least-privilege NATS user without stream-update permission).
+func reconcileStableIDBucketMaxAge(
+	ctx context.Context,
+	js jetstream.JetStream,
+	kv jetstream.KeyValue,
+	bucket string,
+	wantMaxAge time.Duration,
+	logger types.Logger,
+) error {
+	cfg, err := kvStreamConfig(ctx, kv)
+	if err != nil {
+		// The bucket was just opened, so a status failure here is unexpected.
+		// Fail loud rather than silently skip: an unverified bucket may carry
+		// MaxAge=0 and leak a worker ID on every ungraceful restart.
+		return fmt.Errorf(
+			"stableID KV bucket %q: cannot verify MaxAge: %w — a MaxAge that "+
+				"differs from WorkerIDTTL leaks stable worker IDs on ungraceful "+
+				"restart; retry startup, or verify the bucket TTL matches WorkerIDTTL",
+			bucket, err,
+		)
+	}
+	if cfg.MaxAge == wantMaxAge {
+		return nil
+	}
+
+	next := cfg
+	next.MaxAge = wantMaxAge
+	// A KV bucket's backing stream carries a Duplicates window — 2m by default
+	// for a bucket created with no TTL. JetStream rejects UpdateStream with
+	// "duplicates window can not be larger than max age" (err 10052) whenever
+	// Duplicates > MaxAge, so Duplicates must be clamped in the same call.
+	// This matches what CreateKeyValue(TTL=wantMaxAge) itself produces: a
+	// TTL'd KV bucket is created with Duplicates == MaxAge. (Clearing MaxAge to
+	// 0 — what the handoff reconciler does — needs no clamp, since 0 means
+	// "unlimited" and no Duplicates value can exceed it.)
+	if next.Duplicates > wantMaxAge {
+		next.Duplicates = wantMaxAge
+	}
+	if uerr := kvStreamUpdate(ctx, js, next); uerr != nil {
+		// A concurrent worker may have reconciled the bucket already.
+		if cur, rerr := kvStreamConfig(ctx, kv); rerr == nil && cur.MaxAge == wantMaxAge {
+			return nil
+		}
+
+		return fmt.Errorf(
+			"stableID KV bucket %q has MaxAge=%v, which differs from WorkerIDTTL=%v "+
+				"and leaks stable worker IDs on ungraceful restart; parti could not "+
+				"correct it: %w — recreate the bucket with TTL=WorkerIDTTL (e.g. via "+
+				"partictl) or grant this NATS user stream-update permission",
+			bucket, cfg.MaxAge, wantMaxAge, uerr,
+		)
+	}
+
+	if logger != nil {
+		logger.Info("reconciled MaxAge on stableID KV bucket",
+			"bucket", bucket, "previous_max_age", cfg.MaxAge, "new_max_age", wantMaxAge)
 	}
 
 	return nil
