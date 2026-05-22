@@ -16,9 +16,10 @@ const kvStreamPrefix = "KV_"
 // filtered by scope.
 //
 // The implementation walks $JS.API.STREAM.LIST (via jetstream.ListStreams)
-// once, filters for KV streams (Name starts with "KV_"), and reads
-// stream.Config.Metadata to decide which buckets are Parti-managed. Unmarked
-// buckets are excluded from default View output.
+// once, filters for KV streams (Name starts with "KV_") and application
+// streams (all other names), and reads stream.Config.Metadata to decide which
+// resources are Parti-managed. Unmarked resources are excluded from default
+// View output.
 //
 // Cancellation: ctx cancellation returns a zero-value Snapshot plus ctx.Err().
 func View(ctx context.Context, js jetstream.JetStream, scope Scope) (Snapshot, error) {
@@ -33,11 +34,12 @@ func View(ctx context.Context, js jetstream.JetStream, scope Scope) (Snapshot, e
 		ControlPlane:     []KVBucketState{},
 		PartitionSource:  []KVBucketState{},
 		DynamicConsumers: []ConsumerState{},
+		Streams:          []StreamState{},
 	}
 
-	// Short-circuit: nothing to do if no KV kinds are requested.
+	// Short-circuit: nothing to do if no resource kinds are requested.
 	// DynamicConsumers is not yet populated by View.
-	if !scope.ControlPlane && !scope.PartitionSource {
+	if !scope.ControlPlane && !scope.PartitionSource && !scope.Streams {
 		return snap, nil
 	}
 
@@ -49,25 +51,41 @@ func View(ctx context.Context, js jetstream.JetStream, scope Scope) (Snapshot, e
 		if info == nil {
 			continue
 		}
-		state, ok := kvBucketStateFromStreamInfo(info)
-		if !ok {
-			continue
+		appendStreamInfo(&snap, scope, info)
+	}
+	if err := lister.Err(); err != nil {
+		// Distinguish ctx cancellation (handled at top) from server-side
+		// errors. The latter we propagate to the caller.
+		if ctx.Err() != nil {
+			return Snapshot{}, ctx.Err()
 		}
-		// Default View filter: skip resources without a Parti marker.
-		if state.Managed == "" {
-			continue
-		}
-		// Instance filter: when set, drop entries with a mismatching
-		// (or absent) instance value.
-		if scope.Instance != "" && state.Instance != scope.Instance {
-			continue
-		}
+		return Snapshot{}, err
+	}
 
-		// Categorize by component value. Known control-plane components
-		// and unknown forward-compat values both surface under
-		// ControlPlane (operators don't lose visibility of new
-		// components). PartitionSource has its own slot. Anything else
-		// (dynamic-consumer, future categories) is silently dropped.
+	sortBucketStates(snap.ControlPlane)
+	sortBucketStates(snap.PartitionSource)
+	sortStreamStates(snap.Streams)
+
+	return snap, nil
+}
+
+// appendStreamInfo classifies a single *jetstream.StreamInfo and appends it to
+// the appropriate Snapshot slot if scope and filters permit.
+func appendStreamInfo(snap *Snapshot, scope Scope, info *jetstream.StreamInfo) {
+	if strings.HasPrefix(info.Config.Name, kvStreamPrefix) {
+		// KV bucket path: existing classifier, unchanged.
+		state, ok := kvBucketStateFromStreamInfo(info)
+		if !ok || state.Managed == "" {
+			return
+		}
+		if scope.Instance != "" && state.Instance != scope.Instance {
+			return
+		}
+		// Categorize by component value. Known control-plane components and
+		// unknown forward-compat values both surface under ControlPlane
+		// (operators don't lose visibility of new components). PartitionSource
+		// has its own slot. Anything else (dynamic-consumer, future categories)
+		// is silently dropped.
 		switch state.Component {
 		case ComponentPartitionSource:
 			if scope.PartitionSource {
@@ -83,20 +101,21 @@ func View(ctx context.Context, js jetstream.JetStream, scope Scope) (Snapshot, e
 				snap.ControlPlane = append(snap.ControlPlane, state)
 			}
 		}
-	}
-	if err := lister.Err(); err != nil {
-		// Distinguish ctx cancellation (handled at top) from server-side
-		// errors. The latter we propagate to the caller.
-		if ctx.Err() != nil {
-			return Snapshot{}, ctx.Err()
-		}
-		return Snapshot{}, err
+
+		return
 	}
 
-	sortBucketStates(snap.ControlPlane)
-	sortBucketStates(snap.PartitionSource)
-
-	return snap, nil
+	// Application stream path.
+	state, ok := streamStateFromStreamInfo(info)
+	if !ok {
+		return
+	}
+	if scope.Instance != "" && state.Instance != scope.Instance {
+		return
+	}
+	if scope.Streams {
+		snap.Streams = append(snap.Streams, state)
+	}
 }
 
 // kvBucketStateFromStreamInfo decodes a *jetstream.StreamInfo into a
@@ -167,5 +186,81 @@ func sortBucketStates(s []KVBucketState) {
 		}
 
 		return stringsCmp(a.Bucket, b.Bucket)
+	})
+}
+
+// streamStateFromStreamInfo decodes a *jetstream.StreamInfo into a StreamState
+// for a candidate application (non-KV) stream. It returns (_, false) if the
+// stream carries no Parti marker or if the marker component is not
+// ComponentStream — those resources are not application streams and are dropped
+// by the default View filter.
+func streamStateFromStreamInfo(info *jetstream.StreamInfo) (StreamState, bool) {
+	marker := ParseMarker(info.Config.Metadata)
+	// Default View filter: unmarked streams are excluded.
+	if !marker.IsManaged() {
+		return StreamState{}, false
+	}
+	// Non-stream-component markers on a non-KV stream are not application
+	// streams — drop them.
+	if marker.ClassifyComponent() != ComponentStream {
+		return StreamState{}, false
+	}
+
+	// Normalize live MaxBytes and MaxMsgs: NATS stores "no limit" as -1 at
+	// the stream level, but provision convention uses 0 for "no limit".
+	maxBytes := info.Config.MaxBytes
+	if maxBytes == -1 {
+		maxBytes = 0
+	}
+	maxMsgs := info.Config.MaxMsgs
+	if maxMsgs == -1 {
+		maxMsgs = 0
+	}
+
+	state := StreamState{
+		Stream:    info.Config.Name,
+		Managed:   marker.Managed,
+		Component: marker.ClassifyComponent(),
+		Instance:  marker.Instance,
+		Subjects:  info.Config.Subjects,
+		Retention: retentionName(info.Config.Retention),
+		Storage:   storageName(info.Config.Storage),
+		Discard:   discardName(info.Config.Discard),
+		Replicas:  info.Config.Replicas,
+		MaxAge:    info.Config.MaxAge,
+		MaxBytes:  maxBytes,
+		MaxMsgs:   maxMsgs,
+	}
+
+	return state, true
+}
+
+func retentionName(r jetstream.RetentionPolicy) string {
+	switch r {
+	case jetstream.LimitsPolicy:
+		return "limits"
+	case jetstream.WorkQueuePolicy:
+		return "workqueue"
+	case jetstream.InterestPolicy:
+		return "interest"
+	default:
+		return ""
+	}
+}
+
+func discardName(d jetstream.DiscardPolicy) string {
+	switch d {
+	case jetstream.DiscardOld:
+		return "old"
+	case jetstream.DiscardNew:
+		return "new"
+	default:
+		return ""
+	}
+}
+
+func sortStreamStates(s []StreamState) {
+	slices.SortStableFunc(s, func(a, b StreamState) int {
+		return stringsCmp(a.Stream, b.Stream)
 	})
 }

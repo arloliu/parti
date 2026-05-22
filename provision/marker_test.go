@@ -93,3 +93,27 @@ func TestBuildMarker_ParseMarker_Roundtrip(t *testing.T) {
 	require.Equal(t, provision.ComponentPartitionSource, parsed.Component)
 	require.Equal(t, "envA", parsed.Instance)
 }
+
+// TestParseMarker_ComponentStream verifies that a stream-marked resource
+// is classified as ComponentStream by both ParseMarker and ClassifyComponent.
+func TestParseMarker_ComponentStream(t *testing.T) {
+	t.Parallel()
+	m := provision.BuildMarker(provision.ComponentStream, "prod")
+	info := provision.ParseMarker(m)
+	require.True(t, info.IsManaged())
+	require.Equal(t, provision.ComponentStream, info.Component)
+	require.Equal(t, provision.ComponentStream, info.ClassifyComponent())
+	require.Equal(t, "prod", info.Instance)
+}
+
+// TestClassifyComponent_ComponentStream verifies that ClassifyComponent returns
+// ComponentStream (not ComponentUnknown) for a stream-marked resource.
+func TestClassifyComponent_ComponentStream(t *testing.T) {
+	t.Parallel()
+	info := provision.ParseMarker(map[string]string{
+		provision.MarkerManagedKey:   provision.MarkerManagedValue,
+		provision.MarkerComponentKey: provision.ComponentStream,
+	})
+	require.True(t, info.IsManaged())
+	require.Equal(t, provision.ComponentStream, info.ClassifyComponent())
+}

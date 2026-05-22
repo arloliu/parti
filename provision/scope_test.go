@@ -13,6 +13,7 @@ func TestScopeAll_IncludesEveryKind(t *testing.T) {
 	require.True(t, s.ControlPlane)
 	require.True(t, s.PartitionSource)
 	require.True(t, s.DynamicConsumers)
+	require.True(t, s.Streams)
 	require.Equal(t, "", s.Instance)
 }
 
@@ -37,11 +38,15 @@ func TestScopeFromConfig_AllSet(t *testing.T) {
 		DynamicConsumers: []provision.DynamicConsumerCfg{
 			{StreamName: "orders"},
 		},
+		Streams: []provision.StreamCfg{
+			{Name: "orders", Subjects: []string{"orders.>"}},
+		},
 	}
 	s := provision.ScopeFromConfig(cfg)
 	require.True(t, s.ControlPlane)
 	require.True(t, s.PartitionSource)
 	require.True(t, s.DynamicConsumers)
+	require.True(t, s.Streams)
 	require.Equal(t, "prod", s.Instance)
 }
 
@@ -52,4 +57,13 @@ func TestScopeFromConfig_EmptyDynamicConsumersDoesNotEnable(t *testing.T) {
 	}
 	s := provision.ScopeFromConfig(cfg)
 	require.False(t, s.DynamicConsumers)
+}
+
+func TestScopeFromConfig_EmptyStreamsDoesNotEnable(t *testing.T) {
+	t.Parallel()
+	cfg := provision.Config{
+		Streams: []provision.StreamCfg{},
+	}
+	s := provision.ScopeFromConfig(cfg)
+	require.False(t, s.Streams)
 }

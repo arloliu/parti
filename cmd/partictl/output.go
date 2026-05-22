@@ -30,7 +30,8 @@ func renderSnapshotText(w io.Writer, snap provision.Snapshot) {
 
 	allEmpty := len(snap.ControlPlane) == 0 &&
 		len(snap.PartitionSource) == 0 &&
-		len(snap.DynamicConsumers) == 0
+		len(snap.DynamicConsumers) == 0 &&
+		len(snap.Streams) == 0
 	if allEmpty {
 		fmt.Fprintln(w, "no Parti-managed resources found")
 		return
@@ -64,6 +65,16 @@ func renderSnapshotText(w io.Writer, snap provision.Snapshot) {
 		for _, c := range snap.DynamicConsumers {
 			fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n",
 				c.StreamName, c.Durable, c.Component, c.Instance)
+		}
+		fmt.Fprintln(tw)
+	}
+
+	if len(snap.Streams) > 0 {
+		fmt.Fprintln(tw, "APPLICATION STREAMS")
+		fmt.Fprintln(tw, "  STREAM\tCOMPONENT\tSTORAGE\tRETENTION\tREPLICAS\tINSTANCE")
+		for _, s := range snap.Streams {
+			fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%d\t%s\n",
+				s.Stream, s.Component, s.Storage, s.Retention, s.Replicas, s.Instance)
 		}
 		fmt.Fprintln(tw)
 	}

@@ -3,6 +3,9 @@ package provision
 import (
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
+	"unicode"
 )
 
 // ErrInvalidConfig is the sentinel returned by Validate for any static
@@ -111,6 +114,31 @@ func normalize(cfg Config) (Config, error) {
 		out.DynamicConsumers = dc
 	}
 
+	// Streams is a slice of value structs; deep-copy the backing array so
+	// caller-owned entries are not mutated when defaults are applied.
+	if len(cfg.Streams) > 0 {
+		ss := make([]StreamCfg, len(cfg.Streams))
+		copy(ss, cfg.Streams)
+		for i := range ss {
+			// Clone the Subjects slice so a caller's backing array is never
+			// aliased by the defaulted Config (the StreamCfg structs hold a
+			// slice; the outer copy above is shallow for it).
+			if len(ss[i].Subjects) > 0 {
+				ss[i].Subjects = slices.Clone(ss[i].Subjects)
+			}
+			if ss[i].Retention == "" {
+				ss[i].Retention = "limits"
+			}
+			if ss[i].Storage == "" {
+				ss[i].Storage = "file"
+			}
+			if ss[i].Discard == "" {
+				ss[i].Discard = "old"
+			}
+		}
+		out.Streams = ss
+	}
+
 	return out, nil
 }
 
@@ -139,6 +167,13 @@ func validateResolved(cfg Config) error {
 	}
 
 	// DynamicConsumers: deeper static validation is not yet implemented.
+
+	if len(cfg.Streams) > 0 {
+		if err := validateStreams(cfg.Streams); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -214,6 +249,73 @@ func validateControlPlane(cp ControlPlaneConfig) error {
 	// values are rejected. No upper bound here — the server enforces feasibility.
 	if cp.Replicas < 0 {
 		return fmt.Errorf("%w: controlPlane.replicas must be >= 0", ErrInvalidConfig)
+	}
+
+	return nil
+}
+
+// validateStreams validates a Streams slice that has already had
+// Retention/Storage/Discard defaults applied by normalize.
+func validateStreams(streams []StreamCfg) error {
+	seen := make(map[string]bool, len(streams))
+	for i, s := range streams {
+		if s.Name == "" {
+			return fmt.Errorf("%w: streams[%d].name must not be empty", ErrInvalidConfig, i)
+		}
+		if seen[s.Name] {
+			return fmt.Errorf("%w: streams[%d].name %q is a duplicate", ErrInvalidConfig, i, s.Name)
+		}
+		seen[s.Name] = true
+
+		if len(s.Subjects) == 0 {
+			return fmt.Errorf("%w: streams[%d].subjects must contain at least one entry", ErrInvalidConfig, i)
+		}
+		for j, subj := range s.Subjects {
+			if subj == "" {
+				return fmt.Errorf("%w: streams[%d].subjects[%d] must not be empty", ErrInvalidConfig, i, j)
+			}
+			if strings.IndexFunc(subj, unicode.IsSpace) >= 0 {
+				return fmt.Errorf("%w: streams[%d].subjects[%d] %q must not contain whitespace",
+					ErrInvalidConfig, i, j, subj)
+			}
+		}
+
+		switch s.Retention {
+		case "limits", "workqueue", "interest":
+			// valid
+		default:
+			return fmt.Errorf("%w: streams[%d].retention %q is not valid (must be %q, %q, or %q)",
+				ErrInvalidConfig, i, s.Retention, "limits", "workqueue", "interest")
+		}
+
+		switch s.Storage {
+		case "file", "memory":
+			// valid
+		default:
+			return fmt.Errorf("%w: streams[%d].storage %q is not valid (must be %q or %q)",
+				ErrInvalidConfig, i, s.Storage, "file", "memory")
+		}
+
+		switch s.Discard {
+		case "old", "new":
+			// valid
+		default:
+			return fmt.Errorf("%w: streams[%d].discard %q is not valid (must be %q or %q)",
+				ErrInvalidConfig, i, s.Discard, "old", "new")
+		}
+
+		if s.Replicas < 0 {
+			return fmt.Errorf("%w: streams[%d].replicas must be >= 0", ErrInvalidConfig, i)
+		}
+		if s.MaxAge < 0 {
+			return fmt.Errorf("%w: streams[%d].maxAge must be >= 0", ErrInvalidConfig, i)
+		}
+		if s.MaxBytes < 0 {
+			return fmt.Errorf("%w: streams[%d].maxBytes must be >= 0", ErrInvalidConfig, i)
+		}
+		if s.MaxMsgs < 0 {
+			return fmt.Errorf("%w: streams[%d].maxMsgs must be >= 0", ErrInvalidConfig, i)
+		}
 	}
 
 	return nil

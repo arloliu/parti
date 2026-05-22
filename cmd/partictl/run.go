@@ -34,6 +34,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdAdopt(rest, stdout, stderr)
 	case "partitions":
 		return cmdPartitions(rest, stdout, stderr)
+	case "stream":
+		return cmdStream(rest, stdout, stderr)
 	case "help", "-help", "--help", "-h":
 		printUsage(stdout)
 		return ExitOK
@@ -58,6 +60,7 @@ Commands:
   apply       Create missing resources; -dry-run emits the same output as plan
   adopt       Stamp Parti ownership marker on unmarked resources (shorthand for apply --policy=adopt)
   partitions  Plan/apply the partition-source key contents (partitions plan|apply)
+  stream      Manage application JetStream streams (stream view|plan|apply)
 
 Common flags (accepted by all commands):
   -server   <url>       NATS server URL (default: $NATS_URL or nats://127.0.0.1:4222)
@@ -72,7 +75,7 @@ Common flags (accepted by all commands):
                         Not accepted by partitions — record reconciliation ignores policy.
 
 Deferred commands (not yet supported):
-  stream view/plan/apply, init, emit
+  init, emit
 
 Exit codes:
   0  success

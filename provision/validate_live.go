@@ -97,6 +97,20 @@ func ValidateLive(ctx context.Context, js jetstream.JetStream, cfg Config) (Repo
 		}
 	}
 
+	// Step 1.E: per-stream info probes — only when one or more application
+	// streams are declared. Uses the raw NATS stream name (no "KV_" prefix).
+	if len(cfg.Streams) > 0 {
+		for _, streamCfg := range cfg.Streams {
+			if err := ctx.Err(); err != nil {
+				return Report{}, err
+			}
+			if err := probeStreamInfo(ctx, js, streamCfg.Name); err != nil {
+				return liveErrorReport(KindApplicationStream, streamCfg.Name, err),
+					fmt.Errorf("provision: validatelive: stream info %q: %w", streamCfg.Name, err)
+			}
+		}
+	}
+
 	// Dynamic-consumer live checks. Only runs when the caller declared one or
 	// more dynamic-consumer alignment targets. A failure here is a
 	// config-mismatch (WorkQueuePolicy + incompatible recovery strategy),
@@ -125,6 +139,29 @@ func ValidateLive(ctx context.Context, js jetstream.JetStream, cfg Config) (Repo
 // otherwise classifies the error via classifyLiveError.
 func probeBucketInfo(ctx context.Context, js jetstream.JetStream, bucket string) error {
 	stream, err := js.Stream(ctx, kvStreamPrefix+bucket)
+	if err != nil {
+		if errors.Is(err, jetstream.ErrStreamNotFound) {
+			return nil
+		}
+		return classifyLiveError(ctx, err)
+	}
+	if _, err := stream.Info(ctx); err != nil {
+		if errors.Is(err, jetstream.ErrStreamNotFound) {
+			return nil
+		}
+		return classifyLiveError(ctx, err)
+	}
+
+	return nil
+}
+
+// probeStreamInfo probes live stream info for the named application stream.
+// Returns nil on success or on ErrStreamNotFound (the stream is creatable by
+// Apply); otherwise classifies the error via classifyLiveError. Unlike
+// probeBucketInfo, the raw stream name is used — application streams have no
+// "KV_" prefix.
+func probeStreamInfo(ctx context.Context, js jetstream.JetStream, name string) error {
+	stream, err := js.Stream(ctx, name)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrStreamNotFound) {
 			return nil

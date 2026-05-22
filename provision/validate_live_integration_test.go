@@ -309,3 +309,40 @@ func TestValidateLive_DefaultBuckets_ProbesResolvedNames(t *testing.T) {
 			"ValidateLive must not probe KV_ (empty suffix); normalization missing")
 	}
 }
+
+// TestValidateLive_Stream_ProbesRawName pins the application-stream probe to
+// the RAW stream name — application streams have no "KV_" prefix. A regression
+// that prefixed the name would record "KV_app-events" here. A black-box
+// success/failure assertion cannot catch a wrong prefix (probeStreamInfo
+// treats a not-found stream as OK), so only the recorded name pins it.
+func TestValidateLive_Stream_ProbesRawName(t *testing.T) {
+	t.Parallel()
+	js := newJS(t)
+
+	createStream(t, js, jetstream.StreamConfig{
+		Name:     "app-events",
+		Subjects: []string{"app.events.>"},
+		Metadata: provision.BuildMarker(provision.ComponentStream, "prod"),
+	})
+
+	cfg := provision.Config{
+		APIVersion: provision.APIVersionV1,
+		Instance:   "prod",
+		Streams: []provision.StreamCfg{
+			{Name: "app-events", Subjects: []string{"app.events.>"}},
+		},
+	}
+
+	rec := newStreamRecordingJS(js)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rep, err := provision.ValidateLive(ctx, rec, cfg)
+	require.NoError(t, err)
+	require.Empty(t, rep.Errors)
+
+	probed := rec.recordedStreams()
+	require.Contains(t, probed, "app-events",
+		"ValidateLive must probe the raw application-stream name")
+	require.NotContains(t, probed, "KV_app-events",
+		"ValidateLive must not prefix an application-stream name with KV_")
+}
