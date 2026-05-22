@@ -7,11 +7,6 @@ import (
 	"github.com/arloliu/parti/v2/provision"
 )
 
-// policyForce is the reserved-but-unsupported policy value. It has no
-// provision.ReconcilePolicy constant because the SDK keeps it internal;
-// the CLI rejects it at flag-parse time with a clear message.
-const policyForce = "force"
-
 // resolveAndStampPolicy resolves the --policy flag against the YAML policy in
 // cfg, stamps the effective value onto cfg.Policy, and reports whether to
 // proceed. cfg.Policy is read (as the raw YAML value) before it is
@@ -68,20 +63,17 @@ func resolvePolicy(flagVal string, rawCfgPolicy provision.ReconcilePolicy, subcm
 }
 
 // validatePolicyFlag checks that the --policy flag value is one of the accepted
-// values. "force" is rejected at flag-parse time (not via provision.Validate)
-// so it gets the right message. Returns true when valid.
+// values (warn, adopt, safe-update, force). Returns true when valid or when
+// flagVal is empty (flag absent).
 func validatePolicyFlag(flagVal string, subcmd string, w io.Writer) bool {
 	if flagVal == "" {
 		return true
 	}
 	switch flagVal {
-	case string(provision.PolicyWarn), string(provision.PolicyAdopt), string(provision.PolicySafeUpdate):
+	case string(provision.PolicyWarn), string(provision.PolicyAdopt), string(provision.PolicySafeUpdate), string(provision.PolicyForce):
 		return true
-	case policyForce:
-		fmt.Fprintf(w, "partictl %s: --policy=force is not yet supported\n", subcmd)
-		return false
 	default:
-		fmt.Fprintf(w, "partictl %s: --policy=%q is not recognized (accepted: warn, adopt, safe-update)\n", subcmd, flagVal)
+		fmt.Fprintf(w, "partictl %s: --policy=%q is not recognized (accepted: warn, adopt, safe-update, force)\n", subcmd, flagVal)
 		return false
 	}
 }

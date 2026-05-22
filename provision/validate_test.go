@@ -74,12 +74,11 @@ func TestValidate_TableDriven(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "policy_force_rejected",
+			name: "policy_force_accepted",
 			mutate: func(c *provision.Config) {
-				c.Policy = "force"
+				c.Policy = provision.PolicyForce
 			},
-			wantErr:   true,
-			errSubstr: "force",
+			wantErr: false,
 		},
 		{
 			name: "policy_unknown_rejected",
@@ -818,4 +817,116 @@ func TestValidate_Streams_DuplicateName(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, provision.ErrInvalidConfig)
 	require.Contains(t, err.Error(), "duplicate")
+}
+
+// TestValidate_PolicyForce_Accepted verifies that PolicyForce passes
+// Validate — it is now a real policy value, not a reserved-future rejection.
+func TestValidate_PolicyForce_Accepted(t *testing.T) {
+	t.Parallel()
+	cfg := provision.Config{
+		APIVersion: provision.APIVersionV1,
+		Policy:     provision.PolicyForce,
+	}
+	require.NoError(t, provision.Validate(cfg))
+}
+
+// TestValidate_AllowDeleteRecreate_YAML_RoundTrip verifies that
+// allowDeleteRecreate: true loads, validates, and round-trips through
+// gopkg.in/yaml.v3 marshal+unmarshal on all four config structs.
+func TestValidate_AllowDeleteRecreate_YAML_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	yamlInput := `
+apiVersion: parti.io/v1
+policy: force
+controlPlane:
+  workerIdTtl: 75s
+  electionTimeout: 10s
+  heartbeatTtl: 15s
+  allowDeleteRecreate: true
+partitionSource:
+  bucket: parti-partitions
+  key: partitions/v1
+  allowDeleteRecreate: true
+streams:
+  - name: orders
+    subjects:
+      - orders.>
+    allowDeleteRecreate: true
+dynamicConsumers:
+  - streamName: orders
+    consumerPrefix: ord-worker
+    subjectTemplate: orders.{partition_id}.>
+    partitionsRef: parti-partitions
+    allowDeleteRecreate: true
+`
+	var cfg provision.Config
+	require.NoError(t, yaml.Unmarshal([]byte(yamlInput), &cfg))
+	require.NoError(t, provision.Validate(cfg))
+
+	// Verify the field loaded on each struct.
+	require.NotNil(t, cfg.ControlPlane)
+	require.True(t, cfg.ControlPlane.AllowDeleteRecreate)
+
+	require.NotNil(t, cfg.PartitionSource)
+	require.True(t, cfg.PartitionSource.AllowDeleteRecreate)
+
+	require.Len(t, cfg.Streams, 1)
+	require.True(t, cfg.Streams[0].AllowDeleteRecreate)
+
+	require.Len(t, cfg.DynamicConsumers, 1)
+	require.True(t, cfg.DynamicConsumers[0].AllowDeleteRecreate)
+
+	// Marshal back and unmarshal again — confirm the field survives the
+	// round-trip.
+	out, err := yaml.Marshal(cfg)
+	require.NoError(t, err)
+
+	var cfg2 provision.Config
+	require.NoError(t, yaml.Unmarshal(out, &cfg2))
+	require.True(t, cfg2.ControlPlane.AllowDeleteRecreate)
+	require.True(t, cfg2.PartitionSource.AllowDeleteRecreate)
+	require.True(t, cfg2.Streams[0].AllowDeleteRecreate)
+	require.True(t, cfg2.DynamicConsumers[0].AllowDeleteRecreate)
+}
+
+// TestValidate_AllowDeleteRecreate_Omitted_ZeroValue verifies that a config
+// omitting allowDeleteRecreate loads with the field at its zero value false,
+// with no behavior change.
+func TestValidate_AllowDeleteRecreate_Omitted_ZeroValue(t *testing.T) {
+	t.Parallel()
+
+	yamlInput := `
+apiVersion: parti.io/v1
+controlPlane:
+  workerIdTtl: 75s
+  electionTimeout: 10s
+  heartbeatTtl: 15s
+partitionSource:
+  bucket: parti-partitions
+  key: partitions/v1
+streams:
+  - name: orders
+    subjects:
+      - orders.>
+dynamicConsumers:
+  - streamName: orders
+    consumerPrefix: ord-worker
+    subjectTemplate: orders.{partition_id}.>
+`
+	var cfg provision.Config
+	require.NoError(t, yaml.Unmarshal([]byte(yamlInput), &cfg))
+	require.NoError(t, provision.Validate(cfg))
+
+	require.NotNil(t, cfg.ControlPlane)
+	require.False(t, cfg.ControlPlane.AllowDeleteRecreate)
+
+	require.NotNil(t, cfg.PartitionSource)
+	require.False(t, cfg.PartitionSource.AllowDeleteRecreate)
+
+	require.Len(t, cfg.Streams, 1)
+	require.False(t, cfg.Streams[0].AllowDeleteRecreate)
+
+	require.Len(t, cfg.DynamicConsumers, 1)
+	require.False(t, cfg.DynamicConsumers[0].AllowDeleteRecreate)
 }

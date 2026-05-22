@@ -82,11 +82,31 @@ func planPartitionSource(ctx context.Context, js jetstream.JetStream, cfg Config
 
 	marked := ParseMarker(info.Config.Metadata).IsManaged()
 
-	// Under safe-update, a Parti-marked bucket with operator-
-	// expressible drift also gets an update-kv action. Drift findings
+	// Recreate gate: force + ownership-proven + immutable drift +
+	// AllowDeleteRecreate. Emits exactly ONE recreate-kv; the update-kv
+	// gate is skipped for this resource. Drift findings coexist.
+	immutableDrift, hasImmutable := immutableFindingDetail(findings)
+	recreateOK := policyRecreatesImmutable(cfg.Policy) &&
+		marked &&
+		ps.AllowDeleteRecreate
+	if hasImmutable && recreateOK {
+		before := cloneKVConfig(streamConfigToKVConfig(info.Config))
+		after := buildPartitionSourceKVConfig(*ps)
+		after.Metadata = BuildMarker(ComponentPartitionSource, cfg.Instance)
+		out.Actions = append(out.Actions, PlannedAction{
+			Kind:     ActionRecreateKV,
+			Name:     ps.Bucket,
+			Resource: &RecreateKVResource{Before: before, After: after, ImmutableDrift: immutableDrift},
+		})
+
+		return nil
+	}
+
+	// Under safe-update or force, a Parti-marked bucket with operator-
+	// expressible mutable drift also gets an update-kv action. Drift findings
 	// and the action coexist; the classifier above still populates
 	// out.Drift in every policy.
-	if cfg.Policy == PolicySafeUpdate && marked {
+	if policyReconcilesMutable(cfg.Policy) && marked {
 		before := cloneKVConfig(streamConfigToKVConfig(info.Config))
 		after := buildPartitionSourceUpdateTarget(ps, cfg.Instance, before)
 		if !kvConfigsEqual(before, after) {

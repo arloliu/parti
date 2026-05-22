@@ -104,7 +104,7 @@ func TestValidatePolicyFlag_Empty(t *testing.T) {
 
 func TestValidatePolicyFlag_ValidValues(t *testing.T) {
 	t.Parallel()
-	for _, v := range []string{"warn", "adopt", "safe-update"} {
+	for _, v := range []string{"warn", "adopt", "safe-update", "force"} {
 		t.Run(v, func(t *testing.T) {
 			t.Parallel()
 			if !validatePolicyFlag(v, "apply", &bytes.Buffer{}) {
@@ -114,14 +114,11 @@ func TestValidatePolicyFlag_ValidValues(t *testing.T) {
 	}
 }
 
-func TestValidatePolicyFlag_ForceRejected(t *testing.T) {
+func TestValidatePolicyFlag_ForceAccepted(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	if validatePolicyFlag("force", "apply", &buf) {
-		t.Error("--policy=force should be rejected")
-	}
-	if !strings.Contains(buf.String(), "not yet supported") {
-		t.Errorf("expected 'not yet supported' in message: %q", buf.String())
+	if !validatePolicyFlag("force", "apply", &buf) {
+		t.Errorf("--policy=force should be accepted, got message: %q", buf.String())
 	}
 }
 
@@ -213,33 +210,39 @@ func TestAdopt_NoFile(t *testing.T) {
 	}
 }
 
-// TestApply_ForceRejected_Exit3: --policy=force → exit 3 before NATS connect.
-func TestApply_ForceRejected_Exit3(t *testing.T) {
+// TestApply_ForceAccepted_ReachesNATS: apply --policy=force is accepted at the
+// flag layer and proceeds to the NATS connect step (which fails offline).
+func TestApply_ForceAccepted_ReachesNATS(t *testing.T) {
 	t.Parallel()
 	_, stderr, code := runArgs("apply",
 		"-f", "testdata/minimal.yaml",
 		"-policy", "force",
+		"-server", "nats://127.0.0.1:1",
+		"-timeout", "500ms",
 	)
-	if code != ExitValidation {
-		t.Errorf("apply --policy=force = %d, want %d (ExitValidation)", code, ExitValidation)
+	if code != ExitNATS {
+		t.Errorf("apply --policy=force = %d, want %d (ExitNATS — accepted, NATS unreachable)", code, ExitNATS)
 	}
-	if !strings.Contains(stderr, "not yet supported") {
-		t.Errorf("expected 'not yet supported' in stderr: %q", stderr)
+	if strings.Contains(stderr, "not yet supported") {
+		t.Errorf("apply --policy=force must not emit 'not yet supported': %q", stderr)
 	}
 }
 
-// TestPlan_ForceRejected_Exit3: plan --policy=force → exit 3 before NATS connect.
-func TestPlan_ForceRejected_Exit3(t *testing.T) {
+// TestPlan_ForceAccepted_ReachesNATS: plan --policy=force is accepted at the
+// flag layer and proceeds to the NATS connect step (which fails offline).
+func TestPlan_ForceAccepted_ReachesNATS(t *testing.T) {
 	t.Parallel()
 	_, stderr, code := runArgs("plan",
 		"-f", "testdata/minimal.yaml",
 		"-policy", "force",
+		"-server", "nats://127.0.0.1:1",
+		"-timeout", "500ms",
 	)
-	if code != ExitValidation {
-		t.Errorf("plan --policy=force = %d, want %d (ExitValidation)", code, ExitValidation)
+	if code != ExitNATS {
+		t.Errorf("plan --policy=force = %d, want %d (ExitNATS — accepted, NATS unreachable)", code, ExitNATS)
 	}
-	if !strings.Contains(stderr, "not yet supported") {
-		t.Errorf("expected 'not yet supported' in stderr: %q", stderr)
+	if strings.Contains(stderr, "not yet supported") {
+		t.Errorf("plan --policy=force must not emit 'not yet supported': %q", stderr)
 	}
 }
 

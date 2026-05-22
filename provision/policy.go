@@ -1,8 +1,7 @@
 package provision
 
 // ReconcilePolicy controls how Apply handles drift. Validate rejects
-// reserved future values by string match so callers receive a clear
-// error today rather than a generic "unrecognized" message.
+// unrecognized values by string match so callers receive a clear error.
 type ReconcilePolicy string
 
 const (
@@ -21,11 +20,25 @@ const (
 	// not mutated under safe-update; operators run partictl adopt first
 	// to transition them.
 	PolicySafeUpdate ReconcilePolicy = "safe-update"
+
+	// PolicyForce is a strict superset of PolicySafeUpdate: it create-misses and
+	// reconciles drift-mutable fields in place exactly as safe-update does, and
+	// additionally repairs a drift-immutable resource by delete/recreate — but
+	// only for an ownership-proven resource (a Parti-marked KV bucket or stream,
+	// or a config-derived dynamic consumer) whose config sets
+	// allowDeleteRecreate: true. Destructive and doubly gated.
+	PolicyForce ReconcilePolicy = "force"
 )
 
-// Reserved string values not yet supported. Listed here so Validate can
-// reject them with a clear "not supported yet" message without forcing
-// callers to type the literal strings.
-const (
-	reservedPolicyForce = "force"
-)
+// policyReconcilesMutable reports whether p applies in-place mutation for
+// drift-mutable fields (update-kv, update-stream). True for safe-update and
+// force; false for warn and adopt.
+func policyReconcilesMutable(p ReconcilePolicy) bool {
+	return p == PolicySafeUpdate || p == PolicyForce
+}
+
+// policyRecreatesImmutable reports whether p permits destructive repair
+// (delete/recreate) for drift-immutable resources. True only for force.
+func policyRecreatesImmutable(p ReconcilePolicy) bool {
+	return p == PolicyForce
+}

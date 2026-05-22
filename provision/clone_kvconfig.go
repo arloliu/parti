@@ -42,6 +42,21 @@ func cloneKVConfig(src jetstream.KeyValueConfig) jetstream.KeyValueConfig {
 	return dst
 }
 
+// cloneConsumerConfig returns a deep clone of src. The slice fields
+// (BackOff, FilterSubjects) and the Metadata map are reallocated so the
+// result is safe to mutate without affecting src — mirroring cloneKVConfig
+// and cloneStreamConfig, since nats.go may mutate slice/map fields of a
+// ConsumerConfig internally while building the underlying API request.
+func cloneConsumerConfig(src jetstream.ConsumerConfig) jetstream.ConsumerConfig {
+	dst := src // shallow copy of scalar fields
+
+	dst.BackOff = slices.Clone(src.BackOff)
+	dst.FilterSubjects = slices.Clone(src.FilterSubjects)
+	dst.Metadata = maps.Clone(src.Metadata)
+
+	return dst
+}
+
 // cloneStreamSource deep-clones a *StreamSource, including its pointer and
 // slice fields (OptStartTime, External, SubjectTransforms).
 func cloneStreamSource(src *jetstream.StreamSource) *jetstream.StreamSource {

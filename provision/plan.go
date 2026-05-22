@@ -154,11 +154,34 @@ func planControlPlane(ctx context.Context, js jetstream.JetStream, cfg Config, o
 
 		marked := ParseMarker(info.Config.Metadata).IsManaged()
 
-		// Under safe-update, a Parti-marked bucket with operator-
-		// expressible drift also gets an update-kv action. Drift
+		// Recreate gate: force + ownership-proven + immutable drift +
+		// AllowDeleteRecreate. Emits exactly ONE recreate-kv; the update-kv
+		// gate is skipped for this resource. Drift findings coexist.
+		immutableDrift, hasImmutable := immutableFindingDetail(findings)
+		recreateOK := policyRecreatesImmutable(cfg.Policy) &&
+			marked &&
+			cfg.ControlPlane.AllowDeleteRecreate
+		if hasImmutable && recreateOK {
+			before := cloneKVConfig(streamConfigToKVConfig(info.Config))
+			afterKV, ok := newCreateKVAction(spec, cfg.Instance).Resource.(jetstream.KeyValueConfig)
+			if !ok {
+				return fmt.Errorf("provision: internal: newCreateKVAction returned unexpected resource type for %q", spec.bucket)
+			}
+
+			out.Actions = append(out.Actions, PlannedAction{
+				Kind:     ActionRecreateKV,
+				Name:     spec.bucket,
+				Resource: &RecreateKVResource{Before: before, After: afterKV, ImmutableDrift: immutableDrift},
+			})
+
+			continue
+		}
+
+		// Under safe-update or force, a Parti-marked bucket with operator-
+		// expressible mutable drift also gets an update-kv action. Drift
 		// findings and the action coexist; the classifier above still
 		// populates out.Drift in every policy.
-		if cfg.Policy == PolicySafeUpdate && marked {
+		if policyReconcilesMutable(cfg.Policy) && marked {
 			before := cloneKVConfig(streamConfigToKVConfig(info.Config))
 			after := buildControlPlaneUpdateTarget(spec, cfg.Instance, before)
 			if !kvConfigsEqual(before, after) {
@@ -181,6 +204,19 @@ func planControlPlane(ctx context.Context, js jetstream.JetStream, cfg Config, o
 	}
 
 	return nil
+}
+
+// immutableFindingDetail returns the Detail map from the first
+// SeverityDriftImmutable finding in findings, and true. Returns nil, false when
+// no drift-immutable finding is present.
+func immutableFindingDetail(findings []DriftFinding) (map[string]any, bool) {
+	for _, f := range findings {
+		if f.Severity == SeverityDriftImmutable {
+			return f.Detail, true
+		}
+	}
+
+	return nil, false
 }
 
 // missingUnderAdoptFinding builds the informational drift finding emitted

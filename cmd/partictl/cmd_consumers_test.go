@@ -299,19 +299,91 @@ func TestConsumers_Apply_DryRunWritesNothing(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// --policy rejected on consumers
+// -policy flag on consumers — acceptance and rejection
 // ---------------------------------------------------------------------------
 
-func TestConsumers_RejectsPolicyFlag(t *testing.T) {
+// TestConsumers_PolicyForce_Plan_ReachesNATS: consumers plan -policy force is
+// accepted at the flag/validation layer and proceeds to NATS connect (fails offline).
+func TestConsumers_PolicyForce_Plan_ReachesNATS(t *testing.T) {
 	t.Parallel()
 	cfg := writeConsumersEnv(t)
 
-	_, stderr, code := runArgs("consumers", "plan", "-f", cfg, "-policy", "warn")
-	if code != ExitValidation {
-		t.Errorf("consumers plan -policy = %d, want %d", code, ExitValidation)
+	_, stderr, code := runArgs("consumers", "plan",
+		"-f", cfg,
+		"-policy", "force",
+		"-server", "nats://127.0.0.1:1",
+		"-timeout", "500ms",
+	)
+	if code != ExitNATS {
+		t.Errorf("consumers plan -policy force = %d, want %d (ExitNATS — accepted, NATS unreachable)", code, ExitNATS)
 	}
-	if !strings.Contains(stderr, "policy") {
-		t.Errorf("expected an unknown-flag error mentioning policy: %q", stderr)
+	if strings.Contains(stderr, "not recognized") || strings.Contains(stderr, "accepts only") {
+		t.Errorf("consumers plan -policy force must not emit a policy rejection: %q", stderr)
+	}
+}
+
+// TestConsumers_PolicyForce_Apply_ReachesNATS: consumers apply -policy force is
+// accepted at the flag/validation layer and proceeds to NATS connect (fails offline).
+func TestConsumers_PolicyForce_Apply_ReachesNATS(t *testing.T) {
+	t.Parallel()
+	cfg := writeConsumersEnv(t)
+
+	_, stderr, code := runArgs("consumers", "apply",
+		"-f", cfg,
+		"-policy", "force",
+		"-server", "nats://127.0.0.1:1",
+		"-timeout", "500ms",
+	)
+	if code != ExitNATS {
+		t.Errorf("consumers apply -policy force = %d, want %d (ExitNATS — accepted, NATS unreachable)", code, ExitNATS)
+	}
+	if strings.Contains(stderr, "not recognized") || strings.Contains(stderr, "accepts only") {
+		t.Errorf("consumers apply -policy force must not emit a policy rejection: %q", stderr)
+	}
+}
+
+// TestConsumers_PolicyAdopt_Rejected: consumers plan -policy adopt → ExitValidation.
+// adopt is meaningless for consumer precreation.
+func TestConsumers_PolicyAdopt_Rejected(t *testing.T) {
+	t.Parallel()
+	cfg := writeConsumersEnv(t)
+
+	_, stderr, code := runArgs("consumers", "plan", "-f", cfg, "-policy", "adopt")
+	if code != ExitValidation {
+		t.Errorf("consumers plan -policy adopt = %d, want %d (ExitValidation)", code, ExitValidation)
+	}
+	if !strings.Contains(stderr, "accepts only") {
+		t.Errorf("expected 'accepts only' in rejection message: %q", stderr)
+	}
+}
+
+// TestConsumers_PolicySafeUpdate_Rejected: consumers plan -policy safe-update → ExitValidation.
+// safe-update is meaningless for consumer precreation.
+func TestConsumers_PolicySafeUpdate_Rejected(t *testing.T) {
+	t.Parallel()
+	cfg := writeConsumersEnv(t)
+
+	_, stderr, code := runArgs("consumers", "plan", "-f", cfg, "-policy", "safe-update")
+	if code != ExitValidation {
+		t.Errorf("consumers plan -policy safe-update = %d, want %d (ExitValidation)", code, ExitValidation)
+	}
+	if !strings.Contains(stderr, "accepts only") {
+		t.Errorf("expected 'accepts only' in rejection message: %q", stderr)
+	}
+}
+
+// TestConsumers_PolicyBogus_Rejected: consumers plan -policy bogus → ExitValidation
+// (unrecognized policy).
+func TestConsumers_PolicyBogus_Rejected(t *testing.T) {
+	t.Parallel()
+	cfg := writeConsumersEnv(t)
+
+	_, stderr, code := runArgs("consumers", "plan", "-f", cfg, "-policy", "bogus")
+	if code != ExitValidation {
+		t.Errorf("consumers plan -policy bogus = %d, want %d (ExitValidation)", code, ExitValidation)
+	}
+	if !strings.Contains(stderr, "not recognized") {
+		t.Errorf("expected 'not recognized' in rejection message: %q", stderr)
 	}
 }
 

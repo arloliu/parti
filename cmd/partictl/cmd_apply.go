@@ -22,7 +22,7 @@ func cmdApply(args []string, stdout, stderr io.Writer) int {
 
 	var f applyFlags
 	fs.StringVar(&f.file, "f", "", "YAML config path (required)")
-	fs.StringVar(&f.policy, "policy", "", "reconcile policy: warn, adopt, safe-update (default: warn or cfg.policy)")
+	fs.StringVar(&f.policy, "policy", "", "reconcile policy: warn, adopt, safe-update, force (default: warn or cfg.policy)")
 	fs.StringVar(&f.common.server, "server", defaultServer(), "NATS server URL")
 	fs.StringVar(&f.common.creds, "creds", "", "path to NATS credentials file")
 	fs.StringVar(&f.common.nkey, "nkey", "", "path to NATS nkey seed file")

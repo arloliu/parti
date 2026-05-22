@@ -125,8 +125,9 @@ type PlanResult struct {
 
 // PlannedAction is one operation Apply would perform. Kind is one of the
 // ActionCreateKV, ActionUpdateKV, ActionStampMarker, ActionWritePartitions,
-// ActionCreateStream, ActionUpdateStream, ActionStampStreamMarker, or
-// ActionCreateConsumer constants. The Resource field carries the would-be
+// ActionCreateStream, ActionUpdateStream, ActionStampStreamMarker,
+// ActionCreateConsumer, ActionRecreateKV, ActionRecreateStream, or
+// ActionRecreateConsumer constants. The Resource field carries the would-be
 // NATS config:
 //   - "create-kv": jetstream.KeyValueConfig value
 //   - "update-kv": *UpdateKVResource
@@ -136,8 +137,9 @@ type PlanResult struct {
 //   - "update-stream": *UpdateStreamResource
 //   - "stamp-stream-marker": *StreamStampMarkerResource
 //   - "create-consumer": PlannedConsumer value
-//
-// Destructive repair (delete/recreate) is not yet supported.
+//   - "recreate-kv": *RecreateKVResource
+//   - "recreate-stream": *RecreateStreamResource
+//   - "recreate-consumer": *RecreateConsumerResource
 type PlannedAction struct {
 	Kind     string `json:"kind"`
 	Name     string `json:"name"`
@@ -148,9 +150,9 @@ type PlannedAction struct {
 const (
 	ActionCreateKV = "create-kv"
 
-	// ActionUpdateKV is emitted by Plan under PolicySafeUpdate when a
-	// Parti-marked KV bucket has at least one operator-expressible field
-	// (Metadata, TTL, MaxValueSize, Replicas) that differs from the
+	// ActionUpdateKV is emitted by Plan under PolicySafeUpdate or PolicyForce
+	// when a Parti-marked KV bucket has at least one operator-expressible
+	// field (Metadata, TTL, MaxValueSize, Replicas) that differs from the
 	// desired config. Apply re-reads live state, verifies it still
 	// matches the plan-time Before, rebuilds the target from the re-read
 	// snapshot, and calls js.UpdateKeyValue. Resource is *UpdateKVResource.
@@ -180,10 +182,11 @@ const (
 	// desired config, including the Parti ownership marker).
 	ActionCreateStream = "create-stream"
 
-	// ActionUpdateStream is emitted by Plan under PolicySafeUpdate when a
-	// Parti-marked stream has at least one operator-expressible mutable field
-	// (Subjects, Discard, Replicas, MaxAge, MaxBytes, MaxMsgs, Description,
-	// Metadata) that differs from the desired config. Apply re-reads live state,
+	// ActionUpdateStream is emitted by Plan under PolicySafeUpdate or
+	// PolicyForce when a Parti-marked stream has at least one
+	// operator-expressible mutable field (Subjects, Discard, Replicas, MaxAge,
+	// MaxBytes, MaxMsgs, Description, Metadata) that differs from the desired
+	// config. Apply re-reads live state,
 	// verifies it still matches the plan-time Before, rebuilds the target from
 	// the re-read snapshot, and calls js.UpdateStream. Resource is
 	// *UpdateStreamResource.
@@ -202,6 +205,24 @@ const (
 	// and that does not exist live. Apply calls js.CreateConsumer. Resource is
 	// a PlannedConsumer value.
 	ActionCreateConsumer = "create-consumer"
+
+	// ActionRecreateKV is emitted by Plan under PolicyForce when a Parti-marked
+	// KV bucket (control-plane or partition-source) has drift-immutable drift and
+	// its config sets AllowDeleteRecreate: true. Apply deletes and recreates the
+	// bucket at the desired After config. Resource is *RecreateKVResource.
+	ActionRecreateKV = "recreate-kv"
+
+	// ActionRecreateStream is emitted by Plan under PolicyForce when a
+	// Parti-marked application stream has drift-immutable drift and its StreamCfg
+	// sets AllowDeleteRecreate: true. Apply deletes and recreates the stream.
+	// Resource is *RecreateStreamResource.
+	ActionRecreateStream = "recreate-stream"
+
+	// ActionRecreateConsumer is emitted by PlanConsumers under PolicyForce when a
+	// config-derived dynamic consumer has drift-immutable drift and its
+	// DynamicConsumerCfg sets AllowDeleteRecreate: true. Apply deletes and
+	// recreates the consumer. Resource is *RecreateConsumerResource.
+	ActionRecreateConsumer = "recreate-consumer"
 )
 
 // UpdateKVResource is the Resource carried by an ActionUpdateKV
@@ -274,6 +295,36 @@ type UpdateStreamResource struct {
 	After  jetstream.StreamConfig `json:"after"`
 }
 
+// RecreateKVResource is the Resource on an ActionRecreateKV PlannedAction.
+// Before is the live KeyValueConfig at plan time; After is the desired config
+// Apply recreates the bucket as; ImmutableDrift names the drift-immutable fields
+// that triggered the repair (the audit surface).
+type RecreateKVResource struct {
+	Before         jetstream.KeyValueConfig `json:"before"`
+	After          jetstream.KeyValueConfig `json:"after"`
+	ImmutableDrift map[string]any           `json:"immutableDrift"`
+}
+
+// RecreateStreamResource is the Resource on an ActionRecreateStream PlannedAction.
+// Before is the live StreamConfig at plan time; After is the desired config Apply
+// recreates the stream as; ImmutableDrift names the drift-immutable fields that
+// triggered the repair.
+type RecreateStreamResource struct {
+	Before         jetstream.StreamConfig `json:"before"`
+	After          jetstream.StreamConfig `json:"after"`
+	ImmutableDrift map[string]any         `json:"immutableDrift"`
+}
+
+// RecreateConsumerResource is the Resource on an ActionRecreateConsumer
+// PlannedAction. Before is the live ConsumerConfig at plan time; After is the
+// desired PlannedConsumer Apply recreates the consumer as; ImmutableDrift names
+// the drift-immutable fields that triggered the repair.
+type RecreateConsumerResource struct {
+	Before         jetstream.ConsumerConfig `json:"before"`
+	After          PlannedConsumer          `json:"after"`
+	ImmutableDrift map[string]any           `json:"immutableDrift"`
+}
+
 // StreamStampMarkerResource is the Resource carried by an
 // ActionStampStreamMarker PlannedAction. Stream is the NATS stream name,
 // MergedMetadata is the full Metadata map the action will write, and
@@ -307,7 +358,8 @@ type PartitionWeightChange struct {
 //   - "drift-mutable": fields differ but can be reconciled in place (see
 //     PolicySafeUpdate and the ActionUpdateKV action kind).
 //   - "drift-immutable": fields differ and require delete/recreate to repair;
-//     destructive repair is not yet supported.
+//     see PolicyForce and the ActionRecreateKV / ActionRecreateStream /
+//     ActionRecreateConsumer action kinds.
 //   - "adopted": resource exists without the Parti marker; see PolicyAdopt.
 type DriftFinding struct {
 	Severity string         `json:"severity"`

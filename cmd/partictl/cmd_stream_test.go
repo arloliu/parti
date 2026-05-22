@@ -295,16 +295,17 @@ func TestStream_Plan_PolicyAccepted(t *testing.T) {
 	}
 }
 
-func TestStream_Plan_PolicyForceRejected(t *testing.T) {
+func TestStream_Plan_PolicyForceAccepted(t *testing.T) {
 	t.Parallel()
 	cfg := writeStreamEnv(t)
 
-	_, stderr, code := runArgs("stream", "plan", "-f", cfg, "-policy", "force")
-	if code != ExitValidation {
-		t.Errorf("stream plan -policy force = %d, want %d (ExitValidation)", code, ExitValidation)
+	_, stderr, code := runArgs("stream", "plan", "-f", cfg, "-policy", "force",
+		"-server", "nats://127.0.0.1:1", "-timeout", "500ms")
+	if code != ExitNATS {
+		t.Errorf("stream plan -policy force = %d, want %d (ExitNATS — accepted, NATS unreachable)", code, ExitNATS)
 	}
-	if !strings.Contains(stderr, "force") {
-		t.Errorf("expected 'force' in error message: %q", stderr)
+	if strings.Contains(stderr, "not yet supported") || strings.Contains(stderr, "not recognized") {
+		t.Errorf("stream plan -policy force must not emit a policy rejection: %q", stderr)
 	}
 }
 
@@ -428,16 +429,17 @@ func TestStream_Apply_PolicyAccepted(t *testing.T) {
 	}
 }
 
-func TestStream_Apply_PolicyForceRejected(t *testing.T) {
+func TestStream_Apply_PolicyForceAccepted(t *testing.T) {
 	t.Parallel()
 	cfg := writeStreamEnv(t)
 
-	_, stderr, code := runArgs("stream", "apply", "-f", cfg, "-policy", "force")
-	if code != ExitValidation {
-		t.Errorf("stream apply -policy force = %d, want %d (ExitValidation)", code, ExitValidation)
+	_, stderr, code := runArgs("stream", "apply", "-f", cfg, "-policy", "force",
+		"-server", "nats://127.0.0.1:1", "-timeout", "500ms")
+	if code != ExitNATS {
+		t.Errorf("stream apply -policy force = %d, want %d (ExitNATS — accepted, NATS unreachable)", code, ExitNATS)
 	}
-	if !strings.Contains(stderr, "force") {
-		t.Errorf("expected 'force' in error message: %q", stderr)
+	if strings.Contains(stderr, "not yet supported") || strings.Contains(stderr, "not recognized") {
+		t.Errorf("stream apply -policy force must not emit a policy rejection: %q", stderr)
 	}
 }
 

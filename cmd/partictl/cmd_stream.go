@@ -78,7 +78,7 @@ Flags:
   -instance <n>   Filter by parti.io/instance (view without -f only)
   -fail-on-drift  plan: exit 2 if non-informational drift is detected
   -dry-run        apply: compute the plan only — write nothing
-  -policy <p>     Reconcile policy: warn, adopt, safe-update (default: warn or cfg.policy)
+  -policy <p>     Reconcile policy: warn, adopt, safe-update, force (default: warn or cfg.policy)
   -server, -creds, -nkey, -token, -timeout   NATS connection flags
 `)
 }
@@ -163,7 +163,7 @@ func cmdStreamApply(args []string, stdout, stderr io.Writer) int {
 // plan and stream apply sub-subcommands.
 func bindStreamPlanApplyFlags(fs *flag.FlagSet, p *streamPlanApplyParams) {
 	fs.StringVar(&p.file, "f", "", "YAML config path (required)")
-	fs.StringVar(&p.policy, "policy", "", "reconcile policy: warn, adopt, safe-update (default: warn or cfg.policy)")
+	fs.StringVar(&p.policy, "policy", "", "reconcile policy: warn, adopt, safe-update, force (default: warn or cfg.policy)")
 	fs.StringVar(&p.common.server, "server", defaultServer(), "NATS server URL")
 	fs.StringVar(&p.common.creds, "creds", "", "path to NATS credentials file")
 	fs.StringVar(&p.common.nkey, "nkey", "", "path to NATS nkey seed file")

@@ -156,11 +156,12 @@ func PlanConsumers(ctx context.Context, js jetstream.JetStream, cfg Config) (Pla
 			return PlanResult{}, fmt.Errorf("provision: build expected consumers for %q: %w", dc.StreamName, err)
 		}
 
+		recreateOK := policyRecreatesImmutable(cfg.Policy) && dc.AllowDeleteRecreate
 		for _, exp := range expected {
 			if err := ctx.Err(); err != nil {
 				return PlanResult{}, err
 			}
-			if err := classifyConsumer(ctx, js, exp, &out); err != nil {
+			if err := classifyConsumer(ctx, js, exp, recreateOK, &out); err != nil {
 				return PlanResult{}, err
 			}
 		}
@@ -173,8 +174,11 @@ func PlanConsumers(ctx context.Context, js jetstream.JetStream, cfg Config) (Pla
 }
 
 // classifyConsumer looks up one expected PlannedConsumer live and appends the
-// appropriate action and/or drift finding to out.
-func classifyConsumer(ctx context.Context, js jetstream.JetStream, expected PlannedConsumer, out *PlanResult) error {
+// appropriate action and/or drift finding to out. recreateOK signals that the
+// caller has already verified policyRecreatesImmutable(cfg.Policy) &&
+// dc.AllowDeleteRecreate; when true and the consumer has drift-immutable drift, a
+// recreate-consumer action is emitted instead of no action.
+func classifyConsumer(ctx context.Context, js jetstream.JetStream, expected PlannedConsumer, recreateOK bool, out *PlanResult) error {
 	consumer, err := js.Consumer(ctx, expected.StreamName, expected.Durable)
 	if errors.Is(err, jetstream.ErrConsumerNotFound) {
 		out.Actions = append(out.Actions, PlannedAction{
@@ -224,6 +228,26 @@ func classifyConsumer(ctx context.Context, js jetstream.JetStream, expected Plan
 		Detail:   offending,
 	})
 
+	// Recreate gate: force + AllowDeleteRecreate + drift-immutable. Ownership for
+	// dynamic consumers is config-derivation (no marker stamp), so no marked check
+	// is needed here — PlanConsumers only iterates config-declared targets.
+	if recreateOK {
+		// Deep-clone both Before and After so the Plan output is immutable
+		// regardless of later Apply or nats.go mutation (the same contract
+		// the Recreate{KV,Stream}Resource Before/After clones honor).
+		after := expected
+		after.Config = cloneConsumerConfig(expected.Config)
+		out.Actions = append(out.Actions, PlannedAction{
+			Kind: ActionRecreateConsumer,
+			Name: expected.Durable,
+			Resource: &RecreateConsumerResource{
+				Before:         cloneConsumerConfig(live),
+				After:          after,
+				ImmutableDrift: offending,
+			},
+		})
+	}
+
 	return nil
 }
 
@@ -233,7 +257,7 @@ func classifyConsumer(ctx context.Context, js jetstream.JetStream, expected Plan
 //
 // Fields checked (Name and Durable are omitted — the lookup key proves them).
 // A live consumer that deviates on any of these is reported drift-immutable;
-// the repair is delete/recreate (Phase 6):
+// the repair is delete/recreate:
 //   - FilterSubject — an identity field. The durable name encodes the subject
 //     hash, so a name carrying a different FilterSubject is a foreign
 //     (hand-created) consumer squatting the name; the repair is to delete the

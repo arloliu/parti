@@ -64,6 +64,13 @@ type ControlPlaneConfig struct {
 	// Applies uniformly to every control-plane bucket; per-bucket
 	// replica overrides are not supported.
 	Replicas int `yaml:"replicas,omitempty" json:"replicas,omitempty"`
+
+	// AllowDeleteRecreate is the per-resource opt-in layer of the
+	// two-layer delete/recreate gate. When true, Apply under PolicyForce
+	// will delete and recreate all five control-plane KV buckets as a set
+	// when any one carries drift-immutable drift. Inert unless the reconcile
+	// policy is force.
+	AllowDeleteRecreate bool `yaml:"allowDeleteRecreate,omitempty" json:"allowDeleteRecreate,omitempty"`
 }
 
 // PartitionSourceConfig declares the NATS KV bucket that holds the partition
@@ -84,6 +91,12 @@ type PartitionSourceConfig struct {
 	MaxValueSize int32         `yaml:"maxValueSize,omitempty" json:"maxValueSize,omitempty"`
 	TTL          time.Duration `yaml:"ttl,omitempty"          json:"ttl,omitempty"`
 
+	// AllowDeleteRecreate is the per-resource opt-in layer of the
+	// two-layer delete/recreate gate. When true, Apply under PolicyForce
+	// will delete and recreate the partition-source KV bucket when it
+	// carries drift-immutable drift. Inert unless the reconcile policy is force.
+	AllowDeleteRecreate bool `yaml:"allowDeleteRecreate,omitempty" json:"allowDeleteRecreate,omitempty"`
+
 	// Partitions is the desired partition table written to the
 	// partitionSource key. It is consumed only by PlanPartitions /
 	// ApplyPartitions (the `partictl partitions` subcommand); the
@@ -100,7 +113,7 @@ type PartitionSourceConfig struct {
 // StreamCfg declares one application JetStream stream provision manages.
 // It exposes a deliberately small subset of jetstream.StreamConfig; every
 // other live-stream field is preserved-from-live by update-stream and never
-// drift-classified (see the Phase 4 Non-Goals in the implementation plan).
+// drift-classified (a deliberate non-goal).
 type StreamCfg struct {
 	Name        string        `yaml:"name"                  json:"name"`
 	Subjects    []string      `yaml:"subjects"              json:"subjects"`
@@ -112,6 +125,12 @@ type StreamCfg struct {
 	MaxBytes    int64         `yaml:"maxBytes,omitempty"    json:"maxBytes,omitempty"`  // 0 = unlimited (NATS stores as -1)
 	MaxMsgs     int64         `yaml:"maxMsgs,omitempty"     json:"maxMsgs,omitempty"`   // 0 = unlimited (NATS stores as -1)
 	Description string        `yaml:"description,omitempty" json:"description,omitempty"`
+
+	// AllowDeleteRecreate is the per-resource opt-in layer of the
+	// two-layer delete/recreate gate. When true, Apply under PolicyForce
+	// will delete and recreate this stream when it carries drift-immutable
+	// drift. Inert unless the reconcile policy is force.
+	AllowDeleteRecreate bool `yaml:"allowDeleteRecreate,omitempty" json:"allowDeleteRecreate,omitempty"`
 }
 
 // DynamicConsumerCfg describes one dynamic-consumer target.
@@ -126,6 +145,13 @@ type DynamicConsumerCfg struct {
 	ConsumerPrefix  string `yaml:"consumerPrefix"          json:"consumerPrefix"`
 	SubjectTemplate string `yaml:"subjectTemplate"         json:"subjectTemplate"`
 	PartitionsRef   string `yaml:"partitionsRef,omitempty" json:"partitionsRef,omitempty"`
+
+	// AllowDeleteRecreate is the per-resource opt-in layer of the
+	// two-layer delete/recreate gate. When true, Apply under PolicyForce
+	// will delete and recreate every per-partition durable consumer this
+	// target precreates when any carries drift-immutable drift. Inert
+	// unless the reconcile policy is force.
+	AllowDeleteRecreate bool `yaml:"allowDeleteRecreate,omitempty" json:"allowDeleteRecreate,omitempty"`
 }
 
 // Runtime bucket-name defaults. These mirror parti.KVBucketConfig's

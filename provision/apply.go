@@ -20,8 +20,9 @@ import (
 //  3. Plan(ctx, js, cfg) — compute the deterministic action list.
 //     Failure returns Report{} + error.
 //  4. Iterate Plan.Actions and execute each one — create-kv, update-kv,
-//     stamp-marker, create-stream, update-stream, stamp-stream-marker —
-//     mapping the result onto Report.{Executed, Skipped, Errors, Aborted}.
+//     stamp-marker, create-stream, update-stream, stamp-stream-marker,
+//     recreate-kv, recreate-stream — mapping the result onto
+//     Report.{Executed, Skipped, Errors, Aborted}.
 //
 // Cancellation semantics:
 //   - Pre-mutation cancel → Report{Aborted: true, Skipped: every-action
@@ -97,10 +98,17 @@ func applyPlan(ctx context.Context, js jetstream.JetStream, cfg Config, plan Pla
 		streamCfgs[sc.Name] = sc
 	}
 	// Production seam adapters wrap js; tests inject fakes directly into
-	// applyUpdateKVAction / the stream apply helpers.
-	reader := jsStreamReader{js: js}
-	updater := jsKVUpdater{js: js}
-	streamMgr := jsStreamManager{js: js}
+	// applyUpdateKVAction / the stream apply / recreate helpers.
+	seams := applyPlanSeams{
+		js:         js,
+		reader:     jsStreamReader{js: js},
+		updater:    jsKVUpdater{js: js},
+		streamMgr:  jsStreamManager{js: js},
+		kvRec:      jsKVRecreator{js: js},
+		cfg:        cfg,
+		cpSpecs:    cpSpecs,
+		streamCfgs: streamCfgs,
+	}
 
 	for i, action := range plan.Actions {
 		// Pre-mutation / between-iteration cancellation check.
@@ -110,48 +118,11 @@ func applyPlan(ctx context.Context, js jetstream.JetStream, cfg Config, plan Pla
 			return report, err
 		}
 
-		switch action.Kind {
-		case ActionCreateKV:
-			executed, err := applyCreateKVAction(ctx, js, action)
-			if done, ferr := foldActionResult(&report, plan.Actions, i, action, executed, err); done {
-				return report, ferr
-			}
-
-		case ActionUpdateKV:
-			executed, err := applyUpdateKVAction(ctx, reader, updater, cfg, cpSpecs, action)
-			if done, ferr := foldActionResult(&report, plan.Actions, i, action, executed, err); done {
-				return report, ferr
-			}
-
-		case ActionStampMarker:
-			executed, err := applyStampMarkerAction(ctx, reader, updater, cfg, cpSpecs, action)
-			if done, ferr := foldActionResult(&report, plan.Actions, i, action, executed, err); done {
-				return report, ferr
-			}
-
-		case ActionCreateStream:
-			executed, err := applyCreateStreamAction(ctx, streamMgr, action)
-			if done, ferr := foldActionResult(&report, plan.Actions, i, action, executed, err); done {
-				return report, ferr
-			}
-
-		case ActionUpdateStream:
-			executed, err := applyUpdateStreamAction(ctx, streamMgr, streamCfgs, cfg.Instance, action)
-			if done, ferr := foldActionResult(&report, plan.Actions, i, action, executed, err); done {
-				return report, ferr
-			}
-
-		case ActionStampStreamMarker:
-			executed, err := applyStampStreamMarkerAction(ctx, streamMgr, cfg.Instance, action)
-			if done, ferr := foldActionResult(&report, plan.Actions, i, action, executed, err); done {
-				return report, ferr
-			}
-
-		default:
-			// Plan emits only create-kv, update-kv, stamp-marker,
-			// create-stream, update-stream, and stamp-stream-marker.
-			// Defensive: surface an unknown kind as a fail-fast resource
-			// error so operators see what was rejected.
+		executed, known, err := seams.dispatch(ctx, action)
+		if !known {
+			// Plan emits only the action kinds dispatch handles. Defensive:
+			// surface an unknown kind as a fail-fast resource error so
+			// operators see what was rejected.
 			err := fmt.Errorf("provision: apply: unsupported action kind %q (resource %q)",
 				action.Kind, action.Name)
 			report.Errors = append(report.Errors, ResourceError{
@@ -160,9 +131,61 @@ func applyPlan(ctx context.Context, js jetstream.JetStream, cfg Config, plan Pla
 			appendSkipped(&report, plan.Actions[i+1:], SkipReasonPriorError)
 			return report, err
 		}
+		if done, ferr := foldActionResult(&report, plan.Actions, i, action, executed, err); done {
+			return report, ferr
+		}
 	}
 
 	return report, nil
+}
+
+// applyPlanSeams bundles the production seam adapters and resolved config the
+// applyPlan dispatch needs, so dispatch can route one action without a long
+// parameter list.
+type applyPlanSeams struct {
+	js         jetstream.JetStream
+	reader     streamReader
+	updater    kvUpdater
+	streamMgr  streamManager
+	kvRec      kvRecreator
+	cfg        Config
+	cpSpecs    map[string]controlPlaneSpec
+	streamCfgs map[string]StreamCfg
+}
+
+// dispatch routes one PlannedAction to its apply helper. The known return is
+// false for an action kind Plan never emits — the caller turns that into a
+// fail-fast unsupported-kind error. For a known kind it returns the helper's
+// (ExecutedAction, error) verbatim for foldActionResult.
+func (s applyPlanSeams) dispatch(ctx context.Context, action PlannedAction) (ExecutedAction, bool, error) {
+	switch action.Kind {
+	case ActionCreateKV:
+		executed, err := applyCreateKVAction(ctx, s.js, action)
+		return executed, true, err
+	case ActionUpdateKV:
+		executed, err := applyUpdateKVAction(ctx, s.reader, s.updater, s.cfg, s.cpSpecs, action)
+		return executed, true, err
+	case ActionStampMarker:
+		executed, err := applyStampMarkerAction(ctx, s.reader, s.updater, s.cfg, s.cpSpecs, action)
+		return executed, true, err
+	case ActionCreateStream:
+		executed, err := applyCreateStreamAction(ctx, s.streamMgr, action)
+		return executed, true, err
+	case ActionUpdateStream:
+		executed, err := applyUpdateStreamAction(ctx, s.streamMgr, s.streamCfgs, s.cfg.Instance, action)
+		return executed, true, err
+	case ActionStampStreamMarker:
+		executed, err := applyStampStreamMarkerAction(ctx, s.streamMgr, s.cfg.Instance, action)
+		return executed, true, err
+	case ActionRecreateKV:
+		executed, err := applyRecreateKVAction(ctx, s.kvRec, action)
+		return executed, true, err
+	case ActionRecreateStream:
+		executed, err := applyRecreateStreamAction(ctx, s.streamMgr, action)
+		return executed, true, err
+	default:
+		return ExecutedAction{}, false, nil
+	}
 }
 
 // applyCreateKVAction executes one ActionCreateKV. It type-asserts the

@@ -14,13 +14,20 @@
 //     plan and apply the contents of the partition-source key (the partition
 //     table itself), as distinct from the bucket config Plan/Apply manage.
 //
-// Plan emits three action kinds depending on the reconcile policy:
+// Plan emits several action kinds depending on the reconcile policy. For KV
+// buckets:
 //
 //   - "create-kv": create a missing KV bucket (all policies except adopt).
 //   - "update-kv": reconcile drift-mutable fields in place on a Parti-marked
-//     bucket (safe-update policy only).
+//     bucket (safe-update and force policies).
 //   - "stamp-marker": stamp the Parti ownership marker on an unmarked bucket
 //     that exists live, preserving all non-Parti metadata (adopt policy only).
+//   - "recreate-kv": delete and recreate a Parti-marked bucket carrying
+//     drift-immutable drift (force policy, and only when the bucket config
+//     opts in via allowDeleteRecreate).
+//
+// Application streams and dynamic consumers have analogous action kinds
+// (create / update / stamp / recreate-stream; create / recreate-consumer).
 //
 // PlanPartitions emits a single "write-partitions" action carrying the
 // record-level diff (added / removed / weight-changed) between the declared
@@ -38,7 +45,9 @@
 //   - "safe-update": create missing buckets; reconcile drift-mutable fields
 //     (Metadata, TTL, MaxValueSize, Replicas) on Parti-marked buckets. Never
 //     mutates unmarked buckets; operators run adopt first.
-//   - "force": reserved, not yet supported.
+//   - "force": superset of safe-update; additionally repairs drift-immutable
+//     resources by delete/recreate when allowDeleteRecreate: true is set on
+//     the resource config. Destructive; requires explicit opt-in per resource.
 //
 // Byte-equivalence invariant: every "create-kv" action's KeyValueConfig is
 // built by calling github.com/arloliu/parti/v2/internal/kvbuckets.BuildKeyValueConfig
