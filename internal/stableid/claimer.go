@@ -19,6 +19,10 @@ var (
 	ErrNotClaimed            = errors.New("worker ID not claimed")
 	ErrAlreadyClosed         = errors.New("claimer already closed")
 	ErrRenewalAlreadyStarted = errors.New("renewal loop already started")
+	// ErrClaimLost is returned by renewal when the claimed ID's KV revision no
+	// longer matches — another worker took the ID over, or it expired and was
+	// re-created. The renewal loop stops; the claim cannot be recovered in place.
+	ErrClaimLost = errors.New("worker ID claim lost")
 )
 
 // Claimer handles stable worker ID claiming and background renewal using NATS KV.
@@ -58,6 +62,13 @@ type Claimer struct {
 
 	renewStarted atomic.Int32 // 0 = not started, 1 = started
 	closed       atomic.Int32 // 0 = open, 1 = closed (Release/Close called)
+
+	// lastRevision is the KV revision this Claimer last wrote (via Create,
+	// takeover Update, or a renewal Update). renew() uses it as the
+	// compare-and-swap expectation; Release() uses it for a revision-checked
+	// delete. Written by Claim before StartRenewal and by the renewal
+	// goroutine afterwards; atomic so Release can read it concurrently.
+	lastRevision atomic.Uint64
 
 	logger  types.Logger
 	onError atomic.Pointer[func(error)]
@@ -162,6 +173,7 @@ func (c *Claimer) Claim(ctx context.Context) (string, error) {
 			c.mu.Lock()
 			c.workerID = workerID
 			c.mu.Unlock()
+			c.lastRevision.Store(revision)
 			c.logger.Info("stable ID claimed successfully", "worker_id", workerID, "key", key, "revision", revision, "attempts", id-c.minID+1)
 
 			return workerID, nil
@@ -187,6 +199,7 @@ func (c *Claimer) Claim(ctx context.Context) (string, error) {
 				c.mu.Lock()
 				c.workerID = workerID
 				c.mu.Unlock()
+				c.lastRevision.Store(revision)
 				c.logger.Info("stable ID claimed via Create retry after expiry", "worker_id", workerID, "key", key, "revision", revision)
 
 				return workerID, nil
@@ -255,8 +268,7 @@ func (c *Claimer) renewalLoop() {
 	defer close(c.doneCh)
 
 	// Renew at 1/3 of TTL to provide safety margin; enforce minimum interval.
-	renewInterval := max(c.ttl/3, 100*time.Millisecond)
-	ticker := time.NewTicker(renewInterval)
+	ticker := time.NewTicker(c.renewInterval())
 	defer ticker.Stop()
 
 	for {
@@ -272,7 +284,9 @@ func (c *Claimer) renewalLoop() {
 				opTimeout = 5 * time.Second
 			}
 			opCtx, cancel := context.WithTimeout(context.Background(), opTimeout)
-			if err := c.renew(opCtx); err != nil {
+			err := c.renew(opCtx)
+			cancel()
+			if err != nil {
 				c.mu.RLock()
 				wid := c.workerID
 				c.mu.RUnlock()
@@ -280,13 +294,24 @@ func (c *Claimer) renewalLoop() {
 				if onError := c.onError.Load(); onError != nil {
 					(*onError)(err)
 				}
+				if errors.Is(err, ErrClaimLost) {
+					// The claim cannot be recovered in place; stop renewing so
+					// we no longer fight the new owner of this ID.
+					c.logger.Error("stable ID claim lost, stopping renewal", "worker_id", wid)
+					return
+				}
 			}
-			cancel()
 		}
 	}
 }
 
 // renew updates the claimed ID's timestamp to maintain the lease.
+//
+// It uses a revision-checked Update rather than Put so a worker that lost its
+// claim (the ID was taken over, or expired and re-created) detects it instead
+// of silently overwriting the new owner's key. A revision mismatch surfaces as
+// jetstream.ErrKeyExists (nats.go's wrong-last-sequence sentinel) and is
+// translated to ErrClaimLost.
 func (c *Claimer) renew(ctx context.Context) error {
 	c.mu.RLock()
 	wid := c.workerID
@@ -302,10 +327,16 @@ func (c *Claimer) renew(ctx context.Context) error {
 	key := c.keyForID(wid)
 	value := time.Now().Format(time.RFC3339)
 
-	_, err := c.kv.Put(ctx, key, []byte(value))
+	newRev, err := c.kv.Update(ctx, key, []byte(value), c.lastRevision.Load())
 	if err != nil {
+		if errors.Is(err, jetstream.ErrKeyExists) {
+			// Revision mismatch: another worker took this ID over, or it
+			// expired and was re-created. The claim is lost.
+			return fmt.Errorf("%w: ID %s", ErrClaimLost, wid)
+		}
 		return fmt.Errorf("failed to renew ID %s: %w", wid, err)
 	}
+	c.lastRevision.Store(newRev)
 
 	return nil
 }
@@ -355,8 +386,16 @@ func (c *Claimer) Release(ctx context.Context) error {
 
 	key := c.keyForID(wid)
 	if c.kv != nil {
-		if err := c.kv.Delete(ctx, key); err != nil {
+		// Revision-checked delete: if this ID was taken over (revision moved),
+		// the delete is rejected with jetstream.ErrKeyExists — tolerated, so we
+		// never clobber the new owner's key.
+		err := c.kv.Delete(ctx, key, jetstream.LastRevision(c.lastRevision.Load()))
+		if err != nil && !errors.Is(err, jetstream.ErrKeyExists) {
 			return fmt.Errorf("failed to delete ID %s: %w", wid, err)
+		}
+		if errors.Is(err, jetstream.ErrKeyExists) {
+			c.logger.Warn("stable ID not deleted on release: claim was already lost",
+				"worker_id", wid, "key", key)
 		}
 	}
 
@@ -390,4 +429,15 @@ func (c *Claimer) WorkerID() string {
 // keyForID converts a worker ID to a KV key.
 func (c *Claimer) keyForID(workerID string) string {
 	return workerID
+}
+
+// minRenewInterval is the floor for the renewal cadence. It also floors the
+// stale-takeover threshold (see staleThreshold) so that a healthy holder is
+// never judged stale even when ttl is small enough that ttl/3 drops below it.
+const minRenewInterval = 100 * time.Millisecond
+
+// renewInterval is the cadence at which the renewal loop refreshes the claim:
+// one third of ttl, floored at minRenewInterval.
+func (c *Claimer) renewInterval() time.Duration {
+	return max(c.ttl/3, minRenewInterval)
 }

@@ -664,3 +664,28 @@ func TestDegradedBehaviorPreset(t *testing.T) {
 		require.ErrorIs(t, err, ErrInvalidPreset)
 	})
 }
+
+func TestConfig_Validate_RejectsTinyWorkerIDTTL(t *testing.T) {
+	cfg := TestConfig()
+	// Scale heartbeat/emergency fields down together so the only failing rule
+	// is the new WorkerIDTTL floor, not a cascading dependent constraint.
+	cfg.HeartbeatInterval = 20 * time.Millisecond
+	cfg.HeartbeatTTL = 100 * time.Millisecond
+	cfg.EmergencyGracePeriod = 50 * time.Millisecond
+	cfg.WorkerIDTTL = 200 * time.Millisecond // below 3×minRenewInterval (300ms)
+
+	err := cfg.Validate()
+	require.Error(t, err, "WorkerIDTTL below the renewal floor must be rejected")
+	require.Contains(t, err.Error(), "renewal loop",
+		"the error must be the new WorkerIDTTL floor rule, not a different field")
+}
+
+func TestConfig_Validate_AcceptsWorkerIDTTLAtFloor(t *testing.T) {
+	cfg := TestConfig()
+	cfg.HeartbeatInterval = 20 * time.Millisecond
+	cfg.HeartbeatTTL = 100 * time.Millisecond
+	cfg.EmergencyGracePeriod = 50 * time.Millisecond
+	cfg.WorkerIDTTL = 300 * time.Millisecond // exactly the floor
+
+	require.NoError(t, cfg.Validate(), "WorkerIDTTL at the floor must be accepted")
+}

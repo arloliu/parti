@@ -13,6 +13,90 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
+// claimLostStopTimeout bounds the self-stop triggered by a lost stable-ID
+// claim, so a sluggish KV cannot make the stopping worker hang indefinitely.
+const claimLostStopTimeout = 30 * time.Second
+
+// revokeWorkerConsumer removes all partitions from the worker consumer, if one
+// is configured, so it stops pulling messages for an ID this worker no longer
+// owns. UpdateWorkerConsumer with a nil partition set reconciles the consumer
+// to zero subjects, tearing down every per-partition pull loop. Best-effort:
+// errors are logged, not returned.
+func (m *Manager) revokeWorkerConsumer(ctx context.Context, workerID string) {
+	if m.consumerUpdater == nil {
+		return
+	}
+	if err := m.consumerUpdater.UpdateWorkerConsumer(ctx, workerID, nil); err != nil {
+		m.logger.Error("failed to revoke worker consumer partitions after claim loss",
+			"worker_id", workerID, "error", err)
+	}
+}
+
+// claimLostShutdown stops the Manager after its stable-ID claim is lost. A lost
+// claim is unrecoverable in place, so the worker must cease all partition
+// processing. It is a package-level indirection so onClaimerError's routing is
+// unit-testable without a fully wired Manager; production never reassigns it.
+//
+// Manager.Stop transitions to Shutdown and tears the worker down, but it does
+// NOT revoke the worker consumer — the WorkerConsumerUpdater is owned by the
+// embedding application, and on a normal (app-initiated) Stop the app drains it
+// itself. A claim-loss stop is not app-initiated, so claimLostShutdown revokes
+// the worker consumer explicitly, applying an empty partition set so it stops
+// pulling messages for the lost ID.
+//
+// Order matters: Stop runs FIRST, then the revoke. Stop cancels m.ctx and
+// m.wg.Wait()s the assignment-apply loop dead, so after it returns nothing can
+// re-apply a non-empty assignment and the worker consumer's update mutex is
+// uncontended. Revoking BEFORE Stop could deadlock — see the inline comment.
+//
+// The whole sequence runs in its own goroutine: onClaimerError executes on the
+// claimer's renewal goroutine, and Manager.Stop -> idClaimer.Release waits on
+// that goroutine's doneCh — calling Stop synchronously here would deadlock.
+var claimLostShutdown = func(m *Manager) {
+	go func() {
+		workerID := m.WorkerID()
+
+		// Stop the Manager first. Stop cancels m.ctx — which unblocks any
+		// in-flight assignment update — and waits for the assignment-apply loop
+		// to exit (m.wg.Wait). Revoking the worker consumer BEFORE Stop could
+		// deadlock: revokeWorkerConsumer blocks on the worker consumer's update
+		// mutex, which an in-flight assignment update may hold while parked in
+		// an m.ctx-scoped JetStream call — and m.ctx is only cancelled once
+		// Stop runs.
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), claimLostStopTimeout)
+		defer stopCancel()
+		if err := m.Stop(stopCtx); err != nil && !errors.Is(err, types.ErrNotStarted) {
+			m.logger.Error("error stopping worker after stable-ID claim loss", "error", err)
+		}
+
+		// With the apply loop provably gone and m.ctx cancelled, revoke the
+		// worker consumer (empty partition set) so it stops pulling messages
+		// for the lost ID. This is the authoritative final state. A fresh
+		// context is used since stopCtx may be near-expired after a slow Stop.
+		revokeCtx, revokeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer revokeCancel()
+		m.revokeWorkerConsumer(revokeCtx, workerID)
+	}()
+}
+
+// onClaimerError handles background errors from the stable-ID claimer.
+//
+// ErrClaimLost means another worker now owns this ID. recordKVError would
+// silently drop it (it is neither a connectivity nor a degrading-JetStream
+// error), and Degraded mode does not halt processing — so the worker is
+// stopped outright via claimLostShutdown, and the cause is surfaced through the
+// OnError hook (fired by logError) so the embedding application can start a
+// fresh worker. Every other error flows through the normal degraded-mode KV
+// circuit.
+func (m *Manager) onClaimerError(err error) {
+	if errors.Is(err, stableid.ErrClaimLost) {
+		m.logError("stable worker ID claim lost, stopping worker", "worker_id", m.WorkerID(), "error", err)
+		claimLostShutdown(m)
+		return
+	}
+	m.recordKVError(err)
+}
+
 // claimWorkerID claims a stable worker ID.
 func (m *Manager) claimWorkerID(ctx context.Context, kv jetstream.KeyValue) error {
 	claimer := stableid.NewClaimer(
@@ -23,9 +107,9 @@ func (m *Manager) claimWorkerID(ctx context.Context, kv jetstream.KeyValue) erro
 		m.cfg.WorkerIDTTL,
 		m.logger,
 	)
-	// Feed renewal failures into the degraded-mode circuit so sustained KV
-	// errors on the stableID bucket drive the manager into Degraded.
-	claimer.SetOnError(m.recordKVError)
+	// Route renewal failures: ErrClaimLost stops the worker, everything else
+	// feeds the degraded-mode circuit — see onClaimerError.
+	claimer.SetOnError(m.onClaimerError)
 	m.idClaimer = claimer
 
 	workerID, err := claimer.Claim(ctx)

@@ -285,6 +285,13 @@ func DegradedBehaviorPreset(preset string) (DegradedBehaviorConfig, error) {
 //
 // ============================================================================
 
+// minWorkerIDTTL is the smallest supported WorkerIDTTL. It is three times the
+// stable-ID renewal floor (the renewal loop in internal/stableid renews at most
+// every 100ms): below this, a live worker's stable-ID key — whose bucket MaxAge
+// is reconciled to WorkerIDTTL — can age out before the renewal loop refreshes
+// it, letting another worker claim the still-live ID.
+const minWorkerIDTTL = 300 * time.Millisecond
+
 // Config is the configuration for the Manager.
 //
 // All duration fields accept standard Go duration strings like "30s", "5m", "1h".
@@ -517,6 +524,16 @@ func (cfg *Config) Validate() error {
 		return fmt.Errorf(
 			"WorkerIDTTL (%v) must be >= 3*HeartbeatInterval (%v) for stable ID renewal",
 			cfg.WorkerIDTTL, cfg.HeartbeatInterval,
+		)
+	}
+
+	// Rule 2b: WorkerIDTTL floor for the stable-ID renewal cadence.
+	if cfg.WorkerIDTTL < minWorkerIDTTL {
+		return fmt.Errorf(
+			"WorkerIDTTL (%v) must be >= %v: below this the stable-ID key can "+
+				"expire before the renewal loop refreshes it and a live worker "+
+				"can lose its ID",
+			cfg.WorkerIDTTL, minWorkerIDTTL,
 		)
 	}
 
