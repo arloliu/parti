@@ -19,11 +19,13 @@ type Snapshot struct {
 	ObservedAt      time.Time       `json:"observedAt"`
 	ControlPlane    []KVBucketState `json:"controlPlane"`
 	PartitionSource []KVBucketState `json:"partitionSource"`
-	// DynamicConsumers is always empty in the current release: alignment-check
-	// is the only dynamic-consumer surface, and it does not produce
-	// ConsumerState entries because the SDK does not yet stamp the ownership
-	// marker on dynamic consumers. Dynamic consumer precreation is not yet
-	// supported.
+	// DynamicConsumers is always empty: View builds the Snapshot by the Parti
+	// ownership marker, and provision stamps no marker on dynamic consumers —
+	// they are located by their deterministic durable name instead, because a
+	// marker would oscillate against the runtime's unconditional
+	// CreateOrUpdateConsumer overwrite. The consumer plan/apply surface
+	// (PlanConsumers / ApplyConsumers) is config-scoped and does not flow
+	// through View.
 	DynamicConsumers []ConsumerState `json:"dynamicConsumers"`
 	// Streams holds the live view of every Parti-marked application JetStream
 	// stream visible to the account, filtered by Scope. Always non-nil (empty
@@ -123,8 +125,9 @@ type PlanResult struct {
 
 // PlannedAction is one operation Apply would perform. Kind is one of the
 // ActionCreateKV, ActionUpdateKV, ActionStampMarker, ActionWritePartitions,
-// ActionCreateStream, ActionUpdateStream, or ActionStampStreamMarker constants.
-// The Resource field carries the would-be NATS config:
+// ActionCreateStream, ActionUpdateStream, ActionStampStreamMarker, or
+// ActionCreateConsumer constants. The Resource field carries the would-be
+// NATS config:
 //   - "create-kv": jetstream.KeyValueConfig value
 //   - "update-kv": *UpdateKVResource
 //   - "stamp-marker": *StampMarkerResource
@@ -132,9 +135,9 @@ type PlanResult struct {
 //   - "create-stream": jetstream.StreamConfig value
 //   - "update-stream": *UpdateStreamResource
 //   - "stamp-stream-marker": *StreamStampMarkerResource
+//   - "create-consumer": PlannedConsumer value
 //
-// Consumer precreation and destructive repair (delete/recreate) are not yet
-// supported.
+// Destructive repair (delete/recreate) is not yet supported.
 type PlannedAction struct {
 	Kind     string `json:"kind"`
 	Name     string `json:"name"`
@@ -193,6 +196,12 @@ const (
 	// merge is already a no-op, otherwise writes the re-read snapshot back with
 	// only Metadata changed. Resource is *StreamStampMarkerResource.
 	ActionStampStreamMarker = "stamp-stream-marker"
+
+	// ActionCreateConsumer is emitted by PlanConsumers for each per-partition
+	// durable consumer that a precreation-opted DynamicConsumerCfg describes
+	// and that does not exist live. Apply calls js.CreateConsumer. Resource is
+	// a PlannedConsumer value.
+	ActionCreateConsumer = "create-consumer"
 )
 
 // UpdateKVResource is the Resource carried by an ActionUpdateKV
@@ -383,9 +392,10 @@ type ResourceError struct {
 	Error string `json:"error"`
 }
 
-// PlannedConsumer is the dynamic-consumer alignment output type. The struct
-// exists so the Plan surface is stable; dynamic-consumer entries are not
-// yet populated through Plan (use PlanDynamicConsumers directly).
+// PlannedConsumer is the dynamic-consumer precreation output type. It is
+// produced by PlanDynamicConsumers (the pure builder) and used as the
+// Resource value in ActionCreateConsumer PlannedActions emitted by
+// PlanConsumers.
 type PlannedConsumer struct {
 	StreamName string                   `json:"streamName"`
 	Subject    string                   `json:"subject"`

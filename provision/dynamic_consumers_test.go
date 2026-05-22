@@ -72,6 +72,19 @@ func TestPlanDynamicConsumers_RuntimeRoundtripEquivalence(t *testing.T) {
 	require.NoError(t, runtimeCfg.SetDefaults(),
 		"the equivalence assertion is only meaningful after SetDefaults runs")
 
+	// Pin: dynamicbuild.DefaultDynamicDefaults (what provision precreates
+	// from) must match the runtime's post-SetDefaults config on the
+	// NATS-immutable fields. If these drift, a provision-precreated consumer
+	// can no longer be adopted by the runtime — CreateOrUpdateConsumer rejects
+	// an immutable-field change.
+	rd := dynamicbuild.DefaultDynamicDefaults()
+	require.Equal(t, runtimeCfg.AckPolicy, rd.AckPolicy,
+		"AckPolicy is NATS-immutable; provision defaults must match the runtime")
+	require.Equal(t, runtimeCfg.MaxWaiting, rd.MaxWaiting,
+		"MaxWaiting is NATS-immutable; provision defaults must match the runtime")
+	require.Equal(t, runtimeCfg.ConsumerMemoryStorage, rd.ConsumerMemoryStorage,
+		"MemoryStorage is NATS-immutable; provision defaults must match the runtime")
+
 	pre, suf, _ := dynamicbuild.ParseSubjectTemplateParts(subjectTemplate)
 
 	planned, err := PlanDynamicConsumers(streamName, consumerPrefix, subjectTemplate, partitions)
@@ -95,20 +108,21 @@ func TestPlanDynamicConsumers_RuntimeRoundtripEquivalence(t *testing.T) {
 			},
 		)
 
-		// §2 in-scope subset — these MUST match between runtime and provision.
+		// Identity / immutable subset — these MUST match between runtime and
+		// provision (NATS rejects an update that changes any of them, so a
+		// precreated consumer must carry the runtime's values).
 		require.Equal(t, expectedCfg.Name, pc.Config.Name)
 		require.Equal(t, expectedCfg.Durable, pc.Config.Durable)
 		require.Equal(t, expectedCfg.FilterSubject, pc.Config.FilterSubject)
 		require.Equal(t, expectedCfg.AckPolicy, pc.Config.AckPolicy)
 		require.Equal(t, expectedCfg.DeliverPolicy, pc.Config.DeliverPolicy)
+		require.Equal(t, expectedCfg.MaxWaiting, pc.Config.MaxWaiting)
+		require.Equal(t, expectedCfg.MemoryStorage, pc.Config.MemoryStorage)
 
-		// Out-of-scope fields (AckWait, MaxDeliver, InactiveThreshold,
-		// MaxWaiting, MaxAckPending, MemoryStorage, Replicas) are
-		// intentionally NOT asserted. The provision builder leaves them at
-		// dynamicbuild.Defaults zero values; runtime sets them from
-		// SetDefaults() output. The v1 equality subset (sub-spec §2)
-		// explicitly limits assertions to the five identity/semantic-
-		// constant fields above.
+		// The mutable runtime-owned tunables (AckWait, MaxDeliver,
+		// InactiveThreshold, MaxAckPending, Replicas) are not asserted: the
+		// runtime overwrites them freely via CreateOrUpdateConsumer, so they
+		// need not match at precreation time.
 	}
 }
 

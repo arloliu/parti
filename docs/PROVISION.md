@@ -19,7 +19,8 @@
 6. [Safety Contracts](#safety-contracts)
 7. [Partition Records](#partition-records)
 8. [Application Streams](#application-streams)
-9. [Example Configuration](#example-configuration)
+9. [Dynamic Consumer Precreation](#dynamic-consumer-precreation)
+10. [Example Configuration](#example-configuration)
 
 ---
 
@@ -35,8 +36,10 @@ Parti's runtime manager depends on:
   partition definition record read by the runtime source.
 
 `provision` manages application streams via a `streams:` block in the
-config file. It does not manage dynamic consumers (alignment-check only)
-or partition record contents directly. It provides:
+config file and optionally precreates per-partition durable consumers via
+the `partictl consumers` command (see
+[Dynamic Consumer Precreation](#dynamic-consumer-precreation)). It
+does not manage partition record contents directly. It provides:
 
 - **Read-only inspection** — `view` lists all Parti-marked resources
   in the NATS account; `validate` checks a config file for static or
@@ -238,6 +241,22 @@ partictl partitions apply -f <path> [flags]
 
 The `-policy` flag is not accepted: the reconcile policy governs bucket
 config, not record contents.
+
+### `partictl consumers`
+
+Precreates per-partition durable consumers for `dynamicConsumers:` targets
+that have opted in via `partitionsRef`. See
+[Dynamic Consumer Precreation](#dynamic-consumer-precreation) for the full
+workflow.
+
+```
+partictl consumers plan  -f <path> [flags]
+  -fail-on-drift   Exit 2 if non-informational drift is found
+partictl consumers apply -f <path> [flags]
+  -dry-run   Plan only — emit the same output as consumers plan
+```
+
+The `-policy` flag is not accepted: precreation is policy-independent.
 
 ### Exit codes
 
@@ -588,14 +607,162 @@ Fields not in the `StreamCfg` set (mirror, source, republish,
 placement, per-subject limits) are preserved verbatim from the live
 stream by `update-stream` and are never drift-classified.
 
-### Subject coverage (Phase 4 limitation)
+### Subject coverage
 
 Phase 4 provisions a stream with exactly the `subjects` declared in
 config. It does **not** cross-check that those subjects cover the
-partition subjects a `dynamicConsumers:` entry would need — that check
-requires resolving `partitionsRef` against partition data and is the
-home of **Phase 5 (Dynamic Precreate)**. Misconfigured subject coverage
-is not detected until the consumer binds at runtime.
+partition subjects a `dynamicConsumers:` entry would need — verifying
+subject coverage requires cross-referencing the partition set, which is a
+future enhancement. Misconfigured subject coverage is not detected until
+the consumer binds at runtime.
+
+---
+
+## Dynamic Consumer Precreation
+
+The `consumers` command precreates the per-partition durable consumers that
+Parti's runtime binds to an application stream. Before Phase 5, `provision`
+only *alignment-checked* dynamic consumers; it never created them. With
+precreation, operators can verify that all expected consumers exist before
+workers start, and observe any missing consumers as explicit drift.
+
+### Opting a target into precreation
+
+Dynamic-consumer targets are declared under `dynamicConsumers:` in
+`parti-env.yaml`. By default a target is **alignment-check only** — it is
+inspected by `validate --live` but never created by `provision`. Setting
+`partitionsRef` to the partition-source bucket name opts the target into
+precreation:
+
+```yaml
+partitionSource:
+  bucket: my-partitions
+  key:    partitions
+  partitions:
+    - keys: ["orders", "0"]
+    - keys: ["orders", "1"]
+    - keys: ["audit"]
+
+dynamicConsumers:
+  - streamName:      orders
+    consumerPrefix:  orders-consumer
+    subjectTemplate: orders.{{.PartitionID}}
+    partitionsRef:   my-partitions   # <-- opts this target into precreation
+```
+
+`partitionsRef` must equal `partitionSource.bucket` — it names the
+partition-source the consumer's partition set is drawn from. A
+`partitionsRef` that does not match is rejected at validation time (exit 3).
+A target with an empty `partitionsRef` keeps its Phase 1 behavior: it is
+alignment-checked by `validate --live` only and is never touched by
+`consumers plan` / `apply`.
+
+### plan and apply
+
+```
+partictl consumers plan  -f parti-env.yaml [-fail-on-drift]
+partictl consumers apply -f parti-env.yaml [-dry-run]
+```
+
+`consumers plan` reads the current live state of each expected consumer and
+reports the diff — which per-partition durable consumers are missing and
+which already exist. `-fail-on-drift` exits 2 when any non-informational drift
+is found; a fully-precreated consumer set emits only `informational` findings
+and exits 0.
+
+`consumers apply` runs `consumers plan` then creates every missing consumer.
+`--dry-run` makes it behave exactly like `consumers plan`. The `-policy` flag
+is not accepted; precreation is policy-independent (a consumer either exists
+or is created — there is no warn / safe-update / adopt distinction for it).
+
+The `provision` SDK exposes the same surface as `PlanConsumers` and
+`ApplyConsumers`.
+
+### The runtime-owns model — no ownership marker, no tunable management
+
+The Parti runtime calls `js.CreateOrUpdateConsumer` on every worker start.
+NATS **overwrites** the consumer's config on update (it does not merge). Phase
+5 chooses the runtime as the single owner of a dynamic consumer's config.
+Three deliberate consequences flow from that decision:
+
+**No ownership marker on consumers.** Phases 1-4 stamp the Parti marker
+(`parti.io/managed` / `parti.io/component` / `parti.io/instance`) in each
+resource's `Metadata`. A consumer stamped by `provision` would have its
+`Metadata` stripped the first time the runtime's `CreateOrUpdateConsumer`
+ran without setting `Metadata` — producing an endless re-stamp loop (`apply`
+stamps → worker restart strips → `plan` reports drift → `apply` stamps …).
+Phase 5 therefore stamps **no marker on consumers at all.** `provision`
+locates a Parti consumer the only way that is stable across runtime overwrites:
+by its **deterministic durable name**, recomputed from config via the shared
+`internal/dynamicbuild` package.
+
+**No tunable management.** `provision` precreates consumers at runtime-default
+tunable values (`AckWait`, `MaxDeliver`, `InactiveThreshold`, `MaxAckPending`,
+`ConsumerReplicas`) and never updates them. There is no `update-consumer`
+action. The source of truth for these tunables is the application's
+`consumer.Dynamic` options, not a provisioning YAML; the runtime overwrites
+them on every worker start. A live consumer whose tunables differ from any
+value is **not** drift — the runtime owns tuning.
+
+**Precreation is not a least-privilege enabler.** Because the runtime still
+calls `CreateOrUpdateConsumer` unconditionally, precreation does **not** let
+a runtime run without consumer-write permission. Phase 5's value is
+**pre-flight readiness** (the consumers exist and are inspectable before
+workers start) and **drift visibility** (`plan` reports missing consumers).
+
+### The immutable-field contract
+
+NATS rejects a `CreateOrUpdateConsumer` that changes certain fields on an
+existing consumer. The ones reachable on a Parti dynamic (pull) consumer are:
+`AckPolicy`, `DeliverPolicy`, `MaxWaiting`, and `MemoryStorage`. These cannot
+be "owned by the runtime and overwritten later" — if provision precreates a
+consumer whose immutable fields differ from the runtime's, the runtime's own
+`CreateOrUpdateConsumer` on worker start **fails**.
+
+Provision therefore precreates from `dynamicbuild.DefaultDynamicDefaults()` —
+the same defaults a `consumer.Dynamic` with no options uses:
+
+| Immutable field  | Precreated value              |
+|------------------|-------------------------------|
+| `AckPolicy`      | `AckExplicitPolicy`           |
+| `DeliverPolicy`  | `DeliverAllPolicy` (hard-coded) |
+| `MaxWaiting`     | `2`                           |
+| `MemoryStorage`  | `false` (file storage)        |
+
+**Operator responsibility:** a `consumer.Dynamic` configured with a non-default
+`WithAckPolicy`, `WithMaxWaiting`, or `WithConsumerMemoryStorage(true)` must
+**not** be opted into precreation. If such a consumer is already live,
+`consumers plan` reports it as `drift-immutable` with the offending field named
+in the finding detail — the misconfiguration is not silent.
+
+### Honest scope — declared partition set, not the live table
+
+A successful `partictl consumers apply` means the per-partition durable
+consumers for the **declared** `partitionSource.partitions` set exist. It
+does **not** certify that they match the live partition table the runtime will
+read — the live table can be mutated independently
+(`source.NatsKV.AddPartitions` / `RemovePartitions` / `Modify`), exactly as
+Phase 3's `partitions apply` documents its own honest-scope limit.
+
+The intended operator workflow:
+
+```bash
+# 1. Converge the live partition table to the declared set.
+partictl partitions apply -f parti-env.yaml
+
+# 2. Precreate per-partition consumers for that declared set.
+partictl consumers apply -f parti-env.yaml
+```
+
+Run `partitions apply` first when live-table readiness is needed; then
+`consumers apply` to precreate for the resulting set.
+
+### The bucket and stream must exist first
+
+`partictl consumers` never creates the partition-source bucket or the
+application stream. Run `partictl apply -f parti-env.yaml` to provision both
+before running `consumers plan` / `apply`. A missing stream exits 3 with a
+message pointing back at `partictl apply`.
 
 ---
 

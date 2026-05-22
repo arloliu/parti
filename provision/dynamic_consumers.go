@@ -21,15 +21,15 @@ import (
 // supplied via Dynamic options; the equality subset is documented in the
 // corresponding integration test).
 //
-// The builder hard-codes:
-//   - AckPolicy = jetstream.AckExplicitPolicy
-//   - DeliverPolicy = jetstream.DeliverAllPolicy
-//
-// All other ConsumerConfig fields are populated from the zero values of
-// dynamicbuild.Defaults; runtime equivalents are tunable through consumer
-// options that this builder does not accept. The runtime-defaults
-// roundtrip test (provision/dynamic_consumers_test.go) pins the equality
-// subset against durable.WorkerConsumerConfig.SetDefaults().
+// The builder fills the ConsumerConfig from dynamicbuild.DefaultDynamicDefaults
+// — the Defaults a default-configured consumer.Dynamic uses. This makes the
+// NATS-immutable fields (AckPolicy = AckExplicitPolicy, MaxWaiting = 2,
+// MemoryStorage = false) and DeliverPolicy = DeliverAllPolicy match the
+// runtime, so a consumer provision precreates from this output can be adopted
+// by the runtime's own CreateOrUpdateConsumer. The mutable tunables also carry
+// the runtime defaults; the runtime overwrites them on start. The
+// runtime-defaults roundtrip test (provision/dynamic_consumers_test.go) pins
+// the immutable fields against durable.WorkerConsumerConfig.SetDefaults().
 //
 // Output ordering is deterministic by subject (matches the runtime
 // internal/durable.buildSubjects sort). Two partitions that resolve to the
@@ -84,11 +84,11 @@ func PlanDynamicConsumers(
 	// Template framing for partition-id extraction inside PerSubjectDurableName.
 	pre, suf, _ := dynamicbuild.ParseSubjectTemplateParts(subjectTemplate)
 
-	defaults := dynamicbuild.Defaults{
-		AckPolicy: jetstream.AckExplicitPolicy,
-		// Remaining tunables left at their Go zero values; the equality
-		// subset tested by the roundtrip test does not assert them.
-	}
+	// Use the runtime dynamic-consumer defaults, not zero values: a consumer
+	// provision precreates must carry the same NATS-immutable fields
+	// (AckPolicy, MaxWaiting, MemoryStorage) the runtime will use, or the
+	// runtime's CreateOrUpdateConsumer fails on startup.
+	defaults := dynamicbuild.DefaultDynamicDefaults()
 
 	out := make([]PlannedConsumer, 0, len(subjects))
 	for _, subject := range subjects {

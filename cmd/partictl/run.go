@@ -34,6 +34,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdAdopt(rest, stdout, stderr)
 	case "partitions":
 		return cmdPartitions(rest, stdout, stderr)
+	case "consumers":
+		return cmdConsumers(rest, stdout, stderr)
 	case "stream":
 		return cmdStream(rest, stdout, stderr)
 	case "help", "-help", "--help", "-h":
@@ -60,6 +62,7 @@ Commands:
   apply       Create missing resources; -dry-run emits the same output as plan
   adopt       Stamp Parti ownership marker on unmarked resources (shorthand for apply --policy=adopt)
   partitions  Plan/apply the partition-source key contents (partitions plan|apply)
+  consumers   Precreate per-partition durable consumers (consumers plan|apply)
   stream      Manage application JetStream streams (stream view|plan|apply)
 
 Common flags (accepted by all commands):
@@ -68,11 +71,11 @@ Common flags (accepted by all commands):
   -nkey     <path>      Path to NATS nkey seed file
   -token    <string>    NATS token
   -timeout  <duration>  Operation timeout (default: 30s)
-  -f        <path>      YAML config file (required for validate/plan/apply/adopt/partitions; optional for view)
+  -f        <path>      YAML config file (required for validate/plan/apply/adopt/partitions/consumers; optional for view)
   -json                 Emit machine-readable JSON output
   -instance <name>      Filter by parti.io/instance (view without -f; validate)
-  -policy   <policy>    Reconcile policy for plan/apply/adopt: warn, adopt, safe-update (default: warn).
-                        Not accepted by partitions — record reconciliation ignores policy.
+  -policy   <policy>    Reconcile policy for plan/apply/adopt/stream: warn, adopt, safe-update (default: warn).
+                        Not accepted by partitions or consumers — they are policy-independent.
 
 Deferred commands (not yet supported):
   init, emit
