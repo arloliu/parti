@@ -18,6 +18,10 @@ import (
 // short (staleness threshold elapses fast), so the reclaim is deterministically
 // a takeover of a still-present key — asserted by Get calls before the Claim.
 func TestStableID_TakesOverStaleKeyAfterFileStorageRestart(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration: skipping in short mode")
+	}
+
 	nc, restart := startEmbeddedNATSWithRestart(t)
 	js, err := jetstream.New(nc)
 	require.NoError(t, err)

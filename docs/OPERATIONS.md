@@ -75,7 +75,10 @@ Parti auto-creates KV buckets, but you can pre-create them for custom settings:
 
 ```bash
 # Create buckets with custom retention
-nats kv add parti-my-cluster-stableid --replicas=3 --ttl=1h
+# NOTE: the stableID bucket TTL is reconciled to WorkerIDTTL on Manager.Start;
+# any TTL specified here (including --ttl=0 / unlimited) will be overwritten.
+# Omit --ttl for the stableID bucket and let Parti set it from WorkerIDTTL.
+nats kv add parti-my-cluster-stableid --replicas=3
 nats kv add parti-my-cluster-election --replicas=3
 nats kv add parti-my-cluster-heartbeat --replicas=3 --ttl=5m
 nats kv add parti-my-cluster-assignment --replicas=3
@@ -642,6 +645,18 @@ kubectl rollout restart deployment/parti
 - Wire `OnDegraded` to fail a k8s readiness probe (see `examples/degraded-readiness`) so pods are rotated automatically instead of drifting
 
 **Expected log noise during the incident:** while the buckets are missing the recovery loop retries `refreshAssignmentFromNATS` each second and surfaces `failed to refresh assignment during recovery` warnings plus periodic `KV error threshold exceeded` entries. This is expected — it stops as soon as the buckets are restored (by a process restart) and the manager exits Degraded.
+
+#### Worker Self-Stop After Stable ID Claim Loss
+
+**Symptoms:** A single worker stops itself; `OnError` fires with an error wrapping `worker ID claim lost`; the worker logs `stable ID claim lost, stopping renewal` followed by `stable worker ID claim lost, stopping worker`.
+
+**Causes:**
+- The worker lost stableID KV connectivity for longer than `WorkerIDTTL`, so its claim key expired and another worker reclaimed the ID
+- The worker's key went stale (missed ~3 consecutive renewals) and was taken over by a restarting worker
+
+**Why parti does not auto-recover:** A lost claim is unrecoverable in place — the stable ID now belongs to another worker, and renewing would clobber the new owner's key. By the time a claim is lost the worker has also missed its heartbeat lease, so the cluster has already reassigned its partitions. Parti therefore stops the worker and revokes its consumer rather than fight the new owner.
+
+**Resolution:** The embedding application must start a **fresh worker** — parti does not restart itself. Wire `OnError` to trigger a process restart, or run the worker under a supervisor (systemd, k8s) that restarts the process on exit. The restarted worker claims a new ID from the pool (or reclaims its old one if still within the TTL window).
 
 #### Stable ID Pool Exhaustion
 

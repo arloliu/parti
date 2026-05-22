@@ -313,6 +313,10 @@ type Config struct {
 	// WorkerIDTTL/3, so longer values reduce steady-state IOPS at the cost of slower
 	// ID reclamation after a worker exits.
 	// Recommended: 3-5x HeartbeatTTL. Default 75s is 5x the default HeartbeatTTL (15s).
+	// The stableID KV bucket's MaxAge is reconciled to exactly WorkerIDTTL on
+	// Manager.Start: an existing bucket whose TTL differs (most dangerously 0,
+	// which leaks worker IDs on ungraceful restart) is corrected, and a
+	// deliberately-longer operator TTL is shortened to WorkerIDTTL.
 	WorkerIDTTL time.Duration `yaml:"workerIdTtl" default:"75s" validate:"gt=0,gtefield=HeartbeatTTL"`
 
 	// HeartbeatInterval is how often workers publish heartbeat messages.
@@ -496,6 +500,7 @@ func SetDefaults(cfg *Config) error {
 //   - HeartbeatTTL >= 2 * HeartbeatInterval (allow 1 missed heartbeat)
 //   - WorkerIDTTL >= 3 * HeartbeatInterval (stable ID renewal)
 //   - WorkerIDTTL >= HeartbeatTTL (ID must outlive heartbeat)
+//   - WorkerIDTTL >= 300ms (stable-ID renewal floor)
 //   - RebalanceCooldown > 0 (prevent thrashing)
 //   - ColdStartWindow >= PlannedScaleWindow (cold start is slower)
 //   - RebalanceCooldown <= PlannedScaleWindow (rate limit coordination)

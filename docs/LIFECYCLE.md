@@ -104,7 +104,7 @@ The Stable ID lifecycle consists of four key operations managed by an internal `
    - Must be called after `Claim()`
     - Idempotent: subsequent calls return an error
    - Each renewal uses a short timeout context (100ms–5s)
-   - Failures are logged but don't stop the loop
+   - Transient failures are logged and retried on the next tick; a detected claim loss (`ErrClaimLost`) stops the loop and triggers a worker self-stop
 
 3. **Release(ctx)**: Stops renewal and deletes the KV key
    - Frees the ID for immediate reuse by other workers
@@ -142,10 +142,12 @@ _ = claimer.Release(ctx)
 **Renewal Timing:**
 - Interval: `WorkerIDTTL / 3` (minimum 100ms)
 - Each tick uses its own timeout: `min(max(ttl/3, 100ms), 5s)`
-- Failures are retried on the next tick
+- Transient failures are retried on the next tick; a lost claim stops the renewal loop and triggers a worker self-stop via `Manager.Stop`, surfacing the cause through the `OnError` hook
 
 **Restart Behavior:**
 - If a worker restarts within the TTL window, it will reclaim its previous ID
+- If a worker's key is stale (not renewed within 3 renewal intervals), a restarting worker reclaims it via an atomic revision-checked takeover, recovering worker IDs leaked by ungraceful exits even when the bucket TTL has not yet expired
+- On `Manager.Start`, the stableID bucket's `MaxAge` is reconciled to exactly `WorkerIDTTL`; an operator-created bucket with a different TTL (including `0` / unlimited) is corrected automatically
 - This preserves partition affinity during rolling updates
 
 **Pool Exhaustion:**

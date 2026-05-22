@@ -29,6 +29,10 @@ var (
 //
 // Overview:
 //   - Claim(ctx) acquires the first available ID in [minID, maxID] using KV Create semantics.
+//   - Claim takes over an ID whose key exists but has not been renewed within
+//     the stale threshold (3 renewal intervals) — a stale claim left by an
+//     ungracefully-stopped worker — using an atomic revision-checked Update so
+//     concurrent reclaimers cannot collide.
 //   - StartRenewal() starts a background goroutine that periodically renews the claim.
 //     The provided ctx is used only for initial checks; the goroutine lifetime is controlled
 //     by Release() or Close(). Each renewal tick uses its own short timeout context.
@@ -44,7 +48,9 @@ var (
 // Concurrency and timing:
 //   - Renewal interval is ttl/3 with a minimum of 100ms.
 //   - Each renew attempt uses context.WithTimeout with duration clamped to [100ms, 5s].
-//   - Renew errors are logged and do not stop the loop; loop stops only via Release/Close.
+//   - Renewal uses a revision-checked Update; if the claim is lost (the ID was
+//     taken over, or expired and re-created), renew returns ErrClaimLost and
+//     the renewal loop stops.
 //
 // Workers sequentially search the ID pool until finding an available ID.
 type Claimer struct {
