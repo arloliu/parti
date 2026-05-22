@@ -7,17 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+### Added
 
-- `consumer.WithPullGating(false)` is now honored as an explicit disable even
-  when the processing gate is enabled. Previously the processing gate's
-  default-on rule re-enabled pull gating unconditionally, so a caller that
-  passed `WithPullGating(false)` still had pulls suppressed before fetch. The
-  processing-gate default — pull gating on when the caller never configures it —
-  is unchanged; only an explicit `WithPullGating` call now overrides it. This
-  lets callers opt into the lower-prepull-gating mode where messages may be
-  pulled and then NAKed by the processing gate, which remains the in-handler
-  ownership/state safety layer.
+- `partictl partitions plan` and `partictl partitions apply` manage the
+  contents of the partition-source key — the partition table itself —
+  separately from the bucket-provisioning commands. `plan` reports the
+  record-level diff (added / removed / weight-changed) between the declared
+  `partitionSource.partitions` and the live key; `apply` writes the declared
+  table with a single compare-and-swap, gating record removals behind
+  `-prune`. The `provision` SDK exposes the same surface as `PlanPartitions`
+  and `ApplyPartitions`.
+- `provision.PartitionSourceConfig.Partitions` declares the desired partition
+  table inline in `parti-env.yaml`. The bucket-provisioning commands
+  (`plan` / `apply` / `adopt`) ignore the field, so existing config files are
+  unaffected.
 
 ## [v2.4.1] - 2026-05-20
 

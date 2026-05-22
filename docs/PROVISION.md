@@ -17,7 +17,8 @@
 4. [partictl Commands](#partictl-commands)
 5. [Brownfield Adoption Playbook](#brownfield-adoption-playbook)
 6. [Safety Contracts](#safety-contracts)
-7. [Example Configuration](#example-configuration)
+7. [Partition Records](#partition-records)
+8. [Example Configuration](#example-configuration)
 
 ---
 
@@ -219,6 +220,23 @@ partictl adopt -f <path> [flags]
 `cfg.policy` in the YAML is non-empty and not `adopt`, the command
 exits 3 with the same conflict message as `apply`.
 
+### `partictl partitions`
+
+Manages the *contents* of the partition-source key — the partition table
+itself — as opposed to the partition-source bucket config. See
+[Partition Records](#partition-records) for the full workflow.
+
+```
+partictl partitions plan  -f <path> [flags]
+  -fail-on-drift   Exit 2 if the declared table differs from the live key
+partictl partitions apply -f <path> [flags]
+  -prune     Allow removing records absent from the declared set
+  -dry-run   Plan only — emit the same output as partitions plan
+```
+
+The `-policy` flag is not accepted: the reconcile policy governs bucket
+config, not record contents.
+
 ### Exit codes
 
 | Code | Meaning                                                     |
@@ -351,6 +369,89 @@ the re-read→write window within a single `apply` invocation.
 
 ---
 
+## Partition Records
+
+The commands above provision NATS *buckets*. The `partitions` command
+manages the **contents** of the partition-source key: the partition table
+the Parti runtime reads to know which partitions exist.
+
+### Declaring the partition set
+
+Add a `partitions:` list under `partitionSource:` in `parti-env.yaml`. Each
+record has a `keys` list — the partition identity, one or more non-empty
+strings with no dots or whitespace — and an optional `weight`, the relative
+processing cost (default `0`, meaning the assignment strategy's default):
+
+```yaml
+partitionSource:
+  bucket: parti-partitions
+  key: partitions/v1
+  partitions:
+    - keys: ["orders", "0"]
+      weight: 100
+    - keys: ["orders", "1"]
+      weight: 100
+    - keys: ["audit"]
+```
+
+The bucket-provisioning commands (`plan`, `apply`, `adopt`) ignore
+`partitions:` entirely — only `partictl partitions` reads it. An env file
+that omits `partitions:` works unchanged for those commands; `partictl
+partitions` reports an error (exit 3) when it is missing or empty.
+
+### plan and apply
+
+```
+partictl partitions plan  -f parti-env.yaml
+partictl partitions apply -f parti-env.yaml [-prune]
+```
+
+`partitions plan` reads the live partition-source key, diffs it against the
+declared set by partition identity, and reports the record-level changes —
+records **added**, **removed**, and **weight-changed**. It is read-only;
+`-fail-on-drift` makes a non-empty diff exit 2.
+
+`partitions apply` writes the declared table to the key as a single
+compare-and-swap. `-dry-run` makes it behave exactly like `plan`.
+
+### Removals require `-prune`
+
+Adding records and changing weights apply freely. Removing a record — the
+declared set omits a partition the live key still has — is gated: `partitions
+apply` refuses the whole operation and exits 1 unless `-prune` is passed, the
+same "no destructive default" posture as the bucket commands. The key is
+rewritten atomically, so the refusal is all-or-nothing; there is no partial
+apply.
+
+Phase 3 has no surface for pruning the table to zero records: an empty or
+omitted `partitions:` list is always rejected.
+
+### The bucket must exist first
+
+`partictl partitions` never creates the partition-source bucket. Run
+`partictl apply -f parti-env.yaml` to provision the bucket, then `partictl
+partitions apply` to publish records. A missing bucket exits 3 with a
+message pointing back at `partictl apply`.
+
+### Concurrency
+
+`partitions apply` makes one compare-and-swap attempt. If another writer
+changes the key between the plan re-read and the write, apply reports the
+race and exits 1 — re-run `partitions plan`. A successful apply means its
+CAS landed; it is not a guarantee the table stays converged against a
+runtime writer that also updates the partition source. Operators who care
+about cross-writer ordering serialize their own runs.
+
+### Large partition tables
+
+The partition table is stored gzip-compressed in a single KV value, so it
+is bounded by the bucket's maximum value size. For a large table whose
+lifecycle differs from the infrastructure config, keep the `partitions:`
+list in its own file and assemble `parti-env.yaml` with a YAML include or a
+templating step before invoking `partictl partitions`.
+
+---
+
 ## Example Configuration
 
 ```yaml
@@ -374,6 +475,12 @@ partitionSource:
   replicas:     3
   maxValueSize: 0     # 0 = no limit
   ttl:          0s    # 0 = no expiration
+  partitions:         # read only by `partictl partitions`; bucket commands ignore it
+    - keys: ["orders", "0"]
+      weight: 100
+    - keys: ["orders", "1"]
+      weight: 100
+    - keys: ["audit"]
 ```
 
 ### Minimal configuration (control-plane only, defaults for everything)

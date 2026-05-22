@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arloliu/parti/v2/internal/partcodec"
 	"github.com/arloliu/parti/v2/partitest"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
@@ -275,7 +276,7 @@ func TestNatsKV_Update_CASRetryOnConflict(t *testing.T) {
 	// Bump the KV revision from outside via raw Put (rev=2). The frozen watcher
 	// will not notify the source, so the local cache still believes rev=localRev.
 	bumpData := []types.Partition{{Keys: []string{"bumped"}}}
-	bumpBytes, encErr := encodePartitions(bumpData)
+	bumpBytes, encErr := partcodec.Encode(bumpData)
 	require.NoError(t, encErr)
 	rawRev, err := kv.Put(ctx, "config", bumpBytes)
 	require.NoError(t, err)
@@ -338,7 +339,7 @@ func TestNatsKV_Modify_SeesFreshKVNotCache(t *testing.T) {
 		{Keys: []string{"B"}},
 		{Keys: []string{"C"}},
 	}
-	abcBytes, encErr := encodePartitions(abc)
+	abcBytes, encErr := partcodec.Encode(abc)
 	require.NoError(t, encErr)
 	_, err = kv.Put(ctx, "config", abcBytes)
 	require.NoError(t, err)
@@ -368,7 +369,7 @@ func TestNatsKV_Modify_SeesFreshKVNotCache(t *testing.T) {
 		{Keys: []string{"C"}},
 		{Keys: []string{"D"}},
 	}
-	abcdBytes, encErr2 := encodePartitions(abcd)
+	abcdBytes, encErr2 := partcodec.Encode(abcd)
 	require.NoError(t, encErr2)
 	_, err = kv.Put(ctx, "config", abcdBytes)
 	require.NoError(t, err)
@@ -471,7 +472,7 @@ func TestNatsKV_Reconcile_RecoversFromMissedWatcherEvent(t *testing.T) {
 	// Directly write to KV bypassing src.Update. The frozen watcher cannot
 	// deliver this event — only the reconcile loop can detect the change.
 	injected := []types.Partition{{Keys: []string{"injected"}}}
-	injectedBytes, encErr := encodePartitions(injected)
+	injectedBytes, encErr := partcodec.Encode(injected)
 	require.NoError(t, encErr)
 	_, err = kv.Put(ctx, "config", injectedBytes)
 	require.NoError(t, err)
@@ -829,7 +830,7 @@ func TestNatsKV_WithUpdateRetries_ExhaustionReturnsTypedError(t *testing.T) {
 
 	// Pre-populate the KV key so revision > 0.
 	initialData := []types.Partition{{Keys: []string{"p1"}}}
-	initialBytes, encErr := encodePartitions(initialData)
+	initialBytes, encErr := partcodec.Encode(initialData)
 	require.NoError(t, encErr)
 	_, err = kv.Put(ctx, "config", initialBytes)
 	require.NoError(t, err)
@@ -982,7 +983,7 @@ func TestNatsKV_WatcherRestart_ChannelClose_RestartsAndObservesNewUpdate(t *test
 
 	// Write initial data before Start so we have a known revision.
 	initial := []types.Partition{{Keys: []string{"initial"}}}
-	initialBytes, encErr := encodePartitions(initial)
+	initialBytes, encErr := partcodec.Encode(initial)
 	require.NoError(t, encErr)
 	_, err = kv.Put(ctx, "config", initialBytes)
 	require.NoError(t, err)
@@ -1025,7 +1026,7 @@ func TestNatsKV_WatcherRestart_ChannelClose_RestartsAndObservesNewUpdate(t *test
 
 	// Write a new value to KV; the restarted real watcher (or reconcile) must observe it.
 	updated := []types.Partition{{Keys: []string{"after-restart"}}}
-	updatedBytes, encErr2 := encodePartitions(updated)
+	updatedBytes, encErr2 := partcodec.Encode(updated)
 	require.NoError(t, encErr2)
 	_, err = kv.Put(ctx, "config", updatedBytes)
 	require.NoError(t, err)
@@ -1273,6 +1274,53 @@ func TestNatsKV_Watch_RaceWithStop_NoLeak(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return runtime.NumGoroutine() <= baselineGoroutines+5
 	}, 2*time.Second, 10*time.Millisecond, "goroutine count must not leak after Stop")
+}
+
+// TestNatsKV_GoldenWireFormat_ReadPath cross-checks that the partcodec wire
+// format decodes unchanged through the live source read path: bytes at rest in
+// KV -> NatsKV.Start (initial read) and -> watcher (update read) -> List. It
+// covers both the gzip form and the plain-JSON form of the dual-format contract.
+func TestNatsKV_GoldenWireFormat_ReadPath(t *testing.T) {
+	_, nc := partitest.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx := t.Context()
+
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "partitions"})
+	require.NoError(t, err)
+
+	key := "config"
+	golden := []types.Partition{
+		{Keys: []string{"topic-a", "0"}, Weight: 3},
+		{Keys: []string{"topic-b", "1"}, Weight: 0},
+	}
+
+	// gzip wire form, written before Start so the Start read path decodes it.
+	gzipped, err := partcodec.Encode(golden)
+	require.NoError(t, err)
+	_, err = kv.Put(ctx, key, gzipped)
+	require.NoError(t, err)
+
+	src := NewNatsKV(kv, key, nil, WithReconcileInterval(0))
+	require.NoError(t, src.Start(ctx))
+	defer func() { _ = src.Stop(ctx) }()
+
+	got, err := src.List(ctx)
+	require.NoError(t, err)
+	require.Equal(t, golden, got)
+
+	// plain-JSON wire form (no gzip), exercised end-to-end through the watcher
+	// read path — the dual-format decode contract.
+	plainJSON := []byte(`[{"keys":["topic-c"],"weight":7}]`)
+	_, err = kv.Put(ctx, key, plainJSON)
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		p, listErr := src.List(ctx)
+		return listErr == nil && len(p) == 1 &&
+			len(p[0].Keys) == 1 && p[0].Keys[0] == "topic-c" && p[0].Weight == 7
+	}, 2*time.Second, 10*time.Millisecond)
 }
 
 // fakeKeyWatcher implements jetstream.KeyWatcher for testing.

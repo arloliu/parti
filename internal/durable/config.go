@@ -147,29 +147,15 @@ type WorkerConsumerConfig struct {
 	// exclusivity is required. Without this, ownership transitions may be "loose",
 	// resulting in brief periods where a partition is processed by a worker that
 	// is no longer the assigned owner (though duplicates are rare).
-	//
-	// Default: nil (processing gate disabled).
 	ProcessingGate *ProcessingGateConfig `validate:"omitempty"`
 
 	// Resolver configures the ownership resolver when ProcessingGate is enabled.
 	Resolver ResolverConfig
 
-	// PullGatingEnabled is the resolved decision for pre-pull ownership/state
-	// gating on per-subject consumers. When true, pulls are suppressed (not
-	// issued) if the current worker is not the owner or the handoff state is
-	// not Commit/Stable, which reduces NAK churn during handoffs. SetDefaults
-	// may auto-enable this when the processing gate is on; see
-	// PullGatingConfigured.
+	// PullGatingEnabled enables pre-pull ownership/state gating for per-subject consumers.
+	// When true, pulls are suppressed (not issued) if the current worker is not the owner or
+	// the handoff state is not Commit/Stable. Reduces NAK churn during handoffs.
 	PullGatingEnabled bool
-
-	// PullGatingConfigured records whether PullGatingEnabled reflects an
-	// explicit caller choice. When false (the zero value), SetDefaults treats
-	// pull gating as "not configured" and auto-enables it if the processing
-	// gate is enabled. When true, SetDefaults preserves PullGatingEnabled as
-	// given, so an explicit disable survives. A direct constructor that wants
-	// pull gating off under an enabled processing gate must therefore set this
-	// to true alongside PullGatingEnabled: false.
-	PullGatingConfigured bool
 
 	// DrainOnRemove enables a graceful per-subject drain when a subject is removed
 	// from the worker's assignment. When true, the consumer helper will stop issuing
@@ -213,7 +199,6 @@ type WorkerConsumerConfig struct {
 	// kept in memory rather than inheriting the stream's storage type.
 	// See consumer.WithConsumerMemoryStorage for full semantics and the
 	// non-live-editable caveat.
-	// Default: false (inherit stream storage type).
 	ConsumerMemoryStorage bool
 
 	// ConsumerReplicas overrides jetstream.ConsumerConfig.Replicas on
@@ -225,7 +210,6 @@ type WorkerConsumerConfig struct {
 
 	// MaxConcurrentSubjects caps the total number of per-subject consumers/loops.
 	// When exceeded, additional subjects are skipped with a warning and metric increment.
-	// Default: 0 (no cap).
 	MaxConcurrentSubjects int `validate:"gte=0"`
 
 	// AckPolicy controls JetStream ack policy. Defaults to AckExplicitPolicy.
@@ -245,12 +229,12 @@ type WorkerConsumerConfig struct {
 
 	// IteratorEscalationWindow defines the sliding time window used to aggregate
 	// iterator failures for escalation detection. If zero, defaults to
-	// DefaultIteratorEscalationWindow (60s).
+	// DefaultIteratorEscalationWindow.
 	IteratorEscalationWindow time.Duration `default:"60s" validate:"gt=0"`
 
 	// IteratorEscalationThreshold is the number of iterator failures within the
 	// escalation window that triggers a single escalation (consumer refresh).
-	// If zero, defaults to DefaultIteratorEscalationThreshold (3).
+	// If zero, defaults to DefaultIteratorEscalationThreshold.
 	IteratorEscalationThreshold int `default:"3" validate:"gt=0"`
 
 	// AllowWorkerIDChange controls whether workerID changes are allowed after initialization.
@@ -314,13 +298,9 @@ func (c *WorkerConsumerConfig) SetDefaults() error {
 			return err
 		}
 
-		// Enable pull gating by default to ensure exclusivity with per-subject
-		// durables, regardless of resolver type. Only an unconfigured
-		// pull-gating setting is auto-enabled here, so a deliberate disable
-		// survives. The rule is idempotent: PullGatingConfigured is never
-		// cleared, so the repeated SetDefaults call from Validate preserves
-		// this decision.
-		if c.ProcessingGate.Enabled && !c.PullGatingConfigured {
+		// Enable pull gating by default to ensure exclusivity with per-subject durables,
+		// regardless of resolver type, unless explicitly disabled by the caller.
+		if c.ProcessingGate.Enabled && !c.PullGatingEnabled {
 			c.PullGatingEnabled = true
 		}
 	}
