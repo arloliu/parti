@@ -38,6 +38,13 @@ func cmdView(args []string, stdout, stderr io.Writer) int {
 		return ExitValidation
 	}
 
+	// Create the operation context before scope derivation so a config load
+	// and static validation count against -timeout. connectNATS needs no
+	// scope, but the context must precede the load, so this command opens the
+	// connection itself rather than fusing it with makeContext.
+	ctx, stop := makeContext(timeoutDur)
+	defer stop()
+
 	// Determine scope: config-scoped (with -f) or inventory (without -f).
 	var scope provision.Scope
 	if f.file != "" {
@@ -66,15 +73,20 @@ func cmdView(args []string, stdout, stderr io.Writer) int {
 		scope.Instance = f.instance
 	}
 
-	conn, code := connectWithTimeout(timeoutDur, f.common, stderr)
-	if code != ExitOK {
+	conn, code, err := connectNATS(ctx, f.common)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		if ctxDead(ctx) {
+			return ExitNATS
+		}
+
 		return code
 	}
 	defer conn.close()
 
-	snap, err := provision.View(conn.ctx, conn.js, scope)
+	snap, err := provision.View(ctx, conn.js, scope)
 	if err != nil {
-		if ctxDead(conn.ctx) {
+		if ctxDead(ctx) {
 			return ExitNATS
 		}
 		fmt.Fprintln(stderr, "partictl view:", err)
