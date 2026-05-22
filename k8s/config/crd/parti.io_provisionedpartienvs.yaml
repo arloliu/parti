@@ -1,0 +1,434 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: provisionedpartienvs.parti.io
+spec:
+  group: parti.io
+  names:
+    kind: ProvisionedPartiEnv
+    listKind: ProvisionedPartiEnvList
+    plural: provisionedpartienvs
+    shortNames:
+    - ppe
+    singular: provisionedpartienv
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .spec.policy
+      name: Policy
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ProvisionedPartiEnv is the Schema for the provisionedpartienvs API.
+          It declares desired NATS infrastructure (KV buckets and streams) that the
+          Parti operator reconciles by driving the provision SDK.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: ProvisionedPartiEnvSpec defines the desired state of ProvisionedPartiEnv.
+            properties:
+              controlPlane:
+                description: |-
+                  ControlPlane declares desired control-plane KV buckets. Omitting this
+                  field leaves control-plane provisioning to SDK defaults.
+                properties:
+                  allowDeleteRecreate:
+                    description: |-
+                      AllowDeleteRecreate opts control-plane buckets into delete/recreate
+                      under PolicyForce when they carry drift-immutable drift.
+                    type: boolean
+                  assignmentBucket:
+                    description: AssignmentBucket is the name of the assignment KV
+                      bucket.
+                    type: string
+                  assignmentTtl:
+                    description: AssignmentTTL is the TTL for assignment entries.
+                      0 means no expiration.
+                    type: string
+                  electionBucket:
+                    description: ElectionBucket is the name of the election KV bucket.
+                    type: string
+                  electionTimeout:
+                    description: ElectionTimeout is the TTL for election entries.
+                    type: string
+                  enableTwoPhaseHandoff:
+                    description: |-
+                      EnableTwoPhaseHandoff gates the optional handoff KV bucket. When true,
+                      HandoffTTL must be > 0.
+                    type: boolean
+                  handoffBucket:
+                    description: |-
+                      HandoffBucket is the name of the handoff KV bucket. Only used when
+                      EnableTwoPhaseHandoff is true.
+                    type: string
+                  handoffTtl:
+                    description: |-
+                      HandoffTTL is the advisory sweep TTL for recovering stuck in-flight
+                      handoff claims. Only relevant when EnableTwoPhaseHandoff is true.
+                    type: string
+                  heartbeatBucket:
+                    description: HeartbeatBucket is the name of the heartbeat KV bucket.
+                    type: string
+                  heartbeatTtl:
+                    description: HeartbeatTTL is the TTL for heartbeat entries.
+                    type: string
+                  replicas:
+                    description: |-
+                      Replicas is the desired NATS stream replica count for every
+                      control-plane KV bucket. 0 leaves the server default (1).
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  stableIdBucket:
+                    description: StableIDBucket is the name of the stable-ID KV bucket.
+                    type: string
+                  workerIdTtl:
+                    description: WorkerIDTTL is the TTL for stable-ID entries.
+                    type: string
+                type: object
+              instance:
+                description: |-
+                  Instance is an optional identifier for this Parti instance. Maps to
+                  provision.Config.Instance.
+                type: string
+              nats:
+                description: NATS is the connection configuration for the NATS server.
+                properties:
+                  credentialsSecret:
+                    description: |-
+                      CredentialsSecret is an optional reference to a Kubernetes Secret in
+                      the same namespace as the CR. At most one of CredentialsKey, TokenKey,
+                      or NKeyKey may be set; none means anonymous access.
+                    properties:
+                      credentialsKey:
+                        description: |-
+                          CredentialsKey names the Secret data key whose value is a NATS .creds
+                          file (NKey + JWT bundle). Mutually exclusive with TokenKey and NKeyKey.
+                        type: string
+                      name:
+                        description: Name is the name of the Secret in the CR's namespace.
+                        type: string
+                      nkeyKey:
+                        description: |-
+                          NKeyKey names the Secret data key whose value is an NKey user seed.
+                          Mutually exclusive with CredentialsKey and TokenKey.
+                        type: string
+                      tokenKey:
+                        description: |-
+                          TokenKey names the Secret data key whose value is a NATS authentication
+                          token. Mutually exclusive with CredentialsKey and NKeyKey.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  server:
+                    description: Server is the NATS server URL (e.g. "nats://nats.example.com:4222").
+                    type: string
+                required:
+                - server
+                type: object
+              partitionSource:
+                description: |-
+                  PartitionSource declares the desired partition-source KV bucket.
+                  The partition table contents (Partitions) are deliberately omitted —
+                  those are managed by the partictl CLI, not the operator.
+                properties:
+                  allowDeleteRecreate:
+                    description: |-
+                      AllowDeleteRecreate opts the partition-source bucket into delete/recreate
+                      under PolicyForce when it carries drift-immutable drift.
+                    type: boolean
+                  bucket:
+                    description: Bucket is the name of the partition-source KV bucket.
+                    type: string
+                  history:
+                    description: |-
+                      History is the KV history depth. The SDK uses uint8; the CRD uses int32
+                      with a 0–255 bound so the API server rejects out-of-range values before
+                      the mapper can silently wrap them.
+                    format: int32
+                    maximum: 255
+                    minimum: 0
+                    type: integer
+                  key:
+                    description: Key is the KV key within Bucket that holds the partition
+                      table.
+                    type: string
+                  maxValueSize:
+                    description: MaxValueSize is the maximum per-value size in bytes.
+                      0 means no limit.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  replicas:
+                    description: |-
+                      Replicas is the desired NATS stream replica count for the
+                      partition-source KV bucket. 0 leaves the server default (1).
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  storage:
+                    description: Storage is the NATS storage backend for the partition-source
+                      bucket.
+                    enum:
+                    - file
+                    - memory
+                    type: string
+                  ttl:
+                    description: TTL is the per-entry TTL for the partition-source
+                      KV bucket.
+                    type: string
+                type: object
+              policy:
+                description: |-
+                  Policy controls how the operator reconciles drift. Defaults to "warn"
+                  when empty (the SDK default).
+                enum:
+                - warn
+                - adopt
+                - safe-update
+                - force
+                type: string
+              streams:
+                description: Streams declares desired application JetStream streams.
+                items:
+                  description: StreamSpec mirrors provision.StreamCfg for the CRD
+                    API.
+                  properties:
+                    allowDeleteRecreate:
+                      description: |-
+                        AllowDeleteRecreate opts this stream into delete/recreate under
+                        PolicyForce when it carries drift-immutable drift.
+                      type: boolean
+                    description:
+                      description: Description is an optional human-readable description
+                        of the stream.
+                      type: string
+                    discard:
+                      description: Discard controls which messages are dropped when
+                        limits are reached.
+                      enum:
+                      - old
+                      - new
+                      type: string
+                    maxAge:
+                      description: MaxAge is the maximum age of messages in the stream.
+                        0 means unlimited.
+                      type: string
+                    maxBytes:
+                      description: |-
+                        MaxBytes is the maximum total byte size of messages in the stream.
+                        0 means unlimited (NATS stores as -1 internally).
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    maxMsgs:
+                      description: |-
+                        MaxMsgs is the maximum number of messages in the stream.
+                        0 means unlimited (NATS stores as -1 internally).
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    name:
+                      description: Name is the JetStream stream name.
+                      type: string
+                    replicas:
+                      description: |-
+                        Replicas is the desired NATS stream replica count. 0 leaves the server
+                        default (1).
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    retention:
+                      description: Retention controls the stream's message retention
+                        policy.
+                      enum:
+                      - limits
+                      - workqueue
+                      - interest
+                      type: string
+                    storage:
+                      description: Storage is the NATS storage backend for this stream.
+                      enum:
+                      - file
+                      - memory
+                      type: string
+                    subjects:
+                      description: Subjects is the list of NATS subjects the stream
+                        captures.
+                      items:
+                        type: string
+                      type: array
+                  required:
+                  - name
+                  - subjects
+                  type: object
+                type: array
+            required:
+            - nats
+            type: object
+          status:
+            description: ProvisionedPartiEnvStatus defines the observed state of ProvisionedPartiEnv.
+            properties:
+              conditions:
+                description: |-
+                  Conditions holds the standard Kubernetes condition list. The only
+                  condition type is "Ready"; its Reason field carries granular outcome
+                  information (Reconciled, InvalidSpec, SecretMissing, NATSUnreachable,
+                  ApplyError).
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              lastApply:
+                description: LastApply summarises the most recent provision.Apply
+                  result.
+                properties:
+                  aborted:
+                    description: Aborted is true when the apply was cancelled mid-execution.
+                    type: boolean
+                  errorCount:
+                    description: ErrorCount is the number of resource-level errors
+                      encountered.
+                    type: integer
+                  errors:
+                    description: Errors holds the first N resource error messages
+                      from the apply.
+                    items:
+                      type: string
+                    type: array
+                  executedCount:
+                    description: ExecutedCount is the number of actions successfully
+                      executed.
+                    type: integer
+                  skippedCount:
+                    description: SkippedCount is the number of actions skipped.
+                    type: integer
+                required:
+                - errorCount
+                - executedCount
+                - skippedCount
+                type: object
+              lastPlan:
+                description: LastPlan summarises the most recent provision.Plan result.
+                properties:
+                  actionCount:
+                    description: ActionCount is the total number of planned actions.
+                    type: integer
+                  driftAdopted:
+                    description: DriftAdopted is the count of adopted drift findings.
+                    type: integer
+                  driftImmutable:
+                    description: DriftImmutable is the count of drift-immutable drift
+                      findings.
+                    type: integer
+                  driftInformational:
+                    description: DriftInformational is the count of informational
+                      drift findings.
+                    type: integer
+                  driftMutable:
+                    description: DriftMutable is the count of drift-mutable drift
+                      findings.
+                    type: integer
+                required:
+                - actionCount
+                - driftAdopted
+                - driftImmutable
+                - driftInformational
+                - driftMutable
+                type: object
+              lastReconcileTime:
+                description: |-
+                  LastReconcileTime is the timestamp of the most recent reconcile attempt
+                  that produced a status write.
+                format: date-time
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the .metadata.generation the last
+                  reconcile acted on.
+                format: int64
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

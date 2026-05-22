@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Kubernetes operator** — a new nested Go module at `k8s/`
+  (`github.com/arloliu/parti/v2/k8s`) that reconciles a `ProvisionedPartiEnv`
+  custom resource to NATS infrastructure (control-plane KV buckets,
+  partition-source bucket, and application JetStream streams) by driving the
+  same `provision.Apply` path the `partictl` CLI uses. The operator adds no
+  provisioning logic of its own. The root `github.com/arloliu/parti/v2` module
+  gains **zero** new dependencies — the entire `controller-runtime` / `k8s.io`
+  dependency tree is isolated in the nested module. See `docs/KUBERNETES.md`
+  for the full operator guide.
+- **`ProvisionedPartiEnv` CRD** (`apiVersion: parti.io/v1alpha1`,
+  `kind: ProvisionedPartiEnv`, short name `ppe`) — a namespaced custom resource
+  that declares desired NATS infrastructure. The `Spec` mirrors the
+  bucket-and-stream subset of `provision.Config` plus a `nats` connection block
+  (NATS server URL and an optional reference to a Kubernetes `Secret` for
+  `.creds` / token / NKey auth). The `Status` subresource carries a single
+  `Ready` condition with reasons `Reconciled` (success), `InvalidSpec`,
+  `SecretMissing`, `NATSUnreachable`, and `ApplyError`, plus `lastPlan` and
+  `lastApply` summaries (drift counts, executed/error counts). Deploy manifests
+  live under `k8s/config/` (CRD, RBAC, operator Deployment, sample CR and
+  Secret).
 - `partictl partitions plan` and `partictl partitions apply` manage the
   contents of the partition-source key — the partition table itself —
   separately from the bucket-provisioning commands. `plan` reports the

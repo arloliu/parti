@@ -59,6 +59,7 @@ mgr.Start(context.Background())
 | [API Reference](API_REFERENCE.md) | Detailed API documentation                      |
 | [Operations Guide](OPERATIONS.md) | Deployment, monitoring, troubleshooting         |
 | [Provision Guide](PROVISION.md)   | provision SDK and partictl CLI for NATS resource management |
+| [Kubernetes Operator](KUBERNETES.md) | ProvisionedPartiEnv CRD, install steps, CRD reference |
 
 ---
 

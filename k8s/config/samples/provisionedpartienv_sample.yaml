@@ -1,0 +1,34 @@
+apiVersion: parti.io/v1alpha1
+kind: ProvisionedPartiEnv
+metadata:
+  name: sample-parti-env
+  namespace: default
+spec:
+  nats:
+    server: nats://nats.example.com:4222
+    credentialsSecret:
+      name: sample-nats-creds
+      credentialsKey: credentials
+  instance: sample
+  policy: warn
+  controlPlane:
+    replicas: 1
+    workerIdTtl: 30s
+    electionTimeout: 5s
+    heartbeatTtl: 10s
+    assignmentTtl: 0s
+  partitionSource:
+    bucket: sample-partitions
+    key: partitions
+    replicas: 1
+    storage: file
+    history: 1
+  streams:
+  - name: sample-events
+    subjects:
+    - events.>
+    retention: limits
+    storage: file
+    replicas: 1
+    maxBytes: 1073741824
+    maxMsgs: 1000000
