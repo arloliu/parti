@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -137,17 +138,9 @@ func fmtDriftDetail(detail map[string]any) string {
 		parts = append(parts, fmt.Sprintf("%s=%v", k, v))
 	}
 	// Sort for deterministic output.
-	sortStrings(parts)
+	slices.Sort(parts)
 
 	return strings.Join(parts, " ")
-}
-
-func sortStrings(s []string) {
-	for i := 1; i < len(s); i++ {
-		for j := i; j > 0 && s[j] < s[j-1]; j-- {
-			s[j], s[j-1] = s[j-1], s[j]
-		}
-	}
 }
 
 // --- Report renderer ---

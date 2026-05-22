@@ -22,11 +22,7 @@ func cmdView(args []string, stdout, stderr io.Writer) int {
 
 	var f viewFlags
 	fs.StringVar(&f.file, "f", "", "YAML config path (optional; scopes view to config resources)")
-	fs.StringVar(&f.common.server, "server", defaultServer(), "NATS server URL")
-	fs.StringVar(&f.common.creds, "creds", "", "path to NATS credentials file")
-	fs.StringVar(&f.common.nkey, "nkey", "", "path to NATS nkey seed file")
-	fs.StringVar(&f.common.token, "token", "", "NATS token")
-	fs.StringVar(&f.common.timeout, "timeout", "30s", "operation timeout (e.g. 30s, 1m)")
+	bindCommonFlags(fs, &f.common)
 	fs.BoolVar(&f.jsonOut, "json", false, "emit JSON output (Snapshot)")
 	fs.StringVar(&f.instance, "instance", "", "restrict results to resources with matching parti.io/instance")
 
@@ -41,9 +37,6 @@ func cmdView(args []string, stdout, stderr io.Writer) int {
 
 		return ExitValidation
 	}
-
-	ctx, stop, exitIfTimeout := makeContext(timeoutDur, stderr)
-	defer stop()
 
 	// Determine scope: config-scoped (with -f) or inventory (without -f).
 	var scope provision.Scope
@@ -73,20 +66,15 @@ func cmdView(args []string, stdout, stderr io.Writer) int {
 		scope.Instance = f.instance
 	}
 
-	conn, code, err := connectNATS(ctx, f.common)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		if exitIfTimeout(ctx) {
-			return ExitNATS
-		}
-
+	conn, code := connectWithTimeout(timeoutDur, f.common, stderr)
+	if code != ExitOK {
 		return code
 	}
 	defer conn.close()
 
-	snap, err := provision.View(ctx, conn.js, scope)
+	snap, err := provision.View(conn.ctx, conn.js, scope)
 	if err != nil {
-		if exitIfTimeout(ctx) {
+		if ctxDead(conn.ctx) {
 			return ExitNATS
 		}
 		fmt.Fprintln(stderr, "partictl view:", err)

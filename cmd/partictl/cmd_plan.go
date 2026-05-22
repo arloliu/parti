@@ -24,11 +24,7 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 	var f planFlags
 	fs.StringVar(&f.file, "f", "", "YAML config path (required)")
 	fs.StringVar(&f.policy, "policy", "", "reconcile policy: warn, adopt, safe-update, force (default: warn or cfg.policy)")
-	fs.StringVar(&f.common.server, "server", defaultServer(), "NATS server URL")
-	fs.StringVar(&f.common.creds, "creds", "", "path to NATS credentials file")
-	fs.StringVar(&f.common.nkey, "nkey", "", "path to NATS nkey seed file")
-	fs.StringVar(&f.common.token, "token", "", "NATS token")
-	fs.StringVar(&f.common.timeout, "timeout", "30s", "operation timeout (e.g. 30s, 1m)")
+	bindCommonFlags(fs, &f.common)
 	fs.BoolVar(&f.jsonOut, "json", false, "emit JSON output (PlanResult)")
 	fs.BoolVar(&f.failOnDrift, "fail-on-drift", false, "exit 2 if non-informational drift is detected")
 
@@ -76,23 +72,15 @@ func cmdPlan(args []string, stdout, stderr io.Writer) int {
 		return ExitValidation
 	}
 
-	ctx, stop, exitIfTimeout := makeContext(timeoutDur, stderr)
-	defer stop()
-
-	conn, code, err := connectNATS(ctx, f.common)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		if exitIfTimeout(ctx) {
-			return ExitNATS
-		}
-
+	conn, code := connectWithTimeout(timeoutDur, f.common, stderr)
+	if code != ExitOK {
 		return code
 	}
 	defer conn.close()
 
-	planResult, err := provision.Plan(ctx, conn.js, cfg)
+	planResult, err := provision.Plan(conn.ctx, conn.js, cfg)
 	if err != nil {
-		if exitIfTimeout(ctx) {
+		if ctxDead(conn.ctx) {
 			return ExitNATS
 		}
 		fmt.Fprintln(stderr, "partictl plan:", err)

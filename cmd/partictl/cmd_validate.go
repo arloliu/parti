@@ -25,11 +25,7 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 
 	var f validateFlags
 	fs.StringVar(&f.file, "f", "", "YAML config path (required)")
-	fs.StringVar(&f.common.server, "server", defaultServer(), "NATS server URL")
-	fs.StringVar(&f.common.creds, "creds", "", "path to NATS credentials file")
-	fs.StringVar(&f.common.nkey, "nkey", "", "path to NATS nkey seed file")
-	fs.StringVar(&f.common.token, "token", "", "NATS token")
-	fs.StringVar(&f.common.timeout, "timeout", "30s", "operation timeout (e.g. 30s, 1m)")
+	bindCommonFlags(fs, &f.common)
 	fs.BoolVar(&f.live, "live", false, "perform live validation (requires NATS connectivity)")
 	fs.BoolVar(&f.jsonOut, "json", false, "emit JSON output (Report-shaped envelope)")
 	fs.StringVar(&f.instance, "instance", "", "restrict results to resources with matching parti.io/instance")
@@ -92,23 +88,15 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 	}
 
 	// Live validation path.
-	ctx, stop, exitIfTimeout := makeContext(timeoutDur, stderr)
-	defer stop()
-
-	conn, code, err := connectNATS(ctx, f.common)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		if exitIfTimeout(ctx) {
-			return ExitNATS
-		}
-
+	conn, code := connectWithTimeout(timeoutDur, f.common, stderr)
+	if code != ExitOK {
 		return code
 	}
 	defer conn.close()
 
-	report, err := provision.ValidateLive(ctx, conn.js, cfg)
+	report, err := provision.ValidateLive(conn.ctx, conn.js, cfg)
 	if err != nil {
-		if exitIfTimeout(ctx) {
+		if ctxDead(conn.ctx) {
 			if f.jsonOut {
 				_ = jsonOutput(stdout, report)
 			}

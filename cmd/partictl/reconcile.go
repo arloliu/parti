@@ -49,24 +49,16 @@ func runReconcile(p reconcileParams, stdout, stderr io.Writer) int {
 		return ExitValidation
 	}
 
-	ctx, stop, exitIfTimeout := makeContext(timeoutDur, stderr)
-	defer stop()
-
-	conn, code, err := connectNATS(ctx, p.common)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		if exitIfTimeout(ctx) {
-			return ExitNATS
-		}
-
+	conn, code := connectWithTimeout(timeoutDur, p.common, stderr)
+	if code != ExitOK {
 		return code
 	}
 	defer conn.close()
 
 	if p.dryRun {
-		planResult, err := provision.Plan(ctx, conn.js, cfg)
+		planResult, err := provision.Plan(conn.ctx, conn.js, cfg)
 		if err != nil {
-			if exitIfTimeout(ctx) {
+			if ctxDead(conn.ctx) {
 				return ExitNATS
 			}
 			fmt.Fprintf(stderr, "partictl %s -dry-run: %v\n", p.subcmd, err)
@@ -82,10 +74,10 @@ func runReconcile(p reconcileParams, stdout, stderr io.Writer) int {
 		return ExitOK
 	}
 
-	report, err := provision.Apply(ctx, conn.js, cfg)
+	report, err := provision.Apply(conn.ctx, conn.js, cfg)
 	emitReport(stdout, report, p.jsonOut)
 	if err != nil {
-		if exitIfTimeout(ctx) {
+		if ctxDead(conn.ctx) {
 			return ExitNATS
 		}
 

@@ -130,11 +130,7 @@ func cmdPartitionsApply(args []string, stdout, stderr io.Writer) int {
 // does not govern record-level reconciliation.
 func bindPartitionCommonFlags(fs *flag.FlagSet, f *partitionParams) {
 	fs.StringVar(&f.file, "f", "", "YAML config path (required)")
-	fs.StringVar(&f.common.server, "server", defaultServer(), "NATS server URL")
-	fs.StringVar(&f.common.creds, "creds", "", "path to NATS credentials file")
-	fs.StringVar(&f.common.nkey, "nkey", "", "path to NATS nkey seed file")
-	fs.StringVar(&f.common.token, "token", "", "NATS token")
-	fs.StringVar(&f.common.timeout, "timeout", "30s", "operation timeout (e.g. 30s, 1m)")
+	bindCommonFlags(fs, &f.common)
 	fs.BoolVar(&f.jsonOut, "json", false, "emit JSON output")
 }
 
@@ -177,23 +173,15 @@ func runPartitions(p partitionParams, stdout, stderr io.Writer) int {
 		return ExitValidation
 	}
 
-	ctx, stop, exitIfTimeout := makeContext(timeoutDur, stderr)
-	defer stop()
-
-	conn, code, err := connectNATS(ctx, p.common)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		if exitIfTimeout(ctx) {
-			return ExitNATS
-		}
-
+	conn, code := connectWithTimeout(timeoutDur, p.common, stderr)
+	if code != ExitOK {
 		return code
 	}
 	defer conn.close()
 
-	planResult, err := provision.PlanPartitions(ctx, conn.js, cfg)
+	planResult, err := provision.PlanPartitions(conn.ctx, conn.js, cfg)
 	if err != nil {
-		if exitIfTimeout(ctx) {
+		if ctxDead(conn.ctx) {
 			return ExitNATS
 		}
 		fmt.Fprintf(stderr, "partictl %s: %v\n", p.subcmd, err)
@@ -211,10 +199,10 @@ func runPartitions(p partitionParams, stdout, stderr io.Writer) int {
 		return ExitOK
 	}
 
-	report, err := provision.ApplyPartitions(ctx, conn.js, planResult, p.prune)
+	report, err := provision.ApplyPartitions(conn.ctx, conn.js, planResult, p.prune)
 	emitReport(stdout, report, p.jsonOut)
 	if err != nil {
-		if exitIfTimeout(ctx) {
+		if ctxDead(conn.ctx) {
 			return ExitNATS
 		}
 

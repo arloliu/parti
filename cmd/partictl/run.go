@@ -109,9 +109,7 @@ func parseTimeout(s string) (time.Duration, error) {
 
 // makeContext creates a context with the signal-cancel wrapper on top of a
 // timeout. The returned stop function must be deferred by the caller.
-// exitIfTimeout returns true when ctx expired due to timeout or signal, used
-// by commands to map the error to ExitNATS.
-func makeContext(d time.Duration, _ io.Writer) (context.Context, context.CancelFunc, func(ctx context.Context) bool) {
+func makeContext(d time.Duration) (context.Context, context.CancelFunc) {
 	// Signal-cancellable root context.
 	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 
@@ -122,9 +120,11 @@ func makeContext(d time.Duration, _ io.Writer) (context.Context, context.CancelF
 		stop()
 	}
 
-	exitIfTimeout := func(ctx context.Context) bool {
-		return ctx.Err() != nil
-	}
+	return ctx, combinedStop
+}
 
-	return ctx, combinedStop, exitIfTimeout
+// ctxDead reports whether ctx has expired due to a timeout or a received
+// signal. Commands use it to map a downstream error to ExitNATS.
+func ctxDead(ctx context.Context) bool {
+	return ctx.Err() != nil
 }
