@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: provisionedpartienv-manager
+  namespace: parti-operator-system
+  labels:
+    app.kubernetes.io/name: parti-operator
+    app.kubernetes.io/component: manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: parti-operator
+      app.kubernetes.io/component: manager
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: parti-operator
+        app.kubernetes.io/component: manager
+    spec:
+      serviceAccountName: provisionedpartienv-manager
+      containers:
+      - name: manager
+        image: parti-operator:latest
+        args:
+        - -resync-period=5m
+        - -leader-elect=true
+        ports:
+        - containerPort: 8080
+          name: metrics
+          protocol: TCP
+        - containerPort: 8081
+          name: health-probe
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: health-probe
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: health-probe
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi

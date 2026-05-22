@@ -11,7 +11,7 @@ COVERAGE_HTML   := $(COVERAGE_DIR)/coverage.html
 
 # Source files
 ALL_GO_FILES    := $(shell find . -name "*.go" -not -path "./vendor/*" -not -path "./.claude/*")
-TEST_DIRS       := $(sort $(dir $(shell find . -name "*_test.go" -not -path "./vendor/*" -not -path "./.claude/*" -not -path "./test/integration/*" -not -path "./test/stress/*" -not -path "./test/iops-investigation/*")))
+TEST_DIRS       := $(sort $(dir $(shell find . -name "*_test.go" -not -path "./vendor/*" -not -path "./.claude/*" -not -path "./test/integration/*" -not -path "./test/stress/*" -not -path "./test/iops-investigation/*" -not -path "./k8s/*")))
 INTEGRATION_DIR := ./test/integration/...
 STRESS_DIR      := ./test/stress/...
 LATEST_GIT_TAG  := $(shell git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
@@ -26,7 +26,7 @@ GOLANGCI_LINT_VERSION := 2.11.4
 # Default target
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-race test-short coverage coverage-html lint fmt vet bench clean gomod-tidy update-pkg-cache ci test-unit test-integration test-stress test-all test-smoke clean-test-results test-quick
+.PHONY: help test test-race test-short coverage coverage-html lint lint-k8s fmt vet bench clean gomod-tidy update-pkg-cache ci test-unit test-integration test-stress test-all test-smoke clean-test-results test-quick test-k8s generate-k8s
 
 ## help: Show this help message
 help:
@@ -136,6 +136,23 @@ lint:
 	@echo "Running linters..."
 	@go tool $(LINTER_GOMOD) golangci-lint run --timeout=$(LINT_TIMEOUT)
 
+## lint-k8s: Run linters in the k8s/ nested module
+lint-k8s:
+	@echo "Running linters in k8s/..."
+	@cd k8s && go tool -modfile=../linter.go.mod golangci-lint run --timeout=$(LINT_TIMEOUT)
+
+## test-k8s: Run tests in the k8s/ nested module
+test-k8s: clean-test-results
+	@echo "Running tests in k8s/..."
+	@cd k8s && CGO_ENABLED=1 go test ./... -timeout=$(TEST_TIMEOUT) -race
+
+## generate-k8s: Run controller-gen to regenerate CRD manifests and deepcopy in k8s/
+generate-k8s:
+	@echo "Running controller-gen in k8s/..."
+	@cd k8s && go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.21.0 object paths=./api/...
+	@cd k8s && go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.21.0 crd paths=./api/... output:crd:dir=config/crd
+	@cd k8s && go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.21.0 rbac:roleName=provisionedpartienv-manager paths=./internal/... output:rbac:dir=config/rbac
+
 ## fmt: Format code
 fmt:
 	@echo "Formatting code..."
@@ -172,7 +189,7 @@ clean: clean-test-results
 ##@ CI/CD
 
 ## ci: Run all CI checks (lint, test, coverage)
-ci: lint vet test-all coverage
+ci: lint lint-k8s vet test-all test-k8s coverage
 
 ##@ Inspection
 

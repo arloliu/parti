@@ -6,6 +6,7 @@
 - [Docs README](README.md) - Documentation map
 - [Operations Guide](OPERATIONS.md) - Deployment, monitoring, troubleshooting
 - [Configuration Guide](CONFIGURATION.md) - Runtime configuration options
+- [Kubernetes Operator](KUBERNETES.md) - ProvisionedPartiEnv CRD, install steps, CRD reference
 
 ---
 
@@ -22,6 +23,7 @@
 9. [Dynamic Consumer Precreation](#dynamic-consumer-precreation)
 10. [Force + Repair](#force--repair)
 11. [Example Configuration](#example-configuration)
+12. [Kubernetes Operator](#kubernetes-operator)
 
 ---
 
@@ -932,3 +934,31 @@ Bucket names default to `parti-stableid`, `parti-election`,
 `parti-heartbeat`, `parti-assignment`, and `parti-handoff`.
 `policy` defaults to `warn`. `controlPlane.replicas` defaults to `0`
 (NATS normalizes to 1 server-side).
+
+---
+
+## Kubernetes Operator
+
+The Parti operator reconciles a `ProvisionedPartiEnv` custom resource to the
+same NATS infrastructure — control-plane KV buckets, partition-source bucket,
+and application streams — by driving this same `provision` SDK. It is a
+Kubernetes-native alternative to running `partictl apply` in a CI pipeline or
+cron job.
+
+The operator lives in a **nested Go module** at `k8s/`
+(`github.com/arloliu/parti/v2/k8s`). The root `github.com/arloliu/parti/v2`
+module gains **zero** new dependencies — the entire `controller-runtime` /
+`k8s.io` dependency tree is isolated to the nested module.
+
+The `ProvisionedPartiEnv` CRD deliberately omits `partitions` and
+`dynamicConsumers` from its `Spec`. Partition-record contents and dynamic
+consumer precreation remain `partictl` operations — the operator reconciling
+them continuously would conflict with the Parti runtime's own ownership of
+those resources.
+
+**See [KUBERNETES.md](KUBERNETES.md) for the full operator guide**, including:
+- Installation steps (CRD → RBAC → Deployment)
+- Complete `Spec` and `Status` field reference
+- NATS authentication modes (`.creds`, token, NKey seed)
+- A worked sample `ProvisionedPartiEnv` CR
+- Non-Goals callout (no finalizer, no partition records, `force` implications)

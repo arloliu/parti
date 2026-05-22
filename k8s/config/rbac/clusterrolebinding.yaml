@@ -1,0 +1,12 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: provisionedpartienv-manager
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: provisionedpartienv-manager
+subjects:
+- kind: ServiceAccount
+  name: provisionedpartienv-manager
+  namespace: parti-operator-system
