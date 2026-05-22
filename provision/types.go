@@ -3,6 +3,7 @@ package provision
 import (
 	"time"
 
+	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -83,10 +84,11 @@ type PlanResult struct {
 }
 
 // PlannedAction is one operation Apply would perform. Kind is one of the
-// ActionCreateKV, ActionUpdateKV, or ActionStampMarker constants. The Resource
-// field carries the would-be NATS config: for "create-kv" this is a
-// jetstream.KeyValueConfig value; for "update-kv" it is *UpdateKVResource;
-// for "stamp-marker" it is *StampMarkerResource.
+// ActionCreateKV, ActionUpdateKV, ActionStampMarker, or ActionWritePartitions
+// constants. The Resource field carries the would-be NATS config: for
+// "create-kv" this is a jetstream.KeyValueConfig value; for "update-kv" it is
+// *UpdateKVResource; for "stamp-marker" it is *StampMarkerResource; for
+// "write-partitions" it is *WritePartitionsResource.
 //
 // Consumer precreation and destructive repair (delete/recreate) are not yet
 // supported.
@@ -116,6 +118,15 @@ const (
 	// writes the re-read snapshot back with only Metadata changed.
 	// Resource is *StampMarkerResource.
 	ActionStampMarker = "stamp-marker"
+
+	// ActionWritePartitions is emitted by PlanPartitions when the declared
+	// partition set differs from the live contents of the partition-source
+	// KV key. There is at most one per plan: the key holds the whole
+	// partition table, so apply is a single atomic CAS write of the full
+	// array. ApplyPartitions re-reads the key, re-validates the target,
+	// short-circuits a no-op, and CAS-writes. Resource is
+	// *WritePartitionsResource.
+	ActionWritePartitions = "write-partitions"
 )
 
 // UpdateKVResource is the Resource carried by an ActionUpdateKV
@@ -154,6 +165,36 @@ type StampMarkerResource struct {
 	PartiKeys      []string          `json:"partiKeys"`
 }
 
+// WritePartitionsResource is the Resource carried by an ActionWritePartitions
+// PlannedAction. Before is the live partition table observed at plan time;
+// After is the full declared table that Apply writes. Added, Removed, and
+// Changed are the record-level diff (each sorted by CanonicalID) — the audit
+// surface JSON consumers render to show exactly which records change.
+//
+// Apply does not blindly write After: it re-reads the live key, re-validates
+// the target, and CAS-writes. Before is what the stale-before check compares
+// the re-read against. All slices are deep clones, so the Plan output is
+// immutable regardless of later Apply mutation.
+type WritePartitionsResource struct {
+	Bucket  string                  `json:"bucket"`
+	Key     string                  `json:"key"`
+	Added   []types.Partition       `json:"added"`
+	Removed []types.Partition       `json:"removed"`
+	Changed []PartitionWeightChange `json:"changed"`
+	Before  []types.Partition       `json:"before"`
+	After   []types.Partition       `json:"after"`
+}
+
+// PartitionWeightChange records a partition present in both the live and
+// declared tables whose Weight differs. Keys identifies the partition (it is
+// unchanged — a different key set is a different partition, i.e. an add plus
+// a remove, not a change).
+type PartitionWeightChange struct {
+	Keys      []string `json:"keys"`
+	OldWeight int64    `json:"oldWeight"`
+	NewWeight int64    `json:"newWeight"`
+}
+
 // DriftFinding describes how a live resource differs from the desired state,
 // or that an existing resource is unmarked ("adopted").
 //
@@ -184,6 +225,12 @@ const (
 	KindControlPlaneKV  = "control-plane-kv"
 	KindPartitionSource = "partition-source-kv"
 	KindDynamicConsumer = "dynamic-consumer"
+
+	// KindPartitionRecords tags drift between the declared partition set and
+	// the live contents of the partition-source key (see PlanPartitions).
+	// It is distinct from KindPartitionSource, which tags drift in the
+	// partition-source bucket *config*.
+	KindPartitionRecords = "partition-records"
 )
 
 // Report is the result of Apply: what executed, what was skipped, what failed.

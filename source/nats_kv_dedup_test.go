@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arloliu/parti/v2/internal/partcodec"
 	"github.com/arloliu/parti/v2/partitest"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
@@ -68,7 +69,7 @@ func TestNatsKV_Watch_StaleEventIgnored(t *testing.T) {
 	// 3. Simulate a watcher event for the *earlier* revision arriving late.
 	//    Under the bug, watchLoop -> applyLocal -> applyLocalLocked sees
 	//    s.partitions=[{p2}] and incoming sorted=[{p1}] → changed=true → signal.
-	stalePayload, encErr := encodePartitions(p1)
+	stalePayload, encErr := partcodec.Encode(p1)
 	require.NoError(t, encErr)
 	fakeUpdates <- &fakeKVEntry{
 		key:      "config",

@@ -73,8 +73,6 @@ type DynamicConfig struct {
 	// When enabled, the WorkerConsumer uses a distributed lock (via KV) to ensure
 	// that it is the *only* active processor for its assigned partitions.
 	// This prevents split-brain processing during rebalances.
-	//
-	// Default: nil (processing gate disabled).
 	ProcessingGate *ProcessingGateConfig
 
 	// Resolver configures the ownership resolver used when ProcessingGate is enabled.
@@ -82,23 +80,17 @@ type DynamicConfig struct {
 	// It defines how ownership is claimed, refreshed, and verified.
 	Resolver ResolverConfig
 
-	// PullGatingEnabled is the resolved pre-pull ownership/state gating
-	// decision for per-subject consumers. When true, the consumer checks that
-	// it still owns the partition before issuing a pull request to JetStream,
-	// which reduces "ghost" processing of messages after assignment revocation.
+	// PullGatingEnabled enables pre-pull ownership/state gating for consumers.
 	//
-	// This field holds the resolved boolean, not caller intent: it cannot
-	// distinguish an unset pull-gating setting from an explicit disable. Use
-	// WithPullGating with NewDynamic, the only supported constructor, to
-	// control pull gating.
+	// When true, the consumer will check if it still owns the partition before
+	// issuing a pull request to JetStream. This reduces "ghost" processing of
+	// messages after assignment revocation.
 	PullGatingEnabled bool
 
 	// DrainOnRemove enables graceful draining when a partition assignment is revoked.
 	//
 	// When true, the consumer will stop pulling new messages but finish processing
 	// buffered messages before shutting down the partition consumer.
-	//
-	// Default: false.
 	DrainOnRemove bool
 
 	// DrainOnRemoveTimeout caps the time spent draining a revoked partition.
@@ -111,8 +103,6 @@ type DynamicConfig struct {
 	//
 	// If the manager assigns more partitions than this limit, excess partitions
 	// will be ignored (and logged/warned).
-	//
-	// Default: 0 (no cap).
 	MaxConcurrentSubjects int `validate:"gte=0"`
 
 	// AllowWorkerIDChange controls whether the worker's identity can change during runtime.
@@ -152,8 +142,6 @@ type DynamicConfig struct {
 	IteratorFactory func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error)
 
 	// RecoveryStrategy defines how a recreated consumer resumes after an unexpected deletion.
-	//
-	// Default: RecoveryDisabled (no auto-recovery).
 	//
 	// All strategies are supported. [RecoverFromLastProcessed] works with both
 	// ManualAck=false (checkpoint advances automatically) and ManualAck=true
@@ -202,15 +190,6 @@ func NewDynamic(
 		opt.apply(&o)
 	}
 
-	// A nil pointer means WithPullGating was never called, so the durable layer
-	// still owns the default; a non-nil pointer is an explicit caller choice.
-	pullGatingEnabled := false
-	pullGatingConfigured := false
-	if o.pullGatingEnabled != nil {
-		pullGatingEnabled = *o.pullGatingEnabled
-		pullGatingConfigured = true
-	}
-
 	// Build configuration
 	cfg := DynamicConfig{
 		CommonConfig: CommonConfig{
@@ -234,7 +213,7 @@ func NewDynamic(
 		SubjectTemplate:             subjectTemplate,
 		ProcessingGate:              o.processingGate,
 		Resolver:                    o.resolver,
-		PullGatingEnabled:           pullGatingEnabled,
+		PullGatingEnabled:           o.pullGatingEnabled,
 		DrainOnRemove:               o.drainOnRemove,
 		DrainOnRemoveTimeout:        o.drainOnRemoveTimeout,
 		MaxConcurrentSubjects:       o.maxConcurrentSubjects,
@@ -272,7 +251,6 @@ func NewDynamic(
 		ProcessingGate:              toSubscriptionGateConfig(cfg.ProcessingGate),
 		Resolver:                    toSubscriptionResolverConfig(cfg.Resolver),
 		PullGatingEnabled:           cfg.PullGatingEnabled,
-		PullGatingConfigured:        pullGatingConfigured,
 		DrainOnRemove:               cfg.DrainOnRemove,
 		DrainOnRemoveTimeout:        cfg.DrainOnRemoveTimeout,
 		MaxConcurrentSubjects:       cfg.MaxConcurrentSubjects,

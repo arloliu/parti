@@ -1,5 +1,6 @@
 // Package provision manages the NATS resources Parti's runtime depends on:
-// control-plane KV buckets and the partition-source bucket.
+// control-plane KV buckets, the partition-source bucket, and the partition
+// table stored inside the partition-source key.
 //
 // The primary entry points are:
 //
@@ -9,6 +10,9 @@
 //   - Plan(ctx, js, cfg) — deterministic drift report and proposed actions.
 //     Read-only; never mutates NATS.
 //   - Apply(ctx, js, cfg) — executes the Plan actions against live NATS.
+//   - PlanPartitions(ctx, js, cfg) / ApplyPartitions(ctx, js, plan, prune) —
+//     plan and apply the contents of the partition-source key (the partition
+//     table itself), as distinct from the bucket config Plan/Apply manage.
 //
 // Plan emits three action kinds depending on the reconcile policy:
 //
@@ -17,6 +21,13 @@
 //     bucket (safe-update policy only).
 //   - "stamp-marker": stamp the Parti ownership marker on an unmarked bucket
 //     that exists live, preserving all non-Parti metadata (adopt policy only).
+//
+// PlanPartitions emits a single "write-partitions" action carrying the
+// record-level diff (added / removed / weight-changed) between the declared
+// PartitionSourceConfig.Partitions and the live key contents; ApplyPartitions
+// executes it as one compare-and-swap write, gating record removals behind an
+// explicit prune flag. The reconcile policy does not govern partition-record
+// reconciliation.
 //
 // Reconcile policies (set via Config.Policy or the -policy CLI flag):
 //

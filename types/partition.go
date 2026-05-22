@@ -16,13 +16,13 @@ import (
 type Partition struct {
 	// Keys uniquely identify this partition. Must contain at least one non-empty key.
 	// For Kafka: ["topic", "partition_id"]
-	Keys []string `json:"keys"`
+	Keys []string `json:"keys" yaml:"keys"`
 
 	// Weight represents the relative processing cost.
 	// A zero value means "use the strategy's default weight" (typically 1).
 	// Negative values are treated as zero (strategy default).
 	// Used by weighted assignment strategies for load balancing.
-	Weight int64 `json:"weight"`
+	Weight int64 `json:"weight" yaml:"weight"`
 }
 
 // Validate checks if the partition configuration is valid.

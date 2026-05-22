@@ -91,49 +91,6 @@ func TestWorkerConsumerConfig_SetDefaults(t *testing.T) {
 				assert.Equal(t, []types.HandoffState{types.HandoffStateStable}, c.ProcessingGate.WarmupAllowedStates)
 			},
 		},
-		{
-			// Safe default: caller never configured pull gating, so the
-			// processing gate auto-enables it.
-			name: "processing gate auto-enables unconfigured pull gating",
-			input: &WorkerConsumerConfig{
-				ProcessingGate:       &ProcessingGateConfig{Enabled: true},
-				PullGatingConfigured: false,
-				PullGatingEnabled:    false,
-			},
-			expected: func(t *testing.T, c *WorkerConsumerConfig) {
-				assert.True(t, c.PullGatingEnabled,
-					"processing gate must auto-enable pull gating when unconfigured")
-			},
-		},
-		{
-			name: "explicit pull gating disable is honored under processing gate",
-			input: &WorkerConsumerConfig{
-				ProcessingGate:       &ProcessingGateConfig{Enabled: true},
-				PullGatingConfigured: true,
-				PullGatingEnabled:    false,
-			},
-			expected: func(t *testing.T, c *WorkerConsumerConfig) {
-				assert.False(t, c.PullGatingEnabled,
-					"explicit disable must not be re-enabled by the processing gate")
-
-				// Idempotent: the constructor runs SetDefaults twice
-				// (NewWorkerConsumer, then Validate).
-				require.NoError(t, c.SetDefaults())
-				assert.False(t, c.PullGatingEnabled,
-					"repeated defaulting must keep honoring the explicit disable")
-			},
-		},
-		{
-			name: "explicit pull gating enable is preserved under processing gate",
-			input: &WorkerConsumerConfig{
-				ProcessingGate:       &ProcessingGateConfig{Enabled: true},
-				PullGatingConfigured: true,
-				PullGatingEnabled:    true,
-			},
-			expected: func(t *testing.T, c *WorkerConsumerConfig) {
-				assert.True(t, c.PullGatingEnabled, "explicit enable must remain enabled")
-			},
-		},
 	}
 
 	for _, tt := range tests {

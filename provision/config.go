@@ -1,6 +1,10 @@
 package provision
 
-import "time"
+import (
+	"time"
+
+	"github.com/arloliu/parti/v2/types"
+)
 
 // Config is the desired environment state for the provision SDK. APIVersion
 // is required; v1 accepts only "parti.io/v1".
@@ -63,9 +67,9 @@ type ControlPlaneConfig struct {
 }
 
 // PartitionSourceConfig declares the NATS KV bucket that holds the partition
-// definition record. The SDK provisions the bucket; partition record contents
-// (the actual partition definitions) are managed separately and are not yet
-// part of this SDK.
+// table and, via Partitions, the desired contents of the partition-source key.
+// The bucket-provisioning commands (plan / apply / adopt) manage the bucket;
+// PlanPartitions / ApplyPartitions manage the record contents.
 type PartitionSourceConfig struct {
 	Bucket   string `yaml:"bucket"                 json:"bucket"`
 	Key      string `yaml:"key"                    json:"key"`
@@ -79,6 +83,18 @@ type PartitionSourceConfig struct {
 	// findings.
 	MaxValueSize int32         `yaml:"maxValueSize,omitempty" json:"maxValueSize,omitempty"`
 	TTL          time.Duration `yaml:"ttl,omitempty"          json:"ttl,omitempty"`
+
+	// Partitions is the desired partition table written to the
+	// partitionSource key. It is consumed only by PlanPartitions /
+	// ApplyPartitions (the `partictl partitions` subcommand); the
+	// bucket-provisioning commands (plan / apply / adopt) ignore it.
+	//
+	// Omitted or empty means "no partitions declared": the partitions
+	// subcommand reports an error rather than treating it as an instruction
+	// to empty the table. Reusing types.Partition couples this input schema
+	// to the runtime struct — any field added there becomes part of
+	// parti.io/v1.
+	Partitions []types.Partition `yaml:"partitions,omitempty" json:"partitions,omitempty"`
 }
 
 // DynamicConsumerCfg describes one dynamic-consumer alignment target.

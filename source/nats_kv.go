@@ -1,19 +1,16 @@
 package source
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math/rand/v2"
 	"slices"
 	"sync"
 	"time"
 
 	"github.com/arloliu/parti/v2/internal/natsutil"
+	"github.com/arloliu/parti/v2/internal/partcodec"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -228,7 +225,7 @@ func (s *NatsKV) Start(ctx context.Context) error {
 		initRevision = 0
 		initKnown = false
 	} else {
-		partitions, decErr := s.decodePartitions(entry.Value())
+		partitions, decErr := partcodec.Decode(entry.Value())
 		if decErr != nil {
 			return fmt.Errorf("failed to decode partitions: %w", decErr)
 		}
@@ -445,7 +442,7 @@ func (s *NatsKV) Update(ctx context.Context, partitions []types.Partition) error
 		return err
 	}
 
-	data, err := encodePartitions(clean)
+	data, err := partcodec.Encode(clean)
 	if err != nil {
 		return err
 	}
@@ -528,7 +525,7 @@ func (s *NatsKV) Modify(ctx context.Context, fn func([]types.Partition) []types.
 			return valErr
 		}
 
-		data, encErr := encodePartitions(clean)
+		data, encErr := partcodec.Encode(clean)
 		if encErr != nil {
 			return encErr
 		}
@@ -755,7 +752,7 @@ func (s *NatsKV) watchLoop(ctx context.Context, watcher jetstream.KeyWatcher) {
 				continue
 			}
 
-			partitions, err := s.decodePartitions(entry.Value())
+			partitions, err := partcodec.Decode(entry.Value())
 			if err != nil {
 				s.logError("failed to decode partitions update", "error", err)
 
@@ -880,7 +877,7 @@ func (s *NatsKV) reconcileOnce(ctx context.Context) {
 		return
 	}
 
-	partitions, err := s.decodePartitions(entry.Value())
+	partitions, err := partcodec.Decode(entry.Value())
 	if err != nil {
 		s.logError("reconcile: failed to decode partitions", "error", err)
 
@@ -908,7 +905,7 @@ func (s *NatsKV) refreshFromKV(ctx context.Context) error {
 		return err
 	}
 
-	partitions, err := s.decodePartitions(entry.Value())
+	partitions, err := partcodec.Decode(entry.Value())
 	if err != nil {
 		return err
 	}
@@ -931,7 +928,7 @@ func (s *NatsKV) fetchFromKV(ctx context.Context) ([]types.Partition, uint64, er
 		return nil, 0, err
 	}
 
-	partitions, err := s.decodePartitions(entry.Value())
+	partitions, err := partcodec.Decode(entry.Value())
 	if err != nil {
 		return nil, 0, err
 	}
@@ -976,70 +973,6 @@ func partitionsEqual(a, b []types.Partition) bool {
 	return true
 }
 
-// decodePartitions decodes partition data, handling both compressed (Gzip) and
-// uncompressed (JSON) formats.
-//
-// On the read path (watcher events, reconcile, Start) corrupt KV data is
-// rejected rather than silently filtered:
-//   - An invalid partition (failing Validate) returns an error immediately.
-//   - A duplicate CanonicalID returns an error immediately.
-//
-// This ensures source corruption is always surfaced to callers, which can then
-// log and skip applying the corrupt update (preserving the last-known-good state).
-//
-// For Start: the error surfaces at boot, making KV corruption visible early.
-// For watcher/reconcile callers: the caller logs the error and skips the update
-// so local state is never replaced with a partial sanitized list.
-func (s *NatsKV) decodePartitions(data []byte) ([]types.Partition, error) {
-	if len(data) == 0 {
-		return []types.Partition{}, nil
-	}
-
-	// Check for Gzip magic bytes (0x1f, 0x8b).
-	isGzip := len(data) > 2 && data[0] == 0x1f && data[1] == 0x8b
-
-	var jsonData []byte
-	if isGzip {
-		gr, err := gzip.NewReader(bytes.NewReader(data))
-		if err != nil {
-			// Fallback to treating as plain JSON if gzip reader fails immediately.
-			jsonData = data
-		} else {
-			defer gr.Close()
-			decompressed, ioErr := io.ReadAll(gr)
-			if ioErr != nil {
-				return nil, fmt.Errorf("failed to decompress data: %w", ioErr)
-			}
-			jsonData = decompressed
-		}
-	} else {
-		jsonData = data
-	}
-
-	var raw []types.Partition
-	if err := json.Unmarshal(jsonData, &raw); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal partitions: %w", err)
-	}
-
-	// Validate and dedupe by CanonicalID — return an error on first violation.
-	// Callers must not apply partial lists when corruption is detected.
-	seen := make(map[string]struct{}, len(raw))
-	result := make([]types.Partition, 0, len(raw))
-	for i, p := range raw {
-		if err := p.Validate(); err != nil {
-			return nil, fmt.Errorf("invalid partition at index %d in KV data: %w", i, err)
-		}
-		cid := p.CanonicalID()
-		if _, dup := seen[cid]; dup {
-			return nil, fmt.Errorf("duplicate partition at index %d (canonical_id=%q) in KV data", i, cid)
-		}
-		seen[cid] = struct{}{}
-		result = append(result, p)
-	}
-
-	return result, nil
-}
-
 // validateAndDedupe validates each partition and dedupes by CanonicalID.
 // Returns an error on the first invalid partition; duplicate partitions
 // (same CanonicalID) also return an error because they indicate a bug in
@@ -1068,25 +1001,6 @@ func validateAndDedupe(partitions []types.Partition) ([]types.Partition, error) 
 	}
 
 	return result, nil
-}
-
-// encodePartitions marshals the partition list to JSON and gzip-compresses it.
-func encodePartitions(partitions []types.Partition) ([]byte, error) {
-	data, err := json.Marshal(partitions)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal partitions: %w", err)
-	}
-
-	var buf bytes.Buffer
-	gw := gzip.NewWriter(&buf)
-	if _, err := gw.Write(data); err != nil {
-		return nil, fmt.Errorf("failed to compress partitions: %w", err)
-	}
-	if err := gw.Close(); err != nil {
-		return nil, fmt.Errorf("failed to close gzip writer: %w", err)
-	}
-
-	return buf.Bytes(), nil
 }
 
 // isCASConflict reports whether err is a CAS conflict that should be retried.
