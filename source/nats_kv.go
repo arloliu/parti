@@ -12,6 +12,7 @@ import (
 	"github.com/arloliu/parti/v2/internal/natsutil"
 	"github.com/arloliu/parti/v2/internal/partcodec"
 	"github.com/arloliu/parti/v2/types"
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -106,6 +107,70 @@ func WithUpdateRetries(n int) NatsKVOption {
 	}
 }
 
+// SourceUnavailableHook fires when the partition-source bucket is observed to
+// be missing on the live connection. The reconciler and watcher-restart paths
+// each see a distinct error from the nats.go surface — [jetstream.ErrBucketNotFound]
+// from a fresh [jetstream.JetStream.KeyValue] lookup, [jetstream.ErrStreamNotFound]
+// from a cached watcher rebind, or [nats.ErrNoResponders] from a cached
+// [jetstream.KeyValue.Get] — and all three classify to bucket-loss internally.
+// The err argument hands the original sentinel to the hook so implementations
+// can log or surface the raw cause, but **do not gate readiness on a single
+// sentinel type**: when the hook fires, the bucket is missing.
+//
+// The library does not recreate the bucket — it is caller-owned, and rebuilding
+// it requires the operator's provisioning flow. Wire this hook into your
+// readiness logic (e.g. flip a readiness flag and let the orchestrator rotate
+// the pod) so the loss becomes an actionable signal rather than a silent stall.
+//
+// Concurrency contract: the hook is invoked synchronously from the source's
+// reconcile / restart goroutine. Implementations MUST be non-blocking and
+// MUST NOT call back into the source (recursive Get / Update / Stop will
+// deadlock against the watcher's restart path).
+//
+// Rate-limiting: repeated observations within a cooldown window (default
+// 30s, matching the default reconcile cadence) suppress the hook so the
+// callback is not flooded. The companion [SourceMetrics] gauge stays set
+// for the full duration of the outage and clears once a subsequent
+// operation succeeds.
+type SourceUnavailableHook func(err error)
+
+// WithUnavailableHook registers a [SourceUnavailableHook] that fires when
+// the partition-source bucket is observed to be missing. See
+// [SourceUnavailableHook] for the deadlock contract and rate-limiting
+// behavior. Without a hook, the loss is still logged and the metric is
+// set (when [WithMetrics] is configured), but no escalation runs — the
+// library cannot recreate a user-owned bucket on its own.
+//
+// Parameters:
+//   - h: Callback invoked on bucket-loss detection
+//
+// Returns:
+//   - NatsKVOption: Option function
+func WithUnavailableHook(h SourceUnavailableHook) NatsKVOption {
+	return func(s *NatsKV) {
+		s.unavailableHook = h
+	}
+}
+
+// WithMetrics wires a [types.SourceMetrics] collector. The source uses the
+// collector to expose its `parti_source_bucket_missing` gauge (set to 1 on
+// the first bucket-loss observation — see [SourceUnavailableHook] for the
+// empirical error surface — cleared on the next successful operation). The
+// default is [types.NopSourceMetrics].
+//
+// Parameters:
+//   - m: SourceMetrics collector
+//
+// Returns:
+//   - NatsKVOption: Option function
+func WithMetrics(m types.SourceMetrics) NatsKVOption {
+	return func(s *NatsKV) {
+		if m != nil {
+			s.metrics = m
+		}
+	}
+}
+
 // NatsKV implements a partition source backed by a NATS KeyValue bucket.
 //
 // It watches a specific key in the KV bucket for updates to the partition list,
@@ -155,6 +220,27 @@ type NatsKV struct {
 	// was scheduled for that tick. It is nil in production and set by tests that
 	// need to observe reconcile cadence without polling test-only struct fields.
 	onReconcileTick func(interval time.Duration)
+
+	// F6-A: bucket-unavailability escalation.
+	//
+	// unavailableHook fires (rate-limited) when the watcher-restart loop or
+	// the reconciler observes any error in the bucket-loss surface — see
+	// isBucketUnavailableErr for the empirical set (currently
+	// jetstream.ErrBucketNotFound, jetstream.ErrStreamNotFound, and
+	// nats.ErrNoResponders).
+	// metrics receives a SetSourceBucketMissing(true/false) call on the
+	// degradation/recovery edges.
+	// unavailableMu serialises lastUnavailableAt and bucketMissing — the two
+	// fields that govern rate-limiting and the gauge state.
+	// unavailableCooldown is the minimum interval between successive hook
+	// invocations under sustained bucket-loss; the default 30s matches the
+	// reconcile cadence.
+	unavailableHook     SourceUnavailableHook
+	metrics             types.SourceMetrics
+	unavailableMu       sync.Mutex
+	lastUnavailableAt   time.Time
+	unavailableCooldown time.Duration
+	bucketMissing       bool
 }
 
 // natsKVListener wraps a channel with a sync.Once to prevent double-close panics.
@@ -186,13 +272,15 @@ var (
 //   - *NatsKV: Configured source (call Start before use)
 func NewNatsKV(kv jetstream.KeyValue, key string, logger types.Logger, opts ...NatsKVOption) *NatsKV {
 	s := &NatsKV{
-		kv:                kv,
-		key:               key,
-		logger:            logger,
-		reconcileInterval: defaultReconcileInterval,
-		updateRetries:     defaultUpdateRetries,
-		leaderInterval:    leaderReconcileInterval,
-		followerInterval:  followerReconcileInterval,
+		kv:                  kv,
+		key:                 key,
+		logger:              logger,
+		reconcileInterval:   defaultReconcileInterval,
+		updateRetries:       defaultUpdateRetries,
+		leaderInterval:      leaderReconcileInterval,
+		followerInterval:    followerReconcileInterval,
+		metrics:             types.NopSourceMetrics{},
+		unavailableCooldown: defaultReconcileInterval, // 30s
 	}
 	s.watchFn = func(ctx context.Context) (jetstream.KeyWatcher, error) {
 		return s.kv.Watch(ctx, s.key)
@@ -800,11 +888,22 @@ func (s *NatsKV) restartWatcher(ctx context.Context) {
 			s.watcher = watcher
 			s.mu.Unlock()
 			s.wg.Go(func() { s.watchLoop(ctx, watcher) })
+			s.noteBucketAvailable()
 
 			return
 		}
 
-		s.logError("failed to restart watcher, will retry", "error", err, "backoff", backoff)
+		// F6-A: bucket-missing escalation. noteBucketUnavailable returns
+		// true on a wrapped ErrBucketNotFound and fires the hook (rate-
+		// limited) + sets the SourceBucketMissing gauge. The log line is
+		// still emitted in both branches so operators see the retry
+		// cadence; only the message text changes to distinguish the
+		// bucket-loss case from a generic watcher error.
+		if s.noteBucketUnavailable(err) {
+			s.logError("source bucket missing; will retry watcher", "error", err, "backoff", backoff)
+		} else {
+			s.logError("failed to restart watcher, will retry", "error", err, "backoff", backoff)
+		}
 
 		//nolint:gosec // jitter does not require crypto-secure random
 		f := rand.Float64()
@@ -883,10 +982,19 @@ func (s *NatsKV) reconcileOnce(ctx context.Context) {
 	entry, err := s.kv.Get(ctx, s.key)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			// Key does not exist. Preserve revision/known if already known — the
-			// watcher will deliver the delete event with the correct revision.
-			// Only the initial-never-written case (known=false) leaves state unchanged.
+			// Key does not exist but the bucket does — confirm the
+			// bucket-available gauge and apply the empty state.
+			s.noteBucketAvailable()
+			// Preserve revision/known if already known — the watcher will deliver
+			// the delete event with the correct revision. Only the
+			// initial-never-written case (known=false) leaves state unchanged.
 			s.applyEmptyPreservingKnown()
+
+			return
+		}
+		// F6-A: bucket-missing escalation. See noteBucketUnavailable Godoc.
+		if s.noteBucketUnavailable(err) {
+			s.logError("reconcile: source bucket missing", "error", err)
 
 			return
 		}
@@ -902,6 +1010,8 @@ func (s *NatsKV) reconcileOnce(ctx context.Context) {
 		return
 	}
 
+	// Successful kv.Get confirms the bucket is reachable.
+	s.noteBucketAvailable()
 	s.applyLocal(partitions, entry.Revision(), true)
 }
 
@@ -1037,5 +1147,93 @@ func (s *NatsKV) logError(msg string, args ...any) {
 func (s *NatsKV) logWarn(msg string, args ...any) {
 	if s.logger != nil {
 		s.logger.Warn(msg, args...)
+	}
+}
+
+// isBucketUnavailableErr classifies an error from a cached KV / watcher
+// operation as "the source bucket is unavailable from this connection's
+// point of view". Empirical surface (verified against nats.go v1.50.0):
+//
+//   - jetstream.ErrBucketNotFound: returned by js.KeyValue(...) when the
+//     bucket has been deleted (lookup path).
+//   - jetstream.ErrStreamNotFound: returned by kv.Watch on a CACHED kv
+//     handle after the bucket was deleted under it. The KV bucket is
+//     backed by a stream named KV_<bucket>; once the stream is gone the
+//     watcher's bind fails with this error.
+//   - nats.ErrNoResponders: returned by kv.Get on a cached handle after
+//     the bucket was deleted — the request reaches the JetStream subject
+//     but no responder is listening.
+//
+// The latter two are what production paths actually see (the reconciler
+// uses cached kv.Get; restartWatcher uses cached kv.Watch). The first is
+// included for completeness and for any future code path that re-binds
+// the bucket via js.KeyValue.
+//
+// nats.ErrNoResponders is broader than "bucket deleted" — it also fires
+// during a transient NATS reconnect when no JetStream node has surfaced
+// the subject yet. The cooldown + gauge-clears-on-success design tolerates
+// the false-positive: the hook fires once, the gauge clears on the next
+// successful op, and the operator's readiness probe sees the brief blip.
+// This is preferable to missing the genuine bucket-loss case.
+func isBucketUnavailableErr(err error) bool {
+	return errors.Is(err, jetstream.ErrBucketNotFound) ||
+		errors.Is(err, jetstream.ErrStreamNotFound) ||
+		errors.Is(err, nats.ErrNoResponders)
+}
+
+// noteBucketUnavailable handles the bucket-missing escalation path. Returns
+// true iff err is classified as a bucket-unavailable error (see
+// isBucketUnavailableErr), so the caller can substitute a more specific
+// log line for the existing generic one.
+//
+// On a match:
+//   - Sets the SourceBucketMissing gauge to true (idempotent — no-op if
+//     already set).
+//   - Invokes the configured SourceUnavailableHook, rate-limited by
+//     unavailableCooldown so a sustained outage does not flood the
+//     caller's escalation logic.
+//
+// The hook is invoked OUTSIDE unavailableMu so a long-running caller hook
+// does not block the reconcile / restart goroutine's next tick.
+func (s *NatsKV) noteBucketUnavailable(err error) bool {
+	if !isBucketUnavailableErr(err) {
+		return false
+	}
+	s.unavailableMu.Lock()
+	var fire bool
+	if s.unavailableHook != nil && time.Since(s.lastUnavailableAt) >= s.unavailableCooldown {
+		s.lastUnavailableAt = time.Now()
+		fire = true
+	}
+	gaugeChanged := !s.bucketMissing
+	if gaugeChanged {
+		s.bucketMissing = true
+	}
+	s.unavailableMu.Unlock()
+
+	if gaugeChanged {
+		s.metrics.SetSourceBucketMissing(true)
+	}
+	if fire {
+		s.unavailableHook(err)
+	}
+
+	return true
+}
+
+// noteBucketAvailable clears the SourceBucketMissing gauge after a
+// successful watcher-restart or kv.Get. The hook is NOT re-fired on
+// recovery — escalation is one-way; the gauge carries the recovery
+// signal. Cheap: a no-op if the gauge is already clear.
+func (s *NatsKV) noteBucketAvailable() {
+	s.unavailableMu.Lock()
+	gaugeChanged := s.bucketMissing
+	if gaugeChanged {
+		s.bucketMissing = false
+	}
+	s.unavailableMu.Unlock()
+
+	if gaugeChanged {
+		s.metrics.SetSourceBucketMissing(false)
 	}
 }
