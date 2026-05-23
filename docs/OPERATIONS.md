@@ -578,6 +578,70 @@ Automatic process:
 
 **Recovery time:** ~2-3 heartbeat intervals (10-15s default)
 
+### Election Bucket Storage Migration
+
+The election bucket's storage type changed from `MemoryStorage` to
+`FileStorage` so the leadership lease key survives a NATS node
+restart. Previously, every NATS node restart lost the lease and
+triggered fleet-wide leadership churn.
+
+**Existing clusters need a one-time bucket replacement** because
+`EnsureKVBucketWithRetry` is get-first — it does not upgrade an
+existing `MemoryStorage` bucket to `FileStorage`.
+
+Pre-flight: confirm the F1 epoch fence is in your build (look in
+release notes, or check operational logs for `bucket-recreated`
+warn entries — any prior occurrence confirms the fence is wired).
+The fence is the migration's safety net.
+
+Migration steps, during a planned maintenance window:
+
+```bash
+# 1. Delete the bucket (this also removes the backing KV_<bucket> stream).
+nats kv rm parti-<cluster>-election
+
+# 2. Paranoia check — confirm the backing stream is gone.
+nats stream ls | grep KV_parti-<cluster>-election  # expect no output
+
+# 3. Recreate with the desired replica count (recommended: 3 in a
+#    multi-node cluster). The new bucket MUST be FileStorage; this
+#    matches what the runtime creates on a fresh deploy.
+nats kv add parti-<cluster>-election --replicas=3 --storage=file
+
+# 4. Rolling restart of Parti workers (any order is fine).
+```
+
+Workers that observed the deletion before their own restart enter
+degraded mode via the F1 epoch fence (reason
+`bucket-recreated:parti-<cluster>-election`); the existing
+`OnDegraded → readiness probe → pod rotation` path completes the
+migration automatically.
+
+Post-migration verification:
+
+```bash
+nats kv info parti-<cluster>-election | grep -i storage  # expect "File"
+```
+
+After the migration a single-node restart in a 3-replica cluster
+no longer causes leadership churn.
+
+### Tuning OperationTimeout vs ElectionTimeout
+
+The leader's renew loop has three attempts within `ElectionTimeout`
+to refresh the lease; each attempt's timeout is `OperationTimeout`.
+If `OperationTimeout > ElectionTimeout / 3`, a single slow renew
+can consume the entire lease budget and produce a false leadership
+flip. The library logs a one-shot WARN at `Manager.Start` when this
+ratio is exceeded. The recommended posture:
+
+```
+OperationTimeout <= ElectionTimeout / 3
+```
+
+At the default pair (both 10s) the warning fires; in production
+prefer something like `OperationTimeout=3s, ElectionTimeout=10s`.
+
 ### NATS Cluster Maintenance
 
 When performing NATS maintenance:

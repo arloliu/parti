@@ -412,6 +412,9 @@ func (m *Manager) Start(ctx context.Context) (startErr error) {
 	// while the worker's cache is still stale. The fix is to tune
 	// consumer.ResolverConfig.ReconcileInterval at the consumer config layer.
 	m.warnOnShortAuditGrace()
+	// F9-A (P2.1): warn when OperationTimeout could let a single slow
+	// renew consume the lease's three-attempt budget.
+	warnOnOperationTimeoutVsElection(m.cfg, m.logger)
 
 	// Warn when the caller-owned nats.Conn is configured with a finite
 	// MaxReconnect budget. A finite budget turns a sustained outage into

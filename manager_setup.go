@@ -55,10 +55,14 @@ func (m *Manager) ensureStableIDKV(ctx context.Context, js jetstream.JetStream) 
 
 // ensureCoreKVBuckets ensures election, heartbeat, and assignment KV buckets.
 //
-// Storage choices are fixed per bucket to minimize PVC IOPS on file-backed
-// JetStream clusters while preserving durability where it matters:
-//   - election:   MemoryStorage — a lost leader key simply triggers re-election.
-//   - heartbeat:  MemoryStorage — workers re-publish every HeartbeatInterval.
+// Storage choices are fixed per bucket to balance durability against PVC
+// IOPS cost:
+//   - election:   FileStorage   — the leadership lease key must survive a
+//     NATS node restart, otherwise every restart triggers fleet-wide
+//     leadership churn (was MemoryStorage prior to F9-A; the switch is
+//     IOPS-free at production scales per iops-investigation §M1.9).
+//   - heartbeat:  MemoryStorage — workers re-publish every HeartbeatInterval,
+//     so a missed window is recovered by the next publish.
 //   - assignment: FileStorage  — must survive NATS restart so followers
 //     joining during the outage window can receive their assignment.
 //
@@ -87,7 +91,16 @@ func (m *Manager) ensureCoreKVBuckets( //nolint:revive
 		return kv, nil
 	}
 
-	electionKV, err = ensure("election", m.cfg.KVBuckets.ElectionBucket, m.cfg.ElectionTimeout, jetstream.MemoryStorage)
+	// F9-A (P2.1): election bucket uses FileStorage so the leadership
+	// lease key survives a NATS node restart. Previously MemoryStorage —
+	// any node restart lost the lease and triggered fleet-wide
+	// leadership churn. The switch is effectively IOPS-free at
+	// production scales (see docs/plans/iops-investigation/findings.md
+	// §M1.9). Replicas remain at the server default (1) here; operators
+	// who need cross-node HA pre-create the bucket with --replicas=3
+	// (EnsureKVBucketWithRetry is get-first and honors the existing
+	// config). See docs/OPERATIONS.md for the migration runbook.
+	electionKV, err = ensure("election", m.cfg.KVBuckets.ElectionBucket, m.cfg.ElectionTimeout, jetstream.FileStorage)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -541,6 +554,29 @@ func (m *Manager) checkBucketEpochs(ctx context.Context) {
 			return // once degraded; no need to probe the rest this tick
 		}
 	}
+}
+
+// warnOnOperationTimeoutVsElection emits a one-shot WARN when
+// OperationTimeout is too close to ElectionTimeout. The leader's renew
+// loop has three attempts within ElectionTimeout to refresh the lease;
+// if a single attempt's timeout (OperationTimeout) exceeds
+// ElectionTimeout/3, one slow renew consumes the lease's entire budget
+// and produces a false leadership flip.
+//
+// The boundary is non-strict (OperationTimeout == ElectionTimeout/3
+// is acceptable). Anything strictly greater warns.
+func warnOnOperationTimeoutVsElection(cfg Config, logger types.Logger) {
+	if cfg.OperationTimeout <= cfg.ElectionTimeout/3 {
+		return
+	}
+	logger.Warn(
+		"OperationTimeout exceeds ElectionTimeout/3; a single slow "+
+			"renew can consume the lease's three-attempt budget and "+
+			"trigger a false leadership flip. Set OperationTimeout "+
+			"<= ElectionTimeout/3.",
+		"OperationTimeout", cfg.OperationTimeout,
+		"ElectionTimeout", cfg.ElectionTimeout,
+	)
 }
 
 // storageTypeName renders jetstream.StorageType as a human-readable string.
