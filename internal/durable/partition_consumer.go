@@ -9,6 +9,7 @@ import (
 
 	"github.com/arloliu/parti/v2/internal/natsutil"
 	"github.com/arloliu/parti/v2/internal/recovery"
+	"github.com/arloliu/parti/v2/internal/retry"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -27,6 +28,14 @@ type partitionConsumerConfig struct {
 	Retry                       RetryConfig
 	IteratorEscalationWindow    time.Duration
 	IteratorEscalationThreshold int
+
+	// RecoveryRetry configures the bounded-retry envelope wrapped around
+	// the iterator-creation retry loop. See RecoveryRetryConfig.
+	RecoveryRetry RecoveryRetryConfig
+
+	// OnPermanentFailure is fired exactly once when the iterator-creation
+	// envelope exhausts its attempt budget. See WorkerConsumerConfig.
+	OnPermanentFailure func(subject string, err error)
 
 	// Metrics
 	Metrics types.WorkerConsumerMetrics
@@ -93,6 +102,19 @@ func newPartitionConsumer(
 	config partitionConsumerConfig,
 	opts partitionConsumerOpts,
 ) *partitionConsumer {
+	// Apply recovery-envelope defaults once at construction so callers
+	// (including in-package tests) that omit RecoveryRetry don't trip
+	// retry.New's required-field panics on every outer-loop iteration.
+	if config.RecoveryRetry.MaxAttempts <= 0 {
+		config.RecoveryRetry.MaxAttempts = DefaultRecoveryMaxAttempts
+	}
+	if config.RecoveryRetry.BaseBackoff <= 0 {
+		config.RecoveryRetry.BaseBackoff = DefaultRecoveryBaseBackoff
+	}
+	if config.RecoveryRetry.MaxBackoff < config.RecoveryRetry.BaseBackoff {
+		config.RecoveryRetry.MaxBackoff = config.RecoveryRetry.BaseBackoff
+	}
+
 	return &partitionConsumer{
 		logger:               logger,
 		js:                   js,
@@ -164,28 +186,12 @@ func (pc *partitionConsumer) Run(ctx context.Context, handler messageHandler) {
 		cons := pc.consumer
 		pc.consumerMu.RUnlock()
 
-		// Create iterator and enter message processing loop.
-		pc.consInfoMu.Lock()
-		iter, err := pc.iterFactory(cons, batch, expiry)
-		pc.consInfoMu.Unlock()
+		// Iterator creation runs under a bounded-retry envelope; ErrExhausted
+		// (after OnPermanent fired) and ctx-cancel both terminate the loop.
+		// See RecoveryRetryConfig for the per-episode budget-reset semantics.
+		iter, err := pc.runIteratorEnvelope(ctx, cons, batch, expiry)
 		if err != nil {
-			pc.logger.Warn("iterator creation failed", "subject", pc.subject, "error", err)
-			if pc.config.Metrics != nil {
-				pc.config.Metrics.IncrementWorkerConsumerIteratorRestart("transient")
-			}
-
-			// Iterator creation failures (from cons.Messages()) are distinct from
-			// iterator consumption failures (from iter.Next()). Consumer deletion
-			// is detected via iter.Next() errors, not creation errors. The legacy
-			// escalation mechanism handles creation failures (rebind the durable)
-			// regardless of recovery strategy.
-			pc.maybeEscalateIteratorFailures(ctx)
-
-			if pc.delayWithBackoffOrExit(ctx, "iterate") {
-				return
-			}
-
-			continue
+			return
 		}
 
 		exit, iterErr := pc.processIterator(ctx, iter, handler)
@@ -197,6 +203,75 @@ func (pc *partitionConsumer) Run(ctx context.Context, handler messageHandler) {
 		}
 		// loop continues to recreate iterator on next iteration
 	}
+}
+
+// runIteratorEnvelope drives one bounded-retry envelope around iterator
+// creation. Returns (iter, nil) on success, (nil, ErrExhausted) once
+// OnPermanentFailure has fired, or (nil, ctx.Err()) on cancellation.
+// Mirrors source/nats_kv.go:restartWatcher (P2.4a).
+func (pc *partitionConsumer) runIteratorEnvelope(
+	ctx context.Context,
+	cons jetstream.Consumer,
+	batch int,
+	expiry time.Duration,
+) (jetstream.MessagesContext, error) {
+	cfg := pc.config.RecoveryRetry
+
+	var iter jetstream.MessagesContext
+	env := retry.New(retry.Config{
+		Work: func(workCtx context.Context) error {
+			pc.consInfoMu.Lock()
+			i, err := pc.iterFactory(cons, batch, expiry)
+			pc.consInfoMu.Unlock()
+			if err != nil {
+				pc.logger.Warn("iterator creation failed", "subject", pc.subject, "error", err)
+				if pc.config.Metrics != nil {
+					pc.config.Metrics.IncrementWorkerConsumerIteratorRestart("transient")
+				}
+				// Iterator creation failures (from cons.Messages()) are distinct from
+				// iterator consumption failures (from iter.Next()): consumer deletion
+				// is detected on Next() errors, not creation. The legacy per-subject
+				// escalation handles creation failures (rebind the durable) regardless
+				// of recovery strategy, so it runs inside the envelope.
+				pc.maybeEscalateIteratorFailures(workCtx)
+
+				return err
+			}
+			iter = i
+
+			return nil
+		},
+		OnPermanent: func(err error) {
+			pc.logger.Warn("partition consumer iterator-creation budget exhausted; entering permanent failure",
+				"op", "partition_consumer_permanent_failure",
+				"subject", pc.subject,
+				"durable", pc.durableName,
+				"max_attempts", cfg.MaxAttempts,
+				"error", err)
+			if pc.config.Metrics != nil {
+				pc.config.Metrics.IncrementWorkerConsumerIteratorRestart("recovery_exhausted")
+			}
+			if pc.config.OnPermanentFailure != nil {
+				pc.config.OnPermanentFailure(pc.subject, err)
+			}
+		},
+		OnProgress: func(attempt int, err error) {
+			pc.logger.Debug("partition consumer iterator-creation retry",
+				"subject", pc.subject,
+				"attempt", attempt,
+				"max_attempts", cfg.MaxAttempts,
+				"error", err)
+		},
+		BaseBackoff: cfg.BaseBackoff,
+		MaxBackoff:  cfg.MaxBackoff,
+		MaxAttempts: cfg.MaxAttempts,
+		Jitter:      cfg.Jitter,
+	})
+	if err := env.Run(ctx); err != nil {
+		return nil, err
+	}
+
+	return iter, nil
 }
 
 func (pc *partitionConsumer) handleIteratorFailure(ctx context.Context, iterErr error) bool {
