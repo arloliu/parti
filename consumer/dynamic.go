@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/arloliu/fuda"
@@ -40,9 +41,33 @@ type Dynamic struct {
 	js               jetstream.JetStream
 	streamName       string
 	recoveryStrategy RecoveryStrategy
-	workQueueOnce    sync.Once
-	workQueueErr     error
+
+	// workQueueResult holds the immutable outcome of the most recent
+	// WorkQueuePolicy/recovery compatibility check. nil means "not yet
+	// checked, or cleared after a stream recreate". Publishing the
+	// result through a single atomic.Pointer to an immutable struct
+	// eliminates the v1 publication race between a "checked" flag and
+	// the error value.
+	workQueueResult atomic.Pointer[compatCheckResult]
+	// workQueueMu serializes the once-style check so resetCompatCheck
+	// cannot interleave between an in-flight slow-path's compute and
+	// publish steps (the pre-v3 stale-store race).
+	workQueueMu sync.Mutex
 }
+
+// compatCheckResult is the immutable outcome of one WorkQueue
+// compatibility check. A nil *compatCheckResult means "not yet
+// checked, or reset after a stream recreate".
+type compatCheckResult struct {
+	err error // non-nil iff the check failed
+}
+
+// compatCheckFn is the seam Dynamic invokes to run the
+// WorkQueue/recovery compatibility check. Tests swap this to inject
+// canned outcomes or to block the slow-path inside the mutex region
+// without standing up a real jetstream.JetStream. Production callers
+// never reassign it.
+var compatCheckFn = CheckWorkQueueRecoveryCompat
 
 // DynamicConfig configures a Dynamic consumer.
 type DynamicConfig struct {
@@ -307,11 +332,8 @@ func NewDynamic(
 //   - [ErrMaxSubjectsExceeded]: Returned when partition count
 //     exceeds MaxConcurrentSubjects.
 func (d *Dynamic) Update(ctx context.Context, workerID string, partitions []types.Partition) error {
-	d.workQueueOnce.Do(func() {
-		d.workQueueErr = CheckWorkQueueRecoveryCompat(ctx, d.js, d.streamName, d.recoveryStrategy)
-	})
-	if d.workQueueErr != nil {
-		return d.workQueueErr
+	if err := d.ensureCompatChecked(ctx); err != nil {
+		return err
 	}
 	return d.inner.UpdateWorkerConsumer(ctx, workerID, partitions)
 }
@@ -323,7 +345,53 @@ func (d *Dynamic) Update(ctx context.Context, workerID string, partitions []type
 // backward compatibility with code that expects the WorkerConsumerUpdater
 // interface.
 func (d *Dynamic) UpdateWorkerConsumer(ctx context.Context, workerID string, partitions []types.Partition) error {
+	// Run the same compat check as the Update path. Pre-fix this method
+	// bypassed the check entirely, so a stale Dynamic registered with
+	// the manager could silently accept an incompatible
+	// WorkQueuePolicy/recovery combination on a recreated stream.
+	if err := d.ensureCompatChecked(ctx); err != nil {
+		return err
+	}
 	return d.inner.UpdateWorkerConsumer(ctx, workerID, partitions)
+}
+
+// ensureCompatChecked runs the WorkQueue/recovery compatibility check at
+// most once per reset cycle. The fast path is a single atomic load; the
+// result struct is immutable once published, so there is no publication
+// race between the "is it checked" flag and the error value (they are one
+// pointer). The slow path takes workQueueMu so resetCompatCheck cannot
+// interleave between a still-running compat check's compute and publish
+// steps.
+func (d *Dynamic) ensureCompatChecked(ctx context.Context) error {
+	if r := d.workQueueResult.Load(); r != nil {
+		return r.err
+	}
+	d.workQueueMu.Lock()
+	defer d.workQueueMu.Unlock()
+	if r := d.workQueueResult.Load(); r != nil {
+		// another goroutine published while we waited
+		return r.err
+	}
+	err := compatCheckFn(ctx, d.js, d.streamName, d.recoveryStrategy)
+	d.workQueueResult.Store(&compatCheckResult{err: err})
+
+	return err
+}
+
+// resetCompatCheck clears the cached result so the next Update or
+// UpdateWorkerConsumer re-runs the WorkQueue/recovery compatibility
+// check. Wired into the partition consumer's stream-missing recovery
+// detour: after Controller.HandleStreamRecreated rebuilds the consumer
+// against a freshly-restored stream, the cached compatibility verdict
+// no longer applies to the new stream and must be re-armed.
+//
+// Takes workQueueMu so the reset cannot interleave between an
+// in-flight slow-path check's compute and publish steps (the pre-v3
+// stale-store race fixed in v3).
+func (d *Dynamic) resetCompatCheck() {
+	d.workQueueMu.Lock()
+	defer d.workQueueMu.Unlock()
+	d.workQueueResult.Store(nil)
 }
 
 // Capabilities forwards to the inner [durable.WorkerConsumer]; implements
