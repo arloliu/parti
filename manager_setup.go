@@ -174,10 +174,18 @@ func (m *Manager) setupHandoff(startupCtx context.Context, js jetstream.JetStrea
 // Uses retry logic to handle race conditions when multiple workers
 // try to create the same bucket concurrently.
 //
-// Note: if the bucket already exists, its existing storage type is honored
-// (kvutil.EnsureKVBucketWithRetry is get-first). A warning is logged when the
-// existing storage type does not match the requested one so operators can
-// diagnose why they're not seeing the IOPS profile they expect after upgrading.
+// Note: if the bucket already exists, its existing storage type and
+// replica count are honored (kvutil.EnsureKVBucketWithRetry is
+// get-first). A warning is logged when the existing storage type does
+// not match the requested one so operators can diagnose why they're
+// not seeing the IOPS profile they expect after upgrading.
+//
+// Replicas: m.cfg.KVBuckets.Replicas is stamped onto the canonical
+// builder output when > 0 (mirrors the provision package's pattern —
+// see internal/kvbuckets/builder.go Godoc). Zero leaves the field
+// unset, which nats.go normalizes to 1 server-side (legacy behavior).
+// Pre-created buckets keep their existing replica count regardless of
+// this setting.
 func (m *Manager) ensureKVBucket(
 	ctx context.Context,
 	js jetstream.JetStream,
@@ -186,6 +194,9 @@ func (m *Manager) ensureKVBucket(
 	storage jetstream.StorageType,
 ) (jetstream.KeyValue, error) {
 	cfg := kvbuckets.BuildKeyValueConfig(bucket, ttl, storage)
+	if m.cfg.KVBuckets.Replicas > 0 {
+		cfg.Replicas = m.cfg.KVBuckets.Replicas
+	}
 
 	// Use retry logic to handle concurrent creation
 	const maxRetries = 5
@@ -195,6 +206,7 @@ func (m *Manager) ensureKVBucket(
 	}
 
 	m.warnOnStorageMismatch(ctx, kv, bucket, storage)
+	m.warnOnReplicasMismatch(ctx, kv, bucket)
 	// F1 epoch fence (P1.3): record this bucket's stream-Created
 	// timestamp so monitorBucketEpochs can detect a future wipe-and-
 	// recreate event. Failures are logged but never block Start.
@@ -391,6 +403,51 @@ func (m *Manager) warnOnStorageMismatch(
 		"bucket", bucket,
 		"existing_storage", storageTypeName(got),
 		"parti_default_storage", storageTypeName(want),
+	)
+}
+
+// warnOnReplicasMismatch logs a warning when an existing bucket's
+// replica count differs from Config.KVBuckets.Replicas. Mirrors
+// warnOnStorageMismatch.
+//
+// The library does NOT auto-reconcile Replicas (unlike MaxAge, which IS
+// reconciled because it carries a correctness invariant). Replicas is a
+// per-deployment HA-quality decision: silently rewriting an operator's
+// existing bucket config could trigger expensive cross-node replication
+// they did not ask for, or mask a deliberate downsize. The library's
+// contract is "pre-creation wins" (get-first); this warning makes a
+// silent divergence visible so operators can run
+// `nats stream update KV_<bucket> --replicas=N` themselves if they
+// want the change.
+//
+// Silent when Config.KVBuckets.Replicas is 0 (legacy default — no
+// expectation expressed) or when the existing bucket's replica count
+// matches.
+func (m *Manager) warnOnReplicasMismatch(
+	ctx context.Context,
+	kv jetstream.KeyValue,
+	bucket string,
+) {
+	want := m.cfg.KVBuckets.Replicas
+	if want <= 0 {
+		return // operator expressed no preference; nothing to compare against
+	}
+	cfg, err := kvStreamConfig(ctx, kv)
+	if err != nil {
+		return
+	}
+	got := cfg.Replicas
+	if got == want {
+		return
+	}
+	m.logger.Warn(
+		"KV bucket replica count differs from Config.KVBuckets.Replicas — "+
+			"the library does NOT auto-reconcile Replicas (pre-creation wins). "+
+			"To apply the requested value run "+
+			"`nats stream update KV_"+bucket+" --replicas=<N>` against your cluster.",
+		"bucket", bucket,
+		"existing_replicas", got,
+		"requested_replicas", want,
 	)
 }
 
