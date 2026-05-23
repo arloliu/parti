@@ -1,15 +1,16 @@
 # Self-Healing Implementation Status
 
-This file tracks per-PR delivery state. Updated 2026-05-23 mid-session.
+This file tracks per-PR delivery state. Updated 2026-05-23
+(post-`KVBuckets.Replicas` follow-up).
 
 See [`README.md`](./README.md) for the plan overview and
 [`00-fix-plan.md`](./00-fix-plan.md) for the per-PR specs.
 
-## Delivered (9 of 13 in-scope PRs)
+## Delivered (9 of 13 in-scope PRs + 1 follow-up)
 
-All branches below are local-only at session end and need
-`git push -u origin <branch>` followed by per-PR review +
-merge. Each PR is branched off `main`, not stacked.
+All branches below have been pushed to `origin`. Each PR is branched
+off `main`, not stacked — see "Merge ordering" below for the conflict
+zones.
 
 | Order | ID | Branch | Spec | Commit | Notes |
 |---|---|---|---|---|---|
@@ -22,12 +23,39 @@ merge. Each PR is branched off `main`, not stacked.
 | P2.1 | F9-A | `self-healing-p21-f9a-election-filestorage` | [07](./07-pr7-spec.md) | `375c517` | Election bucket FileStorage |
 | P2.4a | F2 | `self-healing-p24a-f2-retry-envelope` | [08](./08-pr8-spec.md) | `908f181` | Retry envelope + restartWatcher wiring |
 | P2.2 | F6-B | `self-healing-p22-f6b-partition-floor` | (in plan) | `8c072dc` | Calculator empty/shrunk floor |
+| F/U  | —     | `self-healing-kvbuckets-replicas`              | (this STATUS) | `399dfb1` | `Config.KVBuckets.Replicas` + warn-on-mismatch helper |
 
 Phase 0 (P0.1-P0.3) and Phase 1 (P1.1-P1.3) are complete. Phase 2
 has the **three dominant fixes**: P2.1 (eliminates leadership-churn),
 P2.4a (bounds the source watcher's infinite retry loop), and P2.2
 (prevents reassign-to-zero thundering herd on a transient empty
 partition observation).
+
+### Follow-up: `Config.KVBuckets.Replicas`
+
+A separate PR (not part of the original plan, but discovered during
+P2.1 implementation when the plan's `m.cfg.Replicas` anchor was
+found to be non-existent). Adds:
+
+- `Config.KVBuckets.Replicas int` — JetStream stream-replication
+  factor stamped onto Parti-owned KV buckets at create time. Defaults
+  to 0 (legacy server-default behavior).
+- `warnOnReplicasMismatch` helper — fires at `Manager.Start` when an
+  existing bucket's Replicas differs from the requested value.
+- Deliberately does **NOT** auto-reconcile Replicas. JetStream
+  `UpdateStream` DOES support changing Replicas on an existing
+  bucket (verified empirically against nats.go v1.50.0), but
+  Replicas is HA-quality, not a correctness invariant like MaxAge.
+  Silently rewriting an operator's bucket config could trigger
+  expensive cross-node replication or mask a deliberate downsize.
+  The warning is the operator-actionable signal; running
+  `nats stream update KV_<bucket> --replicas=N` is the manual
+  remedy.
+
+Independent of P2.1; can land before or after. If P2.1 lands first,
+the migration runbook should get a one-line addendum mentioning the
+new config option as an alternative to pre-creating with
+`--replicas=3`.
 
 ## Remaining (4 of 13 in-scope PRs)
 
@@ -47,12 +75,13 @@ Deferred to Phase 3 (post-promotion gated):
 
 ## Merge ordering — IMPORTANT
 
-The 9 branches are **not stacked**; they all branch from `main`. They
+The 10 branches are **not stacked**; they all branch from `main`. They
 will conflict on shared files when merged. Merge in plan order to
 minimize conflict resolution work:
 
 ```
-P0.1 → P0.2 → P0.3 → P1.1 → P1.2 → P1.3 → P2.1 → P2.4a → P2.2
+plan-specs → P0.1 → P0.2 → P0.3 → P1.1 → P1.2 → P1.3 →
+  P2.1 → kvbuckets-replicas → P2.4a → P2.2
 ```
 
 Known overlap zones:
@@ -64,8 +93,14 @@ Known overlap zones:
 - `manager_setup.go` — P0.1 adds `warnOnFiniteMaxReconnects`, P1.3
   adds `bucketEpoch` / `captureBucketEpoch` / `monitorBucketEpochs`
   helpers, P2.1 flips the election-bucket storage type + adds
-  `warnOnOperationTimeoutVsElection`. All in different regions of
-  the file.
+  `warnOnOperationTimeoutVsElection`, `kvbuckets-replicas` stamps
+  `m.cfg.KVBuckets.Replicas` in `ensureKVBucket` + adds
+  `warnOnReplicasMismatch`. All in different regions of the file
+  except `ensureKVBucket`, where `kvbuckets-replicas` adds two
+  lines (the Replicas stamp + the mismatch warn call) — easy
+  3-way merge.
+- `config.go` — only `kvbuckets-replicas` touches it (adds the
+  `Replicas` field to `KVBucketConfig`). No other PR conflicts.
 - `source/nats_kv.go` — P0.2 adds `logWarn` helper; P1.1 adds the
   unavailable-hook scaffold + the same `logWarn` helper (the latter
   is the first to land); P2.4a replaces `restartWatcher`'s body and
@@ -80,15 +115,15 @@ subsequent PR reviews can reference the specs in-tree.
 
 Per the project's `feedback_post_impl_review_workflow` memory pin, the
 standard cycle is **spec → impl → /simplify → /codex:review (or
-copilot post-impl) → squash on merge**. All 9 PRs here have gone
+copilot post-impl) → squash on merge**. All 10 branches here have gone
 through **spec → impl → make lint && make test (-race)** only. The
 `/simplify` pass and external review are pending — recommended to
 run as a batch before merging.
 
 ## Empirical findings discovered during implementation
 
-Two non-obvious facts about the nats.go KV surface that the plan got
-wrong, surfaced by reproducer probes:
+Three non-obvious facts about the nats.go KV surface that the plan got
+wrong (or didn't address), surfaced by reproducer probes:
 
 1. **After `js.DeleteKeyValue`, no production call site returns
    `jetstream.ErrBucketNotFound`** (the plan's named error):
@@ -104,8 +139,24 @@ wrong, surfaced by reproducer probes:
 2. **No `Config.Replicas` field exists in Parti's runtime config**
    (only in `provision.Config`). The plan's P2.1 instruction to set
    `Replicas: m.cfg.Replicas` was therefore not actionable; P2.1
-   ships the storage-type change only, with operator-driven
-   pre-creation for the replica count documented in the migration
-   runbook.
+   ships the storage-type change only. The `kvbuckets-replicas`
+   follow-up branch adds `Config.KVBuckets.Replicas` as the
+   operator-ergonomics fix (nested under `KVBuckets` rather than
+   top-level because plain `Replicas` would be ambiguous with
+   worker-pod replica notions).
 
-Both deviations are recorded in the respective per-PR spec files.
+3. **JetStream `UpdateStream` accepts post-create Replicas changes.**
+   The library could in principle auto-reconcile Replicas on every
+   `Manager.Start` the way it reconciles MaxAge for stableID and
+   handoff buckets. The `kvbuckets-replicas` follow-up deliberately
+   does NOT do this: Replicas is HA quality (not a correctness
+   invariant like MaxAge), silently rewriting an existing bucket
+   could trigger expensive cross-node replication the operator did
+   not ask for, and the get-first contract ("pre-creation wins")
+   is the safer default. The follow-up's `warnOnReplicasMismatch`
+   helper surfaces divergence so operators can run
+   `nats stream update KV_<bucket> --replicas=N` themselves when
+   they want the change to take effect.
+
+All three deviations are recorded in the respective per-PR spec or
+commit-message bodies.
