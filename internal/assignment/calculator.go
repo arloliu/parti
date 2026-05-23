@@ -17,6 +17,22 @@ import (
 // that normal manager shutdown does not produce spurious error-level log entries.
 var errShuttingDown = errors.New("rebalance aborted: leader is shutting down")
 
+// errSuspiciousPartitionObservation is returned by rebalance() when the
+// partition-source snapshot is empty or has sharply shrunk relative to the
+// last known credible count, and the confirmation window
+// (PartitionShrinkConfirmationCount) has not yet been satisfied. The
+// candidate rebalance is skipped — the cached assignment remains in
+// effect. handleRebalance treats this sentinel like a no-op (no error)
+// because it is an explicit "keep cached assignment" decision, not a
+// failure.
+//
+// This implements the F6-B doctrine of "minimum credible partition input":
+// a single observation of an empty / sharply-shrunk source is more likely a
+// transient blip (KV miss, watcher race) than legitimate operator intent;
+// the confirmation window prevents one bad poll from triggering a
+// fleet-wide reassign-to-zero thundering herd.
+var errSuspiciousPartitionObservation = errors.New("rebalance skipped: partition observation pending confirmation")
+
 // Calculator manages partition assignment calculation and distribution.
 //
 // The calculator runs on the leader worker and orchestrates three focused components:
@@ -80,6 +96,24 @@ type Calculator struct {
 	// the §2.2.3 / §10.3 "at most one extra cycle" invariant is asserted as a
 	// counter delta equal to 1 per dropped partition update.
 	partitionRebalanceEntries atomic.Int64
+
+	// F6-B (P2.2): minimum-credible-partition-input doctrine.
+	//
+	// lastKnownPartitionCount is the most recent partition count the
+	// calculator acted on. Empty / sharply-shrunk observations do NOT
+	// advance it — that is the load-bearing safety. Only confirmed
+	// observations (the rebalance proceeds) update it.
+	//
+	// partitionShrunkObservations is the running count of consecutive
+	// suspicious observations. Once it reaches
+	// PartitionShrinkConfirmationCount the calculator trusts the
+	// shrink and rebalances; any healthy observation resets it to 0.
+	//
+	// Both fields are read+written only on the rebalance path, which is
+	// already serialized by rebalanceMu/pollMu — no extra synchronization
+	// is needed.
+	lastKnownPartitionCount     int
+	partitionShrunkObservations int
 }
 
 // cachedWorkerList bundles worker data with its timestamp for atomic operations.
@@ -715,6 +749,17 @@ func (c *Calculator) handlePartitionRebalance(ctx context.Context, lifecycle str
 				"lifecycle", lifecycle)
 			return err
 		}
+		// A suspicious partition observation is an explicit skip, not a
+		// failure. Surface the sentinel to the lifecycle caller
+		// (triggerPartitionRebalance) so it can re-arm
+		// pendingPartitionUpdate for the next drainTick. The lifecycle
+		// caller translates it to a benign nil; nothing else escalates
+		// because handlePartitionRebalance is wired only as the
+		// state-machine's onPartitionRebalanceCb callback.
+		if errors.Is(err, errSuspiciousPartitionObservation) {
+			return err
+		}
+
 		return fmt.Errorf("partition rebalance failed for %s: %w", lifecycle, err)
 	}
 	// IMPORTANT: do NOT update lastWorkers here. The immediate tail-check in
@@ -748,6 +793,20 @@ func (c *Calculator) triggerPartitionRebalance(lifecycle string) error {
 	defer cancel()
 
 	err := c.stateMach.RunClaimedRebalanceErr(reqCtx, lifecycle)
+
+	// A suspicious-observation suppression is a deferred no-op, not a
+	// failure. The watcher in monitorPartitions fires only when the
+	// partition list changes, so a single N→0 (or N→tiny) transition
+	// produces one signal; without a re-arm the confirmation window
+	// stalls forever because the drainTick has nothing pending to drain.
+	// Re-arm here so the next drainTick re-attempts (each re-attempt
+	// observes the same shrunk source and advances the counter toward
+	// PartitionShrinkConfirmationCount). The lifecycle caller sees a
+	// benign nil; the rebalance was suppressed, not failed.
+	if errors.Is(err, errSuspiciousPartitionObservation) {
+		c.pendingPartitionUpdate.Store(true)
+		err = nil
+	}
 
 	// Tail-check on a FRESH stop-aware context: reqCtx may already be near or
 	// past its deadline; observeAndDecide exits fast on a cancelled context
@@ -1153,6 +1212,54 @@ func (c *Calculator) getActiveWorkersFiltered(ctx context.Context, disappearedWo
 	return filtered, fresh, nil
 }
 
+// partitionInputCredibilityGuard implements the F6-B confirmation window.
+// Returns true when the observation is suspicious and the caller must skip
+// the rebalance (the caller surfaces errSuspiciousPartitionObservation).
+// Returns false when the observation is credible (the caller advances the
+// baseline and proceeds). A healthy observation also resets the running
+// suspicious-observations counter.
+//
+// The guard is silent until lastKnownPartitionCount > 0 — the first ever
+// rebalance must run so the baseline can be established. Subsequent
+// empty / sharply-shrunk observations require
+// PartitionShrinkConfirmationCount consecutive sightings before being
+// trusted.
+func (c *Calculator) partitionInputCredibilityGuard(lifecycle string, observed int) bool {
+	if c.lastKnownPartitionCount == 0 {
+		return false // baseline not yet established; let the first rebalance run
+	}
+	switch {
+	case observed == 0:
+		c.partitionShrunkObservations++
+		if c.partitionShrunkObservations < c.PartitionShrinkConfirmationCount {
+			c.Logger.Warn("ignoring empty partition observation pending confirmation",
+				"lifecycle", lifecycle,
+				"last_known", c.lastKnownPartitionCount,
+				"consecutive_observations", c.partitionShrunkObservations,
+				"required", c.PartitionShrinkConfirmationCount)
+
+			return true
+		}
+	case observed*100 < c.lastKnownPartitionCount*c.PartitionShrinkConfirmationThresholdPct:
+		c.partitionShrunkObservations++
+		if c.partitionShrunkObservations < c.PartitionShrinkConfirmationCount {
+			c.Logger.Warn("ignoring sharply-shrunk partition observation pending confirmation",
+				"lifecycle", lifecycle,
+				"last_known", c.lastKnownPartitionCount,
+				"observed", observed,
+				"threshold_pct", c.PartitionShrinkConfirmationThresholdPct,
+				"consecutive_observations", c.partitionShrunkObservations,
+				"required", c.PartitionShrinkConfirmationCount)
+
+			return true
+		}
+	default:
+		c.partitionShrunkObservations = 0 // healthy observation; reset counter
+	}
+
+	return false
+}
+
 // handleRebalance is the callback invoked by StateMachine when rebalancing should occur.
 //
 // This method bridges the StateMachine component to the Calculator's rebalancing logic
@@ -1174,6 +1281,14 @@ func (c *Calculator) handleRebalance(ctx context.Context, reason string) error {
 			c.Logger.Info("rebalance skipped during shutdown", "reason", reason)
 			return nil
 		}
+		// F6-B: suspicious partition observation is an explicit "keep
+		// cached assignment for now" decision, not a failure. Treat as
+		// no-op so the state machine does not escalate. The rebalance
+		// path already logged a WARN with the confirmation progress.
+		if errors.Is(err, errSuspiciousPartitionObservation) {
+			return nil
+		}
+
 		return fmt.Errorf("rebalance failed for %s: %w", reason, err)
 	}
 
@@ -1235,6 +1350,8 @@ func snapshotSource(ctx context.Context, src types.PartitionSource) ([]types.Par
 }
 
 // rebalance calculates and publishes new assignments.
+//
+//nolint:cyclop // already-large function; F6-B adds one credibility-guard branch — refactoring is a separate effort
 func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 	// Serialize rebalance operations to prevent race conditions
 	c.rebalanceMu.Lock()
@@ -1294,6 +1411,15 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 
 		return nil
 	}
+
+	// F6-B (P2.2): minimum-credible-partition-input guard.
+	if suspicious := c.partitionInputCredibilityGuard(lifecycle, len(partitions)); suspicious {
+		c.Metrics.RecordRebalanceDuration(time.Since(start).Seconds(), lifecycle)
+		c.Metrics.RecordRebalanceAttempt(lifecycle, true)
+
+		return errSuspiciousPartitionObservation
+	}
+	c.lastKnownPartitionCount = len(partitions)
 
 	// Calculate new assignments using strategy
 	assignments, err := c.Strategy.Assign(workers, partitions)

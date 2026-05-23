@@ -51,6 +51,23 @@ type Config struct {
 	ColdStartWindow      time.Duration // Stabilization window for cold start (default: 30s)
 	PlannedScaleWindow   time.Duration // Stabilization window for planned scale (default: 10s)
 
+	// F6-B partition-input credibility (P2.2).
+	//
+	// PartitionShrinkConfirmationCount is the number of consecutive
+	// suspicious partition-source observations the calculator requires
+	// before trusting an empty / sharply-shrunk shape. Default: 3.
+	// Setting this to 1 disables the confirmation window (every
+	// observation is acted on immediately — restores pre-F6-B behavior).
+	PartitionShrinkConfirmationCount int
+
+	// PartitionShrinkConfirmationThresholdPct defines "sharply shrunk".
+	// A new partition count below
+	//   lastKnownPartitionCount * Pct / 100
+	// is suspicious. Default: 50 (a >=50% drop in one poll is
+	// suspicious). An empty observation is always suspicious
+	// regardless of this threshold.
+	PartitionShrinkConfirmationThresholdPct int
+
 	// RebalanceGraceDrainInterval is the period at which monitorPartitions
 	// checks for a partition-source update that was deferred because the
 	// leader was in recovery grace. When grace lifts, the deferred update
@@ -173,5 +190,11 @@ func (c *Config) SetDefaults() {
 	}
 	if c.Logger == nil {
 		c.Logger = logging.NewNop()
+	}
+	if c.PartitionShrinkConfirmationCount == 0 {
+		c.PartitionShrinkConfirmationCount = 3
+	}
+	if c.PartitionShrinkConfirmationThresholdPct == 0 {
+		c.PartitionShrinkConfirmationThresholdPct = 50
 	}
 }

@@ -2,6 +2,7 @@ package assignment
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,8 +38,11 @@ type StateMachine struct {
 
 	// Callback invoked by RunClaimedRebalanceErr for partition-lifecycle
 	// rebalances. Distinct from onRebalanceCb because the partition path needs
-	// errShuttingDown to propagate to restorePendingOnGraceBail rather than
-	// being swallowed (see calculator.go handlePartitionRebalance).
+	// the callback's sentinel errors to propagate to its lifecycle owner —
+	// errShuttingDown to restorePendingOnGraceBail, and
+	// errSuspiciousPartitionObservation to triggerPartitionRebalance for the
+	// re-arm on the pending flag. See calculator.go handlePartitionRebalance
+	// and triggerPartitionRebalance for the consumers.
 	onPartitionRebalanceCb func(ctx context.Context, reason string) error
 
 	// For tracking scaling timer goroutine
@@ -365,7 +369,14 @@ func (sm *StateMachine) RunClaimedRebalanceErr(ctx context.Context, reason strin
 	var cbErr error
 	if sm.onPartitionRebalanceCb != nil {
 		cbErr = sm.onPartitionRebalanceCb(ctx, reason)
-		if cbErr != nil {
+		// errSuspiciousPartitionObservation is a benign deferred no-op —
+		// the credibility guard suppressed the rebalance pending more
+		// observations and the lifecycle owner (triggerPartitionRebalance)
+		// re-arms pendingPartitionUpdate so the next drain tick retries.
+		// Logging it as a "failed" Error would surface false failures to
+		// operators tailing worker logs; the suppression is already
+		// recorded at Warn level by partitionInputCredibilityGuard.
+		if cbErr != nil && !errors.Is(cbErr, errSuspiciousPartitionObservation) {
 			sm.logger.Error("partition rebalance failed", "reason", reason, "error", cbErr)
 		}
 	}

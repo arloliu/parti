@@ -1186,6 +1186,7 @@ func (s *NatsKV) logWarn(msg string, args ...any) {
 		s.logger.Warn(msg, args...)
 	}
 }
+
 // isBucketUnavailableErr classifies an error from a cached KV / watcher
 // operation as "the source bucket is unavailable from this connection's
 // point of view". Empirical surface (verified against nats.go v1.50.0):
