@@ -90,6 +90,7 @@ func TestManager_F1_BucketRecreate_TripsDegraded(t *testing.T) {
 				},
 				logger: logging.NewNop(),
 				hooks:  &Hooks{OnDegraded: spy.record},
+				js:     js,
 			}
 			m.state.Store(int32(StateStable))
 			m.degradedSince.Store(0)
@@ -157,6 +158,7 @@ func TestManager_F1_HappyPath_NoDegraded(t *testing.T) {
 		},
 		logger: logging.NewNop(),
 		hooks:  &Hooks{OnDegraded: spy.record},
+		js:     js,
 	}
 	m.state.Store(int32(StateStable))
 	m.metrics = nopManagerMetrics{}

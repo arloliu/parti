@@ -530,20 +530,47 @@ type bucketEpoch struct {
 // epoch fence simply does not protect that bucket; the existing readiness-
 // degraded paths (recordKVError, connection monitor, source-unavailable
 // hook) still apply. This keeps the change additive and never blocks Start.
+//
+// The probe stores a DEDICATED [jetstream.KeyValue] handle, separate from
+// the one the rest of the manager uses. nats.go's KeyValue / stream objects
+// cache state internally and are NOT documented as safe for concurrent use
+// across goroutines — calling kv.Status() (which internally calls
+// stream.Info()) from the monitorBucketEpochs ticker while assignment /
+// heartbeat / election code paths concurrently read or write through the
+// SAME handle races on the cached *stream fields. Opening a fresh handle
+// via [jetstream.JetStream.KeyValue] returns a new *kvs with its own
+// *stream, so the monitor goroutine never shares state with production
+// paths. If the per-bucket dedicated handle cannot be opened (e.g. an
+// account-permission edge), the epoch fence falls back to the bucket-not-
+// protected behaviour described above.
 func (m *Manager) captureBucketEpoch(ctx context.Context, bucket string, kv jetstream.KeyValue) {
 	if kv == nil {
+		return
+	}
+	if m.js == nil {
+		// No JetStream context wired (tests that exercise ensureKVBucket
+		// without setting m.js take this path). The epoch fence cannot
+		// open its own probe handle, so disable bucket-recreate
+		// detection for this bucket; production code paths always wire
+		// m.js via NewManager.
 		return
 	}
 	if m.bucketEpochs == nil {
 		m.bucketEpochs = make(map[string]bucketEpoch, 5)
 	}
-	created, err := kvutil.BucketStreamCreated(ctx, kv)
+	probeKV, err := m.js.KeyValue(ctx, bucket)
+	if err != nil {
+		m.logger.Warn("epoch fence: failed to open dedicated probe handle; bucket-recreate detection disabled for this bucket",
+			"bucket", bucket, "error", err)
+		return
+	}
+	created, err := kvutil.BucketStreamCreated(ctx, probeKV)
 	if err != nil {
 		m.logger.Warn("epoch fence: failed to capture bucket stream Created at Start; bucket-recreate detection disabled for this bucket",
 			"bucket", bucket, "error", err)
 		return
 	}
-	m.bucketEpochs[bucket] = bucketEpoch{kv: kv, created: created}
+	m.bucketEpochs[bucket] = bucketEpoch{kv: probeKV, created: created}
 }
 
 // monitorBucketEpochs polls each Parti-owned bucket's stream-Created
