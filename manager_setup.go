@@ -182,6 +182,10 @@ func (m *Manager) ensureKVBucket(
 	}
 
 	m.warnOnStorageMismatch(ctx, kv, bucket, storage)
+	// F1 epoch fence (P1.3): record this bucket's stream-Created
+	// timestamp so monitorBucketEpochs can detect a future wipe-and-
+	// recreate event. Failures are logged but never block Start.
+	m.captureBucketEpoch(ctx, bucket, kv)
 
 	return kv, nil
 }
@@ -441,6 +445,102 @@ func warnOnFiniteMaxReconnects(conn *nats.Conn, logger types.Logger) {
 			"ReconnectJitter (see docs/OPERATIONS.md \"NATS Client Connection\").",
 		"max_reconnect", limit,
 	)
+}
+
+// bucketEpoch records a Parti-owned KV bucket's identity at Start for the
+// F1 epoch fence. The Created timestamp changes precisely when the bucket's
+// backing stream is recreated — exactly the wipe-and-recreate case the
+// fence must detect.
+type bucketEpoch struct {
+	kv      jetstream.KeyValue
+	created time.Time
+}
+
+// captureBucketEpoch records a bucket's stream-Created timestamp into
+// m.bucketEpochs for the monitorBucketEpochs goroutine to compare against.
+// A failure to read the stream info at Start is logged but not fatal — the
+// epoch fence simply does not protect that bucket; the existing readiness-
+// degraded paths (recordKVError, connection monitor, P1.1 source hook) still
+// apply. This keeps the change additive and never blocks Start.
+func (m *Manager) captureBucketEpoch(ctx context.Context, bucket string, kv jetstream.KeyValue) {
+	if kv == nil {
+		return
+	}
+	if m.bucketEpochs == nil {
+		m.bucketEpochs = make(map[string]bucketEpoch, 5)
+	}
+	created, err := kvutil.BucketStreamCreated(ctx, kv)
+	if err != nil {
+		m.logger.Warn("epoch fence: failed to capture bucket stream Created at Start; bucket-recreate detection disabled for this bucket",
+			"bucket", bucket, "error", err)
+		return
+	}
+	m.bucketEpochs[bucket] = bucketEpoch{kv: kv, created: created}
+}
+
+// monitorBucketEpochs polls each Parti-owned bucket's stream-Created
+// timestamp on a periodic ticker. A mismatch against the cached value
+// means the bucket was wiped and recreated under us; we enter degraded
+// mode with reason "bucket-recreated:<bucket>" so the readiness probe
+// can rotate the pod and start re-provisions the missing buckets.
+//
+// The poll interval is OperationTimeout (defaults to 10s; the same knob
+// that bounds the ensure-bucket calls at Start). A stream-info read that
+// itself fails is not degraded-mode worthy — the connection monitor,
+// source-hook, and generic kvErrorCount paths handle connectivity
+// errors. The epoch fence is solely concerned with the wipe-and-recreate
+// case where the operation succeeds but returns a different Created.
+//
+// Exits when m.ctx is cancelled. Started by Start after the five Parti-
+// owned buckets have been captured.
+func (m *Manager) monitorBucketEpochs(ctx context.Context) {
+	if len(m.bucketEpochs) == 0 {
+		return
+	}
+	interval := m.cfg.OperationTimeout
+	if interval <= 0 {
+		interval = 10 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.checkBucketEpochs(ctx)
+		}
+	}
+}
+
+// checkBucketEpochs is one tick of monitorBucketEpochs, split out so a
+// unit test can drive it deterministically without waiting on the
+// ticker.
+func (m *Manager) checkBucketEpochs(ctx context.Context) {
+	for bucket, ep := range m.bucketEpochs {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, m.cfg.OperationTimeout)
+		live, err := kvutil.BucketStreamCreated(probeCtx, ep.kv)
+		cancel()
+		if err != nil {
+			m.logger.Debug("epoch fence: probe failed; relying on next tick",
+				"bucket", bucket, "error", err)
+			continue
+		}
+		if !live.Equal(ep.created) {
+			m.logger.Warn("epoch fence: bucket stream Created mismatch — bucket was wiped and recreated",
+				"bucket", bucket,
+				"cached_created", ep.created,
+				"live_created", live)
+			m.enterDegraded("bucket-recreated:" + bucket)
+			return // once degraded; no need to probe the rest this tick
+		}
+	}
 }
 
 // storageTypeName renders jetstream.StorageType as a human-readable string.
