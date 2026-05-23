@@ -25,6 +25,51 @@ const (
 	RecoverFromBeginning     = recovery.FromBeginning
 )
 
+// RecoveryRetryConfig configures the bounded-retry envelope wrapped
+// around the partition consumer's iterator-creation retry loop.
+//
+// On a vanished resource (consumer or stream deleted, or sustained
+// JetStream outage), iterator creation fails repeatedly. Without a
+// bound, the loop generated infinite consumer-create / iterator-create
+// API load against NATS and never surfaced an escalation signal. The
+// envelope caps consecutive iter-create failures at MaxAttempts; on
+// exhaustion it fires OnPermanentFailure once, logs at WARN, emits a
+// metric, and exits the consumption loop.
+//
+// Budget reset semantics: the envelope is constructed fresh on each
+// outer-loop iteration of the consumer's Run loop, so any iteration
+// that successfully obtains a usable iterator clears the accumulated
+// attempt count. Only consecutive failures within a single failure
+// episode count against the budget. See P2.4a (source/nats_kv.go
+// restartWatcher) for the canonical pattern this mirrors.
+//
+// BaseBackoff defaults to 500ms to compose with recovery.Controller's
+// internal minRecoveryInterval (also 500ms): a smaller BaseBackoff
+// would silently inflate the effective attempt budget because the
+// internal cooldown skips Classify's recover() call without consuming
+// an envelope attempt.
+type RecoveryRetryConfig struct {
+	// MaxAttempts is the total attempt budget per failure episode. After
+	// the Nth consecutive failure the envelope fires OnPermanentFailure
+	// and exits the consumption loop. Must be > 0.
+	// Default: DefaultRecoveryMaxAttempts.
+	MaxAttempts int `default:"8" validate:"gt=0"`
+
+	// BaseBackoff is the delay before the second attempt; doubles each
+	// step up to MaxBackoff. Must be > 0.
+	// Default: DefaultRecoveryBaseBackoff (500ms).
+	BaseBackoff time.Duration `default:"500ms" validate:"gt=0"`
+
+	// MaxBackoff caps the per-attempt delay. Must be >= BaseBackoff.
+	// Default: DefaultRecoveryMaxBackoff (30s).
+	MaxBackoff time.Duration `default:"30s" validate:"gt=0,gtefield=BaseBackoff"`
+
+	// Jitter is the ± fraction applied to each backoff delay
+	// (0..1 reasonable; 0 disables).
+	// Default: DefaultRecoveryJitter (0.2).
+	Jitter float64 `default:"0.2" validate:"gte=0,lte=1"`
+}
+
 // RetryConfig groups retry backoff settings.
 type RetryConfig struct {
 	// Backoff is the delay between retries for control-plane operations.
@@ -237,6 +282,22 @@ type WorkerConsumerConfig struct {
 	// If zero, defaults to DefaultIteratorEscalationThreshold.
 	IteratorEscalationThreshold int `default:"3" validate:"gt=0"`
 
+	// RecoveryRetry configures the bounded-retry envelope wrapped around
+	// the partition consumer's iterator-creation retry loop. See
+	// RecoveryRetryConfig for semantics.
+	RecoveryRetry RecoveryRetryConfig
+
+	// OnPermanentFailure is invoked exactly once per partition consumer
+	// when the iterator-creation retry envelope exhausts its attempt
+	// budget. Callers typically wire this to enterDegraded / Hooks.OnError
+	// at the Manager layer so a vanished consumer or stream trips
+	// readiness rather than generating infinite NATS API load.
+	//
+	// The callback runs synchronously on the consumption loop's goroutine
+	// immediately before the loop exits. It must be non-blocking; long
+	// work should be offloaded to a goroutine inside the callback.
+	OnPermanentFailure func(subject string, err error)
+
 	// AllowWorkerIDChange controls whether workerID changes are allowed after initialization.
 	// Default: false (immutable once set). Intended for controlled migrations only.
 	AllowWorkerIDChange bool
@@ -270,6 +331,12 @@ func DefaultWorkerConsumerConfig() WorkerConsumerConfig {
 		},
 		IteratorEscalationWindow:    DefaultIteratorEscalationWindow,
 		IteratorEscalationThreshold: DefaultIteratorEscalationThreshold,
+		RecoveryRetry: RecoveryRetryConfig{
+			MaxAttempts: DefaultRecoveryMaxAttempts,
+			BaseBackoff: DefaultRecoveryBaseBackoff,
+			MaxBackoff:  DefaultRecoveryMaxBackoff,
+			Jitter:      DefaultRecoveryJitter,
+		},
 		PartitionRefreshMinInterval: 500 * time.Millisecond,
 		DrainOnRemoveTimeout:        10 * time.Second,
 		Resolver: ResolverConfig{

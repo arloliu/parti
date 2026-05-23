@@ -57,4 +57,29 @@ const (
 	// failures within the escalation window required to trigger a single
 	// escalation event (refresh) per window.
 	DefaultIteratorEscalationThreshold = 3
+
+	// DefaultRecoveryMaxAttempts is the default attempt budget for the
+	// bounded-retry envelope that wraps the partition consumer's
+	// iterator-creation retry loop. After this many consecutive iter-create
+	// failures the envelope transitions to permanent failure: it fires
+	// OnPermanentFailure exactly once, logs at WARN, emits a metric, and
+	// exits the consumption loop so no further consumer-create traffic is
+	// generated against the (presumed) vanished resource.
+	DefaultRecoveryMaxAttempts = 8
+
+	// DefaultRecoveryBaseBackoff is the default base delay between iter-create
+	// retry attempts. Set to 500ms to compose with (not fight)
+	// recovery.Controller's internal minRecoveryInterval (500ms cooldown
+	// between consecutive recover() calls) — a BaseBackoff below the
+	// cooldown would silently inflate the effective attempt budget when
+	// Classify hits the cooldown and returns ActionBackoff without consuming
+	// an envelope attempt.
+	DefaultRecoveryBaseBackoff = 500 * time.Millisecond
+
+	// DefaultRecoveryMaxBackoff caps the per-attempt delay.
+	DefaultRecoveryMaxBackoff = 30 * time.Second
+
+	// DefaultRecoveryJitter is the ± fraction applied to each backoff delay
+	// to avoid synchronized reconnect thundering herds across worker fleets.
+	DefaultRecoveryJitter = 0.2
 )
