@@ -340,58 +340,104 @@ func (m *Manager) fetchAssignment(ctx context.Context, kv jetstream.KeyValue) (*
 }
 
 // monitorAssignmentChanges monitors for assignment changes with automatic
-// retry. The reconcile ticker is created once (shared with watchAssignment
-// via reconcileTicker.C) and survives rewatch boundaries — a missed event
-// during a backoff window is still recovered on the next tick.
+// retry. The reconcile ticker is created once and shared across every
+// runAssignmentWatchSession invocation so a missed event during a backoff
+// window is still recovered on the next tick.
 //
-// On watcher failure (transient NATS error, Updates() channel close), the
-// monitor records the failure into the degraded-mode circuit and retries
-// the watch via the F2 bounded-retry envelope (watcherMaxAttempts attempts
-// with exponential backoff + jitter, capped at watcherMaxBackoff). After
-// the budget is exhausted the manager enters degraded mode with the named
-// reason "assignment-watcher-exhausted" — the assignment bucket is a hard
-// correctness dependency, so silent infinite retries are not acceptable.
-// Context cancellation stops the loop cleanly.
+// The F2 bounded-retry envelope governs ONLY the kv.Watch establish step:
+// each successful establish ends the envelope's Run cleanly (the inner
+// session runs outside the envelope) so the next channel close starts a
+// fresh attempt budget. This preserves the "per failure episode, reset on
+// success" contract — a watcher that re-establishes after each close does
+// not accumulate attempts across the manager's lifetime.
+//
+// Both establish errors and session-end errors feed the degraded-mode
+// circuit via recordKVError so the whole-bucket-loss contract still
+// trips through the existing threshold path on recordable errors. The
+// envelope's exhaustion is the orthogonal escalation for non-recordable
+// errors and for sustained establish-failure rates: after the budget is
+// exhausted on consecutive establish failures, the manager enters
+// degraded mode with the named reason "assignment-watcher-exhausted" —
+// the assignment bucket is a hard correctness dependency, so silent
+// infinite retries are not acceptable. Context cancellation stops the
+// loop cleanly.
 func (m *Manager) monitorAssignmentChanges(ctx context.Context, kv jetstream.KeyValue) {
 	reconcileTicker := time.NewTicker(watcherReconcileInterval)
 	defer reconcileTicker.Stop()
 
-	env := retry.New(retry.Config{
-		Work: func(_ context.Context) error {
-			err := m.watchAssignment(ctx, kv, reconcileTicker.C)
-			if err == nil {
-				return nil
-			}
-			// Feed into the existing degraded circuit on every failure
-			// — a wiped assignment bucket or connection-loss errors that
-			// IsConnectivityError/IsDegradingJetStreamError handle still
-			// accumulate. The envelope's exhaustion is an additional
-			// orthogonal escalation for the case where the budget runs
-			// out before recordKVError's threshold trips (or where the
-			// error class never matches the recordKVError filter).
-			m.recordKVError(err)
-			m.logError("assignment watcher failed, will retry", "error", err)
+	workerID := m.WorkerID()
+	key := fmt.Sprintf("assignment.%s", workerID) // Match calculator's key format
 
-			return err
-		},
-		OnPermanent: func(err error) {
-			m.logError("assignment watcher restart attempt budget exhausted; entering degraded mode",
-				"error", err,
-				"max_attempts", watcherMaxAttempts,
-				"reason", assignmentWatcherDegradedReason)
-			m.enterDegraded(assignmentWatcherDegradedReason)
-		},
-		BaseBackoff: watcherBaseBackoff,
-		MaxBackoff:  watcherMaxBackoff,
-		MaxAttempts: watcherMaxAttempts,
-		Jitter:      watcherJitter,
-	})
-	_ = env.Run(ctx) // ctx-cancel and exhaustion both end the goroutine
+	// One outer iteration == one failure episode. Each iteration spins
+	// up a fresh envelope so the attempt budget resets when the prior
+	// session terminated cleanly (channel close after some healthy
+	// operation). This preserves the F2 contract "per failure episode,
+	// reset on success" — see internal/retry/envelope.go for the
+	// single-shot semantics of Run that this loop adapts.
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+
+		var watcher jetstream.KeyWatcher
+		env := retry.New(retry.Config{
+			Work: func(_ context.Context) error {
+				w, err := kv.Watch(ctx, key)
+				if err != nil {
+					// Establish-time failures feed the existing
+					// degraded circuit (recordKVError) so the
+					// whole-bucket-loss contract still trips through
+					// the threshold path on recordable errors. The
+					// envelope's exhaustion is the orthogonal
+					// escalation for non-recordable error classes
+					// and for sustained establish failure rates that
+					// outrun the threshold window.
+					m.recordKVError(err)
+					m.logError("assignment watcher establish failed, will retry", "error", err)
+
+					return fmt.Errorf("failed to watch assignments: %w", err)
+				}
+				watcher = w
+
+				return nil
+			},
+			OnPermanent: func(err error) {
+				m.logError("assignment watcher restart attempt budget exhausted; entering degraded mode",
+					"error", err,
+					"max_attempts", watcherMaxAttempts,
+					"reason", assignmentWatcherDegradedReason)
+				m.enterDegraded(assignmentWatcherDegradedReason)
+			},
+			BaseBackoff: watcherBaseBackoff,
+			MaxBackoff:  watcherMaxBackoff,
+			MaxAttempts: watcherMaxAttempts,
+			Jitter:      watcherJitter,
+		})
+		if runErr := env.Run(ctx); runErr != nil {
+			// ctx.Err() (clean exit) or ErrExhausted (OnPermanent
+			// already entered degraded). Either way we exit.
+			return
+		}
+
+		// Watcher established. Run one session; the deferred Stop
+		// fires on every return path of runAssignmentWatchSession.
+		sessionErr := m.runAssignmentWatchSession(ctx, kv, watcher, reconcileTicker.C, workerID, key)
+		if sessionErr == nil {
+			// ctx-cancel inside the session: clean shutdown.
+			return
+		}
+		// Session ended on channel close. Feed the threshold circuit
+		// (preserves whole-bucket-loss → Degraded contract when the
+		// loss manifests mid-session) and loop with a fresh envelope.
+		m.recordKVError(sessionErr)
+		m.logError("assignment watcher session ended, will reconnect", "error", sessionErr)
+	}
 }
 
-// watchAssignment runs one watch session on this worker's assignment key.
-// Channel closure is returned as an error so monitorAssignmentChanges can
-// restart with backoff; context cancellation returns nil for clean exit.
+// runAssignmentWatchSession drives one watch session against the
+// already-established watcher. Returns nil for ctx-cancel (clean exit)
+// and a non-nil error when the Updates() channel closes (the session
+// must be restarted with a fresh watcher by the caller).
 //
 // The reconcileTickC arm idempotently re-reads the alias key so missed
 // watcher events (channel close gaps, NATS reconnects, silent stalls) are
@@ -400,15 +446,13 @@ func (m *Manager) monitorAssignmentChanges(ctx context.Context, kv jetstream.Key
 // mid-apply (and vice versa), and once an apply completes the existing
 // stale-leader/version fences in handleAssignmentEntry reject a re-read of
 // the same alias. See PR-1 spec §4 (idempotency contract).
-func (m *Manager) watchAssignment(ctx context.Context, kv jetstream.KeyValue, reconcileTickC <-chan time.Time) error {
-	workerID := m.WorkerID()
-	key := fmt.Sprintf("assignment.%s", workerID) // Match calculator's key format
-
-	watcher, err := kv.Watch(ctx, key)
-	if err != nil {
-		return fmt.Errorf("failed to watch assignments: %w", err)
-	}
-
+func (m *Manager) runAssignmentWatchSession(
+	ctx context.Context,
+	kv jetstream.KeyValue,
+	watcher jetstream.KeyWatcher,
+	reconcileTickC <-chan time.Time,
+	workerID, key string,
+) error {
 	defer func() {
 		if serr := watcher.Stop(); serr != nil && !natsutil.IsConsumerNotFound(serr) {
 			m.logError("failed to stop assignment watcher", "error", serr)

@@ -2,7 +2,9 @@ package parti
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -239,6 +241,150 @@ func TestMonitorAssignmentChanges_NonRecordableError_EnvelopeIsOnlyEscalation(t 
 	require.GreaterOrEqual(t, wrap.callCount.Load(), int32(testMaxAttempts),
 		"envelope must have called kv.Watch at least MaxAttempts times "+
 			"before firing OnPermanent")
+}
+
+// TestMonitorAssignmentChanges_RecoveredSessionsResetBudget is the
+// negative-space companion to ExhaustionEntersDegraded and
+// NonRecordableError_EnvelopeIsOnlyEscalation. Those two prove the
+// envelope ESCALATES on N consecutive failures; this one proves the
+// envelope does NOT escalate when each failure is followed by a full
+// successful re-establish.
+//
+// The contract being pinned, in the F2 spec's exact words:
+//
+//	per failure episode, reset on success
+//
+// The envelope at internal/retry/envelope.go is single-shot and
+// monotonic: attempt only increments and the only way to reset is for
+// Work to return nil, which exits Run. The wiring at
+// manager_assignment.go must therefore arrange for one Run invocation
+// per failure episode — i.e., a successful re-watch must terminate the
+// current Run (returning nil) so the next channel-close starts a fresh
+// envelope with a fresh attempt budget.
+//
+// Mechanism: drive watcherMaxAttempts+1 = 4 force-close + Put cycles,
+// each with a unique Version bump. Each close is followed by a full
+// session that delivers the new value via initial-replay. On a correct
+// implementation, every put applies AND the manager never enters
+// Degraded AND OnDegraded is never invoked. On the regression where
+// Work runs the FULL watchAssignment session (so Work only returns nil
+// on ctx-cancel), the attempt budget accumulates across closes; the
+// 3rd close hits MaxAttempts=3 → OnPermanent fires → manager enters
+// Degraded with reason "assignment-watcher-exhausted" → the goroutine
+// exits → the 4th put never applies.
+//
+// The load-bearing assertions are:
+//
+//  1. m.State() == StateStable at the end
+//  2. reasonSpy.snapshot() is empty (OnDegraded never fired)
+//  3. CurrentAssignment().Version is the LAST put's version (proves
+//     full recovery on the final iteration, not just the early ones)
+//
+// (1) and (2) together prove the budget actually reset between
+// failures. (3) proves each failure was followed by a real recovery,
+// not the test handing the implementation an easier path (e.g.,
+// reconcile-arm fallback).
+func TestMonitorAssignmentChanges_RecoveredSessionsResetBudget(t *testing.T) {
+	// Not t.Parallel() — mutates package-level test-seam vars.
+	const testMaxAttempts = 3
+	origMax := watcherMaxAttempts
+	origBase := watcherBaseBackoff
+	origCap := watcherMaxBackoff
+	watcherMaxAttempts = testMaxAttempts
+	watcherBaseBackoff = 20 * time.Millisecond
+	watcherMaxBackoff = 50 * time.Millisecond
+	defer func() {
+		watcherMaxAttempts = origMax
+		watcherBaseBackoff = origBase
+		watcherMaxBackoff = origCap
+	}()
+
+	_, nc := partitest.StartEmbeddedNATS(t)
+	kv := partitest.CreateJetStreamKV(t, nc, "alias-budget-reset")
+
+	m, _, _, _ := newTestManager(t)
+	reasonSpy := &assignmentWatcherReasonSpy{}
+	m.hooks = &Hooks{OnDegraded: reasonSpy.record}
+	m.state.Store(int32(StateStable))
+	m.cfg.DegradedAlert = DegradedAlertConfig{AlertInterval: time.Second}
+	// High threshold so the threshold-path can't pre-empt the
+	// envelope-path: we're isolating the envelope's reset behavior.
+	m.cfg.DegradedBehavior = DegradedBehaviorConfig{
+		KVErrorThreshold: 100,
+		KVErrorWindow:    30 * time.Second,
+	}
+
+	workerID := m.WorkerID()
+	key := fmt.Sprintf("assignment.%s", workerID)
+
+	// Plant initial alias V=4 so the first session has something to
+	// apply on its initial-values replay.
+	v4 := Assignment{Version: 4, LeaderRevision: uint64(15)}
+	b4, err := json.Marshal(v4)
+	require.NoError(t, err)
+	_, err = kv.Create(t.Context(), key, b4)
+	require.NoError(t, err)
+
+	wrap := &forceCloseWatcherKV{KeyValue: kv}
+	done := make(chan struct{})
+	go func() {
+		m.monitorAssignmentChanges(m.ctx, wrap)
+		close(done)
+	}()
+
+	// Wait for the initial watch + apply.
+	require.Eventually(t, func() bool {
+		return m.CurrentAssignment().Version == 4
+	}, 2*time.Second, 10*time.Millisecond, "initial watcher must apply V=4")
+
+	// Drive testMaxAttempts+1 = 4 isolated close-and-recover cycles.
+	// On the broken (monotonic-counter) implementation, the 3rd close
+	// would exhaust the budget and fire OnDegraded; the 4th put would
+	// never apply. On the correct (per-episode-reset) implementation,
+	// every cycle succeeds.
+	const cycles = testMaxAttempts + 1
+	for i := 1; i <= cycles; i++ {
+		wrap.forceCloseLatest()
+
+		newVersion := int64(4 + i)
+		v := Assignment{Version: newVersion, LeaderRevision: uint64(15 + i)} //nolint:gosec // small test indices
+		b, err := json.Marshal(v)
+		require.NoError(t, err)
+		_, err = kv.Put(t.Context(), key, b)
+		require.NoError(t, err)
+
+		// Wait for the post-restart session to apply the new value.
+		// 2s comfortably exceeds the worst-case backoff window
+		// (BaseBackoff * 2^(testMaxAttempts-1) + jitter ≈ 80ms +
+		// reconcile-tick latency).
+		require.Eventuallyf(t, func() bool {
+			return m.CurrentAssignment().Version >= newVersion
+		}, 2*time.Second, 25*time.Millisecond,
+			"cycle %d: post-restart session must apply V=%d "+
+				"(observed V=%d, OnDegraded reasons=%v)",
+			i, newVersion, m.CurrentAssignment().Version, reasonSpy.snapshot())
+	}
+
+	// Load-bearing invariants — these distinguish correct from
+	// broken behavior. The escalation tests cannot distinguish them.
+	require.Equal(t, StateStable, m.State(),
+		"manager must remain StateStable across %d isolated "+
+			"close-and-recover cycles; entering Degraded means the "+
+			"envelope budget did not reset between failures (the F2 "+
+			"contract is 'per failure episode, reset on success')",
+		cycles)
+	require.Empty(t, reasonSpy.snapshot(),
+		"OnDegraded must NOT fire when each failure is followed by a "+
+			"successful re-establish; a non-empty snapshot proves the "+
+			"envelope's attempt budget accumulated across cycles")
+
+	// Cancel and confirm the goroutine exits cleanly.
+	m.cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("monitorAssignmentChanges did not exit after ctx cancel")
+	}
 }
 
 // nonRecordableWatchFailKV intercepts Watch() and returns a fixed
