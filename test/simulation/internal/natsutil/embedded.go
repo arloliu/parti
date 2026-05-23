@@ -34,7 +34,11 @@ func StartEmbeddedNATS() (*server.Server, *nats.Conn, error) {
 		return nil, nil, errors.New("NATS server not ready")
 	}
 
-	nc, err := nats.Connect(ns.ClientURL())
+	// Use MaxReconnects(-1) — the recommended Parti posture (see
+	// docs/OPERATIONS.md "NATS Client Connection"). The simulation
+	// runs against an embedded server that does not go away during
+	// the run; an unlimited reconnect budget is appropriate.
+	nc, err := nats.Connect(ns.ClientURL(), nats.MaxReconnects(-1))
 	if err != nil {
 		ns.Shutdown()
 		return nil, nil, fmt.Errorf("failed to connect to NATS: %w", err)

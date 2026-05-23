@@ -9,6 +9,7 @@ import (
 	"github.com/arloliu/parti/v2/internal/kvbuckets"
 	"github.com/arloliu/parti/v2/kvutil"
 	"github.com/arloliu/parti/v2/types"
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -404,6 +405,41 @@ func (m *Manager) warnOnShortAuditGrace() {
 		"heartbeat_ttl", m.cfg.HeartbeatTTL,
 		"audit_grace", auditGrace,
 		"resolver_reconcile_default", resolverReconcileDefault,
+	)
+}
+
+// warnOnFiniteMaxReconnects emits a one-shot WARN when the caller-owned
+// nats.Conn is configured with a finite MaxReconnect budget. A finite
+// budget turns a sustained NATS outage into a permanently CLOSED zombie
+// connection — the manager's connection monitor then enters degraded
+// mode and the readiness probe rotates the pod. The recommended posture
+// (documented in docs/OPERATIONS.md "NATS Client Connection") is
+// nats.MaxReconnects(-1) (unlimited), which lets the client ride
+// through an outage instead.
+//
+// The warning is read-only; finite MaxReconnect is not rejected (some
+// deployments may consciously choose pod rotation on outage). The plan
+// is to make the foot-gun visible at first deploy rather than during
+// an actual outage.
+//
+// Negative MaxReconnect (-1 or any negative) is unlimited and silent.
+// A nil conn is silent (defensive — test doubles that bypass the real
+// JetStream surface must not panic here).
+func warnOnFiniteMaxReconnects(conn *nats.Conn, logger types.Logger) {
+	if conn == nil {
+		return
+	}
+	limit := conn.Opts.MaxReconnect
+	if limit < 0 {
+		return // unlimited; recommended posture
+	}
+	logger.Warn(
+		"nats.Conn is configured with a finite MaxReconnect; on a sustained "+
+			"NATS outage the connection exhausts its budget, stays CLOSED, "+
+			"forces degraded mode and rotates the pod. Configure with "+
+			"nats.MaxReconnects(-1) plus a reasonable nats.ReconnectWait/"+
+			"ReconnectJitter (see docs/OPERATIONS.md \"NATS Client Connection\").",
+		"max_reconnect", limit,
 	)
 }
 

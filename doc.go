@@ -27,6 +27,10 @@
 //
 //	partitions := []parti.Partition{{Keys: []string{"0"}}, {Keys: []string{"1"}}, {Keys: []string{"2"}}}
 //	src := source.NewStatic(partitions)
+//	// Connect with MaxReconnects(-1) so the client rides through transient
+//	// NATS outages instead of going CLOSED. See docs/OPERATIONS.md
+//	// "NATS Client Connection" for the full posture.
+//	natsConn, _ := nats.Connect(natsURL, nats.MaxReconnects(-1), nats.RetryOnFailedConnect(true))
 //	js, _ := jetstream.New(natsConn)
 //	assignmentStrategy := strategy.NewConsistentHash()
 //	mgr, _ := parti.NewManager(&cfg, js, src, assignmentStrategy)

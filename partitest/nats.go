@@ -71,11 +71,14 @@ func StartEmbeddedNATS(t testing.TB) (*server.Server, *nats.Conn) {
 		t.Fatal("Embedded NATS server not ready within timeout")
 	}
 
-	// Connect client to the server
+	// Connect client to the server with the recommended Parti posture:
+	// MaxReconnects(-1) lets the client ride through transient outages
+	// instead of giving up and going CLOSED. Mirrors the guidance in
+	// docs/OPERATIONS.md "NATS Client Connection".
 	nc, err := nats.Connect(ns.ClientURL(),
 		nats.Timeout(2*time.Second),
 		nats.RetryOnFailedConnect(true),
-		nats.MaxReconnects(3),
+		nats.MaxReconnects(-1),
 	)
 	if err != nil {
 		ns.Shutdown()
