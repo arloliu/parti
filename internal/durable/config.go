@@ -1,6 +1,7 @@
 package durable
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -306,10 +307,61 @@ type WorkerConsumerConfig struct {
 	// Default: RecoveryDisabled (no auto-recovery).
 	RecoveryStrategy RecoveryStrategy
 
+	// StreamMissingHook fires when the partition consumer cannot create
+	// a consumer because the underlying JetStream stream is absent. The
+	// hook is the escalation path for operator-driven stream recreation;
+	// the library does not recreate streams itself.
+	//
+	// Returning a nil error indicates the caller has recreated the stream;
+	// the library will then bump the recovery controller's stream-epoch,
+	// reset its checkpoint, re-seed, and rebuild the consumer against
+	// the freshly-restored stream. Returning a non-nil error (or omitting
+	// the hook) surfaces the loss via the F2 envelope's exhaustion path:
+	// OnPermanentFailure fires with the error wrapped in
+	// types.ErrStreamMissing, and the manager routes that to enterDegraded.
+	//
+	// Requires RecoveryStrategy in {RecoverFromLastProcessed,
+	// RecoverFromBeginning}. RecoveryDisabled (default) and
+	// RecoverFromNew are rejected at Validate time. See
+	// types.StreamMissingHook godoc for the full operator contract.
+	StreamMissingHook types.StreamMissingHook
+
 	// IteratorFactory optionally overrides the iterator creation logic for testing or
 	// advanced customization. When nil, a default factory is used that configures
 	// heartbeat and expiry based on BatchSize and FetchTimeout.
 	IteratorFactory func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error)
+}
+
+// validateStreamMissingHookStrategy enforces the recovery-strategy
+// pre-conditions for StreamMissingHook at the durable/ surface. Identical
+// in spirit to the consumer/ helper of the same name; intentionally
+// duplicated rather than moved to a shared package because internal/durable
+// cannot import consumer/ and a new shared package would just be coupling
+// for ~15 lines. The cross-package consistency is pinned by a test in
+// package consumer_test that runs both public Validate surfaces over the
+// same matrix and asserts equivalent accept/reject outcomes.
+func validateStreamMissingHookStrategy(hookConfigured bool, strategy RecoveryStrategy) error {
+	if !hookConfigured {
+		return nil
+	}
+	switch strategy { //nolint:exhaustive // explicit branches; default catches the rest.
+	case RecoverFromLastProcessed, RecoverFromBeginning:
+		return nil
+	case RecoveryDisabled:
+		return errors.New(
+			"durable: StreamMissingHook requires a non-disabled RecoveryStrategy; " +
+				"set RecoveryStrategy to RecoverFromLastProcessed (at-least-once) or " +
+				"RecoverFromBeginning (replay-all) to enable the stream-missing recovery path")
+	case RecoverFromNew:
+		return errors.New(
+			"durable: StreamMissingHook is incompatible with RecoverFromNew " +
+				"because the recreated-stream replay override only applies to " +
+				"RecoverFromLastProcessed and RecoverFromBeginning; " +
+				"RecoverFromNew would silently skip messages published after a fresh-stream recreate")
+	default:
+		return fmt.Errorf(
+			"durable: StreamMissingHook with unknown RecoveryStrategy %v", strategy)
+	}
 }
 
 // DefaultWorkerConsumerConfig returns a WorkerConsumerConfig with sensible defaults.
@@ -395,5 +447,5 @@ func (c *WorkerConsumerConfig) Validate() error {
 		return fmt.Errorf("subject template is invalid: %w", err)
 	}
 
-	return nil
+	return validateStreamMissingHookStrategy(c.StreamMissingHook != nil, c.RecoveryStrategy)
 }

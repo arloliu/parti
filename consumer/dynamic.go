@@ -184,6 +184,60 @@ type DynamicConfig struct {
 	// cause the first [Dynamic.Update] call to return [ErrInvalidConfig]. Use
 	// [RecoverFromBeginning] or [RecoveryDisabled] for WorkQueuePolicy streams.
 	RecoveryStrategy RecoveryStrategy
+
+	// StreamMissingHook fires when the dynamic partition consumer cannot
+	// create a consumer because the underlying JetStream stream is absent.
+	// The hook is the operator-driven recovery escalation path; the
+	// library does not recreate streams itself.
+	//
+	// Returning nil indicates the operator has recreated the stream. The
+	// library then bumps the recovery controller's stream-epoch, resets
+	// its checkpoint, re-seeds from the new consumer info, and rebuilds
+	// the consumer. Returning a non-nil error (or omitting the hook
+	// entirely) surfaces the loss via the F2 envelope's exhaustion path:
+	// OnPermanentFailure fires with the error wrapped in
+	// [types.ErrStreamMissing] so the manager routes it to enterDegraded.
+	//
+	// Requires [RecoveryStrategy] in {[RecoverFromLastProcessed],
+	// [RecoverFromBeginning]}; [RecoveryDisabled] (default) and
+	// [RecoverFromNew] are rejected at [DynamicConfig.Validate] time.
+	// See [types.StreamMissingHook] godoc for the full operator
+	// contract (same-durable-name preservation, compatible-config
+	// restore, fresh-stream replay semantics).
+	StreamMissingHook types.StreamMissingHook
+}
+
+// validateStreamMissingHookStrategy enforces the recovery-strategy
+// pre-conditions for StreamMissingHook at the consumer/ surface.
+// Intentionally duplicated from internal/durable's same-named helper
+// because internal/durable cannot import consumer/ and a shared
+// package would just be coupling for ~15 lines. Cross-package
+// consistency is pinned by a consumer_test that runs both public
+// Validate surfaces over the same matrix.
+func validateStreamMissingHookStrategy(hookConfigured bool, strategy RecoveryStrategy) error {
+	if !hookConfigured {
+		return nil
+	}
+	switch strategy { //nolint:exhaustive // explicit branches; default catches the rest.
+	case RecoverFromLastProcessed, RecoverFromBeginning:
+		return nil
+	case RecoveryDisabled:
+		return fmt.Errorf(
+			"%w: StreamMissingHook requires a non-disabled RecoveryStrategy; "+
+				"use WithRecoveryStrategy(RecoverFromLastProcessed) for at-least-once "+
+				"or WithRecoveryStrategy(RecoverFromBeginning) for replay-all",
+			ErrInvalidConfig)
+	case RecoverFromNew:
+		return fmt.Errorf(
+			"%w: StreamMissingHook is incompatible with RecoverFromNew "+
+				"because the recreated-stream replay override only applies to "+
+				"RecoverFromLastProcessed and RecoverFromBeginning; "+
+				"RecoverFromNew would silently skip messages published after a fresh-stream recreate",
+			ErrInvalidConfig)
+	default:
+		return fmt.Errorf(
+			"%w: StreamMissingHook with unknown RecoveryStrategy %v", ErrInvalidConfig, strategy)
+	}
 }
 
 // NewDynamic creates a new dynamic partition consumer.
@@ -451,7 +505,7 @@ func (c *DynamicConfig) Validate() error {
 		return fmt.Errorf("consumer prefix %q contains invalid characters (allowed: a-z, A-Z, 0-9, -, _)", c.ConsumerPrefix)
 	}
 
-	return nil
+	return validateStreamMissingHookStrategy(c.StreamMissingHook != nil, c.RecoveryStrategy)
 }
 
 // toSubscriptionGateConfig converts a consumer-owned ProcessingGateConfig to
