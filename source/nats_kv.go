@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/rand/v2"
 	"slices"
 	"sync"
 	"time"
 
 	"github.com/arloliu/parti/v2/internal/natsutil"
 	"github.com/arloliu/parti/v2/internal/partcodec"
+	"github.com/arloliu/parti/v2/internal/retry"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -31,14 +31,27 @@ const (
 	// defaultUpdateRetries is the default maximum CAS attempts for Update/Modify.
 	defaultUpdateRetries = 5
 
+	// watcherJitter is the ±fraction applied to the backoff delay.
+	watcherJitter = 0.3
+)
+
+// Watcher retry-envelope parameters. Declared as vars (not consts) so
+// integration tests in this package can drive the bounded-retry envelope
+// at a sub-second cadence without waiting the production 60-second
+// cycle. Production code must NEVER mutate these.
+var (
 	// watcherBaseBackoff is the initial backoff for watcher restart attempts.
 	watcherBaseBackoff = 2 * time.Second
 
 	// watcherMaxBackoff is the maximum backoff for watcher restart attempts.
 	watcherMaxBackoff = 30 * time.Second
 
-	// watcherJitter is the ±fraction applied to the backoff delay.
-	watcherJitter = 0.3
+	// watcherMaxAttempts caps the F2 retry envelope on the watcher-restart
+	// loop. With watcherBaseBackoff=2s and watcherMaxBackoff=30s, six
+	// attempts span roughly one reconcile cycle (≤ defaultReconcileInterval).
+	// Past this point we rely on the periodic reconciler for recovery and
+	// emit the onWatcherRetryExhausted callback.
+	watcherMaxAttempts = 6
 )
 
 // ErrUpdateRetryExhausted is returned by Update and Modify when all CAS retry
@@ -875,50 +888,74 @@ func (s *NatsKV) watchLoop(ctx context.Context, watcher jetstream.KeyWatcher) {
 // On success it spawns a new watchLoop and returns. On context cancellation
 // it returns immediately. The reconcile loop is the correctness safety net
 // while the watcher is being re-established.
+//
+// F2 (P2.4a): the retry loop is bounded by an internal/retry envelope. After
+// watcherMaxAttempts consecutive failures the envelope fires onWatcherRetryExhausted
+// (logged at WARN) and the goroutine exits. The periodic reconciler then
+// remains as the sole recovery path (the load-bearing recovery per the
+// project_nats_watcher_empirical_finding memory pin). Without the bound, a
+// vanished bucket or a sustained NATS outage produced infinite watcher-create
+// API load and no escalation signal.
 func (s *NatsKV) restartWatcher(ctx context.Context) {
-	backoff := watcherBaseBackoff
-	for {
-		if ctx.Err() != nil {
-			return
+	env := retry.New(retry.Config{
+		Work:        s.tryRebindWatcher(ctx),
+		OnPermanent: s.onWatcherRetryExhausted,
+		BaseBackoff: watcherBaseBackoff,
+		MaxBackoff:  watcherMaxBackoff,
+		MaxAttempts: watcherMaxAttempts,
+		Jitter:      watcherJitter,
+		OnProgress: func(attempt int, err error) {
+			s.logError("failed to restart watcher, will retry", "error", err, "attempt", attempt)
+		},
+	})
+	_ = env.Run(ctx) // ctx-cancel and exhaustion both terminate the goroutine
+}
+
+// tryRebindWatcher captures the lifecycle ctx and returns the Work function
+// the retry envelope drives. Each successful rebind installs the new watcher,
+// spawns the watchLoop goroutine, and clears the F6-A bucket-missing gauge;
+// the envelope then returns nil from Run and restartWatcher exits cleanly.
+// On error the per-attempt path classifies the failure via the F6-A
+// noteBucketUnavailable helper (sets the gauge + fires the rate-limited
+// SourceUnavailableHook) before returning the error to the envelope for
+// the bounded-retry decision.
+func (s *NatsKV) tryRebindWatcher(loopCtx context.Context) func(context.Context) error {
+	return func(_ context.Context) error {
+		// Watch uses the source-lifetime context (loopCtx) so the watcher
+		// outlives this single retry attempt — the envelope's per-attempt
+		// ctx would cancel it on success.
+		watcher, err := s.watchFn(loopCtx)
+		if err != nil {
+			// F6-A: classify the rebind error. noteBucketUnavailable
+			// fires the SourceUnavailableHook (rate-limited) + sets the
+			// SourceBucketMissing gauge on a wrapped bucket-unavailable
+			// error. The envelope still drives the bounded retry; this
+			// just makes the loss observable to operators during the
+			// retry window.
+			s.noteBucketUnavailable(err)
+			return err
 		}
+		s.mu.Lock()
+		s.watcher = watcher
+		s.mu.Unlock()
+		s.wg.Go(func() { s.watchLoop(loopCtx, watcher) })
+		// F6-A: a successful rebind confirms the bucket is reachable.
+		s.noteBucketAvailable()
 
-		watcher, err := s.watchFn(ctx)
-		if err == nil {
-			s.mu.Lock()
-			s.watcher = watcher
-			s.mu.Unlock()
-			s.wg.Go(func() { s.watchLoop(ctx, watcher) })
-			s.noteBucketAvailable()
-
-			return
-		}
-
-		// F6-A: bucket-missing escalation. noteBucketUnavailable returns
-		// true on a wrapped ErrBucketNotFound and fires the hook (rate-
-		// limited) + sets the SourceBucketMissing gauge. The log line is
-		// still emitted in both branches so operators see the retry
-		// cadence; only the message text changes to distinguish the
-		// bucket-loss case from a generic watcher error.
-		if s.noteBucketUnavailable(err) {
-			s.logError("source bucket missing; will retry watcher", "error", err, "backoff", backoff)
-		} else {
-			s.logError("failed to restart watcher, will retry", "error", err, "backoff", backoff)
-		}
-
-		//nolint:gosec // jitter does not require crypto-secure random
-		f := rand.Float64()
-		low := 1 - watcherJitter
-		high := 1 + watcherJitter
-		delay := time.Duration(float64(backoff) * (low + f*(high-low)))
-
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(delay):
-		}
-
-		backoff = min(backoff*2, watcherMaxBackoff)
+		return nil
 	}
+}
+
+// onWatcherRetryExhausted is the envelope's permanent-failure callback.
+// The reconcileLoop remains running and will continue to converge state on
+// each tick; operators should treat sustained watcher-restart exhaustion
+// as a signal that the source bucket needs investigation (and the F6-A
+// SourceUnavailableHook, on its branch, is the wired-up escalation path
+// once that PR merges).
+func (s *NatsKV) onWatcherRetryExhausted(err error) {
+	s.logWarn("source watcher restart attempt budget exhausted; relying on reconciler for recovery",
+		"error", err,
+		"max_attempts", watcherMaxAttempts)
 }
 
 // reconcileLoop runs a background goroutine that periodically fetches the
@@ -1149,7 +1186,6 @@ func (s *NatsKV) logWarn(msg string, args ...any) {
 		s.logger.Warn(msg, args...)
 	}
 }
-
 // isBucketUnavailableErr classifies an error from a cached KV / watcher
 // operation as "the source bucket is unavailable from this connection's
 // point of view". Empirical surface (verified against nats.go v1.50.0):
