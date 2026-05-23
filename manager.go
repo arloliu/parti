@@ -85,15 +85,12 @@ type Manager struct {
 	assignmentKV jetstream.KeyValue
 	heartbeatKV  jetstream.KeyValue
 
-	// F1 epoch fence (P1.3): cached JetStream Created timestamp per
-	// Parti-owned bucket, populated at Start. monitorBucketEpochs
-	// periodically re-reads each bucket's stream info and trips
-	// degraded mode on a mismatch (wipe-and-recreate detection).
-	// Read-only after Start; the map itself is never mutated post-Start
-	// so no mutex is needed for the lookup. The protected fields are
-	// the per-bucket KeyValue handles (already stable) and the cached
-	// time.Time values (also stable). monitorBucketEpochs reads the
-	// snapshot; no writes happen after Start completes.
+	// bucketEpochs caches each Parti-owned bucket's JetStream Created
+	// timestamp at Start. monitorBucketEpochs periodically re-reads the
+	// live timestamp and trips degraded mode on a mismatch (bucket
+	// wipe-and-recreate detection). The map is populated only during
+	// Start and read-only afterwards, so the monitor goroutine needs
+	// no synchronization.
 	bucketEpochs map[string]bucketEpoch
 
 	// State management
@@ -106,10 +103,9 @@ type Manager struct {
 	// capProcessingGateWarned guards the one-shot WARN that fires when
 	// EnableTwoPhaseHandoff is true and the consumer has not reported
 	// CapProcessingGate by the time reportConsumerCapabilities runs.
-	// One-shot per Manager lifetime — a subsequent apply that DOES wire
-	// the gate (operator rolled the consumer config and re-deployed)
-	// will not re-trigger the warning; a single noisy log at the first
-	// misconfigured apply is sufficient to surface the issue.
+	// A subsequent apply that wires the gate (operator rolled the
+	// consumer config and re-deployed) does not re-trigger the warning;
+	// a single log line at the first misconfigured apply is enough.
 	capProcessingGateWarned atomic.Bool
 
 	// Phase 4 commit-path state machine state. Read by both watchers and the
@@ -412,8 +408,8 @@ func (m *Manager) Start(ctx context.Context) (startErr error) {
 	// while the worker's cache is still stale. The fix is to tune
 	// consumer.ResolverConfig.ReconcileInterval at the consumer config layer.
 	m.warnOnShortAuditGrace()
-	// F9-A (P2.1): warn when OperationTimeout could let a single slow
-	// renew consume the lease's three-attempt budget.
+	// Warn when OperationTimeout could let a single slow renew consume
+	// the lease's three-attempt budget.
 	warnOnOperationTimeoutVsElection(m.cfg, m.logger)
 
 	// Warn when the caller-owned nats.Conn is configured with a finite
@@ -550,9 +546,9 @@ func (m *Manager) Start(ctx context.Context) (startErr error) {
 	m.wg.Go(func() { m.monitorAssignmentChanges(m.ctx, assignmentKV) })
 	m.monitorNATSConnection()
 
-	// F1 epoch fence (P1.3): detect bucket wipe-and-recreate on any of
-	// the Parti-owned KV buckets. Started after all buckets are
-	// ensured + captured so the map is stable for the monitor goroutine.
+	// Detect bucket wipe-and-recreate on any of the Parti-owned KV
+	// buckets. Started after all buckets are ensured + captured so the
+	// map is stable for the monitor goroutine.
 	m.wg.Go(func() { m.monitorBucketEpochs(m.ctx) })
 
 	return nil
@@ -869,18 +865,16 @@ func (m *Manager) reportConsumerCapabilities() {
 	if newBits != 0 {
 		m.capabilities.Or(newBits)
 	}
-	// Post-merge: surface a misconfigured two-phase handoff. If
-	// EnableTwoPhaseHandoff is on but the consumer never wired a
-	// processing gate, claims are written and never consulted —
-	// effectively a silent disable. Fires at most once per Manager
-	// lifetime (guard below).
+	// Surface a misconfigured two-phase handoff: if EnableTwoPhaseHandoff
+	// is on but the consumer never wired a processing gate, claims are
+	// written and never consulted — effectively a silent disable.
+	// Fires at most once per Manager lifetime (guarded below).
 	m.maybeWarnMissingProcessingGate()
 }
 
-// maybeWarnMissingProcessingGate emits the F10-B WARN exactly once for
-// the lifetime of the Manager when EnableTwoPhaseHandoff is on and the
-// consumer's reported capabilities (post-merge in
-// reportConsumerCapabilities) do not include CapProcessingGate.
+// maybeWarnMissingProcessingGate emits a one-shot WARN when
+// EnableTwoPhaseHandoff is on but the consumer's reported capabilities
+// do not include CapProcessingGate.
 //
 // Limitation: if the consumer updater does NOT implement
 // CapabilityReporter (m.capReporter == nil), reportConsumerCapabilities

@@ -51,13 +51,14 @@ type Config struct {
 	ColdStartWindow      time.Duration // Stabilization window for cold start (default: 30s)
 	PlannedScaleWindow   time.Duration // Stabilization window for planned scale (default: 10s)
 
-	// F6-B partition-input credibility (P2.2).
+	// Partition-input credibility (see
+	// errSuspiciousPartitionObservation Godoc in calculator.go):
 	//
 	// PartitionShrinkConfirmationCount is the number of consecutive
 	// suspicious partition-source observations the calculator requires
 	// before trusting an empty / sharply-shrunk shape. Default: 3.
 	// Setting this to 1 disables the confirmation window (every
-	// observation is acted on immediately — restores pre-F6-B behavior).
+	// observation is acted on immediately).
 	PartitionShrinkConfirmationCount int
 
 	// PartitionShrinkConfirmationThresholdPct defines "sharply shrunk".

@@ -1,4 +1,4 @@
-// Package retry implements the F2 bounded-retry envelope used to wrap
+// Package retry implements the bounded-retry envelope used to wrap
 // the long-lived retry loops in the Parti runtime (source watcher
 // restart, handoff watcher restart, assignment watcher, dynamic
 // consumer recovery). The envelope replaces forever-retry loops with

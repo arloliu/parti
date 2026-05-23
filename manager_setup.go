@@ -59,8 +59,9 @@ func (m *Manager) ensureStableIDKV(ctx context.Context, js jetstream.JetStream) 
 // IOPS cost:
 //   - election:   FileStorage   — the leadership lease key must survive a
 //     NATS node restart, otherwise every restart triggers fleet-wide
-//     leadership churn (was MemoryStorage prior to F9-A; the switch is
-//     IOPS-free at production scales per iops-investigation §M1.9).
+//     leadership churn. The switch from MemoryStorage is effectively
+//     IOPS-free at production scales (see
+//     docs/plans/iops-investigation/findings.md §M1.9).
 //   - heartbeat:  MemoryStorage — workers re-publish every HeartbeatInterval,
 //     so a missed window is recovered by the next publish.
 //   - assignment: FileStorage  — must survive NATS restart so followers
@@ -91,13 +92,10 @@ func (m *Manager) ensureCoreKVBuckets( //nolint:revive
 		return kv, nil
 	}
 
-	// F9-A (P2.1): election bucket uses FileStorage so the leadership
-	// lease key survives a NATS node restart. Previously MemoryStorage —
-	// any node restart lost the lease and triggered fleet-wide
-	// leadership churn. The switch is effectively IOPS-free at
-	// production scales (see docs/plans/iops-investigation/findings.md
-	// §M1.9). Replicas remain at the server default (1) here; operators
-	// who need cross-node HA pre-create the bucket with --replicas=3
+	// Election bucket uses FileStorage (see the package comment above)
+	// so the leadership lease key survives a NATS node restart.
+	// Replicas remain at the server default (1) here; operators who
+	// need cross-node HA pre-create the bucket with --replicas=3
 	// (EnsureKVBucketWithRetry is get-first and honors the existing
 	// config). See docs/OPERATIONS.md for the migration runbook.
 	electionKV, err = ensure("election", m.cfg.KVBuckets.ElectionBucket, m.cfg.ElectionTimeout, jetstream.FileStorage)
@@ -207,9 +205,9 @@ func (m *Manager) ensureKVBucket(
 
 	m.warnOnStorageMismatch(ctx, kv, bucket, storage)
 	m.warnOnReplicasMismatch(ctx, kv, bucket)
-	// F1 epoch fence (P1.3): record this bucket's stream-Created
-	// timestamp so monitorBucketEpochs can detect a future wipe-and-
-	// recreate event. Failures are logged but never block Start.
+	// Record this bucket's stream-Created timestamp so
+	// monitorBucketEpochs can detect a future wipe-and-recreate event.
+	// Failures are logged but never block Start.
 	m.captureBucketEpoch(ctx, bucket, kv)
 
 	return kv, nil
@@ -518,7 +516,7 @@ func warnOnFiniteMaxReconnects(conn *nats.Conn, logger types.Logger) {
 }
 
 // bucketEpoch records a Parti-owned KV bucket's identity at Start for the
-// F1 epoch fence. The Created timestamp changes precisely when the bucket's
+// epoch fence. The Created timestamp changes precisely when the bucket's
 // backing stream is recreated — exactly the wipe-and-recreate case the
 // fence must detect.
 type bucketEpoch struct {
@@ -530,8 +528,8 @@ type bucketEpoch struct {
 // m.bucketEpochs for the monitorBucketEpochs goroutine to compare against.
 // A failure to read the stream info at Start is logged but not fatal — the
 // epoch fence simply does not protect that bucket; the existing readiness-
-// degraded paths (recordKVError, connection monitor, P1.1 source hook) still
-// apply. This keeps the change additive and never blocks Start.
+// degraded paths (recordKVError, connection monitor, source-unavailable
+// hook) still apply. This keeps the change additive and never blocks Start.
 func (m *Manager) captureBucketEpoch(ctx context.Context, bucket string, kv jetstream.KeyValue) {
 	if kv == nil {
 		return
