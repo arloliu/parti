@@ -26,7 +26,7 @@ GOLANGCI_LINT_VERSION := 2.11.4
 # Default target
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-race test-short coverage coverage-html lint lint-k8s fmt vet bench clean gomod-tidy update-pkg-cache ci test-unit test-integration test-stress test-all test-smoke clean-test-results test-quick test-k8s generate-k8s
+.PHONY: help test test-race test-short coverage coverage-html lint lint-k8s fmt vet bench clean gomod-tidy update-pkg-cache ci test-unit test-integration test-stress test-all test-smoke clean-test-results test-quick test-k8s generate-k8s pre-pr
 
 ## help: Show this help message
 help:
@@ -48,6 +48,14 @@ test-unit: clean-test-results
 test-integration: clean-test-results
 	@echo "Running integration tests..."
 	@CGO_ENABLED=1 go test $(INTEGRATION_DIR) -v -timeout=$(TEST_TIMEOUT) -race
+
+## pre-pr: Run the full pre-PR gate (lint + unit tests + integration tests)
+##         Required local check before opening any PR that touches manager/,
+##         source/, stableid/, recovery/, assignment/, or durable/. The
+##         integration suite catches contract regressions and concurrency
+##         races that the unit suite cannot reproduce.
+pre-pr: lint test test-integration
+	@echo "pre-pr: all gates passed; PR is ready to open"
 
 ## test-kpi-long: Run KPI test with large sample and snapshot results
 test-kpi-long: clean-test-results
