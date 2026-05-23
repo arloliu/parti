@@ -12,16 +12,33 @@ import (
 	"time"
 
 	"github.com/arloliu/parti/v2/internal/assignment/handoff"
+	"github.com/arloliu/parti/v2/internal/retry"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
-// Watcher restart backoff constants. Values mirror the Pillar 2 source-watcher
-// canonical implementation in source/nats_kv.go (and manager_assignment.go):
-// 2s base, 30s cap, ±30% jitter.
+// Watcher restart backoff knobs. Values mirror the canonical
+// source-watcher implementation in source/nats_kv.go (and
+// manager_assignment.go): 2s base, 30s cap, ±30% jitter, 6 attempts.
+//
+// Declared as vars (not consts) so integration tests in this package
+// can drive the bounded-retry envelope at a sub-second cadence without
+// waiting the production worst-case of ~80s. Production code must
+// NEVER mutate these.
+var (
+	watcherBaseBackoff = 2 * time.Second
+	watcherMaxBackoff  = 30 * time.Second
+
+	// watcherMaxAttempts caps the bounded-retry envelope on the
+	// watcher-restart loop in supervise. With watcherBaseBackoff=2s
+	// and watcherMaxBackoff=30s, six attempts span roughly one
+	// reconcile cycle. Past this point we rely on the periodic
+	// reconciler for recovery and emit the watcher-exhausted
+	// escalation signal.
+	watcherMaxAttempts = 6
+)
+
 const (
-	watcherBaseBackoff       = 2 * time.Second
-	watcherMaxBackoff        = 30 * time.Second
 	watcherJitter            = 0.3
 	defaultReconcileInterval = 30 * time.Second
 )
@@ -36,6 +53,15 @@ const (
 	watcherRestartReasonChannelClosed   = "channel_closed"
 	watcherRestartReasonEstablishFailed = "establish_failed"
 	watcherRestartReasonDriftDetected   = "drift_detected"
+
+	// watcherRestartReasonExhausted is emitted exactly once per
+	// envelope-exhaustion event in supervise. The supervisor stops
+	// retrying after this signal; recovery falls back to the periodic
+	// reconciler. Operators should alert on this metric being non-zero
+	// — sustained exhaustion indicates the underlying KV bucket is
+	// unrecoverable from this connection (e.g., wipe with no recreate,
+	// or a sustained NATS outage past the retry budget).
+	watcherRestartReasonExhausted = "exhausted"
 )
 
 // ResolverOption configures a ClaimBasedResolver.
@@ -81,6 +107,36 @@ func WithDriftRestartCooldown(d time.Duration) ResolverOption {
 	return func(r *ClaimBasedResolver) {
 		r.driftRestartCooldown = d
 		r.driftRestartCooldownSet = true
+	}
+}
+
+// WithWatcherRetryExhausted registers a callback invoked exactly once
+// when the watcher-restart envelope exhausts its attempt budget. The
+// callback fires from the supervise goroutine immediately before the
+// supervisor exits; after exit the periodic reconciler remains as the
+// sole recovery path (the nats.go KV watcher's Updates() channel does
+// NOT close on a NATS server restart, so the supervisor's normal
+// restart path will not fire for that trigger — see
+// project_nats_watcher_empirical_finding).
+//
+// The hook is the escalation point operators wire into readiness logic
+// (or alert on directly). Without a hook configured, exhaustion is
+// still logged at Warn level and emitted via
+// IncWatcherRestart("exhausted") so it is never silent.
+//
+// Concurrency contract: the callback runs synchronously on the
+// supervise goroutine. Implementations MUST be non-blocking; a blocking
+// callback delays the supervisor's exit and consequently any
+// subsequent Stop().
+//
+// Parameters:
+//   - fn: Callback invoked at exhaustion. nil clears any prior hook.
+//
+// Returns:
+//   - ResolverOption: Option function
+func WithWatcherRetryExhausted(fn func(err error)) ResolverOption {
+	return func(r *ClaimBasedResolver) {
+		r.onRetryExhausted = fn
 	}
 }
 
@@ -186,6 +242,12 @@ type ClaimBasedResolver struct {
 	// watcherMu protects currentWatcher updates during supervised restarts.
 	watcherMu      sync.Mutex
 	currentWatcher jetstream.KeyWatcher
+
+	// onRetryExhausted fires exactly once per supervise lifecycle when
+	// the watcher-restart envelope exhausts its attempt budget. See
+	// WithWatcherRetryExhausted for the wiring contract. nil means no
+	// callback is configured; exhaustion is still logged + metricized.
+	onRetryExhausted func(err error)
 }
 
 // Compile-time assertion that ClaimBasedResolver implements OwnershipResolver.
@@ -524,7 +586,6 @@ func (r *ClaimBasedResolver) startWatcher(ctx context.Context) error {
 // supervise calls runWatcher which establishes a new watcher.
 func (r *ClaimBasedResolver) supervise(ctx context.Context, initial jetstream.KeyWatcher) {
 	watcher := initial
-	backoff := watcherBaseBackoff
 
 	for {
 		err := r.processWatcher(ctx, watcher)
@@ -543,31 +604,33 @@ func (r *ClaimBasedResolver) supervise(ctx context.Context, initial jetstream.Ke
 		default:
 		}
 
-		// Watcher closed — log + back off + reestablish.
+		// Watcher closed — log + bounded-retry envelope re-establish.
 		if r.logger != nil {
 			r.logger.Warn("claim resolver watcher closed, restarting",
 				"error", err,
-				"backoff", backoff,
 			)
 		}
 
-		if !r.sleepWithStop(ctx, jittered(backoff)) {
+		// Brief pre-attempt sleep before the envelope fires its first
+		// attempt. Preserves the original supervise timing so the
+		// reconciler has a window to observe drift and set
+		// driftRestartPending before the restart consumes it — without
+		// this delay the immediate restart races the reconciler and
+		// the first restart always classifies as channel_closed.
+		// Respects stopCh so Stop() unblocks promptly during this
+		// pre-attempt wait.
+		if !r.sleepWithStop(ctx, jittered(watcherBaseBackoff)) {
 			return
 		}
 
-		nextWatcher, restartErr := r.runWatcher(ctx)
-		if restartErr != nil {
-			if r.metrics != nil {
-				r.metrics.IncWatcherRestart(watcherRestartReasonEstablishFailed)
-			}
-			if r.logger != nil {
-				r.logger.Warn("claim resolver watcher restart failed, retrying",
-					"error", restartErr,
-				)
-			}
-			backoff = nextBackoff(backoff)
-
-			continue
+		nextWatcher := r.restartWatcherWithEnvelope(ctx)
+		if nextWatcher == nil {
+			// Either the envelope exhausted its attempt budget (the
+			// permanent-failure callback already fired) or the context
+			// was cancelled mid-attempt. Either way the supervisor is
+			// done; the periodic reconciler remains as the sole
+			// recovery path.
+			return
 		}
 
 		// Classify the restart reason: a pending drift signal from the
@@ -586,7 +649,116 @@ func (r *ClaimBasedResolver) supervise(ctx context.Context, initial jetstream.Ke
 			r.metrics.IncWatcherRestart(reason)
 		}
 		watcher = nextWatcher
-		backoff = watcherBaseBackoff
+	}
+}
+
+// restartWatcherWithEnvelope drives the bounded-retry envelope that
+// gates the watcher-restart loop. Returns the freshly-established
+// watcher on success or nil if the envelope exhausts its attempt
+// budget / the context is cancelled. Per-attempt failures emit the
+// existing IncWatcherRestart("establish_failed") metric; exhaustion
+// emits IncWatcherRestart("exhausted") and fires the optional
+// onRetryExhausted callback exactly once.
+func (r *ClaimBasedResolver) restartWatcherWithEnvelope(ctx context.Context) jetstream.KeyWatcher {
+	var nextWatcher jetstream.KeyWatcher
+	env := retry.New(retry.Config{
+		Work: func(_ context.Context) error {
+			w, runErr := r.runWatcher(ctx)
+			if runErr != nil {
+				if r.metrics != nil {
+					r.metrics.IncWatcherRestart(watcherRestartReasonEstablishFailed)
+				}
+				return runErr
+			}
+			nextWatcher = w
+
+			return nil
+		},
+		OnPermanent: r.onWatcherRetryExhausted,
+		BaseBackoff: watcherBaseBackoff,
+		MaxBackoff:  watcherMaxBackoff,
+		MaxAttempts: watcherMaxAttempts,
+		Jitter:      watcherJitter,
+		OnProgress: func(attempt int, err error) {
+			if r.logger != nil {
+				r.logger.Warn("claim resolver watcher restart failed, retrying",
+					"error", err,
+					"attempt", attempt,
+				)
+			}
+		},
+		// Sleep is overridden because the envelope's default Sleep
+		// only observes ctx.Done(). The resolver's documented Stop
+		// contract is that Stop() unblocks the supervisor's backoff
+		// sleep without cancelling the lifecycle context — closing
+		// stopCh is the signal. The envelope must respect both.
+		Sleep: func(sctx context.Context, d time.Duration) error {
+			if d <= 0 {
+				return nil
+			}
+			t := time.NewTimer(d)
+			defer t.Stop()
+			select {
+			case <-sctx.Done():
+				return sctx.Err()
+			case <-r.stopCh:
+				return context.Canceled
+			case <-t.C:
+				return nil
+			}
+		},
+	})
+	_ = env.Run(ctx) // ctx-cancel, stopCh, and exhaustion all end the supervisor
+
+	return nextWatcher
+}
+
+// sleepWithStop blocks for d or until stopCh / ctx cancellation. Returns
+// false if the resolver was stopped (caller should exit). Used by
+// supervise for the pre-attempt sleep before the envelope's first
+// restart attempt — see the inline comment at the call site for why
+// the timing preserves drift-detection semantics.
+func (r *ClaimBasedResolver) sleepWithStop(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	case <-r.stopCh:
+		return false
+	}
+}
+
+// jittered returns d with a uniform ±watcherJitter perturbation applied.
+func jittered(d time.Duration) time.Duration {
+	//nolint:gosec // jitter does not require crypto-secure random
+	f := rand.Float64()
+	low := 1 - watcherJitter
+	high := 1 + watcherJitter
+	return time.Duration(float64(d) * (low + f*(high-low)))
+}
+
+// onWatcherRetryExhausted is the envelope's permanent-failure callback.
+// Fires exactly once per supervise lifecycle when restartWatcherWithEnvelope
+// consumes its attempt budget. The reconciler remains running and will
+// continue to converge state on each tick; operators should treat
+// sustained watcher-restart exhaustion as a signal that the underlying
+// KV bucket needs investigation.
+func (r *ClaimBasedResolver) onWatcherRetryExhausted(err error) {
+	if r.metrics != nil {
+		r.metrics.IncWatcherRestart(watcherRestartReasonExhausted)
+	}
+	if r.logger != nil {
+		r.logger.Warn("claim resolver watcher restart attempt budget exhausted; "+
+			"relying on reconciler for recovery",
+			"error", err,
+			"max_attempts", watcherMaxAttempts,
+		)
+	}
+	if hook := r.onRetryExhausted; hook != nil {
+		hook(err)
 	}
 }
 
@@ -938,39 +1110,6 @@ func (r *ClaimBasedResolver) requestWatcherRestartFromReconcile() {
 		// time this goroutine runs; KeyWatcher.Stop is idempotent.
 		go func() { _ = w.Stop() }()
 	}
-}
-
-// sleepWithStop blocks for d or until stopCh/ctx cancellation. Returns false
-// if the resolver was stopped (caller should exit).
-func (r *ClaimBasedResolver) sleepWithStop(ctx context.Context, d time.Duration) bool {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-t.C:
-		return true
-	case <-ctx.Done():
-		return false
-	case <-r.stopCh:
-		return false
-	}
-}
-
-// jittered returns d with a uniform ±watcherJitter perturbation applied.
-func jittered(d time.Duration) time.Duration {
-	//nolint:gosec // jitter does not require crypto-secure random
-	f := rand.Float64()
-	low := 1 - watcherJitter
-	high := 1 + watcherJitter
-	return time.Duration(float64(d) * (low + f*(high-low)))
-}
-
-// nextBackoff doubles backoff, capped at watcherMaxBackoff.
-func nextBackoff(b time.Duration) time.Duration {
-	n := b * 2
-	if n > watcherMaxBackoff {
-		return watcherMaxBackoff
-	}
-	return n
 }
 
 // stopAndResetTimer drains a timer if needed, then resets it to d.
