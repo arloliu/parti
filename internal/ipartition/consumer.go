@@ -119,7 +119,15 @@ func NewJSConsumer(
 
 		var onAck func(jetstream.Msg)
 		if c.rc != nil && c.rc.Strategy() == recovery.FromLastProcessed && !config.ManualAck {
-			onAck = c.rc.AdvanceCheckpoint
+			rc := c.rc
+			onAck = func(msg jetstream.Msg) {
+				// Static consumers never call HandleStreamRecreated, so
+				// streamEpoch is invariant and ack-time CurrentEpoch is
+				// equivalent to dispatch-time. If stream-missing recovery
+				// is ever wired into JSConsumer, plumb dispatch-time epoch
+				// through the keyDispatcher instead of capturing here.
+				rc.AdvanceCheckpoint(msg, rc.CurrentEpoch())
+			}
 		}
 
 		var wrapMsg func(jetstream.Msg) jetstream.Msg

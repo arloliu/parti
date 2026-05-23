@@ -88,7 +88,7 @@ func TestNilController_SafeToCall(t *testing.T) {
 	require.Equal(t, ActionBackoff, action)
 	require.Nil(t, cons)
 
-	c.AdvanceCheckpoint(&mockMsg{seq: 10})
+	c.AdvanceCheckpoint(&mockMsg{seq: 10}, 0)
 	c.SeedCheckpoint(context.Background(), nil)
 	c.ResetBurst()
 }
@@ -323,7 +323,7 @@ func TestController_AdvanceAndClassify_Concurrent(t *testing.T) {
 	// Goroutine 1: advance checkpoint continuously (simulates auto-ack path).
 	wg.Go(func() {
 		for i := range 500 {
-			c.AdvanceCheckpoint(&mockMsg{seq: uint64(i + 1)})
+			c.AdvanceCheckpoint(&mockMsg{seq: uint64(i + 1)}, 0)
 		}
 	})
 

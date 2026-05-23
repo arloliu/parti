@@ -62,3 +62,14 @@ func (cp *Checkpoint) Advance(msg jetstream.Msg) {
 func (cp *Checkpoint) Value() uint64 {
 	return cp.maxAckedStreamSeq.Load()
 }
+
+// ResetForStreamRecreate drops the checkpoint back to zero. Called by
+// Controller.HandleStreamRecreated when the underlying stream has been
+// recreated and the prior checkpoint no longer refers to a sequence in
+// the new stream's address space. Unlike Seed and Advance, this is NOT
+// monotonic — it is the one path that lowers the checkpoint, and is
+// only safe when paired with a streamEpoch bump (so any in-flight
+// trackingMsg captured before the bump is fenced by AdvanceCheckpoint).
+func (cp *Checkpoint) ResetForStreamRecreate() {
+	cp.maxAckedStreamSeq.Store(0)
+}
