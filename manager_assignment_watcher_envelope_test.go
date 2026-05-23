@@ -2,7 +2,9 @@ package parti
 
 import (
 	"context"
+	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,9 +34,8 @@ import (
 // through enterDegraded directly rather than through the generic
 // recordKVError counter.
 func TestMonitorAssignmentChanges_ExhaustionEntersDegraded(t *testing.T) {
-	// Tighten envelope so the test completes in a few seconds rather
-	// than the production worst-case ~80s. Save and restore so other
-	// tests in the package see the production defaults.
+	// Not t.Parallel() — mutates package-level test-seam vars; see
+	// the sibling test's comment for the rationale.
 	origMax := watcherMaxAttempts
 	origBase := watcherBaseBackoff
 	origCap := watcherMaxBackoff
@@ -46,8 +47,6 @@ func TestMonitorAssignmentChanges_ExhaustionEntersDegraded(t *testing.T) {
 		watcherBaseBackoff = origBase
 		watcherMaxBackoff = origCap
 	}()
-
-	t.Parallel()
 	_, nc := partitest.StartEmbeddedNATS(t)
 	js, err := jetstream.New(nc)
 	require.NoError(t, err)
@@ -126,6 +125,137 @@ func TestMonitorAssignmentChanges_ExhaustionEntersDegraded(t *testing.T) {
 	// State must be Degraded.
 	require.Equal(t, StateDegraded, m.State(),
 		"manager must be in StateDegraded after envelope exhaustion")
+}
+
+// TestMonitorAssignmentChanges_NonRecordableError_EnvelopeIsOnlyEscalation
+// is the load-bearing regression for the F2 envelope on this site. The
+// first reproducer above used a contrived KVErrorThreshold=100 so the
+// envelope's escalation path could be observed in isolation. Under
+// production defaults (KVErrorThreshold=5) the deleted-bucket failure
+// pattern would trip recordKVError's threshold path FIRST and the
+// envelope's named-reason path would never reach OnDegraded — making
+// the new escalation effectively dead code for that specific pattern.
+//
+// This test exercises the failure class the F2 envelope is uniquely
+// load-bearing for: a non-recordable error returned by kv.Watch on
+// every attempt. recordKVError silently drops the error on each call
+// (it does not match IsConnectivityError or IsDegradingJetStreamError),
+// so the threshold counter never advances and the threshold-path
+// escalation CANNOT trip. Only the envelope's MaxAttempts budget can
+// surface this failure to operators — which is exactly the
+// "Hole 1: channel-close sentinel slips past recordKVError" case from
+// the PR's design analysis.
+//
+// Configuration uses PRODUCTION-DEFAULT KVErrorThreshold so the test
+// directly demonstrates the fix is not dead code. The envelope's
+// MaxAttempts is tightened only for test speed; the bounds-vs-escalation
+// behavior is the same as production.
+func TestMonitorAssignmentChanges_NonRecordableError_EnvelopeIsOnlyEscalation(t *testing.T) {
+	// Not t.Parallel() — mutates package-level test-seam vars
+	// (watcherMaxAttempts/BaseBackoff/MaxBackoff) and reading them
+	// concurrently with the sibling test's defer-restore raced under
+	// the race detector. Sequential execution of the envelope tests
+	// keeps the seams deterministic.
+	const testMaxAttempts = 3
+	origMax := watcherMaxAttempts
+	origBase := watcherBaseBackoff
+	origCap := watcherMaxBackoff
+	watcherMaxAttempts = testMaxAttempts
+	watcherBaseBackoff = 20 * time.Millisecond
+	watcherMaxBackoff = 50 * time.Millisecond
+	defer func() {
+		watcherMaxAttempts = origMax
+		watcherBaseBackoff = origBase
+		watcherMaxBackoff = origCap
+	}()
+	_, nc := partitest.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	// Real bucket exists; the wrapper KV intercepts Watch() and
+	// returns the simulated error before reaching JetStream.
+	bucket := "p24c-nonrecord-" + t.Name()
+	kv, err := js.CreateKeyValue(t.Context(), jetstream.KeyValueConfig{Bucket: bucket})
+	require.NoError(t, err)
+
+	m, _, _, _ := newTestManager(t)
+	reasonSpy := &assignmentWatcherReasonSpy{}
+	m.hooks = &Hooks{OnDegraded: reasonSpy.record}
+	m.state.Store(int32(StateStable))
+	m.cfg.DegradedAlert = DegradedAlertConfig{AlertInterval: time.Second}
+	// PRODUCTION-DEFAULT threshold. If the test passes the envelope's
+	// named-reason path must be what escalated — recordKVError's path
+	// is physically incapable of reaching threshold=5 with all errors
+	// dropped silently.
+	m.cfg.DegradedBehavior = DegradedBehaviorConfig{
+		KVErrorThreshold: 5,
+		KVErrorWindow:    30 * time.Second,
+	}
+
+	// errors.New produces an error that wraps no NATS sentinel and is
+	// not types.ErrConnectivity. natsutil.IsConnectivityError(err) and
+	// IsDegradingJetStreamError(err) both return false. recordKVError
+	// drops it silently at manager_degraded.go:84.
+	nonRecordable := errors.New("simulated non-recordable transient")
+
+	wrap := &nonRecordableWatchFailKV{
+		KeyValue: kv,
+		failErr:  nonRecordable,
+	}
+
+	done := make(chan struct{})
+	go func() {
+		m.monitorAssignmentChanges(m.ctx, wrap)
+		close(done)
+	}()
+
+	require.Eventually(t, func() bool {
+		return reasonSpy.has(assignmentWatcherDegradedReason)
+	}, 5*time.Second, 25*time.Millisecond,
+		"under production-default KVErrorThreshold=5, only the envelope's "+
+			"named-reason path can escalate a sustained non-recordable error; "+
+			"if this assertion fails the F2 envelope's escalation is dead code "+
+			"for this failure class. observed reasons: %v", reasonSpy.snapshot())
+
+	// CRITICAL invariant — proves the threshold path COULD NOT have
+	// done the escalation; only the envelope's named-reason path
+	// could. If kvErrorCount > 0 the test's premise is broken (the
+	// error was actually recordable) and the assertion above is no
+	// longer a load-bearing regression check.
+	require.Equal(t, int32(0), m.kvErrorCount.Load(),
+		"sanity: kvErrorCount must stay at 0 since every error was "+
+			"dropped by recordKVError's classifier; the named-reason "+
+			"escalation in this test path can ONLY have come from the "+
+			"envelope's OnPermanent callback")
+
+	m.cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("monitorAssignmentChanges did not exit after exhaustion + ctx cancel")
+	}
+
+	require.Equal(t, StateDegraded, m.State())
+	require.GreaterOrEqual(t, wrap.callCount.Load(), int32(testMaxAttempts),
+		"envelope must have called kv.Watch at least MaxAttempts times "+
+			"before firing OnPermanent")
+}
+
+// nonRecordableWatchFailKV intercepts Watch() and returns a fixed
+// non-recordable error on every call. Used by the "envelope is the
+// only escalation path" test above to prove the F2 envelope is
+// load-bearing for failure classes that bypass recordKVError's
+// classifier.
+type nonRecordableWatchFailKV struct {
+	jetstream.KeyValue
+	failErr   error
+	callCount atomic.Int32
+}
+
+func (k *nonRecordableWatchFailKV) Watch(_ context.Context, _ string, _ ...jetstream.WatchOpt) (jetstream.KeyWatcher, error) {
+	k.callCount.Add(1)
+
+	return nil, k.failErr
 }
 
 // assignmentWatcherReasonSpy captures OnDegraded reasons so the
