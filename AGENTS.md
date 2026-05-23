@@ -40,3 +40,68 @@ workflow, with Copilot `gpt-5.5` as a fallback. Effort defaults vary by task:
 `plan-review` and `post-impl-review` (v1/v2) at `xhigh`;
 `final-plan-review` and `post-impl-review` v3+ at `high`. Each invocation costs
 real tokens and about 2–8 minutes wall time. Do not dispatch speculatively.
+
+## Pre-PR gate
+
+For any PR that touches `manager/`, `source/`, `stableid/`,
+`recovery/`, `internal/assignment/`, or `internal/durable/`, run
+`make pre-pr` locally before opening the PR. The target chains lint,
+`make test` (unit tests with `-race`), and `make test-integration`
+(live-NATS scenarios with `-race`). The integration suite catches
+contract regressions and concurrency races that the unit suite cannot
+reproduce — empirically, both bugs surfaced by self-healing batch 1
+slipped past 3 rounds of codex review and were caught only by
+`make test-integration -race` under CI load.
+
+## Cross-feature contracts (do not regress)
+
+These contracts live on `main` and any failure-classification or
+error-routing change MUST preserve them. Each has a regression test
+already in tree; run them when changing how an error is wrapped,
+classified, or routed:
+
+1. **Whole-bucket-missing → every worker enters `StateDegraded` within
+   a bounded window.** Pinned by `TestManager_LiveNATSBucketLoss` and
+   `TestManager_LiveNATSBucketLoss_OnDegradedHook` under
+   `test/integration/manager/`. The mechanism: bucket-missing errors
+   from stableid / heartbeat / election / assignment-watcher flow
+   through `m.recordKVError` → accumulate against `KVErrorThreshold` →
+   trip `m.enterDegraded`. A new classifier that routes the error
+   elsewhere (e.g., to a self-stop path) regresses this contract.
+2. **Peer claim takeover → only that one worker enters claim-lost
+   shutdown; others stay healthy.** Pinned by
+   `TestStableID_StaleKeyTakeover_Reclaim` under
+   `test/integration/stableid/`. The manager's `onClaimerError`
+   routes `ErrClaimLost` through `claimLostShutdown` only when the
+   wrapped cause is neither connectivity nor degrading-JetStream.
+3. **OnDegraded hook fires exactly once per Degraded entry per
+   worker.** Pinned by `TestManager_LiveNATSBucketLoss_OnDegradedHook`.
+
+Background: contract (1) was regressed by self-healing's P1.2
+(stableid classifier widening) on the integration branch; the fix in
+`manager_election.go:onClaimerError` distinguishes "whole-bucket loss"
+from "peer takeover" via `natsutil.IsConnectivityError ||
+natsutil.IsDegradingJetStreamError` and routes the former through
+`recordKVError` instead. Future classifier changes must keep that
+distinction.
+
+## Concurrency stress tests for monitor goroutines
+
+When adding a new monitor goroutine on a ticker (e.g.,
+`monitorBucketEpochs`, `monitorAssignmentChanges`, source `reconciler`,
+F2 envelope retry loops), add a focused concurrency stress test in
+`test/integration/<package>/`:
+
+- Start a small real cluster (embedded NATS, 2-3 worker managers)
+- Configure the monitor at aggressive cadence (e.g.
+  `OperationTimeout=10ms`)
+- Drive concurrent KV traffic against the same buckets the monitor
+  probes for ~5 seconds
+- Assert no race-detector triggers (`go test -race ...`)
+
+The unit tests for the monitor in isolation cannot find races between
+the monitor goroutine and production paths sharing nats.go's cached
+`*stream` state. Self-healing batch 1's P1.3 hit exactly that — the
+unit suite passed, the live-cluster integration suite tripped the
+race detector. `test/integration/manager/epoch_monitor_concurrency_test.go`
+is the template for this pattern.
