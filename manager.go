@@ -92,6 +92,15 @@ type Manager struct {
 	assignment   atomic.Value  // Assignment
 	capabilities atomic.Uint32 // capability bitmask; see types.CapXxx constants
 
+	// capProcessingGateWarned guards the one-shot WARN that fires when
+	// EnableTwoPhaseHandoff is true and the consumer has not reported
+	// CapProcessingGate by the time reportConsumerCapabilities runs.
+	// One-shot per Manager lifetime — a subsequent apply that DOES wire
+	// the gate (operator rolled the consumer config and re-deployed)
+	// will not re-trigger the warning; a single noisy log at the first
+	// misconfigured apply is sufficient to surface the issue.
+	capProcessingGateWarned atomic.Bool
+
 	// Phase 4 commit-path state machine state. Read by both watchers and the
 	// dual-read selector. All four are atomic-only; no mutex needed.
 
@@ -841,6 +850,42 @@ func (m *Manager) reportConsumerCapabilities() {
 	if newBits != 0 {
 		m.capabilities.Or(newBits)
 	}
+	// Post-merge: surface a misconfigured two-phase handoff. If
+	// EnableTwoPhaseHandoff is on but the consumer never wired a
+	// processing gate, claims are written and never consulted —
+	// effectively a silent disable. Fires at most once per Manager
+	// lifetime (guard below).
+	m.maybeWarnMissingProcessingGate()
+}
+
+// maybeWarnMissingProcessingGate emits the F10-B WARN exactly once for
+// the lifetime of the Manager when EnableTwoPhaseHandoff is on and the
+// consumer's reported capabilities (post-merge in
+// reportConsumerCapabilities) do not include CapProcessingGate.
+//
+// Limitation: if the consumer updater does NOT implement
+// CapabilityReporter (m.capReporter == nil), reportConsumerCapabilities
+// returns early and never calls this helper. The warning depends on
+// capability reporting; consumers that bypass it are responsible for
+// their own gate-wiring verification.
+func (m *Manager) maybeWarnMissingProcessingGate() {
+	if !m.cfg.EnableTwoPhaseHandoff {
+		return
+	}
+	if m.capProcessingGateWarned.Load() {
+		return
+	}
+	if m.capabilities.Load()&types.CapProcessingGate != 0 {
+		return // gate present post-merge; silent
+	}
+	if !m.capProcessingGateWarned.CompareAndSwap(false, true) {
+		return // raced another goroutine; that one fired the warning
+	}
+	m.logger.Warn(
+		"two-phase handoff is enabled but the consumer reports no processing gate; "+
+			"partition claims are written and never consulted",
+		"remedy", "wire a processing gate on the consumer (e.g. consumer.Dynamic) so claims fence delivery",
+	)
 }
 
 // invokeHook executes a hook function asynchronously with error logging.
