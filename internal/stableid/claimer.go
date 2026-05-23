@@ -361,12 +361,30 @@ func (c *Claimer) renew(ctx context.Context) error {
 
 	newRev, err := c.kv.Update(ctx, key, []byte(value), c.lastRevision.Load())
 	if err != nil {
-		if errors.Is(err, jetstream.ErrKeyExists) {
-			// Revision mismatch: another worker took this ID over, or it
-			// expired and was re-created. The claim is lost.
+		switch {
+		case errors.Is(err, jetstream.ErrKeyExists):
+			// Revision mismatch: another worker took this ID over (or it
+			// expired and was re-created under us). The claim is lost.
 			return fmt.Errorf("%w: ID %s", ErrClaimLost, wid)
+		case errors.Is(err, jetstream.ErrNoStreamResponse),
+			errors.Is(err, jetstream.ErrBucketNotFound),
+			errors.Is(err, jetstream.ErrStreamNotFound):
+			// Bucket / backing stream vanished from under us. We cannot
+			// renew, so the claim is effectively lost — keep running
+			// would mean holding a stale claim the bucket no longer
+			// recognizes. Triggering claimLostShutdown lets the readiness
+			// probe rotate the pod which can then re-claim into the
+			// re-provisioned bucket cleanly.
+			//
+			// Empirical surface (against nats.go v1.50.0): kv.Update on a
+			// cached KV handle after js.DeleteKeyValue returns
+			// ErrNoStreamResponse. The other two sentinels are kept for
+			// defense-in-depth (different transports / future versions /
+			// internal retry paths). See [[project-nats-kv-delete-surface]].
+			return fmt.Errorf("%w: ID %s (bucket missing): %w", ErrClaimLost, wid, err)
+		default:
+			return fmt.Errorf("failed to renew ID %s: %w", wid, err)
 		}
-		return fmt.Errorf("failed to renew ID %s: %w", wid, err)
 	}
 	c.lastRevision.Store(newRev)
 
