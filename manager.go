@@ -393,6 +393,16 @@ func (m *Manager) Start(ctx context.Context) (startErr error) {
 	// consumer.ResolverConfig.ReconcileInterval at the consumer config layer.
 	m.warnOnShortAuditGrace()
 
+	// Warn when the caller-owned nats.Conn is configured with a finite
+	// MaxReconnect budget. A finite budget turns a sustained outage into
+	// a permanently CLOSED zombie connection (the manager's connection
+	// monitor then enters degraded mode and the readiness probe rotates
+	// the pod). The recommended posture is nats.MaxReconnects(-1) — see
+	// docs/OPERATIONS.md "NATS Client Connection".
+	if m.js != nil {
+		warnOnFiniteMaxReconnects(m.js.Conn(), m.logger)
+	}
+
 	// Auto-cleanup on startup failure: release any partially-acquired resources
 	// so callers do not need to call Stop after a failed Start.
 	defer func() {

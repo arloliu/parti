@@ -69,6 +69,49 @@ cluster {
 }
 ```
 
+### NATS Client Connection
+
+Parti expects the caller-owned `*nats.Conn` to be configured to ride
+through transient NATS outages. The library's recovery design assumes
+the connection eventually reconnects; a connection that gives up turns
+a transient outage into a permanent `CLOSED` zombie that the manager's
+connection monitor then escalates into degraded mode and pod rotation.
+
+**Recommended posture:**
+
+```go
+nc, err := nats.Connect(natsURL,
+    // Unlimited reconnect budget — required for the library's
+    // recovery design. A finite cap will WARN at Manager.Start
+    // and, on a sustained outage, force degraded mode + pod
+    // rotation.
+    nats.MaxReconnects(-1),
+
+    // Spread reconnect attempts and add jitter so a NATS outage
+    // does not produce a thundering herd of synchronized reconnects
+    // when service is restored.
+    nats.ReconnectWait(2*time.Second),
+    nats.ReconnectJitter(500*time.Millisecond, 2*time.Second),
+
+    // Tolerate NATS startup races — return success once the client
+    // is connected, even if the first dial attempt failed.
+    nats.RetryOnFailedConnect(true),
+)
+```
+
+**Why `MaxReconnects(-1)` is required.** With a finite cap, the
+`*nats.Conn` exhausts its reconnect budget on a sustained outage and
+goes `CLOSED`. The Parti manager's connection monitor detects this
+and enters degraded mode (`OnDegraded` fires; readiness probe trips
+on the next health check) — the pod then rotates, which is more
+disruptive than letting the client reconnect. The library emits a
+`Warn`-level log line at `Manager.Start` if `MaxReconnect` is not
+negative; the warning is informational only, not blocking.
+
+**Other knobs.** `nats.Name(...)`, `nats.UserCredentials(...)`,
+`nats.RootCAs(...)`, etc. are orthogonal to the recovery posture —
+configure as your environment requires.
+
 ### KV Bucket Pre-Creation (Optional)
 
 Parti auto-creates KV buckets, but you can pre-create them for custom settings:

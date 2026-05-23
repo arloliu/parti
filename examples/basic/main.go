@@ -31,7 +31,19 @@ func main() {
 		natsURL = nats.DefaultURL
 	}
 
-	nc, err := nats.Connect(natsURL)
+	// Connect with the recommended Parti posture:
+	//   - MaxReconnects(-1): ride through transient NATS outages instead
+	//     of going CLOSED and forcing the manager into degraded mode.
+	//   - ReconnectWait + ReconnectJitter: avoid thundering reconnects.
+	//   - RetryOnFailedConnect: tolerate NATS startup races.
+	// See docs/OPERATIONS.md "NATS Client Connection" for the full
+	// rationale.
+	nc, err := nats.Connect(natsURL,
+		nats.MaxReconnects(-1),
+		nats.ReconnectWait(2*time.Second),
+		nats.ReconnectJitter(500*time.Millisecond, 2*time.Second),
+		nats.RetryOnFailedConnect(true),
+	)
 	if err != nil {
 		log.Fatalf("Failed to connect to NATS: %v", err)
 	}
