@@ -119,6 +119,38 @@ func EnsureKVBucket(ctx context.Context, js jetstream.JetStream, bucket string, 
 	return EnsureKVBucketWithRetry(ctx, js, cfg, 3)
 }
 
+// BucketStreamCreated returns the JetStream stream backing the given KV
+// bucket's Created timestamp. The timestamp is the source-of-truth identity
+// for the bucket: it is an immutable server-recorded value that changes
+// precisely when the backing stream is recreated (which is the case Parti's
+// epoch fence needs to detect). It is independent of any in-band marker the
+// caller might write into the bucket.
+//
+// Implementation note: a KV bucket is backed by a JetStream stream named
+// KV_<bucket>. This helper unwraps the bucket status to read that stream's
+// info; it does not require any extra permissions beyond what the caller
+// already has on the bucket.
+//
+// Parameters:
+//   - ctx: Context for timeout/cancellation
+//   - kv: KV bucket handle (typically returned by EnsureKVBucket)
+//
+// Returns:
+//   - time.Time: The backing stream's Created timestamp
+//   - error: status read error or an introspection-incompatible status type
+func BucketStreamCreated(ctx context.Context, kv jetstream.KeyValue) (time.Time, error) {
+	status, err := kv.Status(ctx)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("read KV bucket status: %w", err)
+	}
+	bs, ok := status.(*jetstream.KeyValueBucketStatus)
+	if !ok || bs.StreamInfo() == nil {
+		return time.Time{}, fmt.Errorf("KV bucket status %T is not introspectable", status)
+	}
+
+	return bs.StreamInfo().Created, nil
+}
+
 // OpenKVBucket opens an existing KV bucket without attempting to create it.
 //
 // Use this when the bucket is expected to be pre-provisioned and the NATS user

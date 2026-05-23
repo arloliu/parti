@@ -85,6 +85,17 @@ type Manager struct {
 	assignmentKV jetstream.KeyValue
 	heartbeatKV  jetstream.KeyValue
 
+	// F1 epoch fence (P1.3): cached JetStream Created timestamp per
+	// Parti-owned bucket, populated at Start. monitorBucketEpochs
+	// periodically re-reads each bucket's stream info and trips
+	// degraded mode on a mismatch (wipe-and-recreate detection).
+	// Read-only after Start; the map itself is never mutated post-Start
+	// so no mutex is needed for the lookup. The protected fields are
+	// the per-bucket KeyValue handles (already stable) and the cached
+	// time.Time values (also stable). monitorBucketEpochs reads the
+	// snapshot; no writes happen after Start completes.
+	bucketEpochs map[string]bucketEpoch
+
 	// State management
 	state        atomic.Int32  // State
 	workerID     atomic.Value  // string
@@ -535,6 +546,11 @@ func (m *Manager) Start(ctx context.Context) (startErr error) {
 	m.wg.Go(func() { m.monitorCommitChanges(m.ctx, assignmentKV) })
 	m.wg.Go(func() { m.monitorAssignmentChanges(m.ctx, assignmentKV) })
 	m.monitorNATSConnection()
+
+	// F1 epoch fence (P1.3): detect bucket wipe-and-recreate on any of
+	// the Parti-owned KV buckets. Started after all buckets are
+	// ensured + captured so the map is stable for the monitor goroutine.
+	m.wg.Go(func() { m.monitorBucketEpochs(m.ctx) })
 
 	return nil
 }
