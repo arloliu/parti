@@ -50,6 +50,44 @@ type KVBucketConfig struct {
 	// retries). Recommended: 2-5 minutes in production; fast tests may use
 	// seconds.
 	HandoffTTL time.Duration `yaml:"handoffTtl" default:"2m"`
+
+	// Replicas is the JetStream stream-replication factor applied to
+	// Parti-owned KV buckets when the library creates them fresh. Zero
+	// (the default) leaves the field unset, which nats.go normalizes to 1
+	// server-side — equivalent to no replication, the legacy behavior.
+	//
+	// Not to be confused with worker-pod replicas: Parti does not
+	// configure pod counts (that is the orchestrator's concern). This
+	// setting controls JetStream-level data replication only.
+	//
+	// Applies uniformly to every Parti-owned bucket the library creates
+	// (stableID, election, heartbeat, assignment, handoff). Per-bucket
+	// precision requires pre-creating buckets with explicit configs (the
+	// provision package supports this) — pre-created buckets keep their
+	// existing replica count regardless of this setting, because the
+	// library's ensure path is get-first.
+	//
+	// Post-create modification: NATS JetStream DOES support changing the
+	// replica count on an existing bucket via `UpdateStream`, but Parti
+	// does NOT auto-reconcile Replicas. Unlike MaxAge (which is reconciled
+	// because it carries a correctness invariant), Replicas is a
+	// per-deployment HA-quality decision; silently rewriting an existing
+	// bucket's Replicas could trigger expensive cross-node replication
+	// the operator did not ask for, or mask a deliberate downsize. When
+	// Manager.Start observes a pre-existing bucket whose Replicas differs
+	// from this setting, it emits a WARN log line naming the divergence
+	// and pointing at the `nats stream update KV_<bucket> --replicas=<N>`
+	// command operators can run to apply the change themselves.
+	//
+	// Cluster topology must support the value at create time or bucket
+	// creation fails loudly at Manager.Start (e.g. Replicas=3 against a
+	// single-node NATS server returns a stream-creation error).
+	//
+	// Recommended values:
+	//   - 0 / 1 — single-node NATS or test environments (default)
+	//   - 3   — production multi-node cluster (minimum for quorum)
+	//   - 5   — high-availability tier
+	Replicas int `yaml:"replicas,omitempty" default:"0" validate:"gte=0"`
 }
 
 // HandoffConfig controls two-phase handoff coordinator behavior.
