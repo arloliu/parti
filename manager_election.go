@@ -8,6 +8,7 @@ import (
 
 	"github.com/arloliu/parti/v2/internal/election"
 	"github.com/arloliu/parti/v2/internal/heartbeat"
+	"github.com/arloliu/parti/v2/internal/natsutil"
 	"github.com/arloliu/parti/v2/internal/stableid"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
@@ -81,15 +82,38 @@ var claimLostShutdown = func(m *Manager) {
 
 // onClaimerError handles background errors from the stable-ID claimer.
 //
-// ErrClaimLost means another worker now owns this ID. recordKVError would
-// silently drop it (it is neither a connectivity nor a degrading-JetStream
-// error), and Degraded mode does not halt processing — so the worker is
-// stopped outright via claimLostShutdown, and the cause is surfaced through the
-// OnError hook (fired by logError) so the embedding application can start a
-// fresh worker. Every other error flows through the normal degraded-mode KV
-// circuit.
+// ErrClaimLost has two distinct underlying causes that the manager must
+// route differently:
+//
+//   - Peer takeover: another worker holds this ID, the bucket itself is
+//     fine. recordKVError would silently drop it (it is neither a
+//     connectivity nor a degrading-JetStream error), and Degraded mode
+//     does not halt processing — so the worker is stopped outright via
+//     claimLostShutdown, and the cause is surfaced through the OnError
+//     hook (fired by logError) so the embedding application can start a
+//     fresh worker.
+//   - Whole-bucket loss: the StableID bucket was wiped (operator action
+//     or NATS data loss). Every worker observes this globally, so the
+//     correct response is the same as for any other bucket-missing
+//     surface — feed the degraded circuit so all workers flip readiness
+//     in lockstep. Without this branch a single worker that happens to
+//     renew first would self-terminate while peers wait for the same
+//     observation, which loses the "all workers Degraded" contract the
+//     live-NATS-bucket-loss tests pin.
+//
+// Every non-ErrClaimLost error flows through the normal degraded-mode KV
+// circuit unchanged.
 func (m *Manager) onClaimerError(err error) {
 	if errors.Is(err, stableid.ErrClaimLost) {
+		// The stableid classifier wraps degrading JetStream and
+		// connectivity errors as ErrClaimLost; both predicates accept
+		// what recordKVError already routes through the degraded
+		// circuit, so the union is the exact "this is bucket loss,
+		// not peer takeover" gate.
+		if natsutil.IsConnectivityError(err) || natsutil.IsDegradingJetStreamError(err) {
+			m.recordKVError(err)
+			return
+		}
 		m.logError("stable worker ID claim lost, stopping worker", "worker_id", m.WorkerID(), "error", err)
 		claimLostShutdown(m)
 		return
