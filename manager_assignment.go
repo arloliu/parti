@@ -12,18 +12,44 @@ import (
 	"github.com/arloliu/parti/v2/internal/assignment"
 	"github.com/arloliu/parti/v2/internal/heartbeat"
 	"github.com/arloliu/parti/v2/internal/natsutil"
+	"github.com/arloliu/parti/v2/internal/retry"
 	"github.com/arloliu/parti/v2/kvutil"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
-const (
+// Watcher restart backoff knobs. Declared as vars (not consts) so
+// integration tests can drive the F2 envelope at a sub-second cadence
+// without waiting the production worst-case of ~80s. Production code
+// must NEVER mutate these.
+var (
 	watcherBaseBackoff = 2 * time.Second
 	watcherMaxBackoff  = 30 * time.Second
-	watcherJitter      = 0.3 // ±30% jitter
+
+	// watcherMaxAttempts caps the bounded-retry envelope on the
+	// assignment watcher's restart loop in monitorAssignmentChanges.
+	// With watcherBaseBackoff=2s and watcherMaxBackoff=30s, six
+	// attempts span roughly one reconcile cycle. Past this point the
+	// assignment bucket is treated as unrecoverable from this
+	// connection and the manager enters degraded mode with the named
+	// reason "assignment-watcher-exhausted".
+	watcherMaxAttempts = 6
+)
+
+const (
+	watcherJitter = 0.3 // ±30% jitter
 
 	// commitKeyName mirrors the publisher's "_commit" sub-component constant.
 	commitKeyName = "_commit"
+
+	// assignmentWatcherDegradedReason is the operator-visible
+	// degraded-mode reason emitted by the F2 envelope's permanent-
+	// failure callback when the assignment watcher exhausts its
+	// attempt budget. Distinct from the generic "KV error threshold
+	// exceeded" reason from recordKVError so operators can
+	// distinguish "assignment bucket is unrecoverable" from
+	// "accumulated transient errors".
+	assignmentWatcherDegradedReason = "assignment-watcher-exhausted"
 )
 
 // watcherReconcileInterval is the period between idempotent KV re-reads
@@ -320,37 +346,47 @@ func (m *Manager) fetchAssignment(ctx context.Context, kv jetstream.KeyValue) (*
 //
 // On watcher failure (transient NATS error, Updates() channel close), the
 // monitor records the failure into the degraded-mode circuit and retries
-// with exponential backoff + jitter, capped at watcherMaxBackoff. Only
-// context cancellation stops the loop cleanly.
+// the watch via the F2 bounded-retry envelope (watcherMaxAttempts attempts
+// with exponential backoff + jitter, capped at watcherMaxBackoff). After
+// the budget is exhausted the manager enters degraded mode with the named
+// reason "assignment-watcher-exhausted" — the assignment bucket is a hard
+// correctness dependency, so silent infinite retries are not acceptable.
+// Context cancellation stops the loop cleanly.
 func (m *Manager) monitorAssignmentChanges(ctx context.Context, kv jetstream.KeyValue) {
-	backoff := watcherBaseBackoff
 	reconcileTicker := time.NewTicker(watcherReconcileInterval)
 	defer reconcileTicker.Stop()
-	for {
-		err := m.watchAssignment(ctx, kv, reconcileTicker.C)
-		if err == nil || ctx.Err() != nil {
-			return
-		}
-		m.logError("assignment watcher failed, retrying", "error", err, "backoff", backoff)
-		// Feed into degraded circuit: a wiped assignment bucket repeatedly
-		// fails here; connection-loss errors also land here.
-		m.recordKVError(err)
 
-		//nolint:gosec // jitter does not require crypto-secure random
-		f := rand.Float64()
-		low := 1 - watcherJitter
-		high := 1 + watcherJitter
-		delay := time.Duration(float64(backoff) * (low + f*(high-low)))
+	env := retry.New(retry.Config{
+		Work: func(_ context.Context) error {
+			err := m.watchAssignment(ctx, kv, reconcileTicker.C)
+			if err == nil {
+				return nil
+			}
+			// Feed into the existing degraded circuit on every failure
+			// — a wiped assignment bucket or connection-loss errors that
+			// IsConnectivityError/IsDegradingJetStreamError handle still
+			// accumulate. The envelope's exhaustion is an additional
+			// orthogonal escalation for the case where the budget runs
+			// out before recordKVError's threshold trips (or where the
+			// error class never matches the recordKVError filter).
+			m.recordKVError(err)
+			m.logError("assignment watcher failed, will retry", "error", err)
 
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(delay):
-		}
-
-		// Double for next attempt, capped at max.
-		backoff = min(backoff*2, watcherMaxBackoff)
-	}
+			return err
+		},
+		OnPermanent: func(err error) {
+			m.logError("assignment watcher restart attempt budget exhausted; entering degraded mode",
+				"error", err,
+				"max_attempts", watcherMaxAttempts,
+				"reason", assignmentWatcherDegradedReason)
+			m.enterDegraded(assignmentWatcherDegradedReason)
+		},
+		BaseBackoff: watcherBaseBackoff,
+		MaxBackoff:  watcherMaxBackoff,
+		MaxAttempts: watcherMaxAttempts,
+		Jitter:      watcherJitter,
+	})
+	_ = env.Run(ctx) // ctx-cancel and exhaustion both end the goroutine
 }
 
 // watchAssignment runs one watch session on this worker's assignment key.
