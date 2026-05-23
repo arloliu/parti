@@ -26,11 +26,11 @@ var errShuttingDown = errors.New("rebalance aborted: leader is shutting down")
 // because it is an explicit "keep cached assignment" decision, not a
 // failure.
 //
-// This implements the F6-B doctrine of "minimum credible partition input":
-// a single observation of an empty / sharply-shrunk source is more likely a
-// transient blip (KV miss, watcher race) than legitimate operator intent;
-// the confirmation window prevents one bad poll from triggering a
-// fleet-wide reassign-to-zero thundering herd.
+// This implements the "minimum credible partition input" doctrine: a
+// single observation of an empty / sharply-shrunk source is more likely
+// a transient blip (KV miss, watcher race) than legitimate operator
+// intent; the confirmation window prevents one bad poll from triggering
+// a fleet-wide reassign-to-zero thundering herd.
 var errSuspiciousPartitionObservation = errors.New("rebalance skipped: partition observation pending confirmation")
 
 // Calculator manages partition assignment calculation and distribution.
@@ -97,7 +97,8 @@ type Calculator struct {
 	// counter delta equal to 1 per dropped partition update.
 	partitionRebalanceEntries atomic.Int64
 
-	// F6-B (P2.2): minimum-credible-partition-input doctrine.
+	// Minimum-credible-partition-input doctrine (see
+	// errSuspiciousPartitionObservation Godoc):
 	//
 	// lastKnownPartitionCount is the most recent partition count the
 	// calculator acted on. Empty / sharply-shrunk observations do NOT
@@ -1212,7 +1213,9 @@ func (c *Calculator) getActiveWorkersFiltered(ctx context.Context, disappearedWo
 	return filtered, fresh, nil
 }
 
-// partitionInputCredibilityGuard implements the F6-B confirmation window.
+// partitionInputCredibilityGuard implements the confirmation window for
+// the minimum-credible-partition-input doctrine (see
+// errSuspiciousPartitionObservation Godoc).
 // Returns true when the observation is suspicious and the caller must skip
 // the rebalance (the caller surfaces errSuspiciousPartitionObservation).
 // Returns false when the observation is credible (the caller advances the
@@ -1281,7 +1284,7 @@ func (c *Calculator) handleRebalance(ctx context.Context, reason string) error {
 			c.Logger.Info("rebalance skipped during shutdown", "reason", reason)
 			return nil
 		}
-		// F6-B: suspicious partition observation is an explicit "keep
+		// A suspicious partition observation is an explicit "keep
 		// cached assignment for now" decision, not a failure. Treat as
 		// no-op so the state machine does not escalate. The rebalance
 		// path already logged a WARN with the confirmation progress.
@@ -1351,7 +1354,7 @@ func snapshotSource(ctx context.Context, src types.PartitionSource) ([]types.Par
 
 // rebalance calculates and publishes new assignments.
 //
-//nolint:cyclop // already-large function; F6-B adds one credibility-guard branch — refactoring is a separate effort
+//nolint:cyclop // already-large function; the credibility-guard branch adds one more — refactoring is a separate effort
 func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 	// Serialize rebalance operations to prevent race conditions
 	c.rebalanceMu.Lock()
@@ -1412,7 +1415,8 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 		return nil
 	}
 
-	// F6-B (P2.2): minimum-credible-partition-input guard.
+	// Minimum-credible-partition-input guard (see
+	// errSuspiciousPartitionObservation Godoc).
 	if suspicious := c.partitionInputCredibilityGuard(lifecycle, len(partitions)); suspicious {
 		c.Metrics.RecordRebalanceDuration(time.Since(start).Seconds(), lifecycle)
 		c.Metrics.RecordRebalanceAttempt(lifecycle, true)

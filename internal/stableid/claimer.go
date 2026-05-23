@@ -380,7 +380,7 @@ func (c *Claimer) renew(ctx context.Context) error {
 			// cached KV handle after js.DeleteKeyValue returns
 			// ErrNoStreamResponse. The other two sentinels are kept for
 			// defense-in-depth (different transports / future versions /
-			// internal retry paths). See [[project-nats-kv-delete-surface]].
+			// internal retry paths).
 			return fmt.Errorf("%w: ID %s (bucket missing): %w", ErrClaimLost, wid, err)
 		default:
 			return fmt.Errorf("failed to renew ID %s: %w", wid, err)
