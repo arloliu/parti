@@ -52,6 +52,15 @@ type NatsKVOption func(*NatsKV)
 // also set the fixed interval is ignored in favour of the leadership-driven
 // cadence (leader=30s / follower=5min).
 //
+// Disabling the reconciler (d <= 0 with no leadership probe wired)
+// disables the load-bearing recovery path for the source watcher: the
+// nats.go KV watcher's Updates() channel does NOT close on a NATS
+// server restart, and the periodic reconcile is the only mechanism
+// that re-syncs source state after a silently stalled watcher. Disable
+// polling only with full awareness — Start emits a one-shot WARN log
+// line when this state is detected so the operational consequence is
+// visible at first deploy.
+//
 // Parameters:
 //   - d: Reconcile interval (0 disables; default 30s)
 //
@@ -250,6 +259,15 @@ func (s *NatsKV) Start(ctx context.Context) error {
 	}
 	s.watcher = watcher
 	s.running = true
+
+	// Warn when the reconciler is disabled with no leadership probe wired.
+	// reconcileLoop (below) exits immediately on this condition; without a
+	// running reconciler, a silent NATS server restart leaves the source
+	// watcher stalled with no recovery path. See the
+	// project_nats_watcher_empirical_finding memory pin.
+	if s.reconcileInterval <= 0 && s.leadershipProbe == nil {
+		s.logWarn("source reconciler disabled; server-restart recovery will not work — call source.WithReconcileInterval with a positive duration (or wire a leadership probe via source.WithLeadershipProbe)")
+	}
 
 	s.wg.Add(2)
 	go func() { defer s.wg.Done(); s.watchLoop(s.ctx, s.watcher) }()
@@ -1013,5 +1031,11 @@ func isCASConflict(err error) bool {
 func (s *NatsKV) logError(msg string, args ...any) {
 	if s.logger != nil {
 		s.logger.Error(msg, args...)
+	}
+}
+
+func (s *NatsKV) logWarn(msg string, args ...any) {
+	if s.logger != nil {
+		s.logger.Warn(msg, args...)
 	}
 }
