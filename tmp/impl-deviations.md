@@ -31,6 +31,41 @@ watchdog anchor.
 The integration test file keeps the other Task 5/8 cases that exercise
 the runner against live NATS.
 
+## Task 1.2 Step 7: StartupBudget negative test relocated to unit-level
+
+**Plan citation:** Task 1.2 Step 7 of `tmp/nats-thundering-herd-hardening-plan.md`
+proposes `TestApplyStartJitter_StartupBudget_Negative` as an integration test
+that sets `cfg.StartupTimeout = 200ms` (later revised to 1s in the task brief)
+and forces jitter = 3s. Expected: watchdog fires "startup-timeout".
+
+**Why the integration form does not work reliably:** When the single
+worker is also the leader, the leader calculator starts running during
+`prepareStart`. The calculator's state machine can transition the manager
+from `StateWaitingAssignment` to `StateScaling` (or similar) within the
+first second. The startup watchdog checks `m.State() != StateWaitingAssignment`
+before firing; if the calculator's state propagation wins the race, the
+watchdog returns without entering Degraded — and the test condition
+"startup-timeout" is never satisfied.
+
+Empirically observed: `TestApplyStartJitter_StartupBudget_Negative` with
+`StartupTimeout=1s` + live NATS consistently produced "Condition never
+satisfied" in the CI-load environment.
+
+**Deviation:** moved the test to `manager_apply_jitter_startup_test.go` at
+unit level using `newTestManager(t)`. The test:
+1. Drives the state machine to `WaitingAssignment` manually
+2. Sets `cfg.StartupTimeout = 100ms`, `cfg.ApplyStartJitter = 5s`,
+   forced jitter sampler = 3s
+3. Calls `startStartupTimeoutWatchdog()` directly
+4. Launches a goroutine calling `mgr.applyAssignment(Assignment{Version: 1})`
+   — this goroutine sleeps 3s of forced jitter while the watchdog fires at 100ms
+5. Asserts "startup-timeout" appears in OnDegraded within 2s
+
+This approach pins the same wiring contract as the integration form without
+the leader-calculator race, and mirrors the precedent in
+`TestStart_WatchdogFiresAfterStartupTimeout` documented in the previous
+section.
+
 ## Task 9a: Cold-start empty test relaxed
 
 **Plan citation:** Task 9a Step 1 sketches

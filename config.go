@@ -452,6 +452,37 @@ type Config struct {
 	// Handoff controls two-phase handoff tuning knobs.
 	// Only applied when EnableTwoPhaseHandoff is true.
 	Handoff HandoffConfig `yaml:"handoff"`
+
+	// ApplyStartJitter, when > 0, randomly delays fresh-version applies
+	// (watcher / commit / alias / initial-bootstrap, all funneled through
+	// applyAssignmentWithPrev) by a uniformly distributed duration in
+	// [0, ApplyStartJitter) before taking applyStoreMu. This spreads
+	// JetStream consumer create/destroy load across a worker fleet that
+	// observed the same new assignment version simultaneously (e.g. after
+	// a leader re-election).
+	//
+	// Retries (scheduleApplyRetry) do NOT pay this jitter. The retry path
+	// has its own exponential-backoff envelope with decorrelated jitter;
+	// compounding apply-start jitter on top would inflate recovery latency
+	// without spreading any fleet because a retry is one worker, not a fleet.
+	//
+	// Default 0 disables jitter (backwards compatible). Recommended starting
+	// point for a 20-worker fleet creating 100 consumers each: 500ms.
+	//
+	// Hard-capped at 10s by Validate(): a larger value would dwarf the
+	// LSR-advancement bookkeeping and risk masking apply failures behind
+	// what would look like apply latency.
+	//
+	// Startup-runner consequence: the startup background runner's first
+	// apply (applyInitialAssignment, manager_startup_async.go) also funnels
+	// through applyAssignmentWithPrev for non-empty commits/aliases. With
+	// jitter enabled, the runner sleeps up to ApplyStartJitter before its
+	// first apply attempt. The soft watchdog measures StartupTimeout from
+	// Start invocation (AGENTS.md "Apply boundedness" section), so operators
+	// MUST configure ApplyStartJitter << StartupTimeout. Recommended:
+	// ApplyStartJitter <= StartupTimeout / 4. A focused test pins this
+	// (TestApplyStartJitter_StartupBudget).
+	ApplyStartJitter time.Duration `yaml:"applyStartJitter" default:"0" validate:"gte=0"`
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -588,6 +619,14 @@ func (cfg *Config) Validate() error {
 		if cfg.KVBuckets.HandoffTTL <= 0 {
 			return errors.New("HandoffTTL must be > 0 when EnableTwoPhaseHandoff is true")
 		}
+	}
+
+	// Rule 11: ApplyStartJitter range
+	if cfg.ApplyStartJitter < 0 {
+		return errors.New("ApplyStartJitter must be >= 0")
+	}
+	if cfg.ApplyStartJitter > 10*time.Second {
+		return errors.New("ApplyStartJitter must be <= 10s")
 	}
 
 	return nil

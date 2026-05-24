@@ -197,6 +197,19 @@ type Manager struct {
 	// applyStoreMu — doing so would self-deadlock. Lock-free reads of
 	// m.assignment / m.lastSeenLeaderRevision are safe.
 	testHookAfterApplyStore func(Assignment)
+
+	// testHookApplyJittered, when non-nil, is invoked synchronously inside
+	// applyAssignmentWithPrev before the jitter sleep (only when
+	// ApplyStartJitter > 0). applyAssignmentWithPrevSkipJitter (the retry
+	// path) does NOT invoke this hook. Set ONLY by same-package tests before
+	// the relevant goroutine starts; production MUST leave this nil.
+	// See TestApplyAssignmentRetry_DoesNotJitter.
+	testHookApplyJittered func()
+
+	// applyJitterSampler, when non-nil, overrides ApplyStartJitter's random
+	// sampling. Set ONLY by same-package tests before the relevant goroutine
+	// starts; production MUST leave this nil.
+	applyJitterSampler func(maxJitter time.Duration) time.Duration
 }
 
 // assignmentCalculator defines the interface for partition assignment calculation.
