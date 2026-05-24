@@ -3,12 +3,27 @@ package consumer
 import (
 	"time"
 
+	"github.com/arloliu/parti/v2/internal/durable"
 	"github.com/arloliu/parti/v2/internal/logging"
 	"github.com/arloliu/parti/v2/internal/metrics"
 	"github.com/arloliu/parti/v2/internal/recovery"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
+
+// RecoveryRetryConfig tunes the bounded-retry envelope wrapped around
+// the dynamic partition consumer's iterator-creation path and the
+// stream-missing Site B detour. The envelope caps consecutive failures
+// at [RecoveryRetryConfig.MaxAttempts]; exhaustion fires
+// [Dynamic]'s OnPermanentFailure / manager observer routes once and
+// the consumer loop exits.
+//
+// Defaults (when fields are zero): MaxAttempts=8, BaseBackoff=500ms,
+// MaxBackoff=30s, Jitter=0.2. Lowering these accelerates the
+// degraded-mode transition for operators willing to trade short-term
+// reconnection patience for faster pod rotation; raising them
+// tolerates longer NATS partitions before escalation.
+type RecoveryRetryConfig = durable.RecoveryRetryConfig
 
 // RecoveryStrategy defines how a recreated consumer decides where to resume
 // after an unexpected deletion.
@@ -181,6 +196,7 @@ type options struct {
 	partitionRefreshMinInterval time.Duration
 	streamMissingHook           types.StreamMissingHook
 	onPermanentFailure          func(subject string, err error)
+	recoveryRetry               RecoveryRetryConfig
 }
 
 // defaultOptions returns sensible defaults.
@@ -477,6 +493,25 @@ func WithStreamMissingHook(hook types.StreamMissingHook) DynamicOption {
 func WithOnPermanentFailure(fn func(subject string, err error)) DynamicOption {
 	return dynamicOpt(func(o *options) {
 		o.onPermanentFailure = fn
+	})
+}
+
+// WithRecoveryRetry tunes the bounded-retry envelope wrapped around
+// the dynamic partition consumer's iterator-creation path and the
+// stream-missing Site B detour. See [RecoveryRetryConfig] for the
+// individual fields and their defaults.
+//
+// Lowering MaxAttempts / BaseBackoff / MaxBackoff is useful when an
+// operator prefers fast pod-rotation on a sustained iter-create
+// failure (e.g. tighter readiness SLAs). Raising them tolerates
+// longer NATS partitions before escalation to OnPermanentFailure
+// and degraded mode.
+//
+// Applies only to [Dynamic]. Zero-valued fields fall back to the
+// durable layer's defaults; partial overrides are supported.
+func WithRecoveryRetry(cfg RecoveryRetryConfig) DynamicOption {
+	return dynamicOpt(func(o *options) {
+		o.recoveryRetry = cfg
 	})
 }
 

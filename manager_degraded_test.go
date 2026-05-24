@@ -2,11 +2,13 @@ package parti
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/arloliu/parti/v2/internal/logging"
 	"github.com/arloliu/parti/v2/internal/metrics"
+	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
@@ -74,6 +76,28 @@ func TestManager_recordKVError(t *testing.T) {
 		require.Equal(t, int32(3), m.kvErrorCount.Load())
 		require.NotZero(t, m.degradedSince.Load())
 		require.Equal(t, StateDegraded, m.State())
+	})
+
+	t.Run("ignores stream-missing errors", func(t *testing.T) {
+		// Cross-feature contract pin: stream-missing exhaustion is
+		// routed through the dynamic-consumer observer to
+		// enterDegraded("stream-missing-recovery-exhausted"), NOT
+		// through the generic KV-error threshold. A stream-missing
+		// error that incidentally wraps jetstream.ErrStreamNotFound
+		// (which natsutil treats as a degrading-JetStream error) must
+		// be short-circuited here so it does not double-count.
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		m := &Manager{logger: logger, cfg: cfg, hooks: &Hooks{}, metrics: nopMetrics, ctx: ctx, cancel: cancel}
+
+		// Wrap mirroring partition_consumer.go's wrapping pattern:
+		// types.ErrStreamMissing PLUS the degrading-JetStream cause.
+		wrapped := fmt.Errorf("%w: stream %q: %w", types.ErrStreamMissing, "TEST", jetstream.ErrStreamNotFound)
+		m.recordKVError(wrapped)
+		require.Equal(t, int32(0), m.kvErrorCount.Load(),
+			"stream-missing errors must not count against the KV threshold")
+		require.Empty(t, m.kvErrorWindow,
+			"stream-missing errors must not append to the KV error window")
 	})
 
 	t.Run("resets on success", func(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 
 	"github.com/arloliu/parti/v2/internal/assignment/handoff"
 	"github.com/arloliu/parti/v2/internal/kvbuckets"
+	"github.com/arloliu/parti/v2/internal/recovery"
 	"github.com/arloliu/parti/v2/kvutil"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go"
@@ -24,12 +25,47 @@ func (m *Manager) prepareStart(ctx context.Context) (context.Context, context.Ca
 	m.ctx, m.cancel = context.WithCancel(context.Background()) //nolint:gosec // G118: cancel stored in m.cancel; called by Manager.Stop
 	m.mu.Unlock()
 
+	// Install the stream-missing observer bridge on the registered
+	// consumer updater BEFORE any worker-consumer interaction. A
+	// stream-missing exhaustion event surfacing later in the
+	// partition-consumer goroutine then reaches m.onStreamMissingError
+	// instead of being silently dropped by the durable layer's
+	// indirection dispatcher. Updaters that do not implement the
+	// observer interface (legacy or test doubles) silently pass
+	// through; the cross-feature contract is unaffected.
+	if obs, ok := m.consumerUpdater.(recovery.StreamMissingObserver); ok {
+		obs.SetOnStreamMissingError(m.onStreamMissingError)
+	}
+
 	if m.cfg.StartupTimeout > 0 {
 		sctx, cancel := context.WithTimeout(ctx, m.cfg.StartupTimeout)
 		return sctx, cancel, nil
 	}
 	// No startup timeout; return passthrough context and no-op cancel
 	return ctx, func() {}, nil
+}
+
+// onStreamMissingError is the manager-side observer registered with
+// the consumer updater (Dynamic or CompositeConsumerUpdater) during
+// prepareStart. It fires exactly once per partition consumer when the
+// stream-missing recovery envelope exhausts its attempt budget — i.e.
+// when no StreamMissingHook is configured, the hook returned an error
+// for MaxAttempts in a row, or the hook returned nil but the post-
+// recreate consumer rebuild kept failing (incompatible config).
+//
+// Routing through m.logError preserves the existing manager wait-group
+// + Hooks.OnError lifecycle semantics. enterDegraded with the named
+// reason distinguishes stream-missing from generic KV-bucket loss
+// (recordKVError's threshold path) so the cross-feature contract that
+// whole-bucket loss is the ONLY path to "KV error threshold exceeded"
+// remains intact (see AGENTS.md "Cross-feature contracts").
+func (m *Manager) onStreamMissingError(streamName string, cause error) {
+	m.logError(
+		fmt.Sprintf("dynamic-consumer stream %q recovery exhausted", streamName),
+		"stream", streamName,
+		"error", cause,
+	)
+	m.enterDegraded("stream-missing-recovery-exhausted")
 }
 
 // ensureStableIDKV ensures the StableID KV bucket exists and that its MaxAge

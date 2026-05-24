@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
+
+	"github.com/arloliu/parti/v2/internal/recovery"
 )
 
 // CompositeConsumerUpdater combines multiple WorkerConsumerUpdater instances.
@@ -17,7 +20,14 @@ import (
 //   - Calls all updaters even if some fail
 //   - Returns a combined error with all failures
 type CompositeConsumerUpdater struct {
-	updaters []WorkerConsumerUpdater
+	// mu guards updaters and currentObserver. Held only long enough to
+	// snapshot the slice (or update the observer); fan-out callbacks
+	// to children run unlocked so a slow child cannot serialize the
+	// rest and so re-entrant Add/SetOnStreamMissingError calls from a
+	// child never self-deadlock.
+	mu              sync.Mutex
+	updaters        []WorkerConsumerUpdater
+	currentObserver func(streamName string, err error)
 }
 
 // NewCompositeConsumerUpdater creates a composite from multiple updaters.
@@ -49,12 +59,21 @@ func NewCompositeConsumerUpdater(updaters ...WorkerConsumerUpdater) *CompositeCo
 // Calls UpdateWorkerConsumer on all registered updaters, collecting any errors.
 // All updaters are called even if some fail.
 func (c *CompositeConsumerUpdater) UpdateWorkerConsumer(ctx context.Context, workerID string, partitions []Partition) error {
+	c.mu.Lock()
 	if len(c.updaters) == 0 {
+		c.mu.Unlock()
 		return nil
 	}
+	// Snapshot under the mutex so a concurrent Add does not race the
+	// fan-out loop. Each child runs unlocked — its UpdateWorkerConsumer
+	// may block on JetStream and must not serialize peers or deadlock
+	// against a callback that calls back into the composite.
+	snapshot := make([]WorkerConsumerUpdater, len(c.updaters))
+	copy(snapshot, c.updaters)
+	c.mu.Unlock()
 
 	var errs []error
-	for _, u := range c.updaters {
+	for _, u := range snapshot {
 		if err := u.UpdateWorkerConsumer(ctx, workerID, partitions); err != nil {
 			errs = append(errs, err)
 		}
@@ -73,17 +92,66 @@ func (c *CompositeConsumerUpdater) UpdateWorkerConsumer(ctx context.Context, wor
 
 // Add appends additional updaters to the composite.
 // This is useful for dynamically registering consumers after creation.
+//
+// When a stream-missing observer has already been installed via
+// SetOnStreamMissingError, any newly-appended updater that implements
+// recovery.StreamMissingObserver inherits the callback so a later
+// registration does not silently miss it.
 func (c *CompositeConsumerUpdater) Add(updaters ...WorkerConsumerUpdater) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	for _, u := range updaters {
-		if u != nil {
-			c.updaters = append(c.updaters, u)
+		if u == nil {
+			continue
+		}
+		c.updaters = append(c.updaters, u)
+		if c.currentObserver != nil {
+			if obs, ok := u.(recovery.StreamMissingObserver); ok {
+				obs.SetOnStreamMissingError(c.currentObserver)
+			}
 		}
 	}
 }
 
 // Len returns the number of registered updaters.
 func (c *CompositeConsumerUpdater) Len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return len(c.updaters)
+}
+
+// SetOnStreamMissingError records the callback and forwards it to all
+// current children that implement [recovery.StreamMissingObserver].
+// Children that do not implement the interface are silently skipped.
+// Subsequent [Add] calls forward the recorded observer to newly-added
+// observer-capable children.
+//
+// Passing fn == nil clears the recorded observer and forwards the
+// nil to current observer-capable children so they stop dispatching
+// to the previous closure.
+//
+// Implements [recovery.StreamMissingObserver]; the Parti manager
+// type-asserts the composite during Manager.Start and bridges the
+// stream-missing recovery exhaustion event to enterDegraded(
+// "stream-missing-recovery-exhausted").
+func (c *CompositeConsumerUpdater) SetOnStreamMissingError(fn func(streamName string, err error)) {
+	c.mu.Lock()
+	c.currentObserver = fn
+	// Snapshot the observer-capable children under the lock; release
+	// before calling SetOnStreamMissingError on each so a slow
+	// installation does not block peers and re-entrant Add calls
+	// remain deadlock-free.
+	observers := make([]recovery.StreamMissingObserver, 0, len(c.updaters))
+	for _, u := range c.updaters {
+		if obs, ok := u.(recovery.StreamMissingObserver); ok {
+			observers = append(observers, obs)
+		}
+	}
+	c.mu.Unlock()
+
+	for _, obs := range observers {
+		obs.SetOnStreamMissingError(fn)
+	}
 }
 
 // Capabilities implements [CapabilityReporter] by ORing the runtime
@@ -98,15 +166,24 @@ func (c *CompositeConsumerUpdater) Len() int {
 //   - uint32: OR of all child-reported capability bits, or 0 if no
 //     child implements CapabilityReporter or none has wired any bits.
 func (c *CompositeConsumerUpdater) Capabilities() uint32 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	var bits uint32
 	for _, u := range c.updaters {
 		if cr, ok := u.(CapabilityReporter); ok {
 			bits |= cr.Capabilities()
 		}
 	}
+
 	return bits
 }
 
 // Compile-time assertion: CompositeConsumerUpdater satisfies
 // CapabilityReporter so the Manager's type-assertion picks it up.
 var _ CapabilityReporter = (*CompositeConsumerUpdater)(nil)
+
+// Compile-time assertion: CompositeConsumerUpdater satisfies
+// recovery.StreamMissingObserver. The Manager's type-assertion during
+// prepareStart forwards through this seam to each observer-capable
+// child.
+var _ recovery.StreamMissingObserver = (*CompositeConsumerUpdater)(nil)

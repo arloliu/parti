@@ -2,6 +2,7 @@ package consumer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -9,10 +10,16 @@ import (
 
 	"github.com/arloliu/fuda"
 	"github.com/arloliu/parti/v2/internal/durable"
+	"github.com/arloliu/parti/v2/internal/recovery"
 	"github.com/arloliu/parti/v2/jsutil"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
+
+// Compile-time assertion: *Dynamic satisfies recovery.StreamMissingObserver
+// so parti.Manager's type-assertion during prepareStart bridges the
+// stream-missing recovery exhaustion event into enterDegraded.
+var _ recovery.StreamMissingObserver = (*Dynamic)(nil)
 
 // Dynamic is a partition-aware consumer that receives assignments from a Parti Manager.
 // It manages multiple internal consumers based on assigned partitions.
@@ -53,6 +60,21 @@ type Dynamic struct {
 	// cannot interleave between an in-flight slow-path's compute and
 	// publish steps (the pre-v3 stale-store race).
 	workQueueMu sync.Mutex
+
+	// userOnPermanentFailure is the application-supplied callback
+	// captured from WithOnPermanentFailure. When non-nil it wins over
+	// the manager-installed observer at fire time, preserving the
+	// existing OnPermanentFailure contract (see [WithOnPermanentFailure]).
+	// Nil if the application did not supply one.
+	userOnPermanentFailure func(subject string, err error)
+
+	// managerOnStreamMissing holds the closure registered via
+	// SetOnStreamMissingError. The atomic.Pointer indirection lets
+	// Manager.Start install the callback AFTER NewDynamic has already
+	// built the durable layer (which captures d.onPermanentFailure by
+	// value); the dispatcher reads the pointer at fire time so a late
+	// Store is honored. nil pointer means "no manager observer wired".
+	managerOnStreamMissing atomic.Pointer[func(streamName string, err error)]
 }
 
 // compatCheckResult is the immutable outcome of one WorkQueue
@@ -219,6 +241,13 @@ type DynamicConfig struct {
 	// distinctly (e.g. via Manager.enterDegraded) from generic envelope
 	// exhaustion. See [WithOnPermanentFailure] for the option form.
 	OnPermanentFailure func(subject string, err error)
+
+	// RecoveryRetry tunes the bounded-retry envelope wrapped around
+	// the iterator-creation path and the stream-missing Site B
+	// detour. Zero-valued fields fall back to the durable layer's
+	// defaults (MaxAttempts=8, BaseBackoff=500ms, MaxBackoff=30s).
+	// See [WithRecoveryRetry] for the option form.
+	RecoveryRetry RecoveryRetryConfig
 }
 
 // validateStreamMissingHookStrategy enforces the recovery-strategy
@@ -319,6 +348,7 @@ func NewDynamic(
 		RecoveryStrategy:            o.recoveryStrategy,
 		StreamMissingHook:           o.streamMissingHook,
 		OnPermanentFailure:          o.onPermanentFailure,
+		RecoveryRetry:               o.recoveryRetry,
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -331,9 +361,10 @@ func NewDynamic(
 	// is safe because the closure captures the d pointer (which does not
 	// change between this point and the return statement).
 	d := &Dynamic{
-		js:               js,
-		streamName:       streamName,
-		recoveryStrategy: o.recoveryStrategy,
+		js:                     js,
+		streamName:             streamName,
+		recoveryStrategy:       o.recoveryStrategy,
+		userOnPermanentFailure: cfg.OnPermanentFailure,
 	}
 
 	// Build worker consumer config from unified DynamicConfig.
@@ -367,8 +398,13 @@ func NewDynamic(
 		RecoveryStrategy:            cfg.RecoveryStrategy,
 		IteratorFactory:             cfg.IteratorFactory,
 		StreamMissingHook:           cfg.StreamMissingHook,
-		OnPermanentFailure:          cfg.OnPermanentFailure,
-		OnStreamRecreated:           d.resetCompatCheck,
+		// Install the indirection dispatcher unconditionally. It reads
+		// d.userOnPermanentFailure (captured above) and
+		// d.managerOnStreamMissing (installed later via
+		// SetOnStreamMissingError) at fire time, so a Manager.Start call
+		// occurring AFTER NewDynamic still reaches the durable layer.
+		OnPermanentFailure: d.onPermanentFailure,
+		OnStreamRecreated:  d.resetCompatCheck,
 		Retry: durable.RetryConfig{
 			Backoff:    cfg.Retry.Backoff,
 			Max:        cfg.Retry.Max,
@@ -376,6 +412,7 @@ func NewDynamic(
 			Base:       cfg.Retry.Base,
 			Seed:       cfg.Retry.Seed,
 		},
+		RecoveryRetry: cfg.RecoveryRetry,
 	}
 
 	inner, err := durable.NewWorkerConsumer(js, workerCfg, handler.Handle)
@@ -385,6 +422,57 @@ func NewDynamic(
 	d.inner = inner
 
 	return d, nil
+}
+
+// onPermanentFailure is the indirection dispatcher installed as
+// WorkerConsumerConfig.OnPermanentFailure for every Dynamic. It runs on
+// the partition consumer's goroutine when iterator-creation envelope
+// or Site B detour exhaustion fires.
+//
+// Dispatch precedence:
+//  1. An application-supplied OnPermanentFailure callback (captured
+//     from WithOnPermanentFailure) wins — applications opt out of the
+//     manager observer route by registering their own callback.
+//  2. Otherwise a manager-installed observer (set via
+//     SetOnStreamMissingError) receives only stream-missing
+//     exhaustion. Generic exhaustion is left to the durable layer's
+//     existing WARN log + metric (see
+//     internal/durable/partition_consumer.go OnPermanent), which is the
+//     operator-visible signal for non-stream-missing failures.
+func (d *Dynamic) onPermanentFailure(subject string, err error) {
+	if d.userOnPermanentFailure != nil {
+		d.userOnPermanentFailure(subject, err)
+		return
+	}
+	if fn := d.managerOnStreamMissing.Load(); fn != nil && errors.Is(err, types.ErrStreamMissing) {
+		(*fn)(d.streamName, err)
+	}
+}
+
+// SetOnStreamMissingError installs a manager-side observer for
+// stream-missing recovery exhaustion. The Parti manager calls this
+// during Manager.Start so a stream-missing failure surfaces as a named
+// degraded entry ("stream-missing-recovery-exhausted") rather than
+// counting against the generic KV-error threshold.
+//
+// fn receives the dynamic consumer's stream name and the wrapped
+// types.ErrStreamMissing error chain. Calling with fn == nil clears
+// any previously-installed observer.
+//
+// Application-supplied callbacks registered via
+// [WithOnPermanentFailure] take precedence over the manager observer
+// (see [Dynamic.onPermanentFailure] for the dispatch rules).
+//
+// Safe for concurrent use; calls before, during, or after NewDynamic
+// are equivalent — the durable layer reads the slot at fire time.
+//
+// Dynamic implements [recovery.StreamMissingObserver] via this method.
+func (d *Dynamic) SetOnStreamMissingError(fn func(streamName string, err error)) {
+	if fn == nil {
+		d.managerOnStreamMissing.Store(nil)
+		return
+	}
+	d.managerOnStreamMissing.Store(&fn)
 }
 
 // Update applies a new partition assignment set.

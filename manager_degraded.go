@@ -1,9 +1,11 @@
 package parti
 
 import (
+	"errors"
 	"time"
 
 	"github.com/arloliu/parti/v2/internal/natsutil"
+	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go"
 )
 
@@ -79,6 +81,18 @@ func (m *Manager) checkConnectionHealth() {
 // fail silently and no state transition occurs.
 func (m *Manager) recordKVError(err error) {
 	if err == nil {
+		return
+	}
+	// Stream-missing exhaustion is routed through the dynamic-consumer
+	// observer (Manager.onStreamMissingError → enterDegraded(
+	// "stream-missing-recovery-exhausted")), NOT through the generic
+	// KV-error threshold. Short-circuit here so an incidental wrap of
+	// jetstream.ErrStreamNotFound (which natsutil treats as a
+	// degrading-JetStream error) does not double-count or trip the
+	// threshold. Preserves the AGENTS.md cross-feature contract that
+	// whole-bucket loss is the ONLY path through recordKVError →
+	// enterDegraded("KV error threshold exceeded").
+	if errors.Is(err, types.ErrStreamMissing) {
 		return
 	}
 	if !natsutil.IsConnectivityError(err) && !natsutil.IsDegradingJetStreamError(err) {
