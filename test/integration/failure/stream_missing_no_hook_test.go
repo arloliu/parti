@@ -143,6 +143,21 @@ func TestStreamMissingNoHook_RoutesPermanentFailureToManager(t *testing.T) {
 
 			return nil
 		}
+
+		degradedMu       sync.Mutex
+		degradedReasons  []string
+		degradedReasonCh = make(chan string, 4)
+		onDegradedHook   = func(_ context.Context, reason string) error {
+			degradedMu.Lock()
+			degradedReasons = append(degradedReasons, reason)
+			degradedMu.Unlock()
+			select {
+			case degradedReasonCh <- reason:
+			default:
+			}
+
+			return nil
+		}
 	)
 
 	cluster := testutil.NewFastWorkerCluster(t, nc, 4)
@@ -150,7 +165,10 @@ func TestStreamMissingNoHook_RoutesPermanentFailureToManager(t *testing.T) {
 
 	mgr := cluster.AddWorkerWithOptions(ctx,
 		parti.WithWorkerConsumerUpdater(dyn),
-		parti.WithHooks(&parti.Hooks{OnError: onErrorHook}),
+		parti.WithHooks(&parti.Hooks{
+			OnError:    onErrorHook,
+			OnDegraded: onDegradedHook,
+		}),
 	)
 	require.NoError(t, mgr.Start(ctx))
 	t.Cleanup(func() { _ = mgr.Stop(context.Background()) })
@@ -196,6 +214,29 @@ WaitForStreamMissing:
 		return mgr.State() == types.StateDegraded
 	}, 15*time.Second, 50*time.Millisecond,
 		"manager must transition to Degraded after stream-missing exhaustion")
+
+	// And the operator-facing reason must be the named one. This is
+	// the load-bearing assertion for the cross-feature contract per
+	// AGENTS.md: whole-bucket KV loss is the SOLE driver of
+	// "KV error threshold exceeded"; stream-missing exhaustion
+	// MUST report "stream-missing-recovery-exhausted" so readiness /
+	// alerting can distinguish the two failure modes.
+	var firstDegradedReason string
+	select {
+	case firstDegradedReason = <-degradedReasonCh:
+	case <-time.After(15 * time.Second):
+		t.Fatal("OnDegraded hook did not fire within 15s of the state transition — readiness signal missing")
+	}
+	require.Equal(t, "stream-missing-recovery-exhausted", firstDegradedReason,
+		"degraded reason must be the named stream-missing route, not the generic KV-threshold one; "+
+			"got %q. A regression here would mean stream-missing exhaustion is double-counting through "+
+			"recordKVError or routing through the wrong enterDegraded site.", firstDegradedReason)
+	degradedMu.Lock()
+	for _, r := range degradedReasons {
+		require.NotEqual(t, "KV error threshold exceeded", r,
+			"degraded reason must never be the KV-threshold one for a stream-missing exhaustion (cross-feature contract); got %q in the observed sequence %v", r, degradedReasons)
+	}
+	degradedMu.Unlock()
 
 	// Post-exhaustion silence (spec T4 §"Post-exhaustion silence").
 	// Snapshot the call count right after the OnError fire, then

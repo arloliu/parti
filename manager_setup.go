@@ -59,7 +59,21 @@ func (m *Manager) prepareStart(ctx context.Context) (context.Context, context.Ca
 // (recordKVError's threshold path) so the cross-feature contract that
 // whole-bucket loss is the ONLY path to "KV error threshold exceeded"
 // remains intact (see AGENTS.md "Cross-feature contracts").
+//
+// Shutdown guard: the closure may be invoked from a partition-consumer
+// goroutine OWNED BY AN EXTERNALLY-CONSTRUCTED Dynamic that outlives
+// Manager.Stop. Once the manager has transitioned to StateShutdown we
+// must not enqueue Hooks.OnError via m.logError (the wait-group is
+// being awaited) and must not enter enterDegraded (rejected anyway,
+// but skipping the call keeps the post-shutdown surface quiet).
+// Manager.Stop also clears the observer via SetOnStreamMissingError(nil)
+// during shutdown so the bridge is removed before m.wg.Wait, but the
+// guard remains as a belt-and-braces defense in case a late fire
+// races the clear.
 func (m *Manager) onStreamMissingError(streamName string, cause error) {
+	if m.State() == StateShutdown {
+		return
+	}
 	m.logError(
 		fmt.Sprintf("dynamic-consumer stream %q recovery exhausted", streamName),
 		"stream", streamName,
