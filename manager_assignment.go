@@ -454,7 +454,7 @@ func (m *Manager) runAssignmentWatchSession(
 	workerID, key string,
 ) error {
 	defer func() {
-		if serr := watcher.Stop(); serr != nil && !natsutil.IsConsumerNotFound(serr) {
+		if serr := watcher.Stop(); serr != nil && !natsutil.IsBenignWatcherStopErr(serr) {
 			m.logError("failed to stop assignment watcher", "error", serr)
 		}
 	}()
@@ -593,7 +593,7 @@ func (m *Manager) watchCommit(ctx context.Context, kv jetstream.KeyValue, reconc
 		return fmt.Errorf("failed to watch commit: %w", err)
 	}
 	defer func() {
-		if serr := watcher.Stop(); serr != nil && !natsutil.IsConsumerNotFound(serr) {
+		if serr := watcher.Stop(); serr != nil && !natsutil.IsBenignWatcherStopErr(serr) {
 			m.logError("failed to stop commit watcher", "error", serr)
 		}
 	}()

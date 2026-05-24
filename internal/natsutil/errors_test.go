@@ -53,6 +53,30 @@ func TestIsConsumerNotFound(t *testing.T) {
 	}
 }
 
+func TestIsBenignWatcherStopErr(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil error", nil, true},
+		{"nats.ErrBadSubscription", nats.ErrBadSubscription, true},
+		{"wrapped ErrBadSubscription", fmt.Errorf("wrap: %w", nats.ErrBadSubscription), true},
+		{"nats.ErrConsumerNotFound", nats.ErrConsumerNotFound, true},
+		{"jetstream.ErrConsumerNotFound", jetstream.ErrConsumerNotFound, true},
+		{"wrapped jetstream consumer not found", fmt.Errorf("wrap: %w", jetstream.ErrConsumerNotFound), true},
+		{"random error", errors.New("something"), false},
+		{"stream not found is NOT benign", jetstream.ErrStreamNotFound, false},
+		{"timeout is NOT benign", nats.ErrTimeout, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, IsBenignWatcherStopErr(tt.err))
+		})
+	}
+}
+
 func TestIsStreamNotFound(t *testing.T) {
 	tests := []struct {
 		name string

@@ -398,9 +398,11 @@ func (s *NatsKV) Stop(_ context.Context) error {
 	var err error
 	if s.watcher != nil {
 		err = s.watcher.Stop()
-		// Ignore "consumer not found" — cancelling the context above may
-		// cause the NATS library to auto-delete the consumer before Stop() runs.
-		if natsutil.IsConsumerNotFound(err) {
+		// Ignore benign teardown signals — cancelling the context above can
+		// trigger nats.go's internal ctx-cancel goroutine to unsubscribe the
+		// watcher first (race -> ErrBadSubscription) or the server may have
+		// already deleted the ephemeral consumer (ErrConsumerNotFound).
+		if natsutil.IsBenignWatcherStopErr(err) {
 			err = nil
 		}
 	}
