@@ -81,6 +81,14 @@ Replace `<PLAN_PATH>`, `<STRATEGY_DOC_PATH>`, `<CODE_REFS>`, and `<REPORT_PATH>`
 > that would cause an implementing agent to either ship a bug or waste
 > cycles asking clarifying questions.
 >
+> **Reviewer constraints:** This is a documentation review. Do not run
+> `make`, `go test`, `go build`, lint, or any command that boots a network
+> service. Verify plan claims about current code by reading source and
+> citing `file:line`. If a claim is genuinely unverifiable without
+> execution, surface it as a finding rather than running anything.
+> `make test-integration` in particular has historically hung in sandboxed
+> reviewer environments — never run it.
+>
 > **Read:**
 >
 > 1. `<PLAN_PATH>` — the spec.

@@ -26,8 +26,32 @@ Caller provides:
 - **Plan / spec file**: the authoritative section the implementation realizes.
 - **Round / version**: `v1`, `v2`, `v3` — increment each time fixes are applied and re-review is needed.
 - **Scope** (files and packages in scope, files explicitly out of scope).
+- **Pre-validation block** (strongly recommended for this repo): a structured record of the lint/build/test commands the caller already ran in the host workspace, with outcomes and tail output. The reviewer is instructed to consume this and **not** re-run the commands. See "Pre-flight: validate locally first" below.
 
 The report is written to `tmp/<plan-stem>_<phase>_post_implementation_review_<vN>.md`.
+
+## Pre-flight: validate locally first
+
+Before dispatching the reviewer, run the project's standard validation suite in the host workspace and capture the result. For Parti this is the pre-PR gate:
+
+```bash
+make lint
+make test            # unit suite with -race
+make test-integration  # live-NATS scenarios with -race
+```
+
+Then build a **pre-validation block** the dispatch prompt embeds verbatim. Two acceptable forms — caller's choice based on output size:
+
+- **Inline** (short / all-pass): a fenced block per command with the last ~20–40 lines of stdout/stderr.
+- **By reference**: write the full captured output to `tmp/<phase>_prevalidation_<vN>.md` (or any path under `tmp/`) and have the prompt name that file plus a one-line outcome per command.
+
+Why this matters:
+
+1. **Re-running is slow.** The full suite is 5–10+ minutes; the reviewer pass would double it.
+2. **Embedded clusters stall in sandboxes.** `make test-integration` boots an embedded NATS cluster. When the reviewer (codex / copilot CLI) executes it inside its sandbox, it has historically hung indefinitely and required manual `kill` of the dispatched agent. Never delegate that command — run it in the host workspace yourself and pass the result.
+3. **The reviewer's strength is reading code, not running commands.** External-reviewer budget is best spent on spec-compliance and bug-hunting, not waiting on `go test`.
+
+If a pre-validation command **failed**, fix it before dispatching the reviewer — the reviewer is not a fix loop. Exception: if the failure is the very thing you want the reviewer's opinion on (e.g., "this race condition reproduces under -race; here's the trace, is my proposed fix right?"), include the failing tail and an explicit question in the prompt.
 
 ## Invocation
 
@@ -84,7 +108,9 @@ These are not substitutes for `post-impl-review` when the spec-vs-impl audit and
 
 ## Prompt template
 
-Replace `<PHASE>`, `<VERSION>`, `<PLAN_PATH>`, `<SPEC_SECTIONS>`, `<IN_SCOPE_FILES>`, `<OUT_OF_SCOPE>`, `<PRIOR_REVIEW>`, `<REPORT_PATH>`, and `<VALIDATION_COMMANDS>` before sending.
+Replace `<PHASE>`, `<VERSION>`, `<PLAN_PATH>`, `<SPEC_SECTIONS>`, `<IN_SCOPE_FILES>`, `<OUT_OF_SCOPE>`, `<PRIOR_REVIEW>`, `<REPORT_PATH>`, `<PRE_VALIDATION_BLOCK>`, and `<VALIDATION_COMMANDS>` before sending.
+
+`<PRE_VALIDATION_BLOCK>` is the caller's pre-validated lint/test output (inline tails or `tmp/` file reference, per "Pre-flight: validate locally first"). If the caller did not pre-validate, set it literally to `None — caller did not pre-validate; run the commands listed below.` and populate `<VALIDATION_COMMANDS>` with the full validation suite. When pre-validation IS provided, `<VALIDATION_COMMANDS>` should be either empty or limited to lightweight static checks the caller deliberately deferred (e.g., `go vet ./<changed-pkg>` for a specific package).
 
 > You are doing a **v<VERSION> post-implementation review of <PHASE>** of
 > the project's implementation plan. The implementation is uncommitted in
@@ -144,20 +170,43 @@ Replace `<PHASE>`, `<VERSION>`, `<PLAN_PATH>`, `<SPEC_SECTIONS>`, `<IN_SCOPE_FIL
 > - Test seams that leak into the production API surface.
 > - Tests that became degenerate after refactoring.
 >
-> ## Run validation
+> ## Validation
 >
-> Run these commands in the working directory and paste the tails:
+> ### Pre-validated by the caller
+>
+> The caller has already executed the validation suite below in their host
+> workspace on the same working tree you are reviewing. Treat these results
+> as authoritative; **do not re-run** these commands.
+>
+> <PRE_VALIDATION_BLOCK>
+>
+> If you believe a tail is stale or does not match the working tree (e.g.,
+> the caller edited files after capturing it), raise a P1 finding
+> ("pre-validation tail appears stale; request a fresh run from the caller")
+> instead of executing the command yourself.
+>
+> ### What you MAY run
+>
+> Static checks scoped to the in-scope files: `gofmt -l`, `grep`,
+> `go vet ./<specific-pkg>`, and any commands explicitly listed in
+> `<VALIDATION_COMMANDS>` below (which the caller deferred to you).
 >
 > <VALIDATION_COMMANDS>
 >
-> Typical for a Go project:
-> ```
-> make lint
-> go test ./... -race -count=1
-> go vet ./...
-> ```
+> ### What you MUST NOT run
 >
-> Note any flakes or failures.
+> - Any command already executed in the pre-validation block above —
+>   re-running wastes 5–10+ minutes of wall time the caller has already paid.
+> - `make test-integration` (or any equivalent target that boots an embedded
+>   NATS cluster / spawns network services). It has historically hung
+>   indefinitely in sandboxed reviewer environments and required the caller
+>   to manually kill the dispatched agent. Never start network services or
+>   long-running clusters, even if you suspect the pre-validation result is
+>   incomplete — surface the gap as a finding instead.
+> - Any unbounded `go test ./...` across the whole module — scope to the
+>   smallest package set if you genuinely need an extra static check.
+>
+> Note any flakes or failures from the pre-validation block in the report.
 >
 > ## Produce a review report
 >
@@ -206,7 +255,9 @@ Replace `<PHASE>`, `<VERSION>`, `<PLAN_PATH>`, `<SPEC_SECTIONS>`, `<IN_SCOPE_FIL
 > (Things downstream phases will need to know.)
 >
 > ## Lint / Build / Test Status
-> (Paste tails. Note any failures or flakes.)
+> (Reference the pre-validated tails — do not re-paste them in full. Note any
+>  failures or flakes you spotted. If you ran any additional scoped static
+>  checks, paste those tails here.)
 >
 > ## Verdict
 > (merge / fix-then-merge / re-do — and the specific gates if fix-then-merge)

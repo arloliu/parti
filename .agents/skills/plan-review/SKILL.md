@@ -81,6 +81,15 @@ Replace `<PLAN_PATH>`, `<SHORT_NAME>`, `<COMPANION_DOCS>`, `<CODE_REFS>`, and `<
 > addresses end-to-end invariants of a distributed system; correctness across
 > failure modes is the bar.
 >
+> **Reviewer constraints:** This is a documentation / design review. Do not
+> run `make`, `go test`, `go build`, lint, or any command that boots a
+> network service. Verify the plan's "current code does X" claims by reading
+> source files and citing `file:line`. If a claim is genuinely unverifiable
+> without execution, surface it as a finding ("claim X cannot be verified
+> statically; recommend caller validate empirically before implementation")
+> rather than running anything. `make test-integration` in particular has
+> historically hung in sandboxed reviewer environments — never run it.
+>
 > **Read in order:**
 >
 > 1. `<PLAN_PATH>` — the authoritative spec. Read every section.
