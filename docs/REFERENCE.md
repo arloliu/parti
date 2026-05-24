@@ -398,8 +398,8 @@ case parti.StateShutdown:    // Shutting down
 
 ```go
 // Wait for stable
-for mgr.State() != parti.StateStable {
-    time.Sleep(100 * time.Millisecond)
+if err := <-mgr.WaitState(parti.StateStable, 30*time.Second); err != nil {
+    log.Fatalf("manager did not reach StateStable: %v", err)
 }
 
 // Check ownership before processing

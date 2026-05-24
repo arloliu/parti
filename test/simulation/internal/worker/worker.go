@@ -400,11 +400,13 @@ func (w *Worker) Start(ctx context.Context) error {
 	w.startCalledAt = time.Now()
 	w.firstAssignmentOK.Store(false)
 
-	// Use the provided context directly (don't create child context)
-	// This ensures that when the parent context is cancelled (e.g., by chaos events),
-	// the manager and all its goroutines will properly shut down
-	w.ctx = ctx
-	w.cancel = nil // No cancel function needed; caller controls lifecycle via context
+	// Derive a Worker-owned child context. Cancelling the caller's context
+	// (e.g., chaos events) still cascades to w.ctx → manager + shard
+	// goroutines. The dedicated cancel is needed for internal failure
+	// paths that must tear down shard goroutines (which select on
+	// w.ctx.Done()) without depending on the caller cancelling its own
+	// context — see WaitState-failure handling below.
+	w.ctx, w.cancel = context.WithCancel(ctx)
 
 	// Add a small randomized jitter to avoid thundering herd on KV operations
 	if d := time.Duration(rand.Intn(750)) * time.Millisecond; d > 0 { //nolint:gosec // Weak RNG acceptable for simulation jitter
@@ -431,12 +433,31 @@ func (w *Worker) Start(ctx context.Context) error {
 
 	// Start manager
 	if err := w.manager.Start(w.ctx); err != nil {
-		w.started.Store(false) // Reset on error
+		w.cancel() // tear down any shard goroutines started above
+		w.started.Store(false)
+
 		return fmt.Errorf("failed to start manager: %w", err)
 	}
 
-	// Start is non-blocking; the manager runs in background goroutines.
-	// Lifecycle is controlled by the context passed from caller.
+	// Start returns after the synchronous sanity phase; wait for the
+	// background runner to reach StateStable so the simulation does not
+	// generate load before assignment is applied. Manager.Start's
+	// auto-cleanup only fires on its own non-nil return — once Start
+	// succeeded, a later wait failure must call Stop to tear down the
+	// running background goroutines (heartbeat, runner, watchdog) and
+	// to cancel m.ctx (created from context.Background, not w.ctx). The
+	// shard goroutines started above select on w.ctx.Done(), so
+	// w.cancel() is also required to prevent them leaking.
+	if err := <-w.manager.WaitState(parti.StateStable, 30*time.Second); err != nil {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_ = w.manager.Stop(stopCtx)
+		stopCancel()
+		w.cancel()
+		w.started.Store(false)
+
+		return fmt.Errorf("manager did not reach StateStable: %w", err)
+	}
+
 	return nil
 }
 

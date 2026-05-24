@@ -185,6 +185,9 @@ func TestRestart_LeaderTakeoverRace(t *testing.T) {
 	// assignment well before the replacementTimeout.
 	require.NoError(t, startErr, "replacement Start should succeed within replacementTimeout after the takeover fix")
 	require.Less(t, elapsed, replacementTimeout, "replacement Start took too long")
+	// Manager.Start now returns at WaitingAssignment; wait for the
+	// background runner to apply the initial assignment.
+	require.NoError(t, <-replacementMgr.WaitState(parti.StateStable, 10*time.Second))
 	require.NotEmpty(t, replacementMgr.CurrentAssignment().Partitions,
 		"replacement should have non-empty assignment")
 

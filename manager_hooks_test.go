@@ -80,10 +80,16 @@ func TestManager_PartitionHooks(t *testing.T) {
 	err = mgr.Start(context.Background())
 	require.NoError(t, err)
 
-	// Wait for manager to be ready (StateStable or StateWaitingAssignment)
+	// Wait for manager to be ready. Manager.Start now returns at
+	// StateWaitingAssignment (post-refactor) and the background runner
+	// transitions to Stable once the initial apply completes. With an
+	// empty source under parti.DefaultConfig the calculator may project
+	// Scaling/Rebalancing before the apply lands — accept those active
+	// states as "ready enough" for the test's churn-then-assert pattern.
 	require.Eventually(t, func() bool {
 		s := mgr.State()
-		return s == parti.StateStable || s == parti.StateWaitingAssignment
+		return s == parti.StateStable || s == parti.StateWaitingAssignment ||
+			s == parti.StateScaling || s == parti.StateRebalancing
 	}, 5*time.Second, 100*time.Millisecond)
 
 	// Update source with partitions
@@ -176,11 +182,26 @@ func TestManager_DegradedHook(t *testing.T) {
 	err = mgr.Start(context.Background())
 	require.NoError(t, err)
 
-	// Wait for manager to be ready
+	// Wait for manager to be ready. Manager.Start now returns at
+	// WaitingAssignment; the calculator may project Scaling/Rebalancing
+	// during initial apply.
 	require.Eventually(t, func() bool {
 		s := mgr.State()
-		return s == parti.StateStable || s == parti.StateWaitingAssignment
+		return s == parti.StateStable || s == parti.StateWaitingAssignment ||
+			s == parti.StateScaling || s == parti.StateRebalancing
 	}, 5*time.Second, 100*time.Millisecond)
+
+	// Wait for the background runner's apply step to finish + post-Stable
+	// monitors to start. With parti.DefaultConfig the calculator may keep
+	// state in Scaling for a while; what we need is for monitorNATSConnection
+	// (started by startPostStableMonitors at the end of the runner) to
+	// be live before NATS goes down, otherwise the connection-loss
+	// detector can not run.
+	require.Eventually(t, func() bool {
+		// CurrentAssignment is set as part of the initial apply pipeline;
+		// once non-nil the runner has reached startPostStableMonitors.
+		return mgr.CurrentAssignment().Version > 0
+	}, 5*time.Second, 50*time.Millisecond, "runner did not complete initial apply (monitors not started)")
 
 	// Stop NATS to trigger degraded mode
 	srv.Shutdown()
@@ -188,7 +209,7 @@ func TestManager_DegradedHook(t *testing.T) {
 	// Verify OnDegraded called
 	require.Eventually(t, func() bool {
 		return degradedCount.Load() > 0
-	}, 5*time.Second, 100*time.Millisecond)
+	}, 10*time.Second, 100*time.Millisecond)
 
 	val := degradedReason.Load()
 	require.NotNil(t, val)
@@ -268,10 +289,13 @@ func TestManager_HandoffCompletesBeforeHooks(t *testing.T) {
 	err = mgr.Start(context.Background())
 	require.NoError(t, err)
 
-	// Wait for manager to be ready
+	// Wait for manager to be ready. Manager.Start now returns at
+	// WaitingAssignment; the calculator may project Scaling/Rebalancing
+	// during initial apply.
 	require.Eventually(t, func() bool {
 		s := mgr.State()
-		return s == parti.StateStable || s == parti.StateWaitingAssignment
+		return s == parti.StateStable || s == parti.StateWaitingAssignment ||
+			s == parti.StateScaling || s == parti.StateRebalancing
 	}, 5*time.Second, 100*time.Millisecond)
 
 	// Capture the consumer-seq baseline AFTER startup has fully settled. The

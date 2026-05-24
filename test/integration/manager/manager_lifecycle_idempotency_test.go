@@ -43,8 +43,10 @@ func TestManager_StartAfterStop(t *testing.T) {
 	mgr, err := parti.NewManager(&cfg, js, src, assignStrat)
 	require.NoError(t, err)
 
-	// First Start: success.
+	// First Start: success. Manager.Start now returns at
+	// WaitingAssignment; wait for the background runner to reach Stable.
 	require.NoError(t, mgr.Start(ctx))
+	require.NoError(t, <-mgr.WaitState(parti.StateStable, 10*time.Second))
 	require.Equal(t, parti.StateStable, mgr.State())
 
 	// Stop succeeds.

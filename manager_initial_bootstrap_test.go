@@ -47,14 +47,25 @@ func TestApplyAssignment_InitialBootstrap_AckPublishedBeforeStateStable(t *testi
 	js, err := jetstream.New(nc)
 	require.NoError(t, err)
 
-	cfg := parti.DefaultConfig()
+	// Use IntegrationTestConfig (RebalanceCooldown=2s) so the calculator
+	// transitions Scaling → Idle within the test's 5s budget. The
+	// Manager.Start refactor (2026-05-24) made StateStable arrival
+	// dependent on the calculator reaching Idle rather than on an
+	// unconditional transitionState(StateStable) at end of Start, so the
+	// previous use of parti.DefaultConfig (RebalanceCooldown=10s) leaves
+	// the manager pinned in Scaling well past the test's Eventually
+	// budget. See tmp/impl-deviations.md.
+	cfg := testutil.IntegrationTestConfig()
 	cfg.StartupTimeout = 5 * time.Second
 	cfg.WorkerIDTTL = 2 * time.Second
 	cfg.HeartbeatTTL = 1 * time.Second
 	cfg.HeartbeatInterval = 500 * time.Millisecond
 	cfg.EmergencyGracePeriod = 750 * time.Millisecond
 
-	src := source.NewStatic([]types.Partition{}) // empty source → empty cold bootstrap
+	// Use a non-empty source so applyAssignmentWithPrev runs (and thus
+	// SetAppliedAssignment runs before the runner's CAS), pinning the
+	// AppliedAt-before-StateStable invariant the test exercises.
+	src := source.NewStatic(testutil.CreateTestPartitions(3))
 	assignStrategy := strategy.NewRoundRobin()
 
 	// Capture heartbeat KV bytes at the moment StateStable transition is

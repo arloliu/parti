@@ -40,6 +40,18 @@ func TestNATSFailure_WorkerExpiry(t *testing.T) {
 	cluster.WaitForStableState(15 * time.Second)
 	t.Log("Cluster stable")
 
+	// Manager.Start now returns at WaitingAssignment; wait for the
+	// full partition coverage to land before snapshotting.
+	require.Eventually(t, func() bool {
+		seen := make(map[string]struct{})
+		for _, mgr := range cluster.Workers {
+			for _, p := range mgr.CurrentAssignment().Partitions {
+				seen[p.ID()] = struct{}{}
+			}
+		}
+		return len(seen) == 50
+	}, 10*time.Second, 100*time.Millisecond, "expected all 50 partitions assigned across workers")
+
 	// Get initial assignments
 	initialAssignments := make(map[string]int)
 	for _, mgr := range cluster.Workers {
@@ -167,6 +179,19 @@ func TestNATSFailure_AssignmentPublishRetry(t *testing.T) {
 	cluster.WaitForStableState(15 * time.Second)
 	t.Log("Cluster stable")
 
+	// Manager.Start now returns at WaitingAssignment; wait for the
+	// runner's apply on every worker to reflect the full partition
+	// coverage before snapshotting initialAssignments.
+	require.Eventually(t, func() bool {
+		seen := make(map[string]struct{})
+		for _, mgr := range cluster.Workers {
+			for _, p := range mgr.CurrentAssignment().Partitions {
+				seen[p.ID()] = struct{}{}
+			}
+		}
+		return len(seen) == 40
+	}, 10*time.Second, 100*time.Millisecond, "expected all 40 partitions assigned across workers")
+
 	// Get leader
 	leader := cluster.GetLeader()
 	require.NotNil(t, leader, "expected to find a leader")
@@ -256,9 +281,17 @@ func TestNATSFailure_SystemStability(t *testing.T) {
 	cluster.WaitForStableState(15 * time.Second)
 	t.Log("Cluster stable")
 
-	// Verify both workers have assignments
+	// Manager.Start now returns at WaitingAssignment; the leader's
+	// runner may still be inside waitForAssignment + initial apply
+	// even after the calculator-driven state transitions reach
+	// Stable. Wait for both workers' CurrentAssignment to reflect
+	// the full partition set before asserting.
 	worker1 := cluster.Workers[0]
 	worker2 := cluster.Workers[1]
+	require.Eventually(t, func() bool {
+		return len(worker1.CurrentAssignment().Partitions)+
+			len(worker2.CurrentAssignment().Partitions) == 20
+	}, 10*time.Second, 100*time.Millisecond, "expected all 20 partitions assigned across workers")
 
 	assignment1 := worker1.CurrentAssignment()
 	assignment2 := worker2.CurrentAssignment()

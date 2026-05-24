@@ -29,6 +29,14 @@ func StartManagerWithHandoffRecorder(t *testing.T, cfg *parti.Config, js jetstre
 	if err := mgr.Start(ctx); err != nil {
 		t.Fatalf("Manager start error: %v", err)
 	}
+	// Manager.Start now returns once the synchronous sanity-check phase
+	// is complete (StateWaitingAssignment). Block until the background
+	// runner has applied the initial assignment so callers can read
+	// CurrentAssignment() immediately on return.
+	if err := <-mgr.WaitState(parti.StateStable, 10*time.Second); err != nil {
+		_ = mgr.Stop(context.Background())
+		t.Fatalf("Manager did not reach StateStable: %v", err)
+	}
 	cleanup := func() { _ = mgr.Stop(context.Background()) }
 
 	return mgr, cleanup

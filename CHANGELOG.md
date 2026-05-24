@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking changes
+
+- `Manager.Start(ctx)` now returns once the synchronous sanity-check phase
+  succeeds (stable worker ID claimed, KV buckets exist, election complete,
+  heartbeat and calculator wired) — i.e. when the worker has transitioned
+  to `StateWaitingAssignment`. Previously, `Start` blocked until
+  `StateStable`. The initial assignment fetch and apply now run in a
+  background goroutine.
+
+  **What you observe:**
+  - `mgr.WorkerID()` is still reliable immediately after `Start` returns.
+  - `mgr.CurrentAssignment()` may return an empty assignment between
+    `Start` returning and the background runner finishing. Block on
+    `mgr.WaitState(parti.StateStable, timeout)` first.
+  - `Start` returns an error only for synchronous-phase failures.
+    Background failures fall through to monitor startup; existing recovery
+    mechanisms (assignment watcher redelivery, `scheduleApplyRetry`,
+    `monitorNATSConnection` → `attemptRecoveryFromDegraded`) handle them.
+  - A soft watchdog enters `StateDegraded` (reason: `startup-timeout`)
+    once if `StartupTimeout` elapses without reaching `Stable` — providing
+    the probe-rotation signal. This is decoupled from the runner, so it
+    fires even when the runner is blocked.
+
+  **Migration:**
+
+  ```go
+  // Before
+  if err := mgr.Start(ctx); err != nil { /* handle */ }
+  use(mgr.CurrentAssignment())
+
+  // After
+  if err := mgr.Start(ctx); err != nil { /* handle */ }
+  if err := <-mgr.WaitState(parti.StateStable, 30*time.Second); err != nil {
+      /* handle */
+  }
+  use(mgr.CurrentAssignment())
+  ```
+
+### Follow-up issues (non-blocking for this release)
+
+- **Apply ctx threading.** `handoffCoordinator.Apply` accepts `m.ctx`
+  unbounded per attempt; threading a per-attempt deadline through to the
+  consumer updater would let the background runner enforce per-attempt
+  bounds. Same property exists in pre-refactor Start. Track separately.
+- **Backoff jitter for `scheduleApplyRetry`.** The existing apply-retry
+  loop uses ±20% jitter; consider exporting that posture as the default
+  for any future async-Start retries.
+- **Stress-soak test for the WaitingAssignment → Stable window.** The
+  "Concurrency stress tests for monitor goroutines" rule in `AGENTS.md`
+  applies in spirit to the new lifetime runner. Add a sibling to
+  `test/integration/manager/manager_epoch_monitor_concurrency_test.go`
+  in a follow-up PR.
+- **Deterministic CAS-clobber regression pin.** The integration test in
+  `test/integration/manager/startup_async_calculator_race_test.go`
+  (`TestStartupAsync_CalculatorStateNotClobbered`) is a liveness +
+  smoke test, not a deterministic clobber pin — pure observability via
+  `OnStateChanged` cannot distinguish clobber from normal calculator
+  oscillation. A future follow-up should add a production test hook
+  (e.g., `m.testHookBeforeStartupCAS func()`, mirroring the
+  `testHookAfterApplyStore` pattern at `manager_assignment.go:957-959`)
+  so the test can force a calculator state projection between the
+  runner's apply and its CAS, then assert the CAS did NOT succeed. The
+  unit tests in `manager_startup_async_cas_test.go` cover the CAS
+  guard's behavior in isolation; this follow-up would close the loop
+  on a live-cluster regression pin.
+
 ### Added
 
 - **Worker-set shrink-confirmation defense.** Calculator rebalances now

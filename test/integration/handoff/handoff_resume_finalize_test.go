@@ -60,6 +60,10 @@ func TestHandoffResume_FinalizesMultipleCommitClaims(t *testing.T) {
 	require.NoError(t, mgr.Start(ctx))
 	t.Cleanup(func() { _ = mgr.Stop(context.Background()) })
 
+	// Manager.Start returns at WaitingAssignment; wait for the
+	// background runner to apply the initial assignment (which triggers
+	// the resume pass after Apply) before inspecting claim state.
+	require.NoError(t, <-mgr.WaitState(parti.StateStable, 10*time.Second))
 	// Allow resume pass to run (triggered async after initial Apply attempt).
 	time.Sleep(300 * time.Millisecond)
 	claims, err := parti.InspectHandoffClaims(ctx, js, bucket)

@@ -136,6 +136,7 @@ func TestProvisionApply_ManagerStartsCleanly(t *testing.T) {
 
 	require.NoError(t, mgr.Start(ctx),
 		"Manager must start cleanly against provision-created buckets (byte-equivalence check)")
+	require.NoError(t, <-mgr.WaitState(parti.StateStable, 10*time.Second))
 	require.Equal(t, parti.StateStable, mgr.State())
 
 	// Step 4: Clean shutdown.
@@ -182,6 +183,7 @@ func TestProvisionApply_IdempotentAfterManagerStart(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, mgr.Start(ctx))
+	require.NoError(t, <-mgr.WaitState(parti.StateStable, 10*time.Second))
 	require.Equal(t, parti.StateStable, mgr.State())
 
 	// Step 3: Re-run Plan with Manager running. All buckets exist and
@@ -308,6 +310,7 @@ func TestProvisionApply_AdoptsManuallyCreatedBuckets(t *testing.T) {
 
 	require.NoError(t, mgr.Start(ctx),
 		"Manager must start cleanly with one manually-created bucket (no marker)")
+	require.NoError(t, <-mgr.WaitState(parti.StateStable, 10*time.Second))
 	require.Equal(t, parti.StateStable, mgr.State())
 
 	// Cleanup.

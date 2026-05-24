@@ -146,17 +146,20 @@ type Manager struct {
 	applyRetryActive  atomic.Bool
 
 	// Degraded mode tracking
-	degradedSince      atomic.Int64  // UnixNano when degraded mode entered; 0 = not degraded
-	lastAssignmentAt   atomic.Int64  // UnixNano of last successful assignment fetch; 0 = never
-	lastAssignment     atomic.Value  // []Partition - cached assignment during degraded
-	connMonitorOnce    sync.Once     // ensures single connection monitor goroutine
-	connMonitorStop    chan struct{} // channel to stop connection monitor
-	connDownSince      atomic.Int64  // UnixNano when connectivity lost; 0 = up
-	connUpSince        atomic.Int64  // UnixNano when connectivity restored; 0 = none
-	kvErrorCount       atomic.Int32  // consecutive KV error count
-	kvErrorWindow      []time.Time   // timestamps of recent KV errors (protected by mu)
-	recoveryGraceStart atomic.Int64  // UnixNano when recovery grace period started; 0 = not in grace
-	inRecoveryGrace    atomic.Bool   // true during recovery grace period
+	degradedSince          atomic.Int64  // UnixNano when degraded mode entered; 0 = not degraded
+	lastAssignmentAt       atomic.Int64  // UnixNano of last successful assignment fetch; 0 = never
+	lastAssignment         atomic.Value  // []Partition - cached assignment during degraded
+	connMonitorOnce        sync.Once     // ensures single connection monitor goroutine
+	postStableMonitorsOnce sync.Once     // ensures startPostStableMonitors fires exactly once
+	startedAt              time.Time     // absolute wall-clock anchor for StartupTimeout budget; set in prepareStart
+	startupWatchdogFired   atomic.Bool   // guards startStartupTimeoutWatchdog (one-shot)
+	connMonitorStop        chan struct{} // channel to stop connection monitor
+	connDownSince          atomic.Int64  // UnixNano when connectivity lost; 0 = up
+	connUpSince            atomic.Int64  // UnixNano when connectivity restored; 0 = none
+	kvErrorCount           atomic.Int32  // consecutive KV error count
+	kvErrorWindow          []time.Time   // timestamps of recent KV errors (protected by mu)
+	recoveryGraceStart     atomic.Int64  // UnixNano when recovery grace period started; 0 = not in grace
+	inRecoveryGrace        atomic.Bool   // true during recovery grace period
 
 	// Lifecycle management
 	ctx    context.Context
@@ -364,33 +367,55 @@ func NewManager(cfg *Config, js jetstream.JetStream, source PartitionSource, str
 	return m, nil
 }
 
-// Start initializes and runs the manager.
+// Start runs the manager's synchronous sanity-check phase: claim a stable
+// worker ID, ensure required KV buckets exist, participate in election,
+// start the heartbeat publisher, and start the calculator if elected
+// leader. On success it transitions the manager to StateWaitingAssignment
+// and spawns a background runner that attempts to fetch the initial
+// assignment and apply it via the unified pipeline; on apply success the
+// runner CAS-transitions to StateStable. A soft watchdog enters
+// StateDegraded ("startup-timeout") if StartupTimeout (measured from
+// Start invocation) elapses without reaching StateStable, signaling the
+// readiness probe to rotate the pod.
 //
-// Blocks until worker ID is claimed and the initial assignment is received.
-// The manager lifecycle runs independently from the startup context - ctx is only
-// used to control the startup timeout, not the manager's operational lifetime.
+// Start returns once the sanity-check phase succeeds. The state observed
+// after Start may be WaitingAssignment, Stable, or any calculator-driven
+// active state (Scaling, Rebalancing, Emergency) depending on race.
+// Callers that need to know the manager is ready to process work should
+// call mgr.WaitState(StateStable, timeout).
 //
-// If a WorkerConsumerUpdater was provided via WithWorkerConsumerUpdater, the
-// initial assignment is applied (best-effort, asynchronously) to the worker's
-// durable JetStream consumer immediately after it is fetched. Subsequent
-// assignment changes will also trigger UpdateWorkerConsumer before Hooks.OnAssignmentChanged
-// is invoked, enabling hot-reload of FilterSubjects without restarting pull loops.
+// The background runner is best-effort: on assignment-fetch or apply
+// failure it logs and continues to monitor startup. Existing recovery
+// mechanisms handle subsequent retries — the assignment watcher redelivers
+// when the leader publishes; applyAssignmentWithPrev's scheduleApplyRetry
+// re-attempts on apply failure; monitorNATSConnection drives
+// attemptRecoveryFromDegraded on reconnect.
 //
-// If Start returns an error, all partially-acquired resources (KV leases,
-// background goroutines, election state) are automatically cleaned up.
-// The caller does NOT need to call Stop after a failed Start.
+// Apply boundedness: applyInitialAssignment internally calls
+// handoffCoordinator.Apply(m.ctx, ...) which is unbounded per attempt
+// (identical to pre-refactor Start). A stuck consumer updater can block
+// the runner inside one apply attempt until Stop. The soft watchdog still
+// fires enterDegraded("startup-timeout") in that case for probe-driven
+// rotation.
+//
+// Start returns an error only for synchronous-phase failures (bucket
+// creation, ID claim, election RPC). Auto-cleanup invokes Stop on a
+// non-nil error so callers do not need to call Stop after a failed Start.
 //
 // Parameters:
-//   - ctx: Context for startup timeout control (not manager lifetime)
+//   - ctx: Context for startup-phase timeout control (not manager lifetime)
 //
 // Returns:
-//   - error: Startup error or context cancellation
+//   - error: Synchronous-phase startup error or context cancellation
 //
 // Example usage:
 //
 //	mgr := parti.NewManager(cfg, js, source, strategy)
 //	if err := mgr.Start(ctx); err != nil {
 //	    return err // no need to call Stop
+//	}
+//	if err := <-mgr.WaitState(parti.StateStable, 30*time.Second); err != nil {
+//	    return err
 //	}
 func (m *Manager) Start(ctx context.Context) (startErr error) {
 	// Prepare context and startup deadline
@@ -506,51 +531,30 @@ func (m *Manager) Start(ctx context.Context) (startErr error) {
 		}
 	}
 
-	// Step 5: Wait for assignment.
+	// Step 5: Hand off the assignment-wait + initial apply to the
+	// background runner. Start returns once the synchronous sanity
+	// checks (claim, election, heartbeat, calculator) are wired. The
+	// background runner attempts one initial wait + apply on a best-
+	// effort basis; existing recovery mechanisms drive any retries
+	// (monitorAssignmentChanges watcher redelivery, scheduleApplyRetry,
+	// monitorNATSConnection → attemptRecoveryFromDegraded). The
+	// startStartupTimeoutWatchdog goroutine fires
+	// enterDegraded("startup-timeout") once if the manager is still in
+	// WaitingAssignment after StartupTimeout from m.startedAt —
+	// providing a probe-rotation signal independent of whether the
+	// runner is blocked inside apply.
 	//
-	// waitForAssignment stores a candidate Assignment into m.assignment via
-	// m.assignment.Store(*curAssignment). For Phase 4 we treat that store
-	// as observational only — the real Apply→Store→Ack pipeline runs in
-	// Step 5.5 below, gated on whether a commit is already visible.
+	// Callers that need to know the manager is ready to process work
+	// should call mgr.WaitState(StateStable, timeout).
+	//
+	// The runner preserves the pre-refactor invariant "Apply→Store→Ack
+	// BEFORE StateStable" by ordering apply before CAS. Monitor goroutines
+	// start unconditionally after the apply attempt so they are present
+	// for subsequent recovery whether or not the initial apply succeeded.
 	m.transitionState(StateWaitingAssignment)
-	m.logger.Info("startup: waiting for assignment")
-	if err := m.waitForAssignment(startupCtx, assignmentKV, heartbeatKV); err != nil {
-		return fmt.Errorf("failed to get assignment: %w", err)
-	}
-	m.logger.Info("startup: initial assignment received")
-
-	// Step 5.5: Apply the initial assignment via the unified pipeline (§4.4).
-	// Must complete (Apply → Store → Ack) BEFORE we transition to StateStable
-	// so the worker does not report AppliedVersion=0 while claiming stable.
-	//
-	// Prefer the commit-path route when a commit is already visible in KV:
-	// re-routing through handleCommitValue populates SourceRevision /
-	// SourceRevisionKnown correctly (the legacy alias envelope does not
-	// carry those). When no commit exists yet (cold-start path against an
-	// empty assignment bucket), apply what waitForAssignment stored —
-	// SourceRevisionKnown remains false, which is the documented "unknown"
-	// signal.
-	if err := m.applyInitialAssignment(startupCtx, assignmentKV); err != nil {
-		return fmt.Errorf("initial apply failed: %w", err)
-	}
-
-	// Step 6: Transition to stable state only after initial apply + ack.
-	m.transitionState(StateStable)
-
-	// Start background workers.
-	// monitorCommitChanges is the primary path for CapAckV1 workers (§3.6
-	// case 1). monitorAssignmentChanges runs concurrently for rolling-upgrade
-	// compatibility (§3.6 case 2 — legacy alias path with leader fence).
-	// The dual-read selector in handleCommitValue / handleAssignmentEntry
-	// resolves which one's payload to apply on any given event.
-	m.wg.Go(func() { m.monitorCommitChanges(m.ctx, assignmentKV) })
-	m.wg.Go(func() { m.monitorAssignmentChanges(m.ctx, assignmentKV) })
-	m.monitorNATSConnection()
-
-	// Detect bucket wipe-and-recreate on any of the Parti-owned KV
-	// buckets. Started after all buckets are ensured + captured so the
-	// map is stable for the monitor goroutine.
-	m.wg.Go(func() { m.monitorBucketEpochs(m.ctx) })
+	m.logger.Info("startup: sanity checks done; background runner taking over for initial apply")
+	m.startStartupTimeoutWatchdog()
+	m.wg.Go(func() { m.runStartupBackground(assignmentKV) })
 
 	return nil
 }
@@ -628,6 +632,14 @@ func (m *Manager) applyInitialAssignment(ctx context.Context, assignmentKV jetst
 		if err := m.heartbeat.PublishNow(m.ctx); err != nil {
 			m.logError("heartbeat publish-now after empty bootstrap failed", "error", err)
 		}
+
+		// Cold-start empty path also completes startup. Without this,
+		// a worker that boots before the leader publishes any
+		// partitions would receive an empty assignment, ack it, and
+		// stay in WaitingAssignment until a later non-empty assignment
+		// triggers applyAssignmentWithPrev's CAS — which may never
+		// happen if the source is genuinely empty.
+		m.casToStableFromWaitingAssignment()
 
 		return nil
 	}

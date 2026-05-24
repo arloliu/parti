@@ -163,15 +163,18 @@ func main() {
         log.Fatal(err)
     }
 
-    // Start and wait for stable state
+    // Start and wait for stable state. Manager.Start returns once the
+    // synchronous sanity-check phase completes (StateWaitingAssignment);
+    // the initial assignment fetch + apply runs in the background.
     ctx := context.Background()
     if err := mgr.Start(ctx); err != nil {
         log.Fatal(err)
     }
 
-    // Wait for assignment
-    for mgr.State() != parti.StateStable {
-        time.Sleep(100 * time.Millisecond)
+    // Block until the background runner has applied the initial
+    // assignment and the manager has reached StateStable.
+    if err := <-mgr.WaitState(parti.StateStable, 30*time.Second); err != nil {
+        log.Fatalf("manager did not reach StateStable: %v", err)
     }
 
     // Get assigned partitions

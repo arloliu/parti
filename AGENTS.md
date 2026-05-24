@@ -76,6 +76,25 @@ classified, or routed:
    wrapped cause is neither connectivity nor degrading-JetStream.
 3. **OnDegraded hook fires exactly once per Degraded entry per
    worker.** Pinned by `TestManager_LiveNATSBucketLoss_OnDegradedHook`.
+4. **`Manager.Start` returns after the synchronous sanity-check phase,
+   not after `StateStable`.** Start transitions to `WaitingAssignment`
+   and spawns a background runner; the runner attempts one initial
+   wait + apply and starts the post-Stable monitor set. On apply
+   success it CAS-transitions `WaitingAssignment → Stable` (CAS-guarded
+   so calculator ownership wins on conflict). Callers needing a ready
+   manager call `WaitState(StateStable, timeout)`. A soft watchdog
+   enters Degraded (reason `startup-timeout`) once if state is still
+   WaitingAssignment after `StartupTimeout` from Start invocation.
+   Pinned by `TestStart_ReturnsBeforeStable`,
+   `TestCasToStableFromWaitingAssignment_*`,
+   `TestStartupAsync_CalculatorStateNotClobbered`,
+   `TestStart_StopDuringBackground_NoDegraded`, and
+   `TestStart_WatchdogFiresAfterStartupTimeout`.
+
+   Apply boundedness: the runner's `handoffCoordinator.Apply(m.ctx, ...)`
+   call is unbounded per attempt — identical to pre-refactor Start. A
+   stuck updater can block the runner inside apply until Stop; the
+   watchdog still fires for probe rotation.
 
 Background: contract (1) was regressed by self-healing's P1.2
 (stableid classifier widening) on the integration branch; the fix in

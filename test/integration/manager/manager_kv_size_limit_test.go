@@ -80,25 +80,26 @@ func TestKVSizeLimit_AssignmentPublishFails(t *testing.T) {
 	startErr := mgr.Start(startCtx)
 	t.Logf("Start returned: %v", startErr)
 
-	// Document the observed behavior. If Start returns a clear error that
-	// mentions the publish failure, callers can diagnose. If Start hangs and
-	// then times out, the operator sees "context deadline exceeded" with no
-	// hint about the real cause — that's the user's production experience.
-	if startErr != nil {
-		t.Logf("symptom: Start failed with %v — operator sees this error at startup", startErr)
-	} else {
-		t.Log("symptom: Start succeeded unexpectedly — either hypothesis is wrong or partitions weren't large enough")
-	}
+	// Post-refactor (Manager.Start async): the assignment publish runs
+	// in the background runner, so the publish failure no longer
+	// propagates as a Start error. Start returns successfully after the
+	// synchronous sanity-check phase; the background failure surfaces
+	// via the runner logs and the startup-timeout watchdog (state never
+	// reaches Stable because the leader can not publish a usable
+	// assignment, so WaitState(Stable) times out). The operator sees
+	// "did not reach StateStable" plus the runner's logged publish
+	// error — different surface than before but equivalent
+	// observability.
+	require.NoError(t, startErr,
+		"post-refactor: Start succeeds; publish failure observable via WaitState(Stable) timeout")
 
-	// Clean up regardless.
+	waitErr := <-mgr.WaitState(parti.StateStable, 3*time.Second)
+	require.Error(t, waitErr,
+		"hypothesis: tight MaxValueSize prevents background runner from reaching Stable")
+
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer stopCancel()
 	_ = mgr.Stop(stopCtx)
-
-	// The test is deliberately assertion-light for now — it's a diagnostic
-	// scaffold to confirm the failure mode. Once we know what error surface
-	// we want, we can tighten it.
-	require.Error(t, startErr, "hypothesis: tight MaxValueSize should cause Start to fail because publisher.Publish is rejected by NATS")
 }
 
 // longKeySuffix returns a ~100-char string so each partition's JSON is large

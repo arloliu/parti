@@ -114,6 +114,20 @@ func TestDegradedMode_PreservesAssignments(t *testing.T) {
 	t.Log("Waiting for cluster to stabilize...")
 	cluster.WaitForStableState(15 * time.Second)
 
+	// Manager.Start now returns at WaitingAssignment; the leader's
+	// runner may still be inside its initial apply when
+	// WaitForStableState reports Stable (calculator-monitor can drive
+	// Stable independently). Wait for every worker's CurrentAssignment
+	// to reflect a non-zero Version before snapshotting.
+	require.Eventually(t, func() bool {
+		for _, mgr := range cluster.Workers {
+			if mgr.CurrentAssignment().Version == 0 {
+				return false
+			}
+		}
+		return true
+	}, 10*time.Second, 100*time.Millisecond, "every worker should have a non-zero initial assignment")
+
 	// Capture initial assignments
 	type AssignmentSnapshot struct {
 		Partitions []string
