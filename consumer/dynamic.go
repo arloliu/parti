@@ -205,6 +205,20 @@ type DynamicConfig struct {
 	// contract (same-durable-name preservation, compatible-config
 	// restore, fresh-stream replay semantics).
 	StreamMissingHook types.StreamMissingHook
+
+	// OnPermanentFailure is the application-facing observability seam for
+	// permanent partition-consumer failure. It fires exactly once per
+	// partition consumer when the iterator-creation envelope or the
+	// stream-missing Site B detour exhausts its attempt budget; the
+	// consumption loop exits immediately afterwards.
+	//
+	// The callback runs synchronously on the consumption loop's goroutine
+	// and MUST be non-blocking. The error preserves the wrap chain:
+	// errors.Is(err, [types.ErrStreamMissing]) is true when stream-missing
+	// exhaustion drove the failure, so applications can route those
+	// distinctly (e.g. via Manager.enterDegraded) from generic envelope
+	// exhaustion. See [WithOnPermanentFailure] for the option form.
+	OnPermanentFailure func(subject string, err error)
 }
 
 // validateStreamMissingHookStrategy enforces the recovery-strategy
@@ -303,10 +317,23 @@ func NewDynamic(
 		PartitionRefreshMinInterval: o.partitionRefreshMinInterval,
 		IteratorFactory:             o.iteratorFactory,
 		RecoveryStrategy:            o.recoveryStrategy,
+		StreamMissingHook:           o.streamMissingHook,
+		OnPermanentFailure:          o.onPermanentFailure,
 	}
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
+	}
+
+	// Construct Dynamic first so the OnStreamRecreated closure can reference
+	// d.resetCompatCheck. The inner WorkerConsumer is assigned after
+	// construction succeeds; passing the closure value into workerCfg below
+	// is safe because the closure captures the d pointer (which does not
+	// change between this point and the return statement).
+	d := &Dynamic{
+		js:               js,
+		streamName:       streamName,
+		recoveryStrategy: o.recoveryStrategy,
 	}
 
 	// Build worker consumer config from unified DynamicConfig.
@@ -339,6 +366,9 @@ func NewDynamic(
 		IteratorEscalationThreshold: cfg.IteratorEscalationThreshold,
 		RecoveryStrategy:            cfg.RecoveryStrategy,
 		IteratorFactory:             cfg.IteratorFactory,
+		StreamMissingHook:           cfg.StreamMissingHook,
+		OnPermanentFailure:          cfg.OnPermanentFailure,
+		OnStreamRecreated:           d.resetCompatCheck,
 		Retry: durable.RetryConfig{
 			Backoff:    cfg.Retry.Backoff,
 			Max:        cfg.Retry.Max,
@@ -352,13 +382,9 @@ func NewDynamic(
 	if err != nil {
 		return nil, err
 	}
+	d.inner = inner
 
-	return &Dynamic{
-		inner:            inner,
-		js:               js,
-		streamName:       streamName,
-		recoveryStrategy: o.recoveryStrategy,
-	}, nil
+	return d, nil
 }
 
 // Update applies a new partition assignment set.

@@ -328,7 +328,7 @@ func (bc *BroadcastConsumer) runLoop(ctx context.Context) {
 		consumerConfig := bc.consumerConfig
 		bc.consumerMu.RUnlock()
 
-		action, newCons := bc.recovery.Classify(ctx, iterErr, bc.consumerInfoFn(), consumerConfig, bc.recreateFn())
+		action, newCons, classifyErr := bc.recovery.Classify(ctx, iterErr, bc.consumerInfoFn(), consumerConfig, bc.recreateFn())
 		switch action {
 		case recovery.ActionExit:
 			return
@@ -343,6 +343,17 @@ func (bc *BroadcastConsumer) runLoop(ctx context.Context) {
 			bc.recovery.SeedCheckpoint(ctx, bc.consumerInfoFn())
 
 			continue
+		case recovery.ActionStreamMissing:
+			// Broadcast does not own stream lifecycle; log for operator
+			// observability and backoff. No callback surface today.
+			bc.logger.Warn("broadcast consumer recovery classified stream missing",
+				"op", "broadcast_stream_missing",
+				"stream", bc.config.StreamName,
+				"error", classifyErr,
+			)
+			if bc.delayOrExit(ctx) {
+				return
+			}
 		case recovery.ActionBackoff:
 			if bc.delayOrExit(ctx) {
 				return

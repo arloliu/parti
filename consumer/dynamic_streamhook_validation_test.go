@@ -1,9 +1,11 @@
 package consumer
 
 import (
+	"context"
 	"testing"
 
 	"github.com/arloliu/parti/v2/types"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 )
 
@@ -78,3 +80,35 @@ func TestDynamicConfig_Validate_Hook_RecoverFromBeginning_Accepted(t *testing.T)
 
 	require.NoError(t, cfg.Validate())
 }
+
+// TestWithStreamMissingHook_OptionThreadedThroughNewDynamic pins the public
+// option-surface wiring: WithStreamMissingHook → o.streamMissingHook →
+// cfg.StreamMissingHook → cfg.Validate(). Without the threading, the option
+// would silently no-op and the strategy validation would never fire — a
+// caller pairing WithStreamMissingHook with RecoverFromNew would then
+// encounter the message-skip hazard at runtime instead of seeing the
+// rejection at construction time. cfg.Validate runs BEFORE
+// NewWorkerConsumer in NewDynamic, so an invalid-strategy rejection here
+// is observable evidence that the option reached the config without
+// requiring a live JetStream.
+func TestWithStreamMissingHook_OptionThreadedThroughNewDynamic(t *testing.T) {
+	_, err := NewDynamic(
+		fakeJS{}, // satisfies the not-nil check; NewDynamic fails at cfg.Validate before any js call.
+		"TEST_STREAM",
+		"wc",
+		"events.{{.PartitionID}}",
+		MessageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error { return nil }),
+		WithRecoveryStrategy(RecoverFromNew),
+		WithStreamMissingHook(func(string) error { return nil }),
+	)
+	require.Error(t, err, "WithStreamMissingHook + RecoverFromNew must be rejected via the validator")
+	require.ErrorIs(t, err, ErrInvalidConfig)
+	require.Contains(t, err.Error(), "RecoverFromNew",
+		"rejection text must name the incompatible strategy so the caller can fix it")
+}
+
+// fakeJS is a minimal jetstream.JetStream satisfying NewDynamic's not-nil
+// guard. The validator runs before any JetStream method is invoked; the
+// embedded nil interface panics if reached, which would be an obvious
+// signal that the validator was bypassed.
+type fakeJS struct{ jetstream.JetStream }

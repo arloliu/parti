@@ -179,6 +179,8 @@ type options struct {
 	maxConcurrentSubjects       int
 	allowWorkerIDChange         bool
 	partitionRefreshMinInterval time.Duration
+	streamMissingHook           types.StreamMissingHook
+	onPermanentFailure          func(subject string, err error)
 }
 
 // defaultOptions returns sensible defaults.
@@ -418,6 +420,63 @@ func WithAckPolicy(p jetstream.AckPolicy) Option {
 func WithRecoveryStrategy(strategy RecoveryStrategy) Option {
 	return universalOpt(func(o *options) {
 		o.recoveryStrategy = strategy
+	})
+}
+
+// WithStreamMissingHook installs the operator-driven escalation invoked when
+// the dynamic partition consumer's recovery flow detects the underlying
+// JetStream stream is absent. Configuring the hook is the way an application
+// learns "Parti's recovery loop has given up trying to find your stream;
+// please recreate it." See [types.StreamMissingHook] for the full operator
+// contract, including same-durable-name preservation, compatible-config
+// reconciliation, and the post-hook checkpoint reset / epoch fence semantics.
+//
+// Requires a non-disabled [RecoveryStrategy]. Only
+// [RecoverFromLastProcessed] (at-least-once, the common case) and
+// [RecoverFromBeginning] (replay-all, intentional duplicate processing) are
+// accepted at [NewDynamic] / [DynamicConfig.Validate] time. [RecoveryDisabled]
+// and [RecoverFromNew] are rejected because the recreated-stream replay
+// override that prevents the fresh-stream skip hazard only applies in the
+// at-least-once and from-beginning branches.
+//
+// Without a hook configured, a stream-missing classification surfaces via
+// the iterator-creation envelope's permanent-failure path: the error wraps
+// [types.ErrStreamMissing] and the Parti manager routes it through its
+// degraded-mode wiring so a readiness probe can rotate the pod.
+//
+// Applies only to [Dynamic]. The hook must be safe to call from a recovery
+// goroutine and should return promptly; long-running hooks delay the
+// consumer rebuild and keep the F2 envelope's attempt budget ticking.
+func WithStreamMissingHook(hook types.StreamMissingHook) DynamicOption {
+	return dynamicOpt(func(o *options) {
+		o.streamMissingHook = hook
+	})
+}
+
+// WithOnPermanentFailure installs a callback fired exactly once per
+// partition consumer when its iterator-creation retry envelope or
+// stream-missing Site B detour exhausts its attempt budget. The callback
+// is the primary observability seam between the bounded recovery loops
+// and the application's manager / readiness wiring.
+//
+// The callback fires synchronously on the consumption loop's goroutine
+// immediately before the loop exits. It MUST be non-blocking; long work
+// should be offloaded to a goroutine inside the callback so partition
+// teardown is not delayed.
+//
+// The error passed to the callback preserves the wrap chain of the
+// underlying cause. When stream-missing exhaustion drove the failure,
+// errors.Is(err, [parti.ErrStreamMissing]) is true; the application can
+// branch on that to distinguish "stream is gone, operator must recreate
+// it" from "iter-create budget exhausted for some other reason".
+//
+// Applies only to [Dynamic]. Optional; if unset, exhaustion is logged at
+// WARN with metric `iterator_restart{reason="recovery_exhausted"}` or
+// `iterator_restart{reason="stream_missing_exhausted"}` but no callback
+// fires.
+func WithOnPermanentFailure(fn func(subject string, err error)) DynamicOption {
+	return dynamicOpt(func(o *options) {
+		o.onPermanentFailure = fn
 	})
 }
 

@@ -296,7 +296,7 @@ func (c *JSConsumer) run(ctx context.Context) {
 		consumerConfig := c.consumerConfig
 		c.consumerMu.RUnlock()
 
-		action, newCons := c.rc.Classify(ctx, iterErr, c.consumerInfoFn(), consumerConfig, c.recreateFn())
+		action, newCons, classifyErr := c.rc.Classify(ctx, iterErr, c.consumerInfoFn(), consumerConfig, c.recreateFn())
 		switch action {
 		case recovery.ActionExit:
 			return
@@ -311,6 +311,17 @@ func (c *JSConsumer) run(ctx context.Context) {
 			c.rc.SeedCheckpoint(ctx, c.consumerInfoFn())
 
 			continue
+		case recovery.ActionStreamMissing:
+			// JSConsumer does not own stream lifecycle; log for operator
+			// observability and backoff. No callback surface today.
+			c.config.Logger.Warn("js consumer recovery classified stream missing",
+				"op", "js_consumer_stream_missing",
+				"stream", c.config.StreamName,
+				"error", classifyErr,
+			)
+			if !sleepWithContext(ctx) {
+				return
+			}
 		case recovery.ActionBackoff:
 			if !sleepWithContext(ctx) {
 				return

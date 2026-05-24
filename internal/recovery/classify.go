@@ -61,4 +61,12 @@ const (
 
 	// ActionExit means the loop should exit (graceful shutdown).
 	ActionExit
+
+	// ActionStreamMissing means recovery detected that the underlying
+	// JetStream stream is absent. The companion error returned by
+	// Classify wraps types.ErrStreamMissing so callers can route the
+	// signal to the operator-supplied StreamMissingHook (Dynamic
+	// partition consumer) or log + backoff (Queue, Broadcast,
+	// internal/ipartition — they do not own stream lifecycle).
+	ActionStreamMissing
 )

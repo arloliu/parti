@@ -307,6 +307,18 @@ type WorkerConsumerConfig struct {
 	// Default: RecoveryDisabled (no auto-recovery).
 	RecoveryStrategy RecoveryStrategy
 
+	// OnStreamRecreated is invoked on the consumption loop's goroutine
+	// after the partition consumer's stream-missing detour has driven
+	// the recovery controller through HandleStreamRecreated (post-hook
+	// success). Wiring layers (currently consumer.Dynamic) use it to
+	// reset transient per-stream-identity caches such as the WorkQueue
+	// compatibility check. Optional; nil is safe.
+	//
+	// The callback runs synchronously; it must be non-blocking. Heavy
+	// work should be offloaded to a goroutine inside the callback so
+	// the partition consumer can resume the rebuild promptly.
+	OnStreamRecreated func()
+
 	// StreamMissingHook fires when the partition consumer cannot create
 	// a consumer because the underlying JetStream stream is absent. The
 	// hook is the escalation path for operator-driven stream recreation;

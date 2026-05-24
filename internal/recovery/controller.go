@@ -141,55 +141,70 @@ func (c *Controller) Strategy() Strategy {
 // baseCfg and recreate are used to perform recovery when needed.
 // infoFn is called only when burst threshold is reached.
 //
-// Returns ActionContinue if recovery succeeded, ActionBackoff if the caller should
-// retry with backoff, or ActionExit for graceful shutdown.
+// Returns:
+//   - (ActionContinue, newCons, nil) if recovery succeeded and the caller
+//     should adopt newCons and reset backoff state.
+//   - (ActionBackoff, nil, nil) if no recovery was needed or recovery
+//     failed transiently; the caller should backoff and retry.
+//   - (ActionExit, nil, nil) for graceful shutdown.
+//   - (ActionStreamMissing, nil, err) when recovery determined that the
+//     underlying JetStream stream is absent. The returned error wraps
+//     types.ErrStreamMissing so callers can route via errors.Is. No
+//     internal recovery state advances on this path.
 func (c *Controller) Classify(
 	ctx context.Context,
 	err error,
 	infoFn InfoFunc,
 	baseCfg jetstream.ConsumerConfig,
 	recreate RecreateFunc,
-) (Action, jetstream.Consumer) {
+) (Action, jetstream.Consumer, error) {
 	if c == nil {
-		return ActionBackoff, nil
+		return ActionBackoff, nil, nil
 	}
 
 	class := ClassifyError(err)
 
 	switch class {
 	case ErrorGracefulExit:
-		return ActionExit, nil
+		return ActionExit, nil, nil
 
 	case ErrorConsumerGone:
 		c.emitIteratorRestart("consumer_deleted")
-		newCons, ok := c.recover(ctx, "consumer_deleted", baseCfg, recreate)
-		if ok {
-			return ActionContinue, newCons
+		newCons, recErr := c.recover(ctx, "consumer_deleted", baseCfg, recreate)
+		if recErr != nil {
+			return ActionStreamMissing, nil, recErr
 		}
-		return ActionBackoff, nil
+		if newCons != nil {
+			return ActionContinue, newCons, nil
+		}
+
+		return ActionBackoff, nil, nil
 
 	case ErrorNeedsConfirm:
 		c.emitIteratorRestart("heartbeat")
 		if !c.burst.Record() {
-			return ActionBackoff, nil // not enough failures yet
+			return ActionBackoff, nil, nil // not enough failures yet
 		}
 		// Burst threshold reached — confirm via consumer.Info().
 		if !c.confirmConsumerGone(ctx, infoFn) {
-			return ActionBackoff, nil // consumer still exists, transient issue
+			return ActionBackoff, nil, nil // consumer still exists, transient issue
 		}
-		newCons, ok := c.recover(ctx, "consumer_not_found_after_burst", baseCfg, recreate)
-		if ok {
-			return ActionContinue, newCons
+		newCons, recErr := c.recover(ctx, "consumer_not_found_after_burst", baseCfg, recreate)
+		if recErr != nil {
+			return ActionStreamMissing, nil, recErr
+		}
+		if newCons != nil {
+			return ActionContinue, newCons, nil
 		}
 
-		return ActionBackoff, nil
+		return ActionBackoff, nil, nil
 
 	case ErrorTransient:
 		c.emitIteratorRestart("transient")
-		return ActionBackoff, nil
+		return ActionBackoff, nil, nil
 	}
 
-	return ActionBackoff, nil
+	return ActionBackoff, nil, nil
 }
 
 // WrapForTracking returns a jetstream.Msg that intercepts Ack/DoubleAck to advance
@@ -412,15 +427,28 @@ func (c *Controller) ResetBurst() {
 }
 
 // recover serializes recovery attempts, builds recovery config, calls recreate,
-// and re-seeds the checkpoint. Returns the new consumer and true on success.
+// and re-seeds the checkpoint. Returns:
+//   - (newCons, nil) on success.
+//   - (nil, nil) when the attempt is short-circuited (another recovery in
+//     flight, context canceled, cooldown in effect) or when recreate fails
+//     with a transient error. The caller should backoff and retry.
+//   - (nil, wrappedErr) where wrappedErr wraps types.ErrStreamMissing when
+//     recreate fails with a stream-not-found classification. The caller is
+//     expected to route this through the stream-missing detour rather than
+//     advance internal recovery state — lastRecoveryTime, burst, and
+//     checkpoint are intentionally NOT updated on this path.
 func (c *Controller) recover(
 	ctx context.Context,
 	reason string,
 	baseCfg jetstream.ConsumerConfig,
 	recreate RecreateFunc,
-) (jetstream.Consumer, bool) {
+) (jetstream.Consumer, error) {
+	// Contract: (nil, nil) is the documented "no-op, backoff" signal —
+	// Classify maps it to ActionBackoff and only ActionStreamMissing
+	// surfaces a non-nil error. The nilnil lint disables below are
+	// intentional and per-return.
 	if !c.inProgress.CompareAndSwap(false, true) {
-		return nil, false // another recovery in flight
+		return nil, nil //nolint:nilnil // another recovery in flight.
 	}
 	defer c.inProgress.Store(false)
 
@@ -428,7 +456,7 @@ func (c *Controller) recover(
 	defer c.mu.Unlock()
 
 	if ctx.Err() != nil {
-		return nil, false
+		return nil, nil //nolint:nilnil // ctx cancelled before lock acquired.
 	}
 
 	// Rate-limit consecutive recoveries to prevent a tight create-delete loop
@@ -442,7 +470,7 @@ func (c *Controller) recover(
 			"min_interval_ms", c.minRecoveryInterval.Milliseconds(),
 		)
 
-		return nil, false
+		return nil, nil //nolint:nilnil // see recover()'s contract above.
 	}
 
 	attempt := beginAttempt(c.metrics, reason)
@@ -471,17 +499,31 @@ func (c *Controller) recover(
 	)
 
 	if ctx.Err() != nil {
-		return nil, false
+		return nil, nil //nolint:nilnil // see recover()'s contract above.
 	}
 
 	newCons, err := recreate(ctx, recoverCfg)
 	if err != nil {
+		if natsutil.IsStreamNotFound(err) {
+			// Stream-missing escalation: bail without advancing
+			// lastRecoveryTime, burst, or checkpoint. The caller's
+			// detour invokes the operator-supplied hook and, on
+			// success, calls RebuildAfterStreamRecreated which has
+			// its own state-advance semantics.
+			c.logger.Warn("consumer recovery surfaced stream missing",
+				"op", "consumer_recovery",
+				"reason", reason,
+				"error", err,
+			)
+			return nil, fmt.Errorf("%w: %w", types.ErrStreamMissing, err)
+		}
 		c.logger.Warn("consumer recovery failed",
 			"op", "consumer_recovery",
 			"reason", reason,
 			"error", err,
 		)
-		return nil, false
+
+		return nil, nil //nolint:nilnil // see recover()'s contract above.
 	}
 
 	c.burst.Reset()
@@ -495,7 +537,7 @@ func (c *Controller) recover(
 
 	success = true
 
-	return newCons, true
+	return newCons, nil
 }
 
 // confirmConsumerGone calls consumer.Info() and returns true if the consumer is confirmed gone.

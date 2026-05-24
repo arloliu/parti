@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/arloliu/parti/v2/internal/logging"
+	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 )
@@ -84,7 +85,7 @@ func TestNilController_SafeToCall(t *testing.T) {
 	var c *Controller
 	require.Equal(t, Disabled, c.Strategy())
 
-	action, cons := c.Classify(context.Background(), jetstream.ErrConsumerDeleted, nil, baseCfg, nil)
+	action, cons, _ := c.Classify(context.Background(), jetstream.ErrConsumerDeleted, nil, baseCfg, nil)
 	require.Equal(t, ActionBackoff, action)
 	require.Nil(t, cons)
 
@@ -99,13 +100,13 @@ func TestClassify_GracefulExit(t *testing.T) {
 		Logger:   nopLog,
 	})
 
-	action, _ := c.Classify(context.Background(), jetstream.ErrMsgIteratorClosed, nil, baseCfg, nil)
+	action, _, _ := c.Classify(context.Background(), jetstream.ErrMsgIteratorClosed, nil, baseCfg, nil)
 	require.Equal(t, ActionExit, action)
 
-	action, _ = c.Classify(context.Background(), context.Canceled, nil, baseCfg, nil)
+	action, _, _ = c.Classify(context.Background(), context.Canceled, nil, baseCfg, nil)
 	require.Equal(t, ActionExit, action)
 
-	action, _ = c.Classify(context.Background(), nil, nil, baseCfg, nil)
+	action, _, _ = c.Classify(context.Background(), nil, nil, baseCfg, nil)
 	require.Equal(t, ActionExit, action)
 }
 
@@ -117,11 +118,43 @@ func TestClassify_ConsumerDeleted_RecoverySucceeds(t *testing.T) {
 		Metrics:  metrics,
 	})
 
-	action, newCons := c.Classify(context.Background(), jetstream.ErrConsumerDeleted, nil, baseCfg, alwaysSucceedRecreate)
+	action, newCons, _ := c.Classify(context.Background(), jetstream.ErrConsumerDeleted, nil, baseCfg, alwaysSucceedRecreate)
 	require.Equal(t, ActionContinue, action)
 	require.NotNil(t, newCons)
 	require.Equal(t, []string{"consumer_deleted"}, metrics.iterRestartReasons)
 	require.Equal(t, []string{"success"}, metrics.results)
+}
+
+// TestClassify_ConsumerDeleted_RecreateStreamNotFound pins the P2.3 wire
+// contract: when the recreate function returns a stream-not-found error,
+// Classify returns ActionStreamMissing with a non-nil error wrapping
+// types.ErrStreamMissing — and does NOT advance internal recovery state
+// (lastRecoveryTime stays zero so the caller's detour can run immediately).
+func TestClassify_ConsumerDeleted_RecreateStreamNotFound(t *testing.T) {
+	metrics := &testMetrics{}
+	c := NewController(ControllerConfig{
+		Strategy: FromNew,
+		Logger:   nopLog,
+		Metrics:  metrics,
+	})
+
+	streamNotFound := func(_ context.Context, _ jetstream.ConsumerConfig) (jetstream.Consumer, error) {
+		return nil, jetstream.ErrStreamNotFound
+	}
+
+	action, newCons, err := c.Classify(context.Background(), jetstream.ErrConsumerDeleted, nil, baseCfg, streamNotFound)
+	require.Equal(t, ActionStreamMissing, action)
+	require.Nil(t, newCons)
+	require.ErrorIs(t, err, types.ErrStreamMissing,
+		"stream-not-found recreate error must surface as wrapped types.ErrStreamMissing")
+	require.ErrorIs(t, err, jetstream.ErrStreamNotFound,
+		"original cause must remain in the wrap chain so the operator can diagnose")
+
+	// State must NOT advance — the detour relies on lastRecoveryTime
+	// being unset so its immediate post-hook RebuildAfterStreamRecreated
+	// is not throttled by the cooldown.
+	require.True(t, c.lastRecoveryTime.IsZero(), "stream-missing must not advance lastRecoveryTime")
+	require.Equal(t, []string{"failure"}, metrics.results, "metric still records the failed attempt")
 }
 
 func TestClassify_ConsumerDeleted_RecoveryFails(t *testing.T) {
@@ -132,7 +165,7 @@ func TestClassify_ConsumerDeleted_RecoveryFails(t *testing.T) {
 		Metrics:  metrics,
 	})
 
-	action, newCons := c.Classify(context.Background(), jetstream.ErrConsumerDeleted, nil, baseCfg, alwaysFailRecreate)
+	action, newCons, _ := c.Classify(context.Background(), jetstream.ErrConsumerDeleted, nil, baseCfg, alwaysFailRecreate)
 	require.Equal(t, ActionBackoff, action)
 	require.Nil(t, newCons)
 	require.Equal(t, []string{"failure"}, metrics.results)
@@ -149,9 +182,9 @@ func TestClassify_NoHeartbeat_BelowThreshold(t *testing.T) {
 	})
 
 	// 2 heartbeat errors — below threshold of 3
-	action, _ := c.Classify(context.Background(), jetstream.ErrNoHeartbeat, nil, baseCfg, nil)
+	action, _, _ := c.Classify(context.Background(), jetstream.ErrNoHeartbeat, nil, baseCfg, nil)
 	require.Equal(t, ActionBackoff, action)
-	action, _ = c.Classify(context.Background(), jetstream.ErrNoHeartbeat, nil, baseCfg, nil)
+	action, _, _ = c.Classify(context.Background(), jetstream.ErrNoHeartbeat, nil, baseCfg, nil)
 	require.Equal(t, ActionBackoff, action)
 
 	require.Equal(t, []string{"heartbeat", "heartbeat"}, metrics.iterRestartReasons)
@@ -169,11 +202,11 @@ func TestClassify_NoHeartbeat_BurstConfirmedGone(t *testing.T) {
 	})
 
 	// 1st: below threshold
-	action, _ := c.Classify(context.Background(), jetstream.ErrNoHeartbeat, alwaysNotFoundInfo, baseCfg, alwaysSucceedRecreate)
+	action, _, _ := c.Classify(context.Background(), jetstream.ErrNoHeartbeat, alwaysNotFoundInfo, baseCfg, alwaysSucceedRecreate)
 	require.Equal(t, ActionBackoff, action)
 
 	// 2nd: threshold reached, Info() confirms gone, recovery succeeds
-	action, newCons := c.Classify(context.Background(), jetstream.ErrNoHeartbeat, alwaysNotFoundInfo, baseCfg, alwaysSucceedRecreate)
+	action, newCons, _ := c.Classify(context.Background(), jetstream.ErrNoHeartbeat, alwaysNotFoundInfo, baseCfg, alwaysSucceedRecreate)
 	require.Equal(t, ActionContinue, action)
 	require.NotNil(t, newCons)
 	require.Equal(t, []string{"success"}, metrics.results)
@@ -187,9 +220,9 @@ func TestClassify_NoHeartbeat_BurstButConsumerStillExists(t *testing.T) {
 		Logger:         nopLog,
 	})
 
-	c.Classify(context.Background(), jetstream.ErrNoHeartbeat, alwaysSuccessInfo, baseCfg, nil)
+	_, _, _ = c.Classify(context.Background(), jetstream.ErrNoHeartbeat, alwaysSuccessInfo, baseCfg, nil)
 	// 2nd: threshold reached, but Info() says consumer exists — no recovery
-	action, newCons := c.Classify(context.Background(), jetstream.ErrNoHeartbeat, alwaysSuccessInfo, baseCfg, nil)
+	action, newCons, _ := c.Classify(context.Background(), jetstream.ErrNoHeartbeat, alwaysSuccessInfo, baseCfg, nil)
 	require.Equal(t, ActionBackoff, action)
 	require.Nil(t, newCons)
 }
@@ -202,7 +235,7 @@ func TestClassify_TransientError(t *testing.T) {
 		Metrics:  metrics,
 	})
 
-	action, _ := c.Classify(context.Background(), errors.New("something"), nil, baseCfg, nil)
+	action, _, _ := c.Classify(context.Background(), errors.New("something"), nil, baseCfg, nil)
 	require.Equal(t, ActionBackoff, action)
 	require.Equal(t, []string{"transient"}, metrics.iterRestartReasons)
 }
@@ -216,7 +249,7 @@ func TestClassify_CancelledContext_NoRecovery(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	action, _ := c.Classify(ctx, jetstream.ErrConsumerDeleted, nil, baseCfg, alwaysSucceedRecreate)
+	action, _, _ := c.Classify(ctx, jetstream.ErrConsumerDeleted, nil, baseCfg, alwaysSucceedRecreate)
 	// Recovery should fail because ctx is cancelled
 	require.Equal(t, ActionBackoff, action)
 }
@@ -252,7 +285,7 @@ func TestRecovery_Serialization(t *testing.T) {
 	// Simulate in-progress recovery by setting the flag.
 	c.inProgress.Store(true)
 
-	action, newCons := c.Classify(context.Background(), jetstream.ErrConsumerDeleted, nil, baseCfg, alwaysSucceedRecreate)
+	action, newCons, _ := c.Classify(context.Background(), jetstream.ErrConsumerDeleted, nil, baseCfg, alwaysSucceedRecreate)
 	// Recovery should be skipped because another is in progress.
 	require.Equal(t, ActionBackoff, action)
 	require.Nil(t, newCons)
@@ -295,7 +328,7 @@ func TestController_Classify_Concurrent(t *testing.T) {
 	for range goroutines {
 		go func() {
 			defer wg.Done()
-			c.Classify(context.Background(), jetstream.ErrConsumerDeleted, nil, baseCfg, recreate)
+			_, _, _ = c.Classify(context.Background(), jetstream.ErrConsumerDeleted, nil, baseCfg, recreate)
 		}()
 	}
 
@@ -331,7 +364,7 @@ func TestController_AdvanceAndClassify_Concurrent(t *testing.T) {
 	// hitting recovery while AdvanceCheckpoint is still running).
 	wg.Go(func() {
 		for range 50 {
-			c.Classify(ctx, jetstream.ErrConsumerDeleted, nil, baseCfg,
+			_, _, _ = c.Classify(ctx, jetstream.ErrConsumerDeleted, nil, baseCfg,
 				func(_ context.Context, _ jetstream.ConsumerConfig) (jetstream.Consumer, error) {
 					return &stubConsumer{}, nil
 				},

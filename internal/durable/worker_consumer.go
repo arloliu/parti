@@ -409,6 +409,8 @@ func (wc *WorkerConsumer) addSubjectLoop(ctx context.Context, workerID string, s
 		IteratorEscalationThreshold: wc.config.IteratorEscalationThreshold,
 		RecoveryRetry:               wc.config.RecoveryRetry,
 		OnPermanentFailure:          wc.config.OnPermanentFailure,
+		StreamMissingHook:           wc.config.StreamMissingHook,
+		OnStreamRecreated:           wc.config.OnStreamRecreated,
 		Metrics:                     wc.config.Metrics,
 	}
 
