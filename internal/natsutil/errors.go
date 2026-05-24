@@ -31,6 +31,39 @@ func IsConsumerNotFound(err error) bool {
 		errors.Is(err, jetstream.ErrConsumerNotFound)
 }
 
+// IsBenignWatcherStopErr reports whether err from a KV/JetStream
+// watcher.Stop call is benign — i.e., it means the underlying
+// subscription/consumer is already gone and the Stop is a no-op.
+//
+// Two sentinels are tolerated:
+//
+//   - "consumer not found" (see [IsConsumerNotFound]): the server has
+//     already deleted the consumer (e.g., MaxAge purge or ephemeral
+//     auto-cleanup) before our Stop call reached it.
+//
+//   - [nats.ErrBadSubscription] ("nats: invalid subscription"): the
+//     subscription has already been unsubscribed locally. This happens
+//     routinely when a context was passed to the watcher constructor
+//     (via [nats.Context]): the nats.go JetStream Subscribe path spawns
+//     an internal goroutine that calls sub.Unsubscribe when ctx is
+//     canceled (see nats.go js.go: `go func() { <-ctx.Done();
+//     sub.Unsubscribe() }()` after the subscription is created). If the
+//     caller cancels that context before calling watcher.Stop, the
+//     internal goroutine can win the race and invalidate the
+//     subscription first, making the subsequent Stop return
+//     ErrBadSubscription. The Stop is still a successful teardown — the
+//     caller's intent (release the watcher) has been met.
+//
+// Use this at every watcher.Stop callsite where the source has its own
+// lifecycle context that is canceled around the same time as Stop.
+func IsBenignWatcherStopErr(err error) bool {
+	if err == nil {
+		return true
+	}
+
+	return IsConsumerNotFound(err) || errors.Is(err, nats.ErrBadSubscription)
+}
+
 // IsStreamNotFound reports whether err indicates a "stream not found" error.
 //
 // Both the root nats and jetstream sentinels are checked for the same reason

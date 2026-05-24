@@ -334,7 +334,7 @@ func (m *WorkerMonitor) stopWatcher() {
 	defer m.watcherMu.Unlock()
 
 	if m.watcher != nil {
-		if err := m.watcher.Stop(); err != nil && !natsutil.IsConsumerNotFound(err) {
+		if err := m.watcher.Stop(); err != nil && !natsutil.IsBenignWatcherStopErr(err) {
 			m.logger.Warn("failed to stop watcher", "error", err)
 		}
 		m.watcher = nil
@@ -352,7 +352,7 @@ func (m *WorkerMonitor) processWatcherEvents(ctx context.Context) error {
 		return fmt.Errorf("failed to start heartbeat watcher: %w", err)
 	}
 	defer func() {
-		if serr := watcher.Stop(); serr != nil && !natsutil.IsConsumerNotFound(serr) {
+		if serr := watcher.Stop(); serr != nil && !natsutil.IsBenignWatcherStopErr(serr) {
 			m.logger.Warn("failed to stop heartbeat watcher", "error", serr)
 		}
 		m.watcherMu.Lock()
