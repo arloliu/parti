@@ -6,6 +6,11 @@ and shows you how to update your code.
 > **Estimated effort**: Most projects can migrate in under an hour.
 > Run `go vet ./...` after each section to catch stragglers.
 
+> **Already on v2.x?** A separate breaking change to `Manager.Start`'s
+> return contract is documented in
+> [docs/MIGRATING_MANAGER_START.md](MIGRATING_MANAGER_START.md) for the
+> upcoming release.
+
 ---
 
 ## Table of Contents

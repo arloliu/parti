@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+> **Full migration guide:** [`docs/MIGRATING_MANAGER_START.md`](docs/MIGRATING_MANAGER_START.md)
+
 - `Manager.Start(ctx)` now returns once the synchronous sanity-check phase
   succeeds (stable worker ID claimed, KV buckets exist, election complete,
   heartbeat and calculator wired) — i.e. when the worker has transitioned

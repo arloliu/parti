@@ -82,6 +82,12 @@ Runs the manager's synchronous sanity-check phase.
 func (m *Manager) Start(ctx context.Context) error
 ```
 
+> **Breaking change:** the return contract changed in the upcoming
+> release — `Start` no longer blocks until `StateStable`. If you are
+> upgrading from v2.4.x or earlier and your code reads
+> `CurrentAssignment()` immediately after `Start`, see
+> [Migrating: Manager.Start returns at StateWaitingAssignment](MIGRATING_MANAGER_START.md).
+
 Start returns once the worker has claimed a stable ID, ensured KV
 buckets exist, completed the election round, and wired the heartbeat
 publisher + (if leader) calculator. The state observed after `Start`
