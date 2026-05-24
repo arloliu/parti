@@ -7,6 +7,7 @@
 - [Architecture](ARCHITECTURE.md) - System architecture and concepts
 - [Configuration Guide](CONFIGURATION.md) - Configuration options
 - [Consumer Helpers](CONSUMERS.md) - JetStream consumer management
+- [Migrating: `Manager.Start` returns at `StateWaitingAssignment`](MIGRATING_MANAGER_START.md) - breaking change in the upcoming release; affects every caller that reads `CurrentAssignment()` immediately after `Start`
 
 ---
 

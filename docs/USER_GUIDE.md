@@ -166,6 +166,10 @@ func main() {
     // Start and wait for stable state. Manager.Start returns once the
     // synchronous sanity-check phase completes (StateWaitingAssignment);
     // the initial assignment fetch + apply runs in the background.
+    //
+    // Upgrading from v2.4.x or earlier and need to migrate existing
+    // callers that read CurrentAssignment() immediately after Start?
+    // See docs/MIGRATING_MANAGER_START.md.
     ctx := context.Background()
     if err := mgr.Start(ctx); err != nil {
         log.Fatal(err)

@@ -61,6 +61,13 @@ mgr.Start(context.Background())
 | [Provision Guide](PROVISION.md)   | provision SDK and partictl CLI for NATS resource management |
 | [Kubernetes Operator](KUBERNETES.md) | ProvisionedPartiEnv CRD, install steps, CRD reference |
 
+### Migration Guides
+
+| Document                                                | Description                                                              |
+|---------------------------------------------------------|--------------------------------------------------------------------------|
+| [Migrating from v1 to v2](MIGRATING_TO_V2.md)           | Module path, import renames, Manager/Config/Metrics/Partition changes    |
+| [Migrating: `Manager.Start` returns at `StateWaitingAssignment`](MIGRATING_MANAGER_START.md) | Breaking change in the upcoming release — `Start` no longer blocks until `StateStable`; use `WaitState` |
+
 ---
 
 ## 🛠️ Development
