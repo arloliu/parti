@@ -98,6 +98,10 @@ type Config struct {
 	// and before finalizing to stable. Useful for external observation of the commit state.
 	// Ignored if <= 0.
 	DelayBeforeStable time.Duration
+	// PhaseConcurrency caps in-flight per-partition KV ops per phase. Zero or
+	// negative is the "use default 20" sentinel set by the parti-side
+	// HandoffConfig contract; New() normalizes the value in place.
+	PhaseConcurrency int
 }
 
 // New returns a Coordinator implementation.
@@ -127,6 +131,9 @@ func New(cfg Config, enableTwoPhase bool) Coordinator {
 	// Default sweep interval
 	if cfg.SweepInterval == 0 {
 		cfg.SweepInterval = 30 * time.Second
+	}
+	if cfg.PhaseConcurrency <= 0 {
+		cfg.PhaseConcurrency = 20
 	}
 	// Default TTL if store is enabled but TTL is missing
 	if cfg.Store != nil && cfg.TTL == 0 {

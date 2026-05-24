@@ -690,6 +690,36 @@ func TestConfig_Validate_AcceptsWorkerIDTTLAtFloor(t *testing.T) {
 	require.NoError(t, cfg.Validate(), "WorkerIDTTL at the floor must be accepted")
 }
 
+func TestHandoffConfig_PhaseConcurrency_Validation(t *testing.T) {
+	cases := []struct {
+		name        string
+		concurrency int
+		wantErr     bool
+	}{
+		{"zero is allowed (sentinel for default 20)", 0, false},
+		{"one is allowed (serial mode)", 1, false},
+		{"positive within cap is allowed", 50, false},
+		{"negative is rejected", -1, true},
+		{"above 256 cap is rejected", 257, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := TestConfig()
+			cfg.EnableTwoPhaseHandoff = true
+			cfg.KVBuckets.HandoffBucket = "test-handoff"
+			cfg.KVBuckets.HandoffTTL = 1 * time.Minute
+			cfg.Handoff.PhaseConcurrency = tc.concurrency
+			err := cfg.Validate()
+			if tc.wantErr {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), "PhaseConcurrency")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestConfig_ApplyStartJitter_Validation(t *testing.T) {
 	cases := []struct {
 		name    string
