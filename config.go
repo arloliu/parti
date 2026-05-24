@@ -489,6 +489,29 @@ type Config struct {
 	// ApplyStartJitter <= StartupTimeout / 4. A focused test pins this
 	// (TestApplyStartJitter_StartupBudget).
 	ApplyStartJitter time.Duration `yaml:"applyStartJitter" default:"0" validate:"gte=0"`
+
+	// AssignmentWatcherDebounce is the idle-window duration used to coalesce
+	// rapid bursts of assignment-watcher events into a single apply. When > 0,
+	// runAssignmentWatchSession holds the latest received entry in a pending
+	// slot and (re)starts a timer of this duration on each delivery; the
+	// timer only fires when the watcher stream has been idle for the full
+	// window, at which point handleAssignmentEntry processes the pending
+	// entry exactly once.
+	//
+	// A Raft re-election can publish V=N, V=N+1, ..., V=N+k inside a short
+	// window; without debouncing, all k+1 versions enter the apply pipeline
+	// and each invokes a full prepare/commit/stabilize handoff cycle. With
+	// debouncing, only the final (highest) version is applied.
+	//
+	// Default 0 disables debouncing (preserves pre-PR-3 behavior). Recommended
+	// value derived from the apply-coalescing diagnostic
+	// (PARTI_RUN_HERD_DIAGNOSTIC=1) plus a 50 ms safety margin — typically
+	// in the 100–300 ms range.
+	//
+	// Hard-capped at 1 second by Validate(): a larger window would dwarf
+	// reasonable reassignment-latency budgets and risk masking real apply
+	// failures behind what looks like apply slowness.
+	AssignmentWatcherDebounce time.Duration `yaml:"assignmentWatcherDebounce" default:"0" validate:"gte=0"`
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -633,6 +656,14 @@ func (cfg *Config) Validate() error {
 	}
 	if cfg.ApplyStartJitter > 10*time.Second {
 		return errors.New("ApplyStartJitter must be <= 10s")
+	}
+
+	// Rule 12: AssignmentWatcherDebounce range
+	if cfg.AssignmentWatcherDebounce < 0 {
+		return errors.New("AssignmentWatcherDebounce must be >= 0")
+	}
+	if cfg.AssignmentWatcherDebounce > 1*time.Second {
+		return errors.New("AssignmentWatcherDebounce must be <= 1s")
 	}
 
 	return nil

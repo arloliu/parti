@@ -66,6 +66,55 @@ the leader-calculator race, and mirrors the precedent in
 `TestStart_WatchdogFiresAfterStartupTimeout` documented in the previous
 section.
 
+## Task 3.3: Diagnostic uses worker churn instead of Raft meta-election
+
+**Plan citation:** `tmp/nats-thundering-herd-hardening-plan.md` §"Task 3.3:
+Multi-version-burst diagnostic + window-sizing measurement", Step 1 ("Boot
+3-node embedded NATS cluster... identify the JetStream meta-leader and
+forcibly stop that NATS node. The cluster will hold an election; assignment-
+bucket leadership flips; the new leader re-publishes the active assignment,
+which the workers' assignment-watchers see.").
+
+**What the plan asks for:** A 3-node embedded NATS cluster where the
+JetStream meta-leader is killed mid-test. The resulting Raft election causes
+the new leader to re-publish the active assignment, producing a rapid burst of
+identical assignment versions hitting every worker's watcher simultaneously.
+
+**Why that doesn't work here:** No 3-node embedded-NATS cluster helper exists
+in this repo. The only available helper is `testutil.StartEmbeddedNATS(t)`,
+which is single-node. A single-node JetStream server has no peer to elect
+against; "killing the leader" stops the only node and disconnects every
+worker — a completely different failure mode from the leadership-flip burst the
+diagnostic is designed to measure.
+
+**Substitute trigger used:** Worker-churn rebalancing via
+`WorkerCluster.AddWorkerWithOptions`. The test starts 20 workers and waits
+for `StateStable`, then adds one extra worker in each of 3 waves
+(`soakAfter/numWaves = 3.3 s` apart). Each addition causes the leader
+calculator to re-publish a new assignment version, which hits every existing
+worker's assignment-watcher and calls `RecordApplyAttempt`. This is the same
+apply-pipeline path that Raft re-election triggers; the measurement
+infrastructure is identical.
+
+**End-to-end result (single run, single-node NATS):**
+
+```
+AGGREGATE max_burst_size=1 max_burst_duration=0s recommended_debounce_window=50ms
+```
+
+`max_burst_size=1` reflects that under single-node embedded NATS each
+rebalance produces exactly one assignment notification per worker with no
+rapid-fire duplicates — no thundering herd is observable at this scale. This
+is the expected baseline; the debounce guards against Raft-election bursts in
+production multi-node clusters where the new leader and the old in-flight
+messages can arrive within milliseconds of each other.
+
+**Adapting to a multi-node cluster:** Operators or CI with access to a
+production-grade NATS endpoint can replace `testutil.StartEmbeddedNATS(t)`
+with any `*nats.Conn` pointing at a multi-node cluster and add a
+meta-leader kill step between Phase 1 and Phase 2. The
+`recordingBurstCollector` and all burst-analysis helpers remain unchanged.
+
 ## Task 9a: Cold-start empty test relaxed
 
 **Plan citation:** Task 9a Step 1 sketches

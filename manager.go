@@ -210,6 +210,18 @@ type Manager struct {
 	// sampling. Set ONLY by same-package tests before the relevant goroutine
 	// starts; production MUST leave this nil.
 	applyJitterSampler func(maxJitter time.Duration) time.Duration
+
+	// testHookHandleAssignment, when non-nil, is invoked instead of
+	// handleAssignmentEntry from runAssignmentWatchSession's debounce-fire
+	// and channel-close-flush branches. Set ONLY by tests in this package
+	// to assert idle-window debounce semantics without booting NATS.
+	// Production code MUST NOT set this field; it is nil-default. See
+	// TestAssignmentWatcher_DebouncesMultiVersionBurst.
+	//
+	// Concurrency contract: tests must set this field BEFORE spawning the
+	// runAssignmentWatchSession goroutine and MUST NOT mutate it
+	// afterwards. The session reads the field from a single goroutine.
+	testHookHandleAssignment func(workerID string, entry jetstream.KeyValueEntry)
 }
 
 // assignmentCalculator defines the interface for partition assignment calculation.

@@ -63,6 +63,11 @@ func (n *NopMetrics) IncrementAlertEmitted(_ /* level */ string) {
 	// No-op
 }
 
+// RecordApplyAttempt discards the apply-attempt counter.
+func (n *NopMetrics) RecordApplyAttempt(_ /* workerID */ string, _ /* version */ int64) {
+	// No-op
+}
+
 // CalculatorMetrics implementation
 
 // RecordRebalanceDuration discards the rebalance duration metric.
