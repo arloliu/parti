@@ -46,14 +46,17 @@ import (
 // load-bearing.
 //
 // Why a loop: the per-attempt outcome is probabilistic (the cancel must
-// race in between message-delivery and marker-send), but with the
-// per-attempt parameters chosen below the truncation rate is empirically
-// ~20%. The 100-attempt loop drives P(false-negative) to ~2e-10,
-// effectively deterministic at the assertion level. If truncation is
-// never observed across all 100 attempts on the parent commit, that is
-// itself a meaningful signal — either the nats.go behavior has changed
-// or the test environment has degraded — and the failure message gives
-// the operator the diagnostic counts to triage from.
+// race in between message-delivery and marker-send). Empirical hit rates
+// on developer hardware fall in the 20–60 % range depending on scheduler
+// load and `-race` overhead; calibrating against the upper end is
+// optimistic for CI, which is typically slower and more contended.
+// Sizing for the conservative case: at a 1 % per-attempt rate the
+// 500-attempt loop drives P(false-negative) to (0.99)^500 ≈ 6.6e-3, and
+// at the realistic 5 % the bound is (0.95)^500 ≈ 7e-12. If truncation
+// is never observed across all 500 attempts that is itself a meaningful
+// signal — either the nats.go behavior has changed or the test
+// environment cannot reproduce the race — and the failure message
+// reports the per-bucket counts so the operator can triage.
 func TestHeartbeatBucket_TruncatedKeysObservable(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -82,11 +85,12 @@ func TestHeartbeatBucket_TruncatedKeysObservable(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// Sweep the cancel delay across 50µs..4ms. Different delays land in
-	// different points of the scan; the spread maximises the chance of
-	// hitting the post-first-message / pre-marker window across varied
-	// scheduler conditions.
-	const attempts = 100
+	// Sweep the cancel delay across ~50µs..10ms. Different delays land
+	// in different points of the scan; the wider spread hardens the
+	// reproducer against slow/contended CI where the post-first-
+	// message / pre-marker window falls outside the optimistic
+	// developer-hardware band.
+	const attempts = 500
 	var (
 		observedTruncated  int
 		observedFull       int
@@ -98,7 +102,7 @@ func TestHeartbeatBucket_TruncatedKeysObservable(t *testing.T) {
 	)
 
 	for i := range attempts {
-		delay := time.Duration(50+(i*39)) * time.Microsecond
+		delay := time.Duration(50+(i*20)) * time.Microsecond
 
 		ctx, cancel := context.WithCancel(t.Context())
 		time.AfterFunc(delay, cancel)
