@@ -24,4 +24,12 @@ var (
 	ErrIDClaimFailed              = types.ErrIDClaimFailed
 	ErrAssignmentFailed           = types.ErrAssignmentFailed
 	ErrInvalidPreset              = types.ErrInvalidPreset
+	// ErrStreamMissing is the operator-actionable umbrella error surfaced
+	// when the dynamic partition consumer's recovery flow determines that
+	// the underlying JetStream stream is absent (or post-hook recovery
+	// fails for any reason — restored consumer config mismatch, etc.).
+	// Callers branch via errors.Is(err, parti.ErrStreamMissing) inside
+	// their Hooks.OnError handler. See [types.ErrStreamMissing] for the
+	// full contract.
+	ErrStreamMissing = types.ErrStreamMissing
 )

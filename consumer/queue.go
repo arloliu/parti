@@ -395,7 +395,7 @@ func (q *Queue) runLoop(ctx context.Context) {
 			continue
 		}
 
-		action, newCons := q.recovery.Classify(ctx, iterErr, q.consumerInfoFn(), consumerConfig, q.recreateFn())
+		action, newCons, classifyErr := q.recovery.Classify(ctx, iterErr, q.consumerInfoFn(), consumerConfig, q.recreateFn())
 		switch action {
 		case recovery.ActionExit:
 			return
@@ -405,6 +405,19 @@ func (q *Queue) runLoop(ctx context.Context) {
 			q.mu.Unlock()
 			backoff = 0
 			continue
+		case recovery.ActionStreamMissing:
+			// Queue does not own stream lifecycle (the JetStream stream
+			// it consumes is operator-provisioned); the typed-error
+			// classification is logged for operator observability and
+			// folded into a backoff. No callback surface today.
+			q.logger.Warn("queue consumer recovery classified stream missing",
+				"op", "queue_stream_missing",
+				"stream", q.config.StreamName,
+				"error", classifyErr,
+			)
+			if q.delayWithBackoffOrExit(ctx, &backoff) {
+				return
+			}
 		case recovery.ActionBackoff:
 			if q.delayWithBackoffOrExit(ctx, &backoff) {
 				return

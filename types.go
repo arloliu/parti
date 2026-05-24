@@ -34,6 +34,13 @@ type (
 	HandoffMetricsRecorder   = types.HandoffMetricsRecorder
 	Logger                   = types.Logger
 	Hooks                    = types.Hooks
+	// StreamMissingHook is the operator-supplied escalation invoked when
+	// the dynamic partition consumer's recovery flow detects the
+	// underlying JetStream stream is absent. See
+	// [types.StreamMissingHook] for the operator contract — same-durable-
+	// name preservation, compatible-config reconciliation, and the
+	// post-hook checkpoint-reset / epoch-fence semantics.
+	StreamMissingHook = types.StreamMissingHook
 )
 
 // Re-export State constants from the internal types package.

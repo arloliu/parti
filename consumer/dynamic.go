@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/arloliu/fuda"
@@ -40,9 +41,33 @@ type Dynamic struct {
 	js               jetstream.JetStream
 	streamName       string
 	recoveryStrategy RecoveryStrategy
-	workQueueOnce    sync.Once
-	workQueueErr     error
+
+	// workQueueResult holds the immutable outcome of the most recent
+	// WorkQueuePolicy/recovery compatibility check. nil means "not yet
+	// checked, or cleared after a stream recreate". Publishing the
+	// result through a single atomic.Pointer to an immutable struct
+	// eliminates the v1 publication race between a "checked" flag and
+	// the error value.
+	workQueueResult atomic.Pointer[compatCheckResult]
+	// workQueueMu serializes the once-style check so resetCompatCheck
+	// cannot interleave between an in-flight slow-path's compute and
+	// publish steps (the pre-v3 stale-store race).
+	workQueueMu sync.Mutex
 }
+
+// compatCheckResult is the immutable outcome of one WorkQueue
+// compatibility check. A nil *compatCheckResult means "not yet
+// checked, or reset after a stream recreate".
+type compatCheckResult struct {
+	err error // non-nil iff the check failed
+}
+
+// compatCheckFn is the seam Dynamic invokes to run the
+// WorkQueue/recovery compatibility check. Tests swap this to inject
+// canned outcomes or to block the slow-path inside the mutex region
+// without standing up a real jetstream.JetStream. Production callers
+// never reassign it.
+var compatCheckFn = CheckWorkQueueRecoveryCompat
 
 // DynamicConfig configures a Dynamic consumer.
 type DynamicConfig struct {
@@ -159,6 +184,74 @@ type DynamicConfig struct {
 	// cause the first [Dynamic.Update] call to return [ErrInvalidConfig]. Use
 	// [RecoverFromBeginning] or [RecoveryDisabled] for WorkQueuePolicy streams.
 	RecoveryStrategy RecoveryStrategy
+
+	// StreamMissingHook fires when the dynamic partition consumer cannot
+	// create a consumer because the underlying JetStream stream is absent.
+	// The hook is the operator-driven recovery escalation path; the
+	// library does not recreate streams itself.
+	//
+	// Returning nil indicates the operator has recreated the stream. The
+	// library then bumps the recovery controller's stream-epoch, resets
+	// its checkpoint, re-seeds from the new consumer info, and rebuilds
+	// the consumer. Returning a non-nil error (or omitting the hook
+	// entirely) surfaces the loss via the F2 envelope's exhaustion path:
+	// OnPermanentFailure fires with the error wrapped in
+	// [types.ErrStreamMissing] so the manager routes it to enterDegraded.
+	//
+	// Requires [RecoveryStrategy] in {[RecoverFromLastProcessed],
+	// [RecoverFromBeginning]}; [RecoveryDisabled] (default) and
+	// [RecoverFromNew] are rejected at [DynamicConfig.Validate] time.
+	// See [types.StreamMissingHook] godoc for the full operator
+	// contract (same-durable-name preservation, compatible-config
+	// restore, fresh-stream replay semantics).
+	StreamMissingHook types.StreamMissingHook
+
+	// OnPermanentFailure is the application-facing observability seam for
+	// permanent partition-consumer failure. It fires exactly once per
+	// partition consumer when the iterator-creation envelope or the
+	// stream-missing Site B detour exhausts its attempt budget; the
+	// consumption loop exits immediately afterwards.
+	//
+	// The callback runs synchronously on the consumption loop's goroutine
+	// and MUST be non-blocking. The error preserves the wrap chain:
+	// errors.Is(err, [types.ErrStreamMissing]) is true when stream-missing
+	// exhaustion drove the failure, so applications can route those
+	// distinctly (e.g. via Manager.enterDegraded) from generic envelope
+	// exhaustion. See [WithOnPermanentFailure] for the option form.
+	OnPermanentFailure func(subject string, err error)
+}
+
+// validateStreamMissingHookStrategy enforces the recovery-strategy
+// pre-conditions for StreamMissingHook at the consumer/ surface.
+// Intentionally duplicated from internal/durable's same-named helper
+// because internal/durable cannot import consumer/ and a shared
+// package would just be coupling for ~15 lines. Cross-package
+// consistency is pinned by a consumer_test that runs both public
+// Validate surfaces over the same matrix.
+func validateStreamMissingHookStrategy(hookConfigured bool, strategy RecoveryStrategy) error {
+	if !hookConfigured {
+		return nil
+	}
+	switch strategy { //nolint:exhaustive // explicit branches; default catches the rest.
+	case RecoverFromLastProcessed, RecoverFromBeginning:
+		return nil
+	case RecoveryDisabled:
+		return fmt.Errorf(
+			"%w: StreamMissingHook requires a non-disabled RecoveryStrategy; "+
+				"use WithRecoveryStrategy(RecoverFromLastProcessed) for at-least-once "+
+				"or WithRecoveryStrategy(RecoverFromBeginning) for replay-all",
+			ErrInvalidConfig)
+	case RecoverFromNew:
+		return fmt.Errorf(
+			"%w: StreamMissingHook is incompatible with RecoverFromNew "+
+				"because the recreated-stream replay override only applies to "+
+				"RecoverFromLastProcessed and RecoverFromBeginning; "+
+				"RecoverFromNew would silently skip messages published after a fresh-stream recreate",
+			ErrInvalidConfig)
+	default:
+		return fmt.Errorf(
+			"%w: StreamMissingHook with unknown RecoveryStrategy %v", ErrInvalidConfig, strategy)
+	}
 }
 
 // NewDynamic creates a new dynamic partition consumer.
@@ -224,10 +317,23 @@ func NewDynamic(
 		PartitionRefreshMinInterval: o.partitionRefreshMinInterval,
 		IteratorFactory:             o.iteratorFactory,
 		RecoveryStrategy:            o.recoveryStrategy,
+		StreamMissingHook:           o.streamMissingHook,
+		OnPermanentFailure:          o.onPermanentFailure,
 	}
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
+	}
+
+	// Construct Dynamic first so the OnStreamRecreated closure can reference
+	// d.resetCompatCheck. The inner WorkerConsumer is assigned after
+	// construction succeeds; passing the closure value into workerCfg below
+	// is safe because the closure captures the d pointer (which does not
+	// change between this point and the return statement).
+	d := &Dynamic{
+		js:               js,
+		streamName:       streamName,
+		recoveryStrategy: o.recoveryStrategy,
 	}
 
 	// Build worker consumer config from unified DynamicConfig.
@@ -260,6 +366,9 @@ func NewDynamic(
 		IteratorEscalationThreshold: cfg.IteratorEscalationThreshold,
 		RecoveryStrategy:            cfg.RecoveryStrategy,
 		IteratorFactory:             cfg.IteratorFactory,
+		StreamMissingHook:           cfg.StreamMissingHook,
+		OnPermanentFailure:          cfg.OnPermanentFailure,
+		OnStreamRecreated:           d.resetCompatCheck,
 		Retry: durable.RetryConfig{
 			Backoff:    cfg.Retry.Backoff,
 			Max:        cfg.Retry.Max,
@@ -273,13 +382,9 @@ func NewDynamic(
 	if err != nil {
 		return nil, err
 	}
+	d.inner = inner
 
-	return &Dynamic{
-		inner:            inner,
-		js:               js,
-		streamName:       streamName,
-		recoveryStrategy: o.recoveryStrategy,
-	}, nil
+	return d, nil
 }
 
 // Update applies a new partition assignment set.
@@ -307,11 +412,8 @@ func NewDynamic(
 //   - [ErrMaxSubjectsExceeded]: Returned when partition count
 //     exceeds MaxConcurrentSubjects.
 func (d *Dynamic) Update(ctx context.Context, workerID string, partitions []types.Partition) error {
-	d.workQueueOnce.Do(func() {
-		d.workQueueErr = CheckWorkQueueRecoveryCompat(ctx, d.js, d.streamName, d.recoveryStrategy)
-	})
-	if d.workQueueErr != nil {
-		return d.workQueueErr
+	if err := d.ensureCompatChecked(ctx); err != nil {
+		return err
 	}
 	return d.inner.UpdateWorkerConsumer(ctx, workerID, partitions)
 }
@@ -323,7 +425,53 @@ func (d *Dynamic) Update(ctx context.Context, workerID string, partitions []type
 // backward compatibility with code that expects the WorkerConsumerUpdater
 // interface.
 func (d *Dynamic) UpdateWorkerConsumer(ctx context.Context, workerID string, partitions []types.Partition) error {
+	// Run the same compat check as the Update path. Pre-fix this method
+	// bypassed the check entirely, so a stale Dynamic registered with
+	// the manager could silently accept an incompatible
+	// WorkQueuePolicy/recovery combination on a recreated stream.
+	if err := d.ensureCompatChecked(ctx); err != nil {
+		return err
+	}
 	return d.inner.UpdateWorkerConsumer(ctx, workerID, partitions)
+}
+
+// ensureCompatChecked runs the WorkQueue/recovery compatibility check at
+// most once per reset cycle. The fast path is a single atomic load; the
+// result struct is immutable once published, so there is no publication
+// race between the "is it checked" flag and the error value (they are one
+// pointer). The slow path takes workQueueMu so resetCompatCheck cannot
+// interleave between a still-running compat check's compute and publish
+// steps.
+func (d *Dynamic) ensureCompatChecked(ctx context.Context) error {
+	if r := d.workQueueResult.Load(); r != nil {
+		return r.err
+	}
+	d.workQueueMu.Lock()
+	defer d.workQueueMu.Unlock()
+	if r := d.workQueueResult.Load(); r != nil {
+		// another goroutine published while we waited
+		return r.err
+	}
+	err := compatCheckFn(ctx, d.js, d.streamName, d.recoveryStrategy)
+	d.workQueueResult.Store(&compatCheckResult{err: err})
+
+	return err
+}
+
+// resetCompatCheck clears the cached result so the next Update or
+// UpdateWorkerConsumer re-runs the WorkQueue/recovery compatibility
+// check. Wired into the partition consumer's stream-missing recovery
+// detour: after Controller.HandleStreamRecreated rebuilds the consumer
+// against a freshly-restored stream, the cached compatibility verdict
+// no longer applies to the new stream and must be re-armed.
+//
+// Takes workQueueMu so the reset cannot interleave between an
+// in-flight slow-path check's compute and publish steps (the pre-v3
+// stale-store race fixed in v3).
+func (d *Dynamic) resetCompatCheck() {
+	d.workQueueMu.Lock()
+	defer d.workQueueMu.Unlock()
+	d.workQueueResult.Store(nil)
 }
 
 // Capabilities forwards to the inner [durable.WorkerConsumer]; implements
@@ -383,7 +531,7 @@ func (c *DynamicConfig) Validate() error {
 		return fmt.Errorf("consumer prefix %q contains invalid characters (allowed: a-z, A-Z, 0-9, -, _)", c.ConsumerPrefix)
 	}
 
-	return nil
+	return validateStreamMissingHookStrategy(c.StreamMissingHook != nil, c.RecoveryStrategy)
 }
 
 // toSubscriptionGateConfig converts a consumer-owned ProcessingGateConfig to
