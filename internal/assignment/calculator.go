@@ -33,6 +33,28 @@ var errShuttingDown = errors.New("rebalance aborted: leader is shutting down")
 // a fleet-wide reassign-to-zero thundering herd.
 var errSuspiciousPartitionObservation = errors.New("rebalance skipped: partition observation pending confirmation")
 
+// errSuspiciousWorkerObservation is returned by rebalance() when the
+// heartbeat-bucket scan returns a sharply-shrunk worker set with no
+// emergency-confirmed deaths in c.disappearedWorkers, and the
+// confirmation window (WorkerShrinkConfirmationCount) has not yet been
+// satisfied. The candidate rebalance is skipped; the cached assignment
+// remains in effect. handleRebalance treats this sentinel like a no-op
+// (no error) because it is an explicit "keep cached assignment"
+// decision, not a failure.
+//
+// This implements the "minimum credible worker input" doctrine: a
+// single observation of a sharply-shrunk heartbeat scan is more likely
+// a transient blip (KV truncated-read race, watcher hiccup) than a
+// legitimate fleet-wide loss; the confirmation window plus the
+// emergency-detector composition prevents one bad scan from
+// reassigning every partition off live workers.
+//
+// The companion to the in-getActiveWorkers defense: that path degrades
+// the observation to cached+fresh=false; this sentinel covers the
+// rebalance-floor branch when a fresh observation arrives but
+// EmergencyDetector has not yet confirmed deaths.
+var errSuspiciousWorkerObservation = errors.New("rebalance skipped: worker observation pending confirmation")
+
 // Calculator manages partition assignment calculation and distribution.
 //
 // The calculator runs on the leader worker and orchestrates three focused components:
@@ -115,6 +137,28 @@ type Calculator struct {
 	// is needed.
 	lastKnownPartitionCount     int
 	partitionShrunkObservations int
+
+	// Minimum-credible-worker-input doctrine (see
+	// errSuspiciousWorkerObservation Godoc):
+	//
+	// lastKnownWorkerCount is the most recent worker count the
+	// calculator committed to. Only a rebalance that passes the F10-A
+	// floor advances it — that is the load-bearing safety.
+	//
+	// workerShrunkObservations is the running count of consecutive
+	// suspicious observations. Once it reaches
+	// WorkerShrinkConfirmationCount the calculator trusts the shrink;
+	// any healthy observation resets it to 0. Named distinctly from
+	// partitionShrunkObservations so the two cross-feature counters
+	// do not share a confirmation window.
+	//
+	// Both fields are touched from the getActiveWorkers path (called
+	// from rebalance under rebalanceMu and from the worker-monitor
+	// poll under pollMu — independent locks) and from the rebalance
+	// floor itself. c.mu fences those read-modify-writes without
+	// widening either of the path-specific locks.
+	lastKnownWorkerCount     int
+	workerShrunkObservations int
 }
 
 // cachedWorkerList bundles worker data with its timestamp for atomic operations.
@@ -760,6 +804,16 @@ func (c *Calculator) handlePartitionRebalance(ctx context.Context, lifecycle str
 		if errors.Is(err, errSuspiciousPartitionObservation) {
 			return err
 		}
+		// A suspicious worker observation does not need re-arming here:
+		// the worker-monitor poll loop will fire its own rebalance
+		// once the heartbeat scan heals or EmergencyDetector confirms
+		// deaths, and that rebalance will pick up any pending
+		// partition change. Swallowing avoids the spurious "partition
+		// rebalance failed" Error log a non-failure would otherwise
+		// produce.
+		if errors.Is(err, errSuspiciousWorkerObservation) {
+			return nil
+		}
 
 		return fmt.Errorf("partition rebalance failed for %s: %w", lifecycle, err)
 	}
@@ -1113,52 +1167,132 @@ func (c *Calculator) hasWorkersChangedLocked(workers map[string]bool) bool {
 
 // getActiveWorkers retrieves the list of workers with active heartbeats.
 //
-// This method implements cache fallback for degraded mode:
-//  1. Try to fetch workers from NATS KV (monitor.GetActiveWorkers)
-//  2. On connectivity error, fall back to cached worker list (fresh=false)
-//  3. Update cache on successful fetches (fresh=true)
-//  4. Return ErrDegraded if no cache available during connectivity issues
+// This method implements cache fallback for two failure shapes:
+//  1. Connectivity error from NATS KV: returns the last cached worker
+//     list with fresh=false; if no cache exists, returns ErrDegraded.
+//  2. Sharply-shrunk fresh observation (the F10-A truncated-Keys()
+//     defense, see errSuspiciousWorkerObservation Godoc): degrades to
+//     the cached set with fresh=false until the confirmation window
+//     (WorkerShrinkConfirmationCount consecutive suspicious reads) is
+//     met.
 //
-// Parameters:
-//   - ctx: Context for KV operations
+// A healthy (non-shrunk) fresh observation refreshes the cache, resets
+// workerShrunkObservations to zero, and returns fresh=true.
 //
-// Returns:
-//   - []string: List of active worker IDs
-//   - bool: true if the list was fetched fresh from KV; false if it came from
-//     the degraded-mode cache. Callers that mutate detector state on the
-//     observation must gate that mutation on fresh==true.
-//   - error: Error if fetch fails and no cache available
+// lastKnownWorkerCount is intentionally NOT advanced here — the
+// rebalance-side floor advances it only after the floor passes, so the
+// floor always compares against a baseline established by a prior
+// committed rebalance.
+//
+// Callers that mutate detector state on the observation MUST gate that
+// mutation on fresh==true (see collectRebalanceWorkers's ObserveAlive
+// gating).
 func (c *Calculator) getActiveWorkers(ctx context.Context) ([]string, bool, error) {
-	// Try to fetch from NATS KV
 	workers, err := c.monitor.GetActiveWorkers(ctx)
 	if err != nil {
-		// Check if this is a connectivity error
 		if natsutil.IsConnectivityError(err) {
-			// Try to use cached worker list
 			if cached, age, ok := c.getCachedWorkers(); ok {
 				c.Logger.Warn("using cached worker list due to connectivity error",
 					"workers", len(cached),
 					"cache_age", age,
 					"error", err)
-				// Record cache usage metrics
 				c.Metrics.RecordCacheUsage("workers", age.Seconds())
 				c.Metrics.IncrementCacheFallback("connectivity_error")
 
 				return cached, false, nil
 			}
-			// No cache available - return degraded error
 			c.Metrics.IncrementCacheFallback("no_cache")
 
 			return nil, false, fmt.Errorf("%w: no cached workers available: %w", types.ErrDegraded, err)
 		}
-		// Non-connectivity error - return as-is
+
 		return nil, false, err
 	}
 
-	// Success - update cache for future use
-	c.updateCachedWorkers(workers)
+	// F10-A defense: a sharply-shrunk fresh observation is treated as
+	// suspicious until the confirmation window is satisfied. The first
+	// such reads degrade to cached+fresh=false; once the confirmation
+	// window is satisfied the read is surfaced fresh so the
+	// rebalance-side floor can apply the emergency-confirmation gate.
+	//
+	// getActiveWorkers is called from the rebalance path
+	// (collectRebalanceWorkers, under rebalanceMu) AND from the
+	// worker-monitor poll path (collectWorkerObservation, under
+	// pollMu). Those locks are independent, so c.mu fences the F10-A
+	// counter read-modify-write here.
+	suspicious, consec, accepted, lastKnown := c.recordWorkerObservation(len(workers))
+	if suspicious && !accepted {
+		c.Logger.Warn("ignoring sharply-shrunk worker observation pending confirmation",
+			"last_known", lastKnown,
+			"observed", len(workers),
+			"threshold_pct", c.WorkerShrinkConfirmationThresholdPct,
+			"consecutive_observations", consec,
+			"required", c.WorkerShrinkConfirmationCount)
+		if cached, age, ok := c.getCachedWorkers(); ok {
+			c.Metrics.RecordCacheUsage("workers", age.Seconds())
+			c.Metrics.IncrementCacheFallback("suspicious_worker_shrink")
+
+			return cached, false, nil
+		}
+		c.Metrics.IncrementCacheFallback("no_cache")
+
+		return nil, false, fmt.Errorf("%w: %w", types.ErrDegraded, errSuspiciousWorkerObservation)
+	}
+
+	// Healthy observation: refresh the cache so future connectivity
+	// errors fall back to a trusted shape. An accepted-shrunk read is
+	// surfaced fresh but NOT cached: until the rebalance floor commits,
+	// the shrunk view is not yet trusted.
+	if !suspicious {
+		c.updateCachedWorkers(workers)
+	}
 
 	return workers, true, nil
+}
+
+// recordWorkerObservation runs the F10-A counter under c.mu. It
+// returns whether the raw observation was suspicious, the resulting
+// consecutive count, whether the observation should be surfaced as
+// accepted (suspicious but past the confirmation window), and the
+// last-known baseline (for the caller's warning log). A healthy
+// non-shrunk observation resets the counter; a suspicious observation
+// increments it. Splitting the locked read-modify-write from the
+// caller's cache-fallback / metrics path keeps c.mu's critical section
+// tight and lets the caller log without holding the lock.
+func (c *Calculator) recordWorkerObservation(observed int) (suspicious bool, consec int, accepted bool, lastKnown int) { //nolint:revive // function-result-limit: caller needs all four signals atomically under c.mu
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	lastKnown = c.lastKnownWorkerCount
+	suspicious = c.workerObservationSuspicious(observed)
+	if !suspicious {
+		c.workerShrunkObservations = 0
+		return suspicious, 0, false, lastKnown
+	}
+
+	c.workerShrunkObservations++
+	consec = c.workerShrunkObservations
+	accepted = consec >= c.WorkerShrinkConfirmationCount
+
+	return suspicious, consec, accepted, lastKnown
+}
+
+// workerObservationSuspicious returns true when a fresh worker-count
+// observation is sharply shrunk relative to the last known baseline.
+// The guard is silent until lastKnownWorkerCount > 0 — the first ever
+// scan must be trusted to establish the baseline. The threshold form
+// mirrors partitionInputCredibilityGuard's
+//
+//	observed*100 < lastKnown*Pct
+//
+// shape to avoid the intermediate-truncation surprise at small worker
+// counts that the pre-divided form (lastKnown*Pct/100) produces.
+func (c *Calculator) workerObservationSuspicious(observed int) bool {
+	if c.lastKnownWorkerCount == 0 {
+		return false
+	}
+
+	return observed*100 < c.lastKnownWorkerCount*c.WorkerShrinkConfirmationThresholdPct
 }
 
 // getActiveWorkersFiltered retrieves workers, excluding those confirmed disappeared in emergency.
@@ -1291,6 +1425,13 @@ func (c *Calculator) handleRebalance(ctx context.Context, reason string) error {
 		if errors.Is(err, errSuspiciousPartitionObservation) {
 			return nil
 		}
+		// A suspicious worker observation is the same shape: the
+		// floor explicitly chose to keep the cached assignment until
+		// EmergencyDetector confirms deaths or the heartbeat scan
+		// heals. The next poll naturally re-observes; no escalation.
+		if errors.Is(err, errSuspiciousWorkerObservation) {
+			return nil
+		}
 
 		return fmt.Errorf("rebalance failed for %s: %w", reason, err)
 	}
@@ -1316,25 +1457,41 @@ func (c *Calculator) handleRebalance(ctx context.Context, reason string) error {
 // triggers (audit_repair, scaling-timer, partition-lifecycle, manual): any
 // worker visible to this fresh KV scan has its stale tracking cleared, so a
 // subsequent disappearance starts a fresh grace period.
-func (c *Calculator) collectRebalanceWorkers(ctx context.Context, lifecycle string) ([]string, error) {
-	var disappearedWorkers []string
+//
+// Returns the worker set, plus a "deaths confirmed" flag for the F10-A
+// rebalance-side floor. The flag is true iff EmergencyDetector has
+// captured at least one death — either consumed locally on the
+// emergency lifecycle, or still resident in c.disappearedWorkers on
+// the non-emergency lifecycle. The floor's check must see the
+// pre-clear state so an emergency rebalance is never wrongly
+// suppressed by its own consumption.
+func (c *Calculator) collectRebalanceWorkers(ctx context.Context, lifecycle string) ([]string, bool, error) {
+	var (
+		disappearedWorkers []string
+		deathsConfirmed    bool
+	)
 	if lifecycle == "emergency" {
 		c.mu.Lock()
 		disappearedWorkers = c.disappearedWorkers
 		c.disappearedWorkers = nil
 		c.mu.Unlock()
+		deathsConfirmed = len(disappearedWorkers) > 0
+	} else {
+		c.mu.RLock()
+		deathsConfirmed = len(c.disappearedWorkers) > 0
+		c.mu.RUnlock()
 	}
 
 	workers, fresh, err := c.getActiveWorkersFiltered(ctx, disappearedWorkers)
 	if err != nil {
-		return nil, c.wrapStopErr(fmt.Errorf("failed to get active workers: %w", err))
+		return nil, false, c.wrapStopErr(fmt.Errorf("failed to get active workers: %w", err))
 	}
 
 	if fresh {
 		c.emergencyDetector.ObserveAlive(workers)
 	}
 
-	return workers, nil
+	return workers, deathsConfirmed, nil
 }
 
 // snapshotSource picks the best partition snapshot path for the source. If
@@ -1377,7 +1534,7 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 
 	start := time.Now()
 
-	workers, err := c.collectRebalanceWorkers(ctx, lifecycle)
+	workers, deathsConfirmed, err := c.collectRebalanceWorkers(ctx, lifecycle)
 	if err != nil {
 		c.Metrics.RecordRebalanceAttempt(lifecycle, false)
 		return err
@@ -1413,6 +1570,37 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 		c.Metrics.RecordRebalanceAttempt(lifecycle, true)
 
 		return nil
+	}
+
+	// F10-A worker-set floor: refuse to commit a rebalance on a
+	// sharply-shrunk worker set when EmergencyDetector has not
+	// confirmed any deaths. Composes with — does not duplicate — the
+	// per-worker grace window in EmergencyDetector: once any death is
+	// confirmed (c.disappearedWorkers populated) the floor releases
+	// and the rebalance proceeds. The in-getActiveWorkers defense
+	// covers the per-poll noise filtering; the floor here is the
+	// emergency-confirmation gate that must clear before the
+	// calculator commits to a shrunk worker set. lastKnownWorkerCount
+	// is advanced ONLY when the floor passes, so it always reflects a
+	// baseline confirmed by a prior successful rebalance.
+	c.mu.Lock()
+	floorBlocks := !deathsConfirmed && c.workerObservationSuspicious(len(workers))
+	lastKnownSnapshot := c.lastKnownWorkerCount
+	if !floorBlocks {
+		c.lastKnownWorkerCount = len(workers)
+	}
+	c.mu.Unlock()
+
+	if floorBlocks {
+		c.Logger.Warn("ignoring rebalance on suspiciously-shrunk worker set; no emergency-confirmed deaths",
+			"lifecycle", lifecycle,
+			"current_count", len(workers),
+			"last_known_count", lastKnownSnapshot,
+			"threshold_pct", c.WorkerShrinkConfirmationThresholdPct)
+		c.Metrics.RecordRebalanceDuration(time.Since(start).Seconds(), lifecycle)
+		c.Metrics.RecordRebalanceAttempt(lifecycle, true)
+
+		return errSuspiciousWorkerObservation
 	}
 
 	// Minimum-credible-partition-input guard (see
