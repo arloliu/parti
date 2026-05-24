@@ -69,6 +69,29 @@ type Config struct {
 	// regardless of this threshold.
 	PartitionShrinkConfirmationThresholdPct int
 
+	// Worker-input credibility (see errSuspiciousWorkerObservation Godoc
+	// in calculator.go):
+	//
+	// WorkerShrinkConfirmationCount is the number of consecutive
+	// suspicious worker-set observations the calculator requires before
+	// trusting a sharply-shrunk heartbeat scan. Default: 2. Setting this
+	// to 1 disables the confirmation window (every observation is acted
+	// on immediately). The default is lower than
+	// PartitionShrinkConfirmationCount because heartbeat scans run on
+	// every monitor poll (~HeartbeatTTL/2) whereas partition-source
+	// observations are watcher-driven and arrive only on source change —
+	// a smaller worker window converges faster on a real shrink without
+	// stranding correctness.
+	WorkerShrinkConfirmationCount int
+
+	// WorkerShrinkConfirmationThresholdPct defines "sharply shrunk" for
+	// the heartbeat scan. A new worker count where
+	//   observed * 100 < lastKnownWorkerCount * Pct
+	// is suspicious. Default: 50 (a >=50% drop in one scan is
+	// suspicious). The defense fires only when lastKnownWorkerCount > 0
+	// (the first ever scan is always trusted).
+	WorkerShrinkConfirmationThresholdPct int
+
 	// RebalanceGraceDrainInterval is the period at which monitorPartitions
 	// checks for a partition-source update that was deferred because the
 	// leader was in recovery grace. When grace lifts, the deferred update
@@ -197,5 +220,11 @@ func (c *Config) SetDefaults() {
 	}
 	if c.PartitionShrinkConfirmationThresholdPct == 0 {
 		c.PartitionShrinkConfirmationThresholdPct = 50
+	}
+	if c.WorkerShrinkConfirmationCount == 0 {
+		c.WorkerShrinkConfirmationCount = 2
+	}
+	if c.WorkerShrinkConfirmationThresholdPct == 0 {
+		c.WorkerShrinkConfirmationThresholdPct = 50
 	}
 }
