@@ -238,8 +238,12 @@ type DynamicConfig struct {
 	// and MUST be non-blocking. The error preserves the wrap chain:
 	// errors.Is(err, [types.ErrStreamMissing]) is true when stream-missing
 	// exhaustion drove the failure, so applications can route those
-	// distinctly (e.g. via Manager.enterDegraded) from generic envelope
-	// exhaustion. See [WithOnPermanentFailure] for the option form.
+	// distinctly from generic envelope exhaustion.
+	//
+	// Setting this disables the Parti manager's auto-degraded route for
+	// stream-missing exhaustion (the manager-installed observer is only
+	// consulted when this field is nil). See [WithOnPermanentFailure]
+	// for the option form and the full trade-off discussion.
 	OnPermanentFailure func(subject string, err error)
 
 	// RecoveryRetry tunes the bounded-retry envelope wrapped around

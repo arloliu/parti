@@ -486,10 +486,36 @@ func WithStreamMissingHook(hook types.StreamMissingHook) DynamicOption {
 // branch on that to distinguish "stream is gone, operator must recreate
 // it" from "iter-create budget exhausted for some other reason".
 //
+// # Interaction with the Parti manager's auto-degraded route
+//
+// IMPORTANT: registering this callback disables the Parti manager's
+// auto-degraded route for stream-missing exhaustion. When a [Dynamic]
+// is wired into a [parti.Manager] (directly or via a
+// [parti.CompositeConsumerUpdater]), the manager installs an observer
+// that — for stream-missing exhaustion only — calls Hooks.OnError with
+// the wrapped error and transitions to Degraded mode with reason
+// "stream-missing-recovery-exhausted" so the readiness probe rotates
+// the pod.
+//
+// That manager-side observer fires ONLY when no application callback
+// is registered here. If WithOnPermanentFailure is set, the dispatcher
+// hands every permanent failure to the application and STOPS — the
+// manager observer never sees the stream-missing event. Applications
+// that want both per-subject observability AND the manager's
+// auto-degraded behavior must either:
+//
+//   - Forgo WithOnPermanentFailure and rely on
+//     [parti.Hooks.OnError] (which receives the wrapped error from the
+//     manager observer route), or
+//   - Within the supplied callback, branch on
+//     errors.Is(err, [parti.ErrStreamMissing]) and forward the event
+//     to their own degraded-mode signaling path.
+//
 // Applies only to [Dynamic]. Optional; if unset, exhaustion is logged at
 // WARN with metric `iterator_restart{reason="recovery_exhausted"}` or
 // `iterator_restart{reason="stream_missing_exhausted"}` but no callback
-// fires.
+// fires (unless the [parti.Manager] observer is wired, in which case
+// stream-missing exhaustion routes through it).
 func WithOnPermanentFailure(fn func(subject string, err error)) DynamicOption {
 	return dynamicOpt(func(o *options) {
 		o.onPermanentFailure = fn
