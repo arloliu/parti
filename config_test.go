@@ -745,3 +745,29 @@ func TestConfig_ApplyStartJitter_Validation(t *testing.T) {
 		})
 	}
 }
+
+func TestConfig_AssignmentWatcherDebounce_Validation(t *testing.T) {
+	cases := []struct {
+		name    string
+		window  time.Duration
+		wantErr bool
+	}{
+		{"zero is allowed (disables debounce)", 0, false},
+		{"positive within cap is allowed", 100 * time.Millisecond, false},
+		{"negative is rejected", -1 * time.Millisecond, true},
+		{"above 1s cap is rejected", 2 * time.Second, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := TestConfig()
+			cfg.AssignmentWatcherDebounce = tc.window
+			err := cfg.Validate()
+			if tc.wantErr {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), "AssignmentWatcherDebounce")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}

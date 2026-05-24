@@ -13,6 +13,31 @@ import (
 	"github.com/arloliu/parti/v2/types"
 )
 
+// newTestManagerWithMetrics constructs a minimal Manager fixture with the
+// supplied MetricsCollector. NOT Stop-safe: election, source, and idClaimer
+// are nil. Cancellation runs via t.Cleanup.
+func newTestManagerWithMetrics(t *testing.T, rm types.MetricsCollector) *Manager {
+	t.Helper()
+	cfg := TestConfig()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	nopHooks := hooks.NewNop()
+	m := &Manager{
+		cfg:                cfg,
+		hooks:              &nopHooks,
+		metrics:            rm,
+		logger:             logging.NewNop(),
+		heartbeat:          &recordingHeartbeat{},
+		handoffCoordinator: &recordingCoordinator{},
+	}
+	m.workerID.Store("worker-test")
+	m.assignment.Store(Assignment{})
+	m.ctx = ctx
+	m.cancel = cancel
+
+	return m
+}
+
 // recordingCoordinator is a test stub for handoff.Coordinator. Apply
 // increments applyCount, invokes onApply if set, and returns a synthetic
 // failure while applyCount <= failUntilCount (0 disables). All

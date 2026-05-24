@@ -54,6 +54,17 @@ type ManagerMetrics interface {
 	// Parameters:
 	//   - level: Alert level name ("info", "warn", "error", "critical")
 	IncrementAlertEmitted(level string)
+
+	// RecordApplyAttempt records each invocation of the manager's apply
+	// pipeline (applyAssignmentWithPrev) BEFORE the (V, LR) stale gate runs.
+	// Used to diagnose Raft-re-election bursts: a clean coalescing should
+	// produce one apply per (worker, version); a leaky watcher path produces
+	// N for N watcher deliveries.
+	//
+	// Parameters:
+	//   - workerID: Stable worker identifier (caller passes m.WorkerID()).
+	//   - version: The candidate assignment's Version field.
+	RecordApplyAttempt(workerID string, version int64)
 }
 
 // AuditMetrics defines metrics for the leader-side apply audit (§4.2) and the

@@ -459,22 +459,83 @@ func (m *Manager) runAssignmentWatchSession(
 		}
 	}()
 
+	window := m.cfg.AssignmentWatcherDebounce
+	debounce := window > 0
+
+	var (
+		pending jetstream.KeyValueEntry
+		timer   *time.Timer
+		timerC  <-chan time.Time
+	)
+	if debounce {
+		timer = time.NewTimer(time.Hour) // any duration; we Stop before first use
+		timer.Stop()
+		timerC = timer.C
+	}
+	// flush dispatches the pending entry to the hook (tests) or production handler.
+	flush := func() {
+		if pending == nil {
+			return
+		}
+		entry := pending
+		pending = nil
+		if hook := m.testHookHandleAssignment; hook != nil {
+			hook(workerID, entry)
+		} else {
+			m.handleAssignmentEntry(workerID, entry)
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
+			// Intentionally do NOT flush. Stop has cancelled m.ctx; running
+			// apply work now would invoke handoffCoordinator.Apply with an
+			// already-dead context, then scheduleApplyRetry would spawn a
+			// wait-group goroutine while Stop is draining the wait group.
+			// Dropping the pending entry is the correct shutdown behavior.
 			m.logger.Debug("assignment monitor stopping (context cancelled)", "worker_id", workerID)
 			return nil
+
 		case entry, ok := <-watcher.Updates():
 			if !ok {
+				// Session-restart path. Flush the pending entry so a
+				// re-election whose final delivery arrived just before
+				// the channel closed is not lost — the caller restarts
+				// the watcher and the version gate makes a repeat safe.
+				//
+				// EXCEPT if Stop has already cancelled m.ctx: a
+				// connection-side close racing Stop cancellation can
+				// surface here, and flushing would apply work during
+				// shutdown (the round-2 P1 hazard reapplied to the
+				// !ok branch).
+				if ctx.Err() != nil {
+					return nil
+				}
+				flush()
 				return errors.New("assignment watcher channel closed")
 			}
 			if entry == nil {
-				// Nil entry indicates end of initial values replay
-				// This is normal - continue watching for future updates
+				// Nil entry indicates end of initial values replay.
+				// This is normal — continue watching for future updates.
 				continue
 			}
+			if !debounce {
+				m.handleAssignmentEntry(workerID, entry)
+				continue
+			}
+			pending = entry
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(window)
 
-			m.handleAssignmentEntry(workerID, entry)
+		case <-timerC:
+			flush()
+
 		case <-reconcileTickC:
 			// Idempotent re-read. Single-goroutine serialization with the
 			// watcher arm above guarantees no concurrent application of
@@ -952,6 +1013,11 @@ func (m *Manager) applyAssignmentWithPrevCore(oldAssignment, newAssignment Assig
 	workerID := m.WorkerID()
 
 	m.applyStoreMu.Lock()
+	// Before the stale gate: retries and fresh applies both call core, so
+	// recording here counts all pipeline entries. Recording after the gate
+	// would miss multi-version bursts (isApplyResultStale returns false for
+	// distinct versions, so each would pass the gate anyway).
+	m.metrics.RecordApplyAttempt(workerID, newAssignment.Version)
 
 	// Stale gate (W15+W16, PR-2). Drops the candidate BEFORE Apply, so no
 	// coordinator-side prepare/commit/stabilize runs for a loser. Strict

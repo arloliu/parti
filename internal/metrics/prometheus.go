@@ -45,6 +45,7 @@ type PrometheusCollector struct {
 	mCacheAge           prometheus.Gauge
 	mAlertLevel         prometheus.Gauge
 	mAlertEmitted       *prometheus.CounterVec
+	mApplyAttempts      *prometheus.CounterVec
 
 	// Calculator metrics
 	cRebalanceDuration    *prometheus.HistogramVec
@@ -266,6 +267,12 @@ func (p *PrometheusCollector) ensureRegistered() {
 			Name:      "alerts_emitted_total",
 			Help:      "Total alerts emitted by level.",
 		}, []string{"level"})
+		p.mApplyAttempts = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: p.namespace,
+			Subsystem: "manager",
+			Name:      "apply_attempts_total",
+			Help:      "Total invocations of applyAssignmentWithPrev counted before the (V, LR) stale gate. A higher rate after a NATS leader re-election indicates the watcher debounce did not collapse a burst.",
+		}, []string{"worker_id"})
 
 		// Calculator metrics
 		p.cRebalanceDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
@@ -387,6 +394,7 @@ func (p *PrometheusCollector) ensureRegistered() {
 		p.reg.MustRegister(p.mCacheAge)
 		p.reg.MustRegister(p.mAlertLevel)
 		p.reg.MustRegister(p.mAlertEmitted)
+		p.reg.MustRegister(p.mApplyAttempts)
 
 		p.reg.MustRegister(p.cRebalanceDuration)
 		p.reg.MustRegister(p.cRebalanceAttempts)
@@ -542,6 +550,15 @@ func (p *PrometheusCollector) SetAlertLevel(level int) {
 func (p *PrometheusCollector) IncrementAlertEmitted(level string) {
 	p.ensureRegistered()
 	p.mAlertEmitted.WithLabelValues(level).Inc()
+}
+
+// RecordApplyAttempt increments the apply-attempt counter for the given
+// worker. The version argument is intentionally discarded — Prometheus
+// label cardinality is bounded to the fleet size (one series per worker
+// rather than one per worker per version).
+func (p *PrometheusCollector) RecordApplyAttempt(workerID string, _ int64) {
+	p.ensureRegistered()
+	p.mApplyAttempts.WithLabelValues(workerID).Inc()
 }
 
 // CalculatorMetrics implementation
