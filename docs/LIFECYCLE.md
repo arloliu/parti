@@ -29,12 +29,12 @@ Workers progress through a defined state machine:
                               ┌─────────────────────────────────────┐
                               │            Normal Flow              │
                               │                                     │
-    ┌────────┐    ┌───────────▼───┐    ┌──────────┐       ┌───────────┐
-    │  INIT  │───▶│ CLAIMING_ID   │───▶│ ELECTION │───▶   │ WAITING   │
-    └────────┘    └───────────────┘    └──────────┘       │ASSIGNMENT │
-                                                          └─────┬─────┘
-                                                                │
-                  ┌─────────────────────────────────────────────┘
+    ┌────────┐    ┌───────────▼───┐    ┌──────────┐       ┌─────────────────────┐
+    │  INIT  │───▶│ CLAIMING_ID   │───▶│ ELECTION │───▶   │ WAITING ASSIGNMENT  │
+    └────────┘    └───────────────┘    └──────────┘       │  [Start returns ◀]  │
+                                                          └─────────┬───────────┘
+                                                                    │ (background runner)
+                  ┌─────────────────────────────────────────────────┘
                   ▼
             ┌──────────┐
             │  STABLE  │◄────────────────────────────────┐
@@ -52,6 +52,42 @@ Workers progress through a defined state machine:
 └───────────┘    │
                  └─────────────────────────────────────────▶ STABLE
 ```
+
+**Start return point:** `Manager.Start(ctx)` returns once the worker has
+reached `WaitingAssignment` — i.e., the stable worker ID is claimed, KV
+buckets exist, election has been run, and heartbeat + calculator are
+wired. The transition to `Stable` happens in a background goroutine after
+the initial assignment lands and is applied. Use
+`Manager.WaitState(StateStable, timeout)` to block until the manager is
+ready to process work.
+
+The background runner is best-effort and single-attempt: if the initial
+assignment fetch or apply fails, the runner logs the error and falls
+through to monitor startup. Subsequent retries are driven by existing
+recovery mechanisms — `monitorAssignmentChanges` redelivers when the
+leader publishes; `scheduleApplyRetry` (inside `applyAssignmentWithPrev`)
+retries failed applies; `monitorNATSConnection` drives
+`attemptRecoveryFromDegraded` on reconnect.
+
+A separate watchdog goroutine fires `enterDegraded("startup-timeout")`
+once if the manager is still in `WaitingAssignment` after `StartupTimeout`
+(measured from `Start` invocation). This is the probe-rotation signal.
+The runner itself does not enter or exit degraded.
+
+**Startup-timeout-degraded recovery is not guaranteed self-healing while
+the runner is blocked.** Once monitors start, `monitorNATSConnection`
+calls `attemptRecoveryFromDegraded` on its `ExitThreshold` tick even
+without a prior disconnect, so the runner-succeeds-but-watchdog-already-
+fired case recovers automatically. But if the runner is stuck inside the
+unbounded `handoffCoordinator.Apply(m.ctx, ...)` call, the monitor set
+has not started yet — startup-timeout-degraded then stays until the
+runner returns or the pod is rotated by the probe. This is the documented
+trade-off of inheriting pre-refactor Start's apply boundedness.
+
+Apply boundedness is unchanged from pre-refactor Start:
+`handoffCoordinator.Apply(m.ctx, ...)` is unbounded per attempt. A stuck
+consumer updater can block the runner inside one apply attempt until
+Stop. The watchdog still fires for probe rotation in that case.
 
 ### State Descriptions
 

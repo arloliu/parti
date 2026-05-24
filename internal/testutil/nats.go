@@ -302,7 +302,10 @@ func (wc *WorkerCluster) AddWorkerWithoutTracking(ctx context.Context) *parti.Ma
 	return mgr
 }
 
-// StartWorkers starts all workers in the cluster.
+// StartWorkers starts all workers in the cluster. Each Start returns
+// once the synchronous sanity-check phase completes; the cluster helper
+// then blocks on WaitState(StateStable) so callers can read partition
+// assignments immediately after StartWorkers returns.
 func (wc *WorkerCluster) StartWorkers(ctx context.Context) {
 	wc.mu.RLock()
 	workers := make([]*parti.Manager, len(wc.Workers))
@@ -312,6 +315,10 @@ func (wc *WorkerCluster) StartWorkers(ctx context.Context) {
 	for i, mgr := range workers {
 		err := mgr.Start(ctx)
 		require.NoError(wc.T, err, "worker %d failed to start", i)
+	}
+	for i, mgr := range workers {
+		require.NoErrorf(wc.T, <-mgr.WaitState(parti.StateStable, 15*time.Second),
+			"worker %d did not reach StateStable", i)
 	}
 }
 

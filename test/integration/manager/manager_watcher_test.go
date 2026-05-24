@@ -154,6 +154,16 @@ func TestWatcher_NoDoubleTriggering(t *testing.T) {
 	leader := cluster.GetLeader()
 	require.NotNil(t, leader, "expected to find leader")
 
+	// Manager.Start now returns at WaitingAssignment; the leader's
+	// runner may still be inside its initial apply when
+	// WaitForStableState reports Stable (calculator-monitor can drive
+	// the Stable transition independently). Wait for a non-zero
+	// assignment version on the leader before snapshotting the
+	// baseline.
+	require.Eventually(t, func() bool {
+		return leader.CurrentAssignment().Version > 0
+	}, 5*time.Second, 50*time.Millisecond, "leader's initial assignment did not land")
+
 	// Get initial assignment version
 	initialAssignment := leader.CurrentAssignment()
 	initialVersion := initialAssignment.Version

@@ -23,6 +23,7 @@ func (m *Manager) prepareStart(ctx context.Context) (context.Context, context.Ca
 		return nil, func() {}, types.ErrAlreadyStarted
 	}
 	m.ctx, m.cancel = context.WithCancel(context.Background()) //nolint:gosec // G118: cancel stored in m.cancel; called by Manager.Stop
+	m.startedAt = time.Now()
 	m.mu.Unlock()
 
 	// Install the stream-missing observer bridge on the registered

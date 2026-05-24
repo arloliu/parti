@@ -133,6 +133,12 @@ func main() {
 	if err := mgr.Start(ctx); err != nil {
 		log.Fatalf("Failed to start manager: %v", err)
 	}
+	// Manager.Start returns once the synchronous sanity-check phase
+	// completes (StateWaitingAssignment). Wait for Stable before
+	// reading CurrentAssignment().
+	if err := <-mgr.WaitState(parti.StateStable, 30*time.Second); err != nil {
+		log.Fatalf("Manager did not reach StateStable: %v", err)
+	}
 
 	fmt.Printf("Manager started successfully!\n")
 	fmt.Printf("Worker ID: %s\n", mgr.WorkerID())

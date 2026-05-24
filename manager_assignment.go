@@ -996,6 +996,16 @@ func (m *Manager) applyAssignmentWithPrev(oldAssignment, newAssignment Assignmen
 	m.recordAssignmentMetrics(oldAssignment, newAssignment)
 	m.invokeAssignmentChangedHooks(workerID, oldAssignment, newAssignment)
 
+	// 7) Complete startup if we are still in WaitingAssignment. Idempotent CAS
+	// (guarded to only fire from WaitingAssignment) so calling it from
+	// every apply-success path (initial, watcher-delivered,
+	// scheduleApplyRetry-driven) is safe. Without this, a worker whose
+	// runner's first apply failed but whose retry-or-watcher-driven apply
+	// later succeeded would stay in WaitingAssignment forever even though
+	// the assignment was applied and acked. See manager_startup_async.go
+	// runStartupBackground Godoc.
+	m.casToStableFromWaitingAssignment()
+
 	return nil
 }
 

@@ -494,6 +494,14 @@ func StartWorker(
 		nc.Close()
 		return nil, fmt.Errorf("worker %d: Start: %w", idx, err)
 	}
+	// Manager.Start returns after the synchronous sanity-check phase
+	// (StateWaitingAssignment); wait for Stable so the harness's
+	// downstream consumer setup observes a fully-initialised manager.
+	if err := <-mgr.WaitState(parti.StateStable, 30*time.Second); err != nil {
+		_ = mgr.Stop(ctx)
+		nc.Close()
+		return nil, fmt.Errorf("worker %d: Manager did not reach StateStable: %w", idx, err)
+	}
 
 	if wh.consumerQ != nil {
 		if err := wh.consumerQ.Start(ctx); err != nil {

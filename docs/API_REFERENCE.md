@@ -76,29 +76,58 @@ if err != nil {
 
 #### Start
 
-Initializes and runs the manager.
+Runs the manager's synchronous sanity-check phase.
 
 ```go
 func (m *Manager) Start(ctx context.Context) error
 ```
 
-Blocks until worker ID is claimed and initial assignment is received. Returns error if startup fails or context is cancelled.
+Start returns once the worker has claimed a stable ID, ensured KV
+buckets exist, completed the election round, and wired the heartbeat
+publisher + (if leader) calculator. The state observed after `Start`
+returns may be `StateWaitingAssignment`, `StateStable`, or any
+calculator-driven active state (`StateScaling`, `StateRebalancing`,
+`StateEmergency`) depending on race — the background runner or
+calculator monitor may have advanced state before the caller observes
+it. The initial assignment fetch and apply run in a background
+goroutine. Callers that need to know the manager is ready to process
+work should call `WaitState(StateStable, timeout)`.
+
+A soft watchdog enters `StateDegraded` (reason: `startup-timeout`)
+once if `StartupTimeout` elapses from `Start` invocation without
+reaching `Stable`, providing the readiness-probe rotation signal. The
+watchdog is decoupled from the runner, so it fires even when the
+runner is blocked inside an unbounded `handoffCoordinator.Apply`
+call. Once monitors start, `monitorNATSConnection` drives
+`attemptRecoveryFromDegraded` on its `ExitThreshold` tick even
+without a prior disconnect — but if the runner is still blocked
+before monitors start, startup-timeout-degraded is a probe-rotation
+signal until the runner returns or the pod is restarted.
+
+**Apply boundedness:** `handoffCoordinator.Apply(m.ctx, ...)` is
+unbounded per attempt (identical to pre-refactor `Start`). A stuck
+consumer updater can block the runner inside one apply attempt until
+`Stop`.
 
 **Parameters**:
-- `ctx`: Context for cancellation and timeout
+- `ctx`: Context for synchronous-phase cancellation and timeout
 
 **Returns**:
-- `error`: Startup error or nil on success
+- `error`: Synchronous-phase startup error or nil on success.
+  Background-phase failures fall through to monitor startup and are
+  recovered by existing watchers / `scheduleApplyRetry` / 
+  `attemptRecoveryFromDegraded`.
 
-**Startup Sequence**:
+**Synchronous Sequence (returns after this completes)**:
 1. Claims stable worker ID from NATS KV
 2. Starts partition source
 3. Ensures KV buckets (election, heartbeat, assignment)
 4. Participates in leader election
 5. Starts heartbeat publisher
 6. If leader: starts assignment calculator
-7. Waits for initial partition assignment
-8. Transitions to stable state
+7. Transitions to `StateWaitingAssignment`
+8. Spawns the background runner (initial-assignment fetch + apply +
+   CAS to `Stable`) and the soft watchdog
 
 **Example**:
 ```go
@@ -1158,6 +1187,21 @@ const (
 - `StateEmergency`: Critical worker failure, emergency rebalancing
 - `StateDegraded`: **Degraded mode** - Using stale cache due to NATS connectivity loss
 - `StateShutdown`: Graceful shutdown in progress
+
+**Start return point:** `Manager.Start(ctx)` returns once the
+synchronous sanity-check phase completes. The state observed on
+return may be `StateWaitingAssignment`, `StateStable`, or any
+calculator-driven active state — the background runner or calculator
+monitor may have advanced state before the caller observes it. The
+transition to `StateStable` (when not already there) happens in a
+background goroutine after the initial assignment is fetched and
+applied. To block until the manager is ready to process work, use:
+
+```go
+if err := <-mgr.WaitState(parti.StateStable, 30*time.Second); err != nil {
+    log.Fatalf("manager did not reach StateStable: %v", err)
+}
+```
 
 **Degraded Mode Behavior**:
 When a worker enters `StateDegraded`:

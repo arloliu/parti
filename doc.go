@@ -38,6 +38,11 @@
 //	if err := mgr.Start(ctx); err != nil {
 //	    log.Fatal(err)
 //	}
+//	// Start returns once the synchronous sanity-check phase succeeds.
+//	// Wait for the background runner to apply the initial assignment.
+//	if err := <-mgr.WaitState(parti.StateStable, 30*time.Second); err != nil {
+//	    log.Fatal(err)
+//	}
 //	defer mgr.Stop(context.Background())
 //
 // # Key Features

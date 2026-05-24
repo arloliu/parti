@@ -59,6 +59,10 @@ func TestManager_StartStop(t *testing.T) {
 	err = mgr.Start(ctx)
 	require.NoError(t, err)
 
+	// Manager.Start now returns at WaitingAssignment; wait for the
+	// background runner to reach Stable before asserting.
+	require.NoError(t, <-mgr.WaitState(parti.StateStable, 10*time.Second))
+
 	// Verify state
 	require.Equal(t, parti.StateStable, mgr.State())
 	require.NotEmpty(t, mgr.WorkerID())

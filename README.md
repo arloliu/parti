@@ -153,7 +153,15 @@ func main() {
     ctx, cancel := context.WithCancel(context.Background())
     defer cancel()
 
+    // Start returns once the synchronous sanity-check phase
+    // (worker-ID claim, KV buckets, election, heartbeat, calculator)
+    // succeeds. The initial assignment fetch + apply runs in the
+    // background. Use WaitState to block until the manager is ready
+    // to process work.
     if err := mgr.Start(ctx); err != nil {
+        log.Fatal(err)
+    }
+    if err := <-mgr.WaitState(parti.StateStable, 30*time.Second); err != nil {
         log.Fatal(err)
     }
 

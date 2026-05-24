@@ -76,12 +76,11 @@ func TestHandoffIntermediateStates_DelaysExposePrepareCommit(t *testing.T) {
 	require.NoError(t, mgr.Start(ctx))
 	t.Cleanup(func() { _ = mgr.Stop(context.Background()) })
 
-	// Phase 4 made the initial-bootstrap apply synchronous-before-StateStable,
-	// so the whole prepare → commit → stable sequence is complete by the
-	// time Start returns. The DelayAfterPrepare / DelayBeforeStable still
-	// run, they just run inside Start's call stack. We can no longer
-	// reliably poll for the intermediate states from a test running after
-	// Start returns; verify the terminal stable state and ownership swap.
+	// Manager.Start now returns at WaitingAssignment; the initial
+	// prepare → commit → stable handoff runs in the background runner.
+	// Wait for the runner to land Stable before polling claim state.
+	require.NoError(t, <-mgr.WaitState(parti.StateStable, 10*time.Second))
+
 	stableCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	c, ok := waitForClaimState(stableCtx, js, bucket, partition.ID(), parti.HandoffClaimStable)

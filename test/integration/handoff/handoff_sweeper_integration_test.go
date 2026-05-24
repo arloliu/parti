@@ -66,7 +66,10 @@ func TestHandoffSweeper_ExpiredCommitReset(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, mgr.Start(ctx))
 	t.Cleanup(func() { _ = mgr.Stop(context.Background()) })
-	// Wait briefly for hygiene to run during Start
+	// Manager.Start returns at WaitingAssignment; wait for the
+	// background runner to apply the initial assignment so the
+	// sweeper has had a chance to run + record claim-store metrics.
+	require.NoError(t, <-mgr.WaitState(parti.StateStable, 10*time.Second))
 	time.Sleep(200 * time.Millisecond)
 	claims, err := parti.InspectHandoffClaims(ctx, js, bucket)
 	require.NoError(t, err)
