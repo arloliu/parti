@@ -3,12 +3,27 @@ package consumer
 import (
 	"time"
 
+	"github.com/arloliu/parti/v2/internal/durable"
 	"github.com/arloliu/parti/v2/internal/logging"
 	"github.com/arloliu/parti/v2/internal/metrics"
 	"github.com/arloliu/parti/v2/internal/recovery"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
+
+// RecoveryRetryConfig tunes the bounded-retry envelope wrapped around
+// the dynamic partition consumer's iterator-creation path and the
+// stream-missing Site B detour. The envelope caps consecutive failures
+// at [RecoveryRetryConfig.MaxAttempts]; exhaustion fires
+// [Dynamic]'s OnPermanentFailure / manager observer routes once and
+// the consumer loop exits.
+//
+// Defaults (when fields are zero): MaxAttempts=8, BaseBackoff=500ms,
+// MaxBackoff=30s, Jitter=0.2. Lowering these accelerates the
+// degraded-mode transition for operators willing to trade short-term
+// reconnection patience for faster pod rotation; raising them
+// tolerates longer NATS partitions before escalation.
+type RecoveryRetryConfig = durable.RecoveryRetryConfig
 
 // RecoveryStrategy defines how a recreated consumer decides where to resume
 // after an unexpected deletion.
@@ -181,6 +196,7 @@ type options struct {
 	partitionRefreshMinInterval time.Duration
 	streamMissingHook           types.StreamMissingHook
 	onPermanentFailure          func(subject string, err error)
+	recoveryRetry               RecoveryRetryConfig
 }
 
 // defaultOptions returns sensible defaults.
@@ -470,13 +486,58 @@ func WithStreamMissingHook(hook types.StreamMissingHook) DynamicOption {
 // branch on that to distinguish "stream is gone, operator must recreate
 // it" from "iter-create budget exhausted for some other reason".
 //
+// # Interaction with the Parti manager's auto-degraded route
+//
+// IMPORTANT: registering this callback disables the Parti manager's
+// auto-degraded route for stream-missing exhaustion. When a [Dynamic]
+// is wired into a [parti.Manager] (directly or via a
+// [parti.CompositeConsumerUpdater]), the manager installs an observer
+// that — for stream-missing exhaustion only — calls Hooks.OnError with
+// the wrapped error and transitions to Degraded mode with reason
+// "stream-missing-recovery-exhausted" so the readiness probe rotates
+// the pod.
+//
+// That manager-side observer fires ONLY when no application callback
+// is registered here. If WithOnPermanentFailure is set, the dispatcher
+// hands every permanent failure to the application and STOPS — the
+// manager observer never sees the stream-missing event. Applications
+// that want both per-subject observability AND the manager's
+// auto-degraded behavior must either:
+//
+//   - Forgo WithOnPermanentFailure and rely on
+//     [parti.Hooks.OnError] (which receives the wrapped error from the
+//     manager observer route), or
+//   - Within the supplied callback, branch on
+//     errors.Is(err, [parti.ErrStreamMissing]) and forward the event
+//     to their own degraded-mode signaling path.
+//
 // Applies only to [Dynamic]. Optional; if unset, exhaustion is logged at
 // WARN with metric `iterator_restart{reason="recovery_exhausted"}` or
 // `iterator_restart{reason="stream_missing_exhausted"}` but no callback
-// fires.
+// fires (unless the [parti.Manager] observer is wired, in which case
+// stream-missing exhaustion routes through it).
 func WithOnPermanentFailure(fn func(subject string, err error)) DynamicOption {
 	return dynamicOpt(func(o *options) {
 		o.onPermanentFailure = fn
+	})
+}
+
+// WithRecoveryRetry tunes the bounded-retry envelope wrapped around
+// the dynamic partition consumer's iterator-creation path and the
+// stream-missing Site B detour. See [RecoveryRetryConfig] for the
+// individual fields and their defaults.
+//
+// Lowering MaxAttempts / BaseBackoff / MaxBackoff is useful when an
+// operator prefers fast pod-rotation on a sustained iter-create
+// failure (e.g. tighter readiness SLAs). Raising them tolerates
+// longer NATS partitions before escalation to OnPermanentFailure
+// and degraded mode.
+//
+// Applies only to [Dynamic]. Zero-valued fields fall back to the
+// durable layer's defaults; partial overrides are supported.
+func WithRecoveryRetry(cfg RecoveryRetryConfig) DynamicOption {
+	return dynamicOpt(func(o *options) {
+		o.recoveryRetry = cfg
 	})
 }
 

@@ -28,6 +28,7 @@ zones.
 | P2.4c | F2 | (on `main`) | (in plan) | `31f2da9` | Envelope reuse on `monitorAssignmentChanges` + named degraded entry |
 | P2.4d | F2 | `self-healing-p23-stream-gone-hook` | (in plan) | `2c359b0` | Envelope reuse on `partition_consumer.go` recovery loop (P2.3 prerequisite) |
 | P2.3 | F5 | `self-healing-p23-stream-gone-hook` | [09](./09-pr9-spec.md) | `51bcaac` | Stream-missing hook + checkpoint reset + epoch fence + Site A/B detours + bounded exhaustion |
+| P2.3-FU | F5 | `self-healing-p23-manager-wiring` | [09](./09-pr9-spec.md) | (this branch) | Manager observer bridge + recordKVError short-circuit + T1/T4/T5 integration tests + CONSUMERS.md hook example |
 
 Phase 0 (P0.1-P0.3) and Phase 1 (P1.1-P1.3) are complete. Phase 2's
 **three dominant fixes** are P2.1 (eliminates leadership-churn),
@@ -69,31 +70,54 @@ new config option as an alternative to pre-creating with
 |---|---|---|---|
 | P2.5 | F10-A | Not started | **Chaos reproducer first** (hard gate). Truncated `Keys()` defense + worker-set floor. |
 
-### P2.3 follow-up — manager-side wiring (deferred from `self-healing-p23-stream-gone-hook`)
+### P2.3 follow-up — manager-side wiring (delivered on `self-healing-p23-manager-wiring`)
 
-P2.3 ships the durable layer's bind point but not the manager-side
-observer that consumes it. The spec's "out of scope" items listed at
-[`09-pr9-spec.md`](./09-pr9-spec.md) (under each Mechanism heading)
-form the next focused PR:
+All six items below landed on the follow-up branch:
 
-- `manager_setup.go`: type-assert the registered consumer updater
-  against `recovery.StreamMissingObserver` and install
-  `m.onStreamMissingError` via `SetOnStreamMissingError`.
-- `CompositeConsumerUpdater.SetOnStreamMissingError`: forward the
+- `manager_setup.go`: prepareStart type-asserts the registered
+  consumer updater against `recovery.StreamMissingObserver` and
+  installs `m.onStreamMissingError` via `SetOnStreamMissingError`
+  before any worker-consumer interaction.
+- `CompositeConsumerUpdater.SetOnStreamMissingError`: forwards the
   observer to current and later-`Add`-ed observer-capable children
-  under a mutex.
-- `consumer.Dynamic.SetOnStreamMissingError`: indirection slot read
-  by the existing `OnPermanentFailure` closure so a `Manager.Start`
-  call after `NewDynamic` reaches the durable layer.
-- `manager_degraded.go:recordKVError`: short-circuit when
+  under a mutex; snapshot-then-release pattern avoids serializing
+  the hot fan-out path.
+- `consumer.Dynamic.SetOnStreamMissingError`: `atomic.Pointer`
+  indirection slot read by the always-installed
+  `OnPermanentFailure` dispatcher, so a `Manager.Start` call after
+  `NewDynamic` reaches the durable layer. Application-supplied
+  `WithOnPermanentFailure` callbacks still win over the manager
+  observer per the documented contract.
+- `manager_degraded.go:recordKVError`: short-circuits on
   `errors.Is(err, types.ErrStreamMissing)` so stream-missing does
   not double-count against the KV error threshold (cross-feature
   contract preservation per AGENTS.md).
 - Integration tests T1/T4/T5 under `test/integration/failure/` —
-  hook fires, no-hook → readiness flip, hook-returns-error → no
-  retry storm.
+  hook fires, no-hook → readiness flip with
+  `"stream-missing-recovery-exhausted"` reason, hook-returns-error
+  → bounded retry budget.
 - `docs/CONSUMERS.md`: worked example with `parti.Provision`-based
-  stream recreate.
+  stream recreate + the no-hook escalation route.
+
+Empirical finding during T4/T5 implementation: the durable layer's
+per-partition exhaustion counter only advances on the first
+`ActionStreamMissing` classification; subsequent `iter.Next()`
+failures classify as `ErrorNeedsConfirm` (heartbeat path) and
+`confirmConsumerGone` returns false because `consumer.Info()`
+surfaces `ErrStreamNotFound` (the stream is gone, not the consumer)
+and `IsConsumerNotFound` does not match. The end-to-end tests use
+`MaxAttempts=1` so the first detour failure exhausts immediately;
+operator-tunable `consumer.WithRecoveryRetry` exposes the knob.
+Closing the classifier gap so the per-partition counter advances
+through repeated stream-missing detections is a separate item
+(noted, not blocking this follow-up).
+
+To support T4/T5's fast exhaustion timing, this branch adds a new
+operator-facing option `consumer.WithRecoveryRetry(cfg)` exposing
+the previously-internal `RecoveryRetryConfig` (`MaxAttempts`,
+`BaseBackoff`, `MaxBackoff`, `Jitter`). Operators who want tighter
+pod-rotation SLAs on a sustained iter-create failure can now lower
+the budget without dropping to the durable package.
 
 Deferred to Phase 3 (post-promotion gated):
 - P3.1 (F9-B) Lease-aware leader

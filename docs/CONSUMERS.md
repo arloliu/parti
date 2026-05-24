@@ -519,6 +519,103 @@ c, err := consumer.NewBroadcast(js, "AUDIT", "audit-logger", "events.>", handler
 )
 ```
 
+### Stream-Missing Hook (Dynamic only)
+
+`RecoveryStrategy` recreates a deleted **consumer** against an
+existing stream. When the underlying **stream itself** is gone —
+operator wipe, JetStream restart with non-replicated data loss,
+disaster recovery — the library cannot recover automatically because
+it does not own stream lifecycle. The `StreamMissingHook` is the
+operator-driven escalation seam: Parti detects the missing stream,
+invokes the hook, and on a `nil` return rebuilds the consumer against
+the freshly-recreated stream.
+
+```go
+import (
+    "context"
+    "github.com/arloliu/parti/v2"
+    "github.com/arloliu/parti/v2/consumer"
+    "github.com/arloliu/parti/v2/provision"
+)
+
+hook := func(streamName string) error {
+    // The operator-supplied recreate path. parti.Provision exposes
+    // a declarative ApplyStream that recreates the stream in place
+    // using the same config Parti expects to consume from.
+    p, err := provision.New(js)
+    if err != nil {
+        return err
+    }
+    _, err = p.ApplyStream(context.Background(), provision.StreamConfig{
+        Name:     streamName,
+        Subjects: []string{"orders.>"},
+        Storage:  provision.FileStorage,
+        Replicas: 3,
+    })
+    return err
+}
+
+c, err := consumer.NewDynamic(js, "ORDERS", "processor",
+    "orders.{{.PartitionID}}", handler,
+    consumer.WithRecoveryStrategy(consumer.RecoverFromLastProcessed),
+    consumer.WithStreamMissingHook(hook),
+)
+```
+
+The hook must obey two operator-facing rules (see
+[`types.StreamMissingHook`](https://pkg.go.dev/github.com/arloliu/parti/v2/types#StreamMissingHook)
+for the full contract):
+
+1. **Same durable name**, if the operator preserves the durable
+   consumer alongside the stream recreate. Parti then resumes from
+   the preserved `AckFloor` (no replay).
+2. **Compatible config** between the preserved consumer and Parti's
+   internal config (DeliverPolicy / AckPolicy / InactiveThreshold).
+   An incompatible restored consumer surfaces as a wrapped
+   `parti.ErrStreamMissing` via the no-hook path below.
+
+If the operator does NOT preserve a consumer (or recreates with a
+different durable name), Parti binds a fresh consumer with
+`DeliverAllPolicy` and replays the new stream from sequence 1 — the
+expected behavior for a true disaster-recovery recreate.
+
+`StreamMissingHook` requires a non-disabled `RecoveryStrategy` —
+specifically `RecoverFromLastProcessed` or `RecoverFromBeginning`.
+`RecoveryDisabled` (default) and `RecoverFromNew` are rejected at
+construction time because the recreated-stream replay override that
+prevents fresh-stream message loss only applies to those two
+strategies.
+
+**No-hook escalation route.** When the hook is omitted, or when the
+operator hook keeps returning an error, the F2 bounded-retry envelope
+eventually exhausts. The library then fires `OnPermanentFailure` with
+the cause wrapped in `parti.ErrStreamMissing`. The Parti `Manager`
+catches this via its built-in observer bridge: the worker enters
+degraded mode with reason `"stream-missing-recovery-exhausted"`, the
+configured `Hooks.OnError` fires with the wrapped error, and the
+readiness probe can rotate the pod. Branch on the typed sentinel
+inside `OnError`:
+
+```go
+mgr, _ := parti.NewManager(&cfg, js, src, strategy,
+    parti.WithWorkerConsumerUpdater(c),
+    parti.WithHooks(&parti.Hooks{
+        OnError: func(ctx context.Context, err error) error {
+            if errors.Is(err, parti.ErrStreamMissing) {
+                // page the operator, log to the disaster-recovery
+                // runbook, etc.
+            }
+            return nil
+        },
+    }),
+)
+```
+
+This route is distinct from the generic KV-error degraded-mode
+circuit — the named reason `"stream-missing-recovery-exhausted"`
+keeps the cross-feature contract that whole-bucket KV loss is the
+sole driver of `"KV error threshold exceeded"`.
+
 ### Validation
 
 Incompatible combinations return [`ErrInvalidConfig`](https://pkg.go.dev/github.com/arloliu/parti/v2/consumer#ErrInvalidConfig) — detect them with `errors.Is`:

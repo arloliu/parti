@@ -15,6 +15,7 @@ import (
 	"github.com/arloliu/parti/v2/internal/hooks"
 	"github.com/arloliu/parti/v2/internal/logging"
 	"github.com/arloliu/parti/v2/internal/metrics"
+	"github.com/arloliu/parti/v2/internal/recovery"
 	"github.com/arloliu/parti/v2/internal/stableid"
 	"github.com/arloliu/parti/v2/kvutil"
 	"github.com/arloliu/parti/v2/types"
@@ -667,6 +668,17 @@ func (m *Manager) Stop(ctx context.Context) error {
 
 	// Transition to shutdown state
 	m.transitionState(StateShutdown)
+
+	// Detach the stream-missing observer installed during prepareStart.
+	// The observer closure routes to m.logError + m.enterDegraded; once
+	// Stop is awaiting m.wg.Wait, a late stream-missing exhaustion from
+	// a Dynamic that outlives this manager must not enqueue new work
+	// into the wait group. The closure itself also short-circuits on
+	// StateShutdown (see manager_setup.go:onStreamMissingError); this
+	// clear is the primary remove, the closure guard the belt-and-braces.
+	if obs, ok := m.consumerUpdater.(recovery.StreamMissingObserver); ok {
+		obs.SetOnStreamMissingError(nil)
+	}
 
 	// Cancel manager context to stop all background goroutines
 	// This will cause monitorAssignmentChanges watcher to close
