@@ -202,6 +202,7 @@ func (m *Manager) setupHandoff(startupCtx context.Context, js jetstream.JetStrea
 		Jitter:            m.cfg.Handoff.Jitter,
 		DelayAfterPrepare: m.cfg.Handoff.DelayAfterPrepare,
 		DelayBeforeStable: m.cfg.Handoff.DelayBeforeStable,
+		PhaseConcurrency:  m.cfg.Handoff.PhaseConcurrency,
 		Logger:            m.logger,
 	}, true)
 

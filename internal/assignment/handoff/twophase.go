@@ -233,7 +233,7 @@ func (t *twoPhaseCoordinator) preparePhase(ctx context.Context, workerID string,
 
 	// Process in parallel with bounded concurrency
 	g, gCtx := errgroup.WithContext(ctx)
-	g.SetLimit(20) // Limit concurrent KV operations
+	g.SetLimit(t.cfg.PhaseConcurrency)
 
 	for _, p := range toPrepare {
 		g.Go(func() error {
@@ -341,7 +341,7 @@ func (t *twoPhaseCoordinator) commitPhase(ctx context.Context, workerID string, 
 
 	// Process in parallel with bounded concurrency
 	g, gCtx := errgroup.WithContext(ctx)
-	g.SetLimit(20)
+	g.SetLimit(t.cfg.PhaseConcurrency)
 
 	for _, p := range next.Partitions {
 		g.Go(func() error {
@@ -395,7 +395,7 @@ func (t *twoPhaseCoordinator) stabilizePhase(ctx context.Context, workerID strin
 
 	// Process in parallel with bounded concurrency
 	g, gCtx := errgroup.WithContext(ctx)
-	g.SetLimit(20)
+	g.SetLimit(t.cfg.PhaseConcurrency)
 
 	for _, p := range next.Partitions {
 		g.Go(func() error {

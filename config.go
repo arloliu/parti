@@ -119,6 +119,12 @@ type HandoffConfig struct {
 	// and before finalizing to stable. Useful for external observation of the commit state.
 	// Ignored if <= 0.
 	DelayBeforeStable time.Duration `yaml:"delayBeforeStable" default:"0" validate:"gte=0"`
+
+	// PhaseConcurrency caps the number of in-flight per-partition KV operations
+	// during each of the prepare, commit, and stabilize phases. Zero uses the
+	// default of 20. Note: 0 means "use default", not "no parallelism"; set 1
+	// for strictly serial execution.
+	PhaseConcurrency int `yaml:"phaseConcurrency" default:"0" validate:"gte=0,lte=256"`
 }
 
 // AlertLevel represents the severity level of degraded mode alerts.
