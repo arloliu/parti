@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Worker-set shrink-confirmation defense.** Calculator rebalances now
+  guard against silently-truncated heartbeat-bucket scans. NATS'
+  `KeyValue.Keys()` can return `(partial-slice, nil)` when the underlying
+  watcher subscription tears down mid-scan, producing a fresh-looking
+  observation that the worker set has shrunk when in fact the workers are
+  alive. Acting on such an observation reassigns live workers' partitions
+  to the survivors, producing transient double ownership. The defense
+  composes two layers: (1) `Calculator.getActiveWorkers` treats a
+  sharply-shrunk scan as suspicious and surfaces the cached worker set
+  with `fresh=false` until a configurable confirmation window has elapsed
+  — the last-known worker baseline is never advanced on a suspicious
+  read; and (2) `Calculator.rebalance` enforces an
+  emergency-confirmation gate: even after the confirmation window
+  accepts a shrunk read, the rebalance is skipped (no commit) unless
+  `EmergencyDetector` has captured at least one confirmed death. The
+  skip surfaces as a benign no-op in the state-machine callbacks, not
+  an error. Two new `Config` fields tune the defense:
+  `WorkerShrinkConfirmationCount` (default `2` — the number of
+  consecutive suspicious scans before the defense accepts the shrink)
+  and `WorkerShrinkConfirmationThresholdPct` (default `50` — an
+  observed count below `lastKnown × Pct / 100` is suspicious). Mirrors
+  the existing `PartitionShrinkConfirmation*` doctrine for the
+  partition-source side.
 - **Kubernetes operator** — a new nested Go module at `k8s/`
   (`github.com/arloliu/parti/v2/k8s`) that reconciles a `ProvisionedPartiEnv`
   custom resource to NATS infrastructure (control-plane KV buckets,
