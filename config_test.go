@@ -689,3 +689,29 @@ func TestConfig_Validate_AcceptsWorkerIDTTLAtFloor(t *testing.T) {
 
 	require.NoError(t, cfg.Validate(), "WorkerIDTTL at the floor must be accepted")
 }
+
+func TestConfig_ApplyStartJitter_Validation(t *testing.T) {
+	cases := []struct {
+		name    string
+		jitter  time.Duration
+		wantErr bool
+	}{
+		{"zero is allowed (disables jitter)", 0, false},
+		{"positive within cap is allowed", 500 * time.Millisecond, false},
+		{"negative is rejected", -1 * time.Millisecond, true},
+		{"above 10s cap is rejected", 11 * time.Second, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := TestConfig()
+			cfg.ApplyStartJitter = tc.jitter
+			err := cfg.Validate()
+			if tc.wantErr {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), "ApplyStartJitter")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}

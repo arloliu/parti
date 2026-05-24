@@ -892,9 +892,54 @@ func isApplyResultStale(candidate, cur Assignment) bool {
 	return candidate.LeaderRevision < cur.LeaderRevision
 }
 
-// applyAssignmentWithPrev runs the apply-then-store-then-ack pipeline with an
-// explicit previous-assignment argument. The default applyAssignment path
-// reads m.CurrentAssignment() for prev; the initial-bootstrap path
+// applyAssignmentWithPrev is the fresh-version apply entry (watcher,
+// commit, alias, initial-bootstrap). It jitters once before calling core,
+// so a fleet of workers observing the same fresh version spreads its
+// JetStream consumer create/destroy load.
+//
+// Retries (scheduleApplyRetry) must NOT jitter — see
+// applyAssignmentWithPrevSkipJitter below. Retries already pay their own
+// exponential backoff; adding jitter on top compounds latency for no
+// fleet-spread benefit (the retry is one worker, not a fleet).
+func (m *Manager) applyAssignmentWithPrev(oldAssignment, newAssignment Assignment) error {
+	if jitter := m.cfg.ApplyStartJitter; jitter > 0 {
+		if hook := m.testHookApplyJittered; hook != nil {
+			hook()
+		}
+		d := m.sampleApplyJitter(jitter)
+		select {
+		case <-time.After(d):
+		case <-m.ctx.Done():
+			return m.ctx.Err()
+		}
+	}
+
+	return m.applyAssignmentWithPrevCore(oldAssignment, newAssignment)
+}
+
+// applyAssignmentWithPrevSkipJitter is the retry entry. It calls core
+// directly, skipping the apply-start jitter sleep. Used by
+// scheduleApplyRetry so a retry's compound delay is bounded by the
+// retry-backoff envelope alone.
+func (m *Manager) applyAssignmentWithPrevSkipJitter(oldAssignment, newAssignment Assignment) error {
+	return m.applyAssignmentWithPrevCore(oldAssignment, newAssignment)
+}
+
+// sampleApplyJitter returns the jitter sleep duration for one apply
+// invocation. Defaults to a uniform sample in [0, maxJitter) via
+// math/rand/v2's top-level (concurrency-safe) Int64N. Tests override
+// applyJitterSampler to force specific durations.
+func (m *Manager) sampleApplyJitter(maxJitter time.Duration) time.Duration {
+	if s := m.applyJitterSampler; s != nil {
+		return s(maxJitter)
+	}
+	//nolint:gosec // jitter does not require crypto-secure random
+	return time.Duration(rand.Int64N(int64(maxJitter)))
+}
+
+// applyAssignmentWithPrevCore runs the apply-then-store-then-ack pipeline
+// with an explicit previous-assignment argument. The default applyAssignment
+// path reads m.CurrentAssignment() for prev; the initial-bootstrap path
 // (applyInitialAssignment) passes an explicit Assignment{} so the handoff
 // coordinator's prepare phase sees the full new partition set as "newly
 // acquired" without touching the snapshot.
@@ -903,7 +948,7 @@ func isApplyResultStale(candidate, cur Assignment) bool {
 // heartbeat SetAppliedAssignment) so concurrent apply paths (commit, alias,
 // retry, refresh) cannot interleave their Stores or heartbeat acks. See
 // applyAssignment Godoc + applyStoreMu Godoc.
-func (m *Manager) applyAssignmentWithPrev(oldAssignment, newAssignment Assignment) error {
+func (m *Manager) applyAssignmentWithPrevCore(oldAssignment, newAssignment Assignment) error {
 	workerID := m.WorkerID()
 
 	m.applyStoreMu.Lock()
@@ -1112,8 +1157,10 @@ func (m *Manager) scheduleApplyRetry(newAssignment Assignment) {
 			if pending == nil {
 				return
 			}
-			if err := m.applyAssignment(*pending); err != nil {
-				// applyAssignment already re-stashed the failure; keep going.
+			prev := m.CurrentAssignment()
+			if err := m.applyAssignmentWithPrevSkipJitter(prev, *pending); err != nil {
+				// applyAssignmentWithPrevSkipJitter already re-stashed via core's
+				// failure path; keep going.
 				if backoff < maxBackoff {
 					backoff *= 2
 					if backoff > maxBackoff {
