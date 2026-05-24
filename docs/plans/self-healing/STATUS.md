@@ -1,12 +1,12 @@
 # Self-Healing Implementation Status
 
-This file tracks per-PR delivery state. Updated 2026-05-23
-(post-`KVBuckets.Replicas` follow-up).
+This file tracks per-PR delivery state. Updated 2026-05-24
+(post-stream-missing-detour P2.3 + P2.4d).
 
 See [`README.md`](./README.md) for the plan overview and
 [`00-fix-plan.md`](./00-fix-plan.md) for the per-PR specs.
 
-## Delivered (9 of 13 in-scope PRs + 1 follow-up)
+## Delivered (12 of 13 in-scope PRs + 1 follow-up)
 
 All branches below have been pushed to `origin`. Each PR is branched
 off `main`, not stacked — see "Merge ordering" below for the conflict
@@ -24,12 +24,18 @@ zones.
 | P2.4a | F2 | `self-healing-p24a-f2-retry-envelope` | [08](./08-pr8-spec.md) | `908f181` | Retry envelope + restartWatcher wiring |
 | P2.2 | F6-B | `self-healing-p22-f6b-partition-floor` | (in plan) | `8c072dc` | Calculator empty/shrunk floor |
 | F/U  | —     | `self-healing-kvbuckets-replicas`              | (this STATUS) | `399dfb1` | `Config.KVBuckets.Replicas` + warn-on-mismatch helper |
+| P2.4b | F2 | (on `main`) | (in plan) | `0d454be` | Envelope reuse on `claim_resolver` supervise loop |
+| P2.4c | F2 | (on `main`) | (in plan) | `31f2da9` | Envelope reuse on `monitorAssignmentChanges` + named degraded entry |
+| P2.4d | F2 | `self-healing-p23-stream-gone-hook` | (in plan) | `2c359b0` | Envelope reuse on `partition_consumer.go` recovery loop (P2.3 prerequisite) |
+| P2.3 | F5 | `self-healing-p23-stream-gone-hook` | [09](./09-pr9-spec.md) | `51bcaac` | Stream-missing hook + checkpoint reset + epoch fence + Site A/B detours + bounded exhaustion |
 
-Phase 0 (P0.1-P0.3) and Phase 1 (P1.1-P1.3) are complete. Phase 2
-has the **three dominant fixes**: P2.1 (eliminates leadership-churn),
+Phase 0 (P0.1-P0.3) and Phase 1 (P1.1-P1.3) are complete. Phase 2's
+**three dominant fixes** are P2.1 (eliminates leadership-churn),
 P2.4a (bounds the source watcher's infinite retry loop), and P2.2
 (prevents reassign-to-zero thundering herd on a transient empty
-partition observation).
+partition observation). The full F2 envelope sweep (P2.4a/b/c/d)
+also landed, and P2.3 layers the operator-driven stream-missing
+recovery flow on top of P2.4d.
 
 ### Follow-up: `Config.KVBuckets.Replicas`
 
@@ -57,17 +63,37 @@ the migration runbook should get a one-line addendum mentioning the
 new config option as an alternative to pre-creating with
 `--replicas=3`.
 
-## Remaining (4 of 13 in-scope PRs)
-
-Each needs its own session — none is mechanical reuse:
+## Remaining (1 of 13 in-scope PRs)
 
 | Order | ID | Status | Reason |
 |---|---|---|---|
-| P2.4b | F2 | Not started | Envelope reuse on `claim_resolver` supervise loop. Site has nested supervisor + restart-reason classification — read carefully. |
-| P2.4c | F2 | Not started | Envelope reuse on `monitorAssignmentChanges`. Different stop semantics; exhaustion must call `enterDegraded("assignment-watcher-exhausted")` per plan. |
-| P2.4d | F2 | Not started | Envelope reuse on `partition_consumer.go` recovery loop. Larger surface; **P2.3's prerequisite**. |
-| P2.3 | F5 | Not started | Stream-gone hook + checkpoint reset + stream-epoch generation fence. **HIGH risk** (three coordinated mechanisms; manual-ack late-ack defense). Depends on P2.4d. |
 | P2.5 | F10-A | Not started | **Chaos reproducer first** (hard gate). Truncated `Keys()` defense + worker-set floor. |
+
+### P2.3 follow-up — manager-side wiring (deferred from `self-healing-p23-stream-gone-hook`)
+
+P2.3 ships the durable layer's bind point but not the manager-side
+observer that consumes it. The spec's "out of scope" items listed at
+[`09-pr9-spec.md`](./09-pr9-spec.md) (under each Mechanism heading)
+form the next focused PR:
+
+- `manager_setup.go`: type-assert the registered consumer updater
+  against `recovery.StreamMissingObserver` and install
+  `m.onStreamMissingError` via `SetOnStreamMissingError`.
+- `CompositeConsumerUpdater.SetOnStreamMissingError`: forward the
+  observer to current and later-`Add`-ed observer-capable children
+  under a mutex.
+- `consumer.Dynamic.SetOnStreamMissingError`: indirection slot read
+  by the existing `OnPermanentFailure` closure so a `Manager.Start`
+  call after `NewDynamic` reaches the durable layer.
+- `manager_degraded.go:recordKVError`: short-circuit when
+  `errors.Is(err, types.ErrStreamMissing)` so stream-missing does
+  not double-count against the KV error threshold (cross-feature
+  contract preservation per AGENTS.md).
+- Integration tests T1/T4/T5 under `test/integration/failure/` —
+  hook fires, no-hook → readiness flip, hook-returns-error → no
+  retry storm.
+- `docs/CONSUMERS.md`: worked example with `parti.Provision`-based
+  stream recreate.
 
 Deferred to Phase 3 (post-promotion gated):
 - P3.1 (F9-B) Lease-aware leader
