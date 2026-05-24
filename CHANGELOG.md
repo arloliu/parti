@@ -5,34 +5,30 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v2.5.0] - 2026-05-24
+
+Two themes: **self-healing under NATS infrastructure churn** — manager
+paths that previously degraded silently on bucket wipes, stale
+subscriptions, or partial KV scans now escalate through the existing
+degraded circuit, and bounded-retry envelopes replace open-ended loops on
+every monitor goroutine — and **operator tooling** — provision adds
+stream + per-partition-consumer management, a `force` policy with
+per-resource opt-in, and a Kubernetes operator driving the same provision
+path from a `ProvisionedPartiEnv` CRD. `Manager.Start` is now fully
+asynchronous (breaking).
 
 ### Breaking changes
 
-> **Full migration guide:** [`docs/MIGRATING_MANAGER_START.md`](docs/MIGRATING_MANAGER_START.md)
+> **Migration guide:** [`docs/MIGRATING_MANAGER_START.md`](docs/MIGRATING_MANAGER_START.md)
 
-- `Manager.Start(ctx)` now returns once the synchronous sanity-check phase
-  succeeds (stable worker ID claimed, KV buckets exist, election complete,
-  heartbeat and calculator wired) — i.e. when the worker has transitioned
-  to `StateWaitingAssignment`. Previously, `Start` blocked until
+- **`Manager.Start(ctx)` returns after sanity checks**, not after
   `StateStable`. The initial assignment fetch and apply now run in a
-  background goroutine.
-
-  **What you observe:**
-  - `mgr.WorkerID()` is still reliable immediately after `Start` returns.
-  - `mgr.CurrentAssignment()` may return an empty assignment between
-    `Start` returning and the background runner finishing. Block on
-    `mgr.WaitState(parti.StateStable, timeout)` first.
-  - `Start` returns an error only for synchronous-phase failures.
-    Background failures fall through to monitor startup; existing recovery
-    mechanisms (assignment watcher redelivery, `scheduleApplyRetry`,
-    `monitorNATSConnection` → `attemptRecoveryFromDegraded`) handle them.
-  - A soft watchdog enters `StateDegraded` (reason: `startup-timeout`)
-    once if `StartupTimeout` elapses without reaching `Stable` — providing
-    the probe-rotation signal. This is decoupled from the runner, so it
-    fires even when the runner is blocked.
-
-  **Migration:**
+  background goroutine. Block on `<-mgr.WaitState(parti.StateStable,
+  timeout)` before reading `mgr.CurrentAssignment()`. A soft watchdog
+  enters `StateDegraded(reason="startup-timeout")` once if
+  `StartupTimeout` elapses without reaching Stable — independent of the
+  runner, so it fires the readiness-probe rotation signal even when the
+  runner is blocked.
 
   ```go
   // Before
@@ -41,177 +37,146 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   // After
   if err := mgr.Start(ctx); err != nil { /* handle */ }
-  if err := <-mgr.WaitState(parti.StateStable, 30*time.Second); err != nil {
-      /* handle */
-  }
+  if err := <-mgr.WaitState(parti.StateStable, 30*time.Second); err != nil { /* handle */ }
   use(mgr.CurrentAssignment())
   ```
 
-### Follow-up issues (non-blocking for this release)
-
-- **Apply ctx threading.** `handoffCoordinator.Apply` accepts `m.ctx`
-  unbounded per attempt; threading a per-attempt deadline through to the
-  consumer updater would let the background runner enforce per-attempt
-  bounds. Same property exists in pre-refactor Start. Track separately.
-- **Backoff jitter for `scheduleApplyRetry`.** The existing apply-retry
-  loop uses ±20% jitter; consider exporting that posture as the default
-  for any future async-Start retries.
-- **Stress-soak test for the WaitingAssignment → Stable window.** The
-  "Concurrency stress tests for monitor goroutines" rule in `AGENTS.md`
-  applies in spirit to the new lifetime runner. Add a sibling to
-  `test/integration/manager/manager_epoch_monitor_concurrency_test.go`
-  in a follow-up PR.
-- **Deterministic CAS-clobber regression pin.** The integration test in
-  `test/integration/manager/startup_async_calculator_race_test.go`
-  (`TestStartupAsync_CalculatorStateNotClobbered`) is a liveness +
-  smoke test, not a deterministic clobber pin — pure observability via
-  `OnStateChanged` cannot distinguish clobber from normal calculator
-  oscillation. A future follow-up should add a production test hook
-  (e.g., `m.testHookBeforeStartupCAS func()`, mirroring the
-  `testHookAfterApplyStore` pattern at `manager_assignment.go:957-959`)
-  so the test can force a calculator state projection between the
-  runner's apply and its CAS, then assert the CAS did NOT succeed. The
-  unit tests in `manager_startup_async_cas_test.go` cover the CAS
-  guard's behavior in isolation; this follow-up would close the loop
-  on a live-cluster regression pin.
-
-### Added
+### Added — self-healing
 
 - **Worker-set shrink-confirmation defense.** Calculator rebalances now
-  guard against silently-truncated heartbeat-bucket scans. NATS'
-  `KeyValue.Keys()` can return `(partial-slice, nil)` when the underlying
-  watcher subscription tears down mid-scan, producing a fresh-looking
-  observation that the worker set has shrunk when in fact the workers are
-  alive. Acting on such an observation reassigns live workers' partitions
-  to the survivors, producing transient double ownership. The defense
-  composes two layers: (1) `Calculator.getActiveWorkers` treats a
-  sharply-shrunk scan as suspicious and surfaces the cached worker set
-  with `fresh=false` until a configurable confirmation window has elapsed
-  — the last-known worker baseline is never advanced on a suspicious
-  read; and (2) `Calculator.rebalance` enforces an
-  emergency-confirmation gate: even after the confirmation window
-  accepts a shrunk read, the rebalance is skipped (no commit) unless
-  `EmergencyDetector` has captured at least one confirmed death. The
-  skip surfaces as a benign no-op in the state-machine callbacks, not
-  an error. Two new `Config` fields tune the defense:
-  `WorkerShrinkConfirmationCount` (default `2` — the number of
-  consecutive suspicious scans before the defense accepts the shrink)
-  and `WorkerShrinkConfirmationThresholdPct` (default `50` — an
-  observed count below `lastKnown × Pct / 100` is suspicious). Mirrors
-  the existing `PartitionShrinkConfirmation*` doctrine for the
-  partition-source side.
-- **Kubernetes operator** — a new nested Go module at `k8s/`
-  (`github.com/arloliu/parti/v2/k8s`) that reconciles a `ProvisionedPartiEnv`
-  custom resource to NATS infrastructure (control-plane KV buckets,
-  partition-source bucket, and application JetStream streams) by driving the
-  same `provision.Apply` path the `partictl` CLI uses. The operator adds no
-  provisioning logic of its own. The root `github.com/arloliu/parti/v2` module
-  gains **zero** new dependencies — the entire `controller-runtime` / `k8s.io`
-  dependency tree is isolated in the nested module. See `docs/KUBERNETES.md`
-  for the full operator guide.
-- **`ProvisionedPartiEnv` CRD** (`apiVersion: parti.io/v1alpha1`,
-  `kind: ProvisionedPartiEnv`, short name `ppe`) — a namespaced custom resource
-  that declares desired NATS infrastructure. The `Spec` mirrors the
-  bucket-and-stream subset of `provision.Config` plus a `nats` connection block
-  (NATS server URL and an optional reference to a Kubernetes `Secret` for
-  `.creds` / token / NKey auth). The `Status` subresource carries a single
-  `Ready` condition with reasons `Reconciled` (success), `InvalidSpec`,
-  `SecretMissing`, `NATSUnreachable`, and `ApplyError`, plus `lastPlan` and
-  `lastApply` summaries (drift counts, executed/error counts). Deploy manifests
-  live under `k8s/config/` (CRD, RBAC, operator Deployment, sample CR and
-  Secret).
-- `partictl partitions plan` and `partictl partitions apply` manage the
-  contents of the partition-source key — the partition table itself —
-  separately from the bucket-provisioning commands. `plan` reports the
-  record-level diff (added / removed / weight-changed) between the declared
-  `partitionSource.partitions` and the live key; `apply` writes the declared
-  table with a single compare-and-swap, gating record removals behind
-  `-prune`. The `provision` SDK exposes the same surface as `PlanPartitions`
-  and `ApplyPartitions`.
-- `provision.PartitionSourceConfig.Partitions` declares the desired partition
-  table inline in `parti-env.yaml`. The bucket-provisioning commands
-  (`plan` / `apply` / `adopt`) ignore the field, so existing config files are
-  unaffected.
-- `partictl stream view|plan|apply` provides a stream-scoped surface over the
-  same provision SDK. `stream view` (with or without `-f`) is an
-  instance-scoped inventory that lists every Parti-marked application stream in
-  the account; `-f` is optional for `view` and required for `plan` / `apply`.
-  `stream plan` and `stream apply` accept `-policy`, `-fail-on-drift`, and
-  `-dry-run` identically to the top-level commands and emit the same JSON
-  envelope (`apiVersion: parti.io/provision/v1`). The existing `partictl plan`
-  / `apply` / `adopt` / `view` commands provision and report streams
-  automatically when the config has a `streams:` block; no config change is
-  needed for configs that omit `streams:`. New action kinds: `create-stream`,
-  `update-stream`, `stamp-stream-marker`. New drift kind: `application-stream`.
-- `provision.Config.Streams []StreamCfg` declares application JetStream streams
-  inline in `parti-env.yaml` under a `streams:` block. `StreamCfg` exposes the
-  common operational knobs (`name`, `subjects`, `retention`, `storage`,
-  `discard`, `replicas`, `maxAge`, `maxBytes`, `maxMsgs`, `description`).
-  `maxBytes` and `maxMsgs` use `0` for "unlimited" in config (the NATS server
-  stores these as -1; `plan` normalises the two representations as equivalent).
-  `Storage` and `Retention` divergences classify as `drift-immutable` and are
-  never auto-reconciled, including `limits` ↔ `interest` retention changes
-  (conservative policy; `force` / delete-recreate is a future phase). Subject
-  coverage against `dynamicConsumers:` entries is not validated in this release.
-- `partictl consumers plan` and `partictl consumers apply` precreate the
-  per-partition durable consumers that a `dynamicConsumers:` target with a
-  non-empty `partitionsRef` describes. `plan` reports which consumers are
-  missing (`create-consumer` actions + `drift-mutable` findings) and which
-  already exist (`informational` findings); `apply` creates the missing ones.
-  A target with an empty `partitionsRef` keeps its Phase 1 alignment-check-only
-  behavior and is unaffected. The `provision` SDK exposes the same surface as
-  `PlanConsumers` and `ApplyConsumers`.
-- `DynamicConsumerCfg.PartitionsRef` — setting this field to the
-  partition-source bucket name opts a `dynamicConsumers:` target into
-  precreation. Must equal `partitionSource.bucket`; validated statically before
-  any NATS I/O (`ErrInvalidConfig`, exit 3). Empty means alignment-check only
-  (unchanged from Phase 1).
-- `provision.ValidateConsumerSet(cfg Config) error` performs static validation
-  for consumer precreation: at least one opted-in target, non-empty partition
-  set, valid `PartitionsRef`, and valid `StreamName` / `ConsumerPrefix` /
-  `SubjectTemplate` on every opted-in target. All errors wrap `ErrInvalidConfig`.
-- `provision.ErrConsumerStreamMissing` — returned by `PlanConsumers` when the
-  application stream a precreation-opted target names does not exist live. Wraps
-  `ErrLiveValidation` (CLI exit 3). Mirrors Phase 3's `ErrPartitionBucketMissing`.
-- New `PlannedAction` kind `"create-consumer"` (`ActionCreateConsumer`): emitted
-  by `PlanConsumers` for each missing per-partition durable consumer; executed by
-  `ApplyConsumers` via `js.CreateConsumer`. A `ErrConsumerExists` create-race
-  re-reads the colliding consumer and verifies its identity / immutable fields
-  before recording a raced success, so a hand-created consumer squatting the
-  deterministic durable name is surfaced as a fail-fast error rather than silently
-  accepted.
-- **Identity-only / runtime-owns model.** Precreation creates consumers from
-  `dynamicbuild.DefaultDynamicDefaults()` — the runtime defaults for the
-  NATS-immutable fields (`AckPolicy = AckExplicitPolicy`, `MaxWaiting = 2`,
-  `MemoryStorage = false`). The runtime's `CreateOrUpdateConsumer` on worker
-  start overwrites the mutable tunables (`AckWait`, `MaxDeliver`, etc.) freely.
-  No ownership marker is stamped on consumers (stamping would oscillate against
-  the runtime's unconditional overwrite). Consumer tunables are not managed by
-  provision; `consumer.Dynamic` options remain the sole source of truth for them.
-- **`force` reconcile policy** — `provision.PolicyForce` (`"force"`, accepted by
-  `partictl plan`, `apply`, `stream plan/apply`, and `consumers plan/apply`). A
-  strict superset of `safe-update`: it create-misses and reconciles drift-mutable
-  fields in place as `safe-update` does, and additionally repairs a
-  drift-immutable resource by delete/recreate — but only when the resource's
-  config also sets `allowDeleteRecreate: true` (the two-layer gate). Under any
-  other policy, or for a resource without `allowDeleteRecreate: true`, immutable
-  drift is still reported but never repaired.
-- **Per-resource `allowDeleteRecreate` opt-in** — a new boolean field on each of
-  the four config structs (`controlPlane`, `partitionSource`, each `streams`
-  entry, each `dynamicConsumers` entry). When `true` and the policy is `force`,
-  Apply deletes and recreates the resource to repair drift-immutable divergences.
-  When omitted (the default, `false`), the resource is never deleted by provision
-  regardless of policy.
-- **`recreate-kv` / `recreate-stream` / `recreate-consumer` actions** — new
-  `PlannedAction` kinds (`ActionRecreateKV`, `ActionRecreateStream`,
-  `ActionRecreateConsumer`) emitted by `Plan` / `PlanConsumers` under `force`
-  when both gate layers opt in. `Apply` / `ApplyConsumers` execute the
-  five-step re-read → re-classify → delete → create sequence. A stale plan is
-  handled gracefully: the re-classify step skips the delete when the live state
-  no longer carries the immutable divergence the plan recorded. A post-delete
-  create failure returns a fail-fast error wrapping `provision.ErrRecreateInterrupted`;
-  re-running `apply` after fixing the persistent cause is safe (a fresh plan
-  emits an ordinary `create-*` action, no re-deletion).
+  guard against silently-truncated heartbeat scans (NATS'
+  `KeyValue.Keys()` can return `(partial-slice, nil)` when the watcher
+  tears down mid-scan, producing a fresh-looking shrink). Two layers:
+  the active-worker scan treats a sharply-shrunk read as suspicious and
+  surfaces the cached set with `fresh=false`; the rebalance enforces an
+  emergency-confirmation gate that requires `EmergencyDetector` to have
+  captured at least one confirmed death. Tunable via
+  `WorkerShrinkConfirmationCount` (default `2`) and
+  `WorkerShrinkConfirmationThresholdPct` (default `50`). Mirrors the
+  existing `PartitionShrinkConfirmation*` doctrine.
+- **Bounded-retry envelopes** on `monitorAssignmentChanges`, the source
+  watcher restart loop, the claim resolver watcher, and partition
+  consumer iter-creation. After the per-episode attempt budget is
+  exhausted, each loop enters `StateDegraded` with a named reason
+  rather than retrying forever.
+- **Epoch fence** detects KV bucket wipe-and-recreate via stream
+  `Created` timestamp change and enters degraded rather than treating
+  stale state as valid.
+- **Stable-ID hardening.** Workers self-stop on a lost claim, take over
+  stale claims belonging to dead workers, and reconcile the stable-ID
+  bucket `MaxAge` on startup.
+- **Source bucket-loss escalation.** `NatsKV` partition source fires
+  the new `SourceUnavailableHook` (rate-limited) and exposes a
+  `SourceBucketMissing` gauge when the bucket disappears.
+- **Stream-missing recovery** for `consumer.Dynamic` — the consumer
+  re-creates a deleted application stream and resumes; manager-side
+  observer escalates recovery-exhaustion as a degraded signal.
+
+### Added — provisioning
+
+- **`partictl partitions plan|apply`** manages the partition table
+  itself (record-level diff, `-prune` gates removals). SDK:
+  `provision.PlanPartitions` / `ApplyPartitions`. New config:
+  `PartitionSourceConfig.Partitions` declares the table inline.
+- **`partictl stream view|plan|apply`** provisions application JetStream
+  streams declared under `streams:` in `parti-env.yaml`.
+  `provision.Config.Streams []StreamCfg` exposes `name`, `subjects`,
+  `retention`, `storage`, `discard`, `replicas`, `maxAge`, `maxBytes`,
+  `maxMsgs`, `description`. New actions: `create-stream`,
+  `update-stream`, `stamp-stream-marker`. The top-level `plan` / `apply`
+  / `adopt` / `view` commands also provision streams automatically when
+  `streams:` is set; configs without a `streams:` block are unaffected.
+- **`partictl consumers plan|apply`** precreates per-partition durable
+  consumers for `dynamicConsumers:` targets opted in via
+  `DynamicConsumerCfg.PartitionsRef`. Identity-only / runtime-owns
+  model: precreation writes the runtime's NATS-immutable defaults; the
+  consumer's `CreateOrUpdateConsumer` on worker start owns mutable
+  tunables. A racing `ErrConsumerExists` re-reads and verifies identity
+  before recording success. New error:
+  `provision.ErrConsumerStreamMissing`.
+- **`force` policy** (`provision.PolicyForce`) — strict superset of
+  `safe-update` that additionally repairs drift-immutable resources by
+  delete/recreate. Gated by a per-resource `allowDeleteRecreate: true`
+  opt-in (new field on `controlPlane`, `partitionSource`, each
+  `streams` entry, each `dynamicConsumers` entry). New actions:
+  `recreate-kv`, `recreate-stream`, `recreate-consumer`. Stale plans
+  re-classify before deleting; post-delete create failure wraps
+  `ErrRecreateInterrupted` (re-running apply is safe).
+- **Kubernetes operator** — nested Go module at `k8s/`
+  (`github.com/arloliu/parti/v2/k8s`) reconciles a `ProvisionedPartiEnv`
+  CRD (`apiVersion: parti.io/v1alpha1`, short name `ppe`) by driving the
+  same `provision.Apply` path. **The root module gains zero new
+  dependencies** — the `controller-runtime` / `k8s.io` tree is isolated
+  in the nested module. `Status` carries a single `Ready` condition
+  (reasons: `Reconciled`, `InvalidSpec`, `SecretMissing`,
+  `NATSUnreachable`, `ApplyError`) plus `lastPlan` / `lastApply`
+  summaries. Deploy manifests under `k8s/config/`. See
+  `docs/KUBERNETES.md`.
+
+### Added — configuration & observability
+
+- **`KVBuckets.Replicas`** — declares desired replica count for
+  parti-owned KV buckets; mismatches surface as a startup warning.
+- **One-shot startup warnings** when: two-phase handoff is enabled
+  without a processing gate; `NatsKV` reconciler is disabled with no
+  leadership probe wired; `nats.Conn` has a finite `MaxReconnect`.
+- **Election bucket on `FileStorage`** by default — survives JetStream
+  restarts in single-node deployments, removing a spurious
+  degraded-entry path.
+
+### Fixed
+
+- **`watcher.Stop` race** (`nats.ErrBadSubscription`). A KV watcher
+  created with `nats.Context(ctx)` registers an internal nats.go
+  goroutine that calls `sub.Unsubscribe` on ctx-cancel, racing callers
+  that explicitly call `watcher.Stop`. New
+  `natsutil.IsBenignWatcherStopErr` tolerates both
+  `ErrConsumerNotFound` (server-side) and `ErrBadSubscription`
+  (local-side) at all five `watcher.Stop` callsites.
+- **Whole-bucket loss → degraded, not claim-lost shutdown.** Restored
+  the contract that all workers enter `StateDegraded` within a bounded
+  window on whole-bucket loss; a prior classifier widening had begun
+  routing the error to claim-lost self-stop on a single worker.
+- **Epoch-probe race on shared stream** — manager now opens a dedicated
+  KV handle for the epoch probe, eliminating a race against the
+  production watcher on the same cached `*stream`.
+- **Assignment-watcher envelope per-episode budget reset** — the
+  envelope now resets its attempt counter at the start of each restart
+  episode rather than carrying state across episodes.
+- **Stable-ID bucket-missing renewal errors classify as `ErrClaimLost`**
+  so the worker self-stops cleanly rather than looping.
+- **`partictl`** — config load is now inside the operation timeout
+  (previously could hang past the user-specified deadline).
+
+### Internal
+
+- **`make pre-pr`** target chains lint + `make test` (unit, `-race`) +
+  `make test-integration` (live NATS, `-race`). Required before opening
+  PRs that touch `manager/`, `source/`, `stableid/`, `recovery/`,
+  `internal/assignment/`, or `internal/durable/`.
+- **Monitor-goroutine concurrency stress-test discipline.** New focused
+  tests pin races between monitor goroutines (envelope retry loops,
+  reconcilers, watchers) and production paths sharing nats.go's cached
+  `*stream` state. Template:
+  `test/integration/manager/epoch_monitor_concurrency_test.go`.
+
+### Follow-up issues (non-blocking)
+
+- **Apply ctx threading.** `handoffCoordinator.Apply` accepts `m.ctx`
+  unbounded per attempt; per-attempt deadline threading would let the
+  background runner enforce bounds. Watchdog already covers the failure
+  case.
+- **Stress-soak test for the WaitingAssignment → Stable window.** Add a
+  sibling to `epoch_monitor_concurrency_test.go` for the lifetime
+  runner.
+- **Deterministic CAS-clobber regression pin.** Add a production test
+  hook (`m.testHookBeforeStartupCAS`) for a live-cluster pin; unit
+  tests in `manager_startup_async_cas_test.go` cover the guard in
+  isolation.
+- **Orphan-claim reaper.** With no `MaxAge` on the handoff bucket,
+  claims for partitions permanently removed from the source no longer
+  expire. Harmless slow leak; add a reaper only if partition-set churn
+  makes it material.
 
 ## [v2.4.1] - 2026-05-20
 
