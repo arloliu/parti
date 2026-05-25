@@ -22,6 +22,7 @@ no-op behavior — upgrading the library is observably identical to current
 | `f03f8eb` | `Config.ApplyStartJitter` (`time.Duration`) | `0` (off) | Random sleep `[0, jitter)` before fresh-version apply takes `applyStoreMu`; retries bypass jitter via `applyAssignmentWithPrevSkipJitter`. Cap at 10s. Body of `applyAssignmentWithPrev` extracted to `applyAssignmentWithPrevCore` (bit-for-bit identical). |
 | `a6191fa` | `HandoffConfig.PhaseConcurrency` (`int`) | `0` → 20 | Surfaces hard-coded `g.SetLimit(20)` in 3 sites of `internal/assignment/handoff/twophase.go`. `0` = default 20, `1` = strictly serial, `2..256` = exact bound. Only active when `EnableTwoPhaseHandoff=true`. |
 | `2efad05` | `Config.AssignmentWatcherDebounce` (`time.Duration`) + `ManagerMetrics.RecordApplyAttempt(workerID, version)` | `0` (off) for the debounce | Idle-window timer in `runAssignmentWatchSession` coalesces watcher events. Cap at 1s. Prometheus counter `parti_manager_apply_attempts_total{worker_id}` (single label, version discarded for bounded cardinality). Opt-in `TestApplyCoalescing_UnderReElectionBurst` diagnostic for operator window sizing. |
+| follow-up | `Config.AssignmentWatcherDebounce` also covers `assignment._commit` watcher updates | `0` (off) | Rapid commit bursts are staged for one idle window; identical-assignment bursts collapse to one apply, while same-or-higher commits that change this worker's partition set early-flush pending to preserve two-phase handoff. Stale lower-version commits are dropped. |
 
 ## Files in this directory
 
@@ -39,6 +40,12 @@ no-op behavior — upgrading the library is observably identical to current
    ```
    Record `AGGREGATE max_burst_size` (call it `<N_before>`) and
    `recommended_debounce_window` (call it `<Y>`).
+   
+   Optionally, also run the rapid-commit diagnostic to measure commit watcher burst behavior:
+   ```bash
+   PARTI_RUN_HERD_DIAGNOSTIC=1 go test ./test/integration/manager/ \
+     -run 'TestApplyCoalescing_UnderRapidCommitBurst' -v -count=3
+   ```
 3. Tune the three knobs in production config as desired, e.g.:
    ```yaml
    applyStartJitter: 500ms
