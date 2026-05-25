@@ -653,11 +653,157 @@ func (m *Manager) watchCommit(ctx context.Context, kv jetstream.KeyValue, reconc
 	if err != nil {
 		return fmt.Errorf("failed to watch commit: %w", err)
 	}
+	return m.runCommitWatchSession(ctx, kv, watcher, reconcileTickC, key)
+}
+
+// commitDebouncer holds the mutable state for one runCommitWatchSession
+// invocation. Extracting stage/flush into methods keeps the main select loop
+// below the cyclop complexity limit while preserving the load-bearing guard
+// ordering documented on stage().
+type commitDebouncer struct {
+	debounce bool
+	window   time.Duration
+	timer    *time.Timer
+	workerID string
+	pending  *types.AssignmentCommit
+	dispatch func(*types.AssignmentCommit)
+}
+
+func newCommitDebouncer(window time.Duration, workerID string, dispatch func(*types.AssignmentCommit)) *commitDebouncer {
+	d := &commitDebouncer{
+		debounce: window > 0,
+		window:   window,
+		workerID: workerID,
+		dispatch: dispatch,
+	}
+	if d.debounce {
+		d.timer = time.NewTimer(time.Hour)
+		d.timer.Stop()
+	}
+
+	return d
+}
+
+func (d *commitDebouncer) timerC() <-chan time.Time {
+	if d.timer == nil {
+		return nil
+	}
+
+	return d.timer.C
+}
+
+// stage routes a freshly decoded commit through the debounce window.
+//
+// Correctness invariant (two-phase handoff): every commit that changes THIS
+// worker's effective partition set must reach handleCommitValue as a discrete
+// apply. Otherwise a skipped intermediate that moved a partition away from us
+// (worker not in commit.Workers, or a payload-set change that drops a
+// partition we own) would leave our local snapshot still containing the
+// partition — and the next debounced apply's preparePhase, which only diffs
+// next-vs-previous on the local snapshot, would elide the reclaim/release and
+// let the claim store and local snapshot diverge
+// (see internal/assignment/handoff/twophase.go:208-232, 334-386).
+// The "flush before staging on payload-hash change" rule below enforces this:
+// bursts of identical-assignment-for-us commits collapse to the highest
+// version (the common case during leader churn), but any intermediate that
+// reshuffles us is flushed before the new pending is staged.
+func (d *commitDebouncer) stage(commit *types.AssignmentCommit) {
+	if commit == nil {
+		return
+	}
+	if !d.debounce {
+		d.dispatch(commit)
+		return
+	}
+	// Out-of-order guard FIRST: drop any commit whose version is strictly
+	// lower than what is already staged. This must run BEFORE the
+	// workerAssignmentChanged check — otherwise a stale lower-version commit
+	// with a different worker hash would force-flush the newer pending and
+	// then re-stage itself, regressing both the version-order guarantee and
+	// the "highest pending" architecture promise. The watcher stream is
+	// monotone in practice, but the reconcile arm can surface a snapshot that
+	// races with a more recent watcher event still in flight, so the guard is
+	// load-bearing.
+	if d.pending != nil && commit.Version < d.pending.Version {
+		return
+	}
+	// If the new commit changes THIS worker's assignment vs. pending, flush
+	// pending first so the handoff diff for the intermediate change is
+	// observed. workerAssignmentChanged compares Workers-membership and
+	// Payloads[workerID].PayloadHash — identical hashes mean identical
+	// partition slices by AssignmentPayloadRef's content-addressable contract
+	// (types/assignment_commit.go:51-66).
+	if d.pending != nil && workerAssignmentChanged(d.pending, commit, d.workerID) {
+		flushed := d.pending
+		d.pending = nil
+		d.dispatch(flushed)
+	}
+	// pending is now nil OR commit.Version >= pending.Version. The replacement
+	// is unconditional in the nil case; the `>= pending.Version` arm in the
+	// non-nil case simply refreshes the timer with the freshest view
+	// (typically identical hash; we already flushed otherwise).
+	commitCopy := *commit
+	d.pending = &commitCopy
+	if !d.timer.Stop() {
+		select {
+		case <-d.timer.C:
+		default:
+		}
+	}
+	d.timer.Reset(d.window)
+}
+
+func (d *commitDebouncer) flush() {
+	if d.pending == nil {
+		return
+	}
+	commit := d.pending
+	d.pending = nil
+	d.dispatch(commit)
+}
+
+// runCommitWatchSession drives one watch session against the already-established
+// commit watcher. Returns nil for ctx-cancel (clean exit) and a non-nil error
+// when the Updates() channel closes (the session must be restarted by the
+// caller via monitorCommitChanges's backoff loop).
+//
+// When Config.AssignmentWatcherDebounce > 0, rapid bursts of commit events are
+// coalesced: only the highest-version commit within each idle window reaches
+// handleCommitValue. When an intermediate commit changes this worker's
+// effective partition set, the pending commit is force-flushed before staging
+// the new one so the two-phase handoff diff sees the ownership change.
+// When debounce == 0 (default), every commit is dispatched immediately,
+// preserving the current behavior.
+//
+//nolint:unparam // key is always "assignment._commit" today but the param documents the reconcile contract and allows future test overrides
+func (m *Manager) runCommitWatchSession(
+	ctx context.Context,
+	kv jetstream.KeyValue,
+	watcher jetstream.KeyWatcher,
+	reconcileTickC <-chan time.Time,
+	key string,
+) error {
 	defer func() {
 		if serr := watcher.Stop(); serr != nil && !natsutil.IsBenignWatcherStopErr(serr) {
 			m.logError("failed to stop commit watcher", "error", serr)
 		}
 	}()
+
+	// dispatch is the single seam through which staged commits exit the
+	// debounce window. It routes to handleCommitValue in production and to
+	// testHookHandleCommitValue when set, mirroring the alias-side
+	// testHookHandleAssignment pattern. Read the hook field once per dispatch
+	// so tests that mutate it after spawn (forbidden by the hook's contract)
+	// cannot create a torn read.
+	dispatch := func(commit *types.AssignmentCommit) {
+		if hook := m.testHookHandleCommitValue; hook != nil {
+			hook(commit)
+			return
+		}
+		m.handleCommitValue(commit)
+	}
+
+	db := newCommitDebouncer(m.cfg.AssignmentWatcherDebounce, m.WorkerID(), dispatch)
 
 	for {
 		select {
@@ -665,19 +811,31 @@ func (m *Manager) watchCommit(ctx context.Context, kv jetstream.KeyValue, reconc
 			return nil
 		case entry, ok := <-watcher.Updates():
 			if !ok {
+				if ctx.Err() != nil {
+					return nil
+				}
+				db.flush()
+
 				return errors.New("commit watcher channel closed")
 			}
 			if entry == nil {
-				// End of initial replay; keep watching.
 				continue
 			}
-			m.handleCommitEntry(entry)
+			commit, ok := m.decodeCommitEntry(entry)
+			if ok {
+				db.stage(commit)
+			}
+		case <-db.timerC():
+			db.flush()
 		case <-reconcileTickC:
+			if kv == nil {
+				continue
+			}
 			current, _, gerr := kvutil.GetJSON[types.AssignmentCommit](ctx, kv, key)
 			if gerr != nil || current == nil {
 				continue
 			}
-			m.handleCommitValue(current)
+			db.stage(current)
 		}
 	}
 }
@@ -687,15 +845,72 @@ func (m *Manager) watchCommit(ctx context.Context, kv jetstream.KeyValue, reconc
 // treated as "no commit", which the dual-read selector handles correctly
 // (the legacy alias may still drive).
 func (m *Manager) handleCommitEntry(entry jetstream.KeyValueEntry) {
-	if entry.Operation() == jetstream.KeyValueDelete {
+	commit, ok := m.decodeCommitEntry(entry)
+	if !ok {
 		return
+	}
+	m.handleCommitValue(commit)
+}
+
+// decodeCommitEntry decodes a KV entry into an AssignmentCommit. Deletion
+// events return (nil, false). JSON decode failures are logged and return
+// (nil, false). On success returns the decoded commit and true.
+func (m *Manager) decodeCommitEntry(entry jetstream.KeyValueEntry) (*types.AssignmentCommit, bool) {
+	if entry.Operation() == jetstream.KeyValueDelete {
+		return nil, false
 	}
 	var commit types.AssignmentCommit
 	if err := json.Unmarshal(entry.Value(), &commit); err != nil {
 		m.logError("failed to unmarshal commit", "error", err)
-		return
+
+		return nil, false
 	}
-	m.handleCommitValue(&commit)
+
+	return &commit, true
+}
+
+// workerAssignmentChanged reports whether `next` assigns a different
+// partition slice to `workerID` than `prev`. Used by the commit watcher
+// debounce path to force-flush pending before staging a new commit that
+// would change this worker's local snapshot.
+//
+// "Different" means EITHER:
+//   - Workers-membership flips (this worker present in one, absent in
+//     the other) — case (d) revoke or case (c) acquire.
+//   - Both have this worker but Payloads[workerID].PayloadHash differs
+//     — case (c) acquire of a different partition set.
+//
+// PayloadHash is the authoritative content identity for
+// AssignmentPayloadRef (types/assignment_commit.go:55-57): identical
+// hashes mean identical canonical partition bytes. Equality on hash is
+// therefore sound for "no partition-set change for this worker".
+func workerAssignmentChanged(prev, next *types.AssignmentCommit, workerID string) bool {
+	prevHas := commitContainsWorker(prev, workerID)
+	nextHas := commitContainsWorker(next, workerID)
+	if prevHas != nextHas {
+		return true
+	}
+	if !prevHas {
+		// worker absent in both — no diff for us
+		return false
+	}
+
+	return prev.Payloads[workerID].PayloadHash != next.Payloads[workerID].PayloadHash
+}
+
+// commitContainsWorker reports whether the commit's Workers slice contains
+// workerID. Returns false for a nil commit.
+func commitContainsWorker(c *types.AssignmentCommit, workerID string) bool {
+	if c == nil {
+		return false
+	}
+	for _, w := range c.Workers {
+		if w == workerID {
+			return true
+		}
+	}
+
+	return false
 }
 
 // handleCommitValue implements §3.6 case 1 (commit-path state machine).
