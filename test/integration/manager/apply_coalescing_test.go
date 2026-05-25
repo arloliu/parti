@@ -12,6 +12,7 @@ import (
 	parti "github.com/arloliu/parti/v2"
 	"github.com/arloliu/parti/v2/internal/metrics"
 	"github.com/arloliu/parti/v2/internal/testutil"
+	"github.com/arloliu/parti/v2/source"
 	"github.com/stretchr/testify/require"
 )
 
@@ -36,14 +37,32 @@ func (r *recordingBurstCollector) RecordApplyAttempt(workerID string, version in
 }
 
 // TestApplyCoalescing_UnderReElectionBurst measures apply-attempt burst
-// behavior across a worker fleet during assignment churn.
+// behavior across a worker fleet during a Parti calculator-leader re-election.
 //
-// The diagnostic boots an embedded single-node NATS cluster, starts N=20
-// parti managers, waits for steady state, then drives rebalancing by adding
-// extra workers in three waves. Each wave causes the leader calculator to
-// publish a new assignment version; every existing worker's watcher fires
-// and calls RecordApplyAttempt. The test collects those samples, groups them
-// into bursts (consecutive calls within idleGap of each other), and emits:
+// The diagnostic boots a 3-node embedded NATS cluster (via
+// testutil.StartEmbeddedNATSCluster), starts N=20 parti managers backed by
+// R=3 KV buckets, waits for steady state, then kills the current Parti
+// calculator leader. Killing the NATS JetStream meta-leader was found to be
+// ineffective: the NATS meta-leader and Parti's calculator leader are separate
+// election layers, and multi-URL-seeded nats.Conn reconnects the Parti leader
+// to a surviving node within milliseconds, leaving the Parti election
+// undisturbed. The 3-node cluster and R=3 KV buckets are retained because they
+// exercise the apply pipeline under the same JetStream replication semantics
+// that production uses.
+//
+// Triggering a Parti-leader re-election forces:
+//  1. The killed leader's stable-ID claim expires → peer takeover via stableid election
+//  2. The new Parti leader's calculator publishes Version=N+1 (a genuinely new version)
+//  3. All surviving workers' assignment-watchers see Version N+1 simultaneously
+//  4. The version gate (manager_assignment.go: oldVersion >= newVersion → skip) lets N+1 through
+//  5. applyAssignment fires across the fleet at roughly the same time — that is the burst
+//
+// Config.AssignmentWatcherDebounce is left at 0 (its default) deliberately:
+// this diagnostic measures the *raw* burst size to inform what the debounce
+// default should be. Running it with debounce enabled would mute the signal.
+//
+// The test collects RecordApplyAttempt timestamps, groups them into bursts
+// (consecutive calls within idleGap of each other), and emits:
 //
 //   - per-worker: max burst size, max burst duration, p95 inter-arrival
 //   - AGGREGATE banner: fleet-wide max + recommended_debounce_window
@@ -51,13 +70,6 @@ func (r *recordingBurstCollector) RecordApplyAttempt(workerID string, version in
 // The recommended_debounce_window value is the operator-facing guidance for
 // Config.AssignmentWatcherDebounce. Paste it into the PR description and
 // release notes.
-//
-// Deviation from plan: the plan specified a 3-node embedded NATS cluster with
-// a forced meta-leader kill to produce the churn. No 3-node cluster helper
-// exists in this repo (only testutil.StartEmbeddedNATS — single-node). The
-// substitute trigger is worker-churn rebalancing: adding workers mid-soak
-// causes the leader to re-publish an assignment that every existing watcher
-// sees, producing an equivalent burst on the apply pipeline.
 //
 // Opt-in: set PARTI_RUN_HERD_DIAGNOSTIC=1 to run.
 func TestApplyCoalescing_UnderReElectionBurst(t *testing.T) {
@@ -69,15 +81,35 @@ func TestApplyCoalescing_UnderReElectionBurst(t *testing.T) {
 		numWorkers    = 20
 		numPartitions = 100
 		idleGap       = 50 * time.Millisecond
-		soakAfter     = 10 * time.Second
-		numWaves      = 3
+		// preKillSettle lets watcher pipelines quiesce before the kill so the
+		// measurement reflects re-election burst, not startup noise.
+		preKillSettle = 5 * time.Second
 	)
 
-	ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 180*time.Second)
 	defer cancel()
 
-	nc, cleanup := testutil.StartEmbeddedNATS(t)
+	// Start 3-node embedded NATS cluster with JetStream.
+	nc, servers, cleanup := testutil.StartEmbeddedNATSCluster(t)
 	defer cleanup()
+
+	t.Logf("cluster: %d nodes started", len(servers))
+
+	// Build config with R=3 so KV buckets replicate across all 3 nodes.
+	// R=3 ensures the KV buckets survive the Parti-leader stop and lets the
+	// new leader publish to a healthy stream — the same failure envelope
+	// production sees when a calculator worker restarts.
+	//
+	// Use reduced heartbeat/election timeouts so the Parti leader re-election
+	// completes well within the 30s WaitForNewLeader timeout:
+	//   HeartbeatTTL=2s + ElectionTimeout=1s → failover in ~3s
+	// This is safe here because we're measuring the burst, not correctness.
+	cfg := testutil.IntegrationTestConfig()
+	cfg.KVBuckets.Replicas = 3
+	cfg.HeartbeatTTL = 2 * time.Second
+	cfg.ElectionTimeout = 1 * time.Second
+	t.Logf("config: KVBuckets.Replicas=%d HeartbeatTTL=%s ElectionTimeout=%s",
+		cfg.KVBuckets.Replicas, cfg.HeartbeatTTL, cfg.ElectionTimeout)
 
 	// Build per-worker recording collectors, keyed by slot index.
 	collectors := make([]*recordingBurstCollector, numWorkers)
@@ -85,9 +117,9 @@ func TestApplyCoalescing_UnderReElectionBurst(t *testing.T) {
 		collectors[i] = &recordingBurstCollector{NopMetrics: metrics.NewNop()}
 	}
 
-	// Phase 1: start numWorkers steady-state workers, each with its own
-	// recording collector wired via WithMetrics.
-	wc := testutil.NewWorkerCluster(t, nc, numPartitions)
+	// Start numWorkers steady-state workers, each with its own recording
+	// collector wired via WithMetrics.
+	wc := testutil.NewWorkerClusterWithSource(t, nc, source.NewStatic(testutil.CreateTestPartitions(numPartitions)), cfg)
 	mgrs := make([]*parti.Manager, numWorkers)
 	for i := range collectors {
 		mgrs[i] = wc.AddWorkerWithOptions(ctx, parti.WithMetrics(collectors[i]))
@@ -97,29 +129,73 @@ func TestApplyCoalescing_UnderReElectionBurst(t *testing.T) {
 	// StartWorkers starts all workers and blocks until every one reaches
 	// StateStable (15 s per worker, enforced inside StartWorkers).
 	wc.StartWorkers(ctx)
-	t.Logf("phase 1: %d workers reached StateStable", numWorkers)
+	t.Logf("all %d workers reached StateStable", numWorkers)
 
-	// Phase 2: drive churn by adding extra workers in numWaves waves.
-	// Each addition triggers a rebalance: the leader calculator computes
-	// new partition assignments and publishes a fresh version. Every
-	// existing worker's assignment-watcher fires and calls RecordApplyAttempt
-	// on the apply pipeline — that's the burst this diagnostic measures.
-	waveInterval := soakAfter / time.Duration(numWaves)
-	for wave := range numWaves {
-		extra := wc.AddWorkerWithOptions(ctx, parti.WithMetrics(&recordingBurstCollector{NopMetrics: metrics.NewNop()}))
-		require.NoError(t, extra.Start(ctx))
-		t.Logf("phase 2 wave %d: extra worker started, sleeping %s for burst tail", wave+1, waveInterval)
-		select {
-		case <-time.After(waveInterval):
-		case <-ctx.Done():
-			t.Fatalf("context cancelled during soak: %v", ctx.Err())
-		}
+	// Let watcher pipelines quiesce before the kill so the burst measurement
+	// is not contaminated by startup-time publish noise.
+	t.Logf("settling for %s before parti-leader kill...", preKillSettle)
+	select {
+	case <-time.After(preKillSettle):
+	case <-ctx.Done():
+		t.Fatalf("context cancelled during pre-kill settle: %v", ctx.Err())
 	}
 
-	// Phase 3: collect samples and compute per-worker burst statistics.
-	// Map key is the Manager's WorkerID so workers with zero attempts still
-	// appear (avoiding the empty-key collision that arises if we key by
-	// burstSample.workerID alone).
+	// Identify the current Parti calculator leader.
+	leader := wc.WaitForLeader(15 * time.Second)
+	oldLeaderID := leader.WorkerID()
+
+	// Find its index in the local mgrs slice.
+	leaderIdx := -1
+	for i, m := range mgrs {
+		if m.WorkerID() == oldLeaderID {
+			leaderIdx = i
+			break
+		}
+	}
+	require.GreaterOrEqual(t, leaderIdx, 0, "leader not in mgrs slice")
+
+	// Log pre-kill assignment version from a surviving worker (proves the new
+	// leader will publish a strictly higher version after takeover).
+	survivorIdx := (leaderIdx + 1) % numWorkers
+	preKillVersion := mgrs[survivorIdx].CurrentAssignment().Version
+	t.Logf("pre-kill: worker=%s assignment_version=%d", mgrs[survivorIdx].WorkerID(), preKillVersion)
+	t.Logf("killing parti calculator leader: index=%d worker=%s", leaderIdx, oldLeaderID)
+
+	// Stop the leader using the test context (180 s total budget) so the
+	// goroutine drain is not cut short. StopWorkers() will skip it because
+	// the manager transitions to StateShutdown before StopWorkers runs,
+	// preventing a double-stop. The local mgrs slice still holds the
+	// (now-stopped) Manager at mgrs[leaderIdx]; its pre-kill collector
+	// samples remain valid for burst analysis.
+	leaderMgr := mgrs[leaderIdx]
+	stopCtx, stopCancel := context.WithTimeout(ctx, 30*time.Second)
+	if err := leaderMgr.Stop(stopCtx); err != nil {
+		t.Logf("leader stop returned: %v (non-fatal; proceeding)", err)
+	}
+	stopCancel()
+
+	// Wait for a new Parti leader to emerge on a surviving worker.
+	newLeader := wc.WaitForNewLeader(oldLeaderID, 30*time.Second)
+	t.Logf("new parti calculator leader: %s", newLeader.WorkerID())
+
+	// Soak to capture the apply-attempt burst as the new leader's published
+	// Version=N+1 propagates through every surviving worker's watcher.
+	const postKillSoak = 10 * time.Second
+	t.Logf("soaking %s to capture burst tail", postKillSoak)
+	select {
+	case <-time.After(postKillSoak):
+	case <-ctx.Done():
+		t.Fatalf("context cancelled during soak: %v", ctx.Err())
+	}
+
+	// Log post-soak assignment version from the same survivor to confirm
+	// the new leader published Version=preKillVersion+N (confirms the
+	// trigger fired; if equal, the election did not complete).
+	postSoakVersion := mgrs[survivorIdx].CurrentAssignment().Version
+	t.Logf("post-soak: worker=%s assignment_version=%d (delta=%d)",
+		mgrs[survivorIdx].WorkerID(), postSoakVersion, postSoakVersion-preKillVersion)
+
+	// Collect samples and compute per-worker burst statistics.
 	workerIDs := make([]string, numWorkers)
 	for i, m := range mgrs {
 		workerIDs[i] = m.WorkerID()

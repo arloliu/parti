@@ -26,7 +26,7 @@ GOLANGCI_LINT_VERSION := 2.11.4
 # Default target
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-race test-short coverage coverage-html lint lint-k8s fmt vet bench clean gomod-tidy update-pkg-cache ci test-unit test-integration test-stress test-all test-smoke clean-test-results test-quick test-k8s generate-k8s pre-pr
+.PHONY: help test test-race test-short coverage coverage-html lint lint-k8s fmt vet bench clean gomod-tidy update-pkg-cache ci test-unit test-integration test-stress test-all test-smoke clean-test-results test-quick test-k8s generate-k8s pre-pr herd-diagnostic
 
 ## help: Show this help message
 help:
@@ -213,6 +213,10 @@ inspect-consumers-json:
 	@if [ -z "$(STREAM)" ]; then echo "STREAM required: make inspect-consumers-json STREAM=<stream>"; exit 2; fi
 	@echo "Inspecting consumers (JSON) for stream $(STREAM)..."
 	@go run ./scripts/inspect_consumers -stream $(STREAM) -json
+
+## herd-diagnostic: Run the apply-coalescing burst diagnostic against an embedded 3-node NATS cluster (prints recommended_debounce_window)
+herd-diagnostic:
+	PARTI_RUN_HERD_DIAGNOSTIC=1 go test -count=1 -timeout 180s -run TestApplyCoalescing_UnderReElectionBurst -v ./test/integration/manager/
 
 ## gap-timeline: Produce baseline gap increment timeline from simulation artifacts
 gap-timeline:

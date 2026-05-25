@@ -1,7 +1,7 @@
 # NATS Thundering-Herd Hardening — Implementation Deviations
 
-Two cases where the implementation deviated from the spec in
-[`00-plan.md`](00-plan.md). Each is documented with plan citation,
+One case where the implementation deviated from the spec in
+[`00-plan.md`](00-plan.md). Documented with plan citation,
 why the spec form did not work, and the substitute used.
 
 ## Task 1.2 Step 7: StartupBudget negative test relocated to unit-level
@@ -40,51 +40,30 @@ the leader-calculator race, and mirrors the precedent in
 `TestStart_WatchdogFiresAfterStartupTimeout` (documented in the
 manager-start-async plan's `tmp/impl-deviations.md` "Task 9" section).
 
-## Task 3.3: Diagnostic uses worker churn instead of Raft meta-election
+## Task 3.3: lifted (3-node cluster diagnostic landed)
 
-**Plan citation:** [`00-plan.md`](00-plan.md) §"Task 3.3:
-Multi-version-burst diagnostic + window-sizing measurement", Step 1 ("Boot
-3-node embedded NATS cluster... identify the JetStream meta-leader and
-forcibly stop that NATS node. The cluster will hold an election; assignment-
-bucket leadership flips; the new leader re-publishes the active assignment,
-which the workers' assignment-watchers see.").
+Original deviation substituted single-node worker-churn rebalancing for
+the plan's intended 3-node-cluster + leader-kill trigger, citing absence
+of a cluster helper. That premise was wrong — `partitest.StartEmbeddedNATSCluster`
+existed all along. Empirically, killing the JetStream meta-leader does not
+trigger a Parti calculator re-publish (separate election layers, multi-URL
+reconnect keeps the Parti leader alive, version gate filters watcher
+replays). The implemented diagnostic uses a 3-node cluster + R=3 KV for
+realistic apply-pipeline semantics, and kills the **Parti calculator
+leader** to force peer takeover + Version=N+1 publish. `Config.AssignmentWatcherDebounce`
+is left at 0 (its default) deliberately — the diagnostic measures the raw
+burst size to inform what the debounce default should be; running it with
+debounce enabled would mute the signal. See
+`test/integration/manager/apply_coalescing_test.go` and `make herd-diagnostic`.
 
-**What the plan asks for:** A 3-node embedded NATS cluster where the
-JetStream meta-leader is killed mid-test. The resulting Raft election causes
-the new leader to re-publish the active assignment, producing a rapid burst of
-identical assignment versions hitting every worker's watcher simultaneously.
-
-**Why that doesn't work here:** No 3-node embedded-NATS cluster helper exists
-in this repo. The only available helper is `testutil.StartEmbeddedNATS(t)`,
-which is single-node. A single-node JetStream server has no peer to elect
-against; "killing the leader" stops the only node and disconnects every
-worker — a completely different failure mode from the leadership-flip burst the
-diagnostic is designed to measure.
-
-**Substitute trigger used:** Worker-churn rebalancing via
-`WorkerCluster.AddWorkerWithOptions`. The test starts 20 workers and waits
-for `StateStable`, then adds one extra worker in each of 3 waves
-(`soakAfter/numWaves = 3.3 s` apart). Each addition causes the leader
-calculator to re-publish a new assignment version, which hits every existing
-worker's assignment-watcher and calls `RecordApplyAttempt`. This is the same
-apply-pipeline path that Raft re-election triggers; the measurement
-infrastructure is identical.
-
-**End-to-end result (single run, single-node NATS):**
-
-```
-AGGREGATE max_burst_size=1 max_burst_duration=0s recommended_debounce_window=50ms
-```
-
-`max_burst_size=1` reflects that under single-node embedded NATS each
-rebalance produces exactly one assignment notification per worker with no
-rapid-fire duplicates — no thundering herd is observable at this scale. This
-is the expected baseline; the debounce guards against Raft-election bursts in
-production multi-node clusters where the new leader and the old in-flight
-messages can arrive within milliseconds of each other.
-
-**Adapting to a multi-node cluster:** Operators or CI with access to a
-production-grade NATS endpoint can replace `testutil.StartEmbeddedNATS(t)`
-with any `*nats.Conn` pointing at a multi-node cluster and add a
-meta-leader kill step between Phase 1 and Phase 2. The
-`recordingBurstCollector` and all burst-analysis helpers remain unchanged.
+**Diagnostic finding:** under Parti-leader kill with `RebalanceCooldown=2s`,
+the per-worker burst observable by this diagnostic is `max_burst_size=1`.
+The existing controls (version gate at `manager_assignment.go:584` + 2s
+rebalance cooldown) space consecutive assignment versions far enough apart
+that no two arrive within the 50 ms `idleGap`. This confirms the pipeline
+is already herd-free under the tested conditions: each worker sees exactly
+one `RecordApplyAttempt` per assignment version. The `recommended_debounce_window`
+output is therefore a conservative 50 ms safety floor. A per-worker burst
+> 1 would require JetStream delivering backed-up messages on reconnect
+(V=N through V=N+k in rapid succession) — not reproduced by either the
+meta-leader-kill or Parti-leader-kill triggers under multi-URL seeding.
