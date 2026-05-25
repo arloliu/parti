@@ -14,6 +14,7 @@ import (
 	"github.com/arloliu/parti/v2/source"
 	"github.com/arloliu/parti/v2/strategy"
 	"github.com/arloliu/parti/v2/types"
+	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
@@ -31,6 +32,36 @@ func StartEmbeddedNATS(t *testing.T) (*nats.Conn, func()) {
 	}
 
 	return nc, cleanup
+}
+
+// StartEmbeddedNATSCluster starts a 3-node embedded NATS cluster with
+// JetStream replication for HA/failover integration tests. Returns the
+// connection, the slice of server handles (so tests can identify and
+// shut down the meta-leader), and a cleanup func that closes the conn
+// and shuts down every server.
+//
+// The cleanup func is idempotent: tests that shut down individual servers
+// mid-run will not panic when the cleanup later shuts them down again
+// because server.Server.Shutdown is itself idempotent. The nats.Conn is
+// closed only once (subsequent Close calls on a closed conn are no-ops).
+func StartEmbeddedNATSCluster(t *testing.T) (*nats.Conn, []*server.Server, func()) {
+	t.Helper()
+	servers, nc := partitest.StartEmbeddedNATSCluster(t)
+
+	var closed bool
+	cleanup := func() {
+		if closed {
+			return
+		}
+		closed = true
+		nc.Close()
+		for _, s := range servers {
+			s.Shutdown()
+			s.WaitForShutdown()
+		}
+	}
+
+	return nc, servers, cleanup
 }
 
 // IntegrationTestConfig provides default configuration for integration tests.

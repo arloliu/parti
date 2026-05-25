@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -147,8 +148,14 @@ func StartEmbeddedNATSCluster(t *testing.T) ([]*server.Server, *nats.Conn) {
 		servers[i] = startClusterNode(t, i, clientPorts[i], clusterPorts[i], routes, servers)
 	}
 
-	// Wait for cluster formation
+	// Wait for cluster formation (routes connected to all peers).
 	waitForClusterFormation(t, servers, clusterSize)
+
+	// Wait for the JetStream meta-leader to be elected. Route formation
+	// is a prerequisite but not sufficient; the Raft meta-group needs an
+	// additional round-trip to elect a leader before R>1 bucket creation
+	// will succeed.
+	waitForJetStreamMetaLeader(t, servers)
 
 	// Connect client and register cleanup
 	clientURLs := make([]string, clusterSize)
@@ -256,6 +263,30 @@ func waitForClusterFormation(t *testing.T, servers []*server.Server, clusterSize
 	}
 }
 
+// waitForJetStreamMetaLeader waits until exactly one server in the cluster
+// reports JetStreamIsLeader()==true. Must be called after waitForClusterFormation.
+func waitForJetStreamMetaLeader(t *testing.T, servers []*server.Server) {
+	t.Helper()
+
+	timeout := time.After(15 * time.Second)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-timeout:
+			shutdownServers(servers)
+			t.Fatal("JetStream meta-leader not elected within 15 s")
+		case <-ticker.C:
+			for _, s := range servers {
+				if s.JetStreamIsLeader() {
+					return
+				}
+			}
+		}
+	}
+}
+
 // isClusterReady checks if all servers are connected to each other.
 func isClusterReady(servers []*server.Server, clusterSize int) bool {
 	for _, s := range servers {
@@ -272,7 +303,7 @@ func connectToCluster(t *testing.T, clientURLs []string, servers []*server.Serve
 	t.Helper()
 
 	nc, err := nats.Connect(
-		clientURLs[0],
+		strings.Join(clientURLs, ","),
 		nats.UserInfo("", ""),
 		nats.Timeout(2*time.Second),
 		nats.RetryOnFailedConnect(true),
