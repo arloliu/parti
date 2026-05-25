@@ -3,6 +3,7 @@ package manager_test
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"math"
 	"os"
 	"slices"
@@ -14,6 +15,7 @@ import (
 	"github.com/arloliu/parti/v2/internal/metrics"
 	"github.com/arloliu/parti/v2/internal/testutil"
 	"github.com/arloliu/parti/v2/source"
+	"github.com/arloliu/parti/v2/types"
 	"github.com/stretchr/testify/require"
 )
 
@@ -437,6 +439,169 @@ func TestApplyCoalescing_UnderReElectionBurst(t *testing.T) {
 
 	// Overall: recommended_apply_jitter must be a positive finite duration.
 	require.Greater(t, jitter, time.Duration(0), "recommended_apply_jitter must be > 0")
+}
+
+// TestApplyCoalescing_UnderRapidCommitBurst measures the commit watcher path
+// directly. It injects a short sequence of valid assignment._commit updates
+// after the fleet is stable and verifies that each worker can enter the apply
+// pipeline for several distinct versions inside one debounce-sized window.
+//
+// This isolates the remaining herd-capable path that AssignmentWatcherDebounce
+// does not cover: watchCommit processes every commit watcher update immediately
+// unless an apply is already in flight.
+func TestApplyCoalescing_UnderRapidCommitBurst(t *testing.T) {
+	if os.Getenv("PARTI_RUN_HERD_DIAGNOSTIC") != "1" {
+		t.Skip("set PARTI_RUN_HERD_DIAGNOSTIC=1 to run")
+	}
+
+	const (
+		numWorkers    = 5
+		numPartitions = 25
+		numCommits    = 4
+		idleGap       = 50 * time.Millisecond
+	)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	defer cancel()
+
+	nc, cleanup := testutil.StartEmbeddedNATS(t)
+	defer cleanup()
+
+	cfg := testutil.FastTestConfig()
+	cfg.ApplyStartJitter = 0
+	cfg.AssignmentWatcherDebounce = 0
+
+	collectors := make([]*recordingBurstCollector, numWorkers)
+	for i := range collectors {
+		collectors[i] = &recordingBurstCollector{NopMetrics: metrics.NewNop()}
+	}
+
+	wc := testutil.NewWorkerClusterWithSource(t, nc, source.NewStatic(testutil.CreateTestPartitions(numPartitions)), cfg)
+	mgrs := make([]*parti.Manager, numWorkers)
+	for i := range collectors {
+		mgrs[i] = wc.AddWorkerWithOptions(ctx, parti.WithMetrics(collectors[i]))
+	}
+	defer wc.StopWorkers()
+
+	wc.StartWorkers(ctx)
+	t.Logf("all %d workers reached StateStable", numWorkers)
+
+	workerIDs := make([]string, numWorkers)
+	for i, m := range mgrs {
+		workerIDs[i] = m.WorkerID()
+	}
+
+	baseCommit, _ := readAssignmentCommit(ctx, t, wc)
+	wc.WaitForAssignmentVersion(baseCommit.Version, 20*time.Second)
+
+	resetBurstCollectors(collectors)
+	phaseStart := time.Now()
+	publishedVersions := publishRapidCommitBurst(ctx, t, wc, mgrs, numCommits)
+	wc.WaitForAssignmentVersion(publishedVersions[len(publishedVersions)-1], 20*time.Second)
+	phaseEnd := time.Now()
+
+	results := analyzeBursts(collectors, workerIDs, idleGap)
+	for _, wid := range workerIDs {
+		r := results[wid]
+		t.Logf(
+			"COMMIT_BURST worker=%s max_burst_size=%d max_burst_duration=%s p95_inter_arrival=%s total_attempts=%d",
+			wid, r.MaxBurstSize, r.MaxBurstDuration.Round(time.Millisecond), r.P95InterArrival.Round(time.Millisecond), r.TotalAttempts,
+		)
+	}
+	t.Logf("COMMIT_BURST_AGGREGATE max_burst_size=%d max_burst_duration=%s recommended_debounce_window=%s versions=%v",
+		aggregateMaxBurstSize(results),
+		aggregateMaxBurstDuration(results).Round(time.Millisecond),
+		recommendedWindow(results),
+		publishedVersions,
+	)
+
+	fleetReports := analyzeFleetBursts(collectors, idleGap, []phaseBound{{name: "commit_burst", start: phaseStart, end: phaseEnd}})
+	commitBurst := fleetReports["commit_burst"]
+	t.Logf("COMMIT_BURST_FLEET peak_concurrency=%d worst_version_span=%s versions_observed=%d",
+		commitBurst.PeakConcurrency,
+		commitBurst.WorstVersionSpan.Round(time.Millisecond),
+		commitBurst.MultiWorkerVersions,
+	)
+
+	require.GreaterOrEqual(t, aggregateMaxBurstSize(results), 2,
+		"commit watcher path should expose a per-worker multi-version burst without commit debounce")
+	require.GreaterOrEqual(t, commitBurst.MultiWorkerVersions, 2,
+		"commit watcher path should expose multiple multi-worker commit-version fanouts")
+}
+
+func resetBurstCollectors(collectors []*recordingBurstCollector) {
+	for _, c := range collectors {
+		c.mu.Lock()
+		c.calls = nil
+		c.mu.Unlock()
+	}
+}
+
+func publishRapidCommitBurst(
+	ctx context.Context,
+	t *testing.T,
+	wc *testutil.WorkerCluster,
+	mgrs []*parti.Manager,
+	count int,
+) []int64 {
+	t.Helper()
+
+	base, prevRev := readAssignmentCommit(ctx, t, wc)
+
+	workerIDs := make([]string, 0, len(mgrs))
+	for _, m := range mgrs {
+		workerIDs = append(workerIDs, m.WorkerID())
+	}
+	slices.Sort(workerIDs)
+	for _, workerID := range workerIDs {
+		_, ok := base.Payloads[workerID]
+		require.True(t, ok, "baseline commit missing payload for worker %s", workerID)
+	}
+
+	assignmentKV, err := wc.JS.KeyValue(ctx, wc.Config.KVBuckets.AssignmentBucket)
+	require.NoError(t, err, "assignment KV must exist after workers start")
+
+	versions := make([]int64, 0, count)
+	for i := range count {
+		next := base
+		next.Version = base.Version + int64(i) + 1
+		next.PublishedAt = time.Now().UTC()
+		next.Workers = workerIDs
+		next.PrevCommitRev = prevRev
+		next.Lifecycle = "diagnostic_commit_burst"
+
+		encoded, err := json.Marshal(next)
+		require.NoError(t, err, "marshal diagnostic commit version %d", next.Version)
+
+		newRev, err := assignmentKV.Update(ctx, "assignment._commit", encoded, prevRev)
+		require.NoError(t, err, "publish diagnostic commit version %d", next.Version)
+
+		prevRev = newRev
+		versions = append(versions, next.Version)
+	}
+
+	t.Logf("published rapid diagnostic commit versions=%v", versions)
+
+	return versions
+}
+
+func readAssignmentCommit(
+	ctx context.Context,
+	t *testing.T,
+	wc *testutil.WorkerCluster,
+) (types.AssignmentCommit, uint64) {
+	t.Helper()
+
+	assignmentKV, err := wc.JS.KeyValue(ctx, wc.Config.KVBuckets.AssignmentBucket)
+	require.NoError(t, err, "assignment KV must exist after workers start")
+
+	entry, err := assignmentKV.Get(ctx, "assignment._commit")
+	require.NoError(t, err, "baseline assignment._commit must exist after workers are stable")
+
+	var commit types.AssignmentCommit
+	require.NoError(t, json.Unmarshal(entry.Value(), &commit), "decode baseline assignment._commit")
+
+	return commit, entry.Revision()
 }
 
 type burstReport struct {
