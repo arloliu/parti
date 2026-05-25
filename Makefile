@@ -214,9 +214,9 @@ inspect-consumers-json:
 	@echo "Inspecting consumers (JSON) for stream $(STREAM)..."
 	@go run ./scripts/inspect_consumers -stream $(STREAM) -json
 
-## herd-diagnostic: Run the apply-coalescing burst diagnostic against an embedded 3-node NATS cluster (prints recommended_debounce_window)
+## herd-diagnostic: Run the apply-coalescing burst diagnostic against an embedded 3-node NATS cluster (prints recommended_debounce_window and recommended_apply_jitter)
 herd-diagnostic:
-	PARTI_RUN_HERD_DIAGNOSTIC=1 go test -count=1 -timeout 180s -run TestApplyCoalescing_UnderReElectionBurst -v ./test/integration/manager/
+	PARTI_RUN_HERD_DIAGNOSTIC=1 go test -count=1 -timeout 240s -run TestApplyCoalescing_UnderReElectionBurst -v ./test/integration/manager/
 
 ## gap-timeline: Produce baseline gap increment timeline from simulation artifacts
 gap-timeline:
