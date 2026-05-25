@@ -441,18 +441,13 @@ func TestApplyCoalescing_UnderReElectionBurst(t *testing.T) {
 	require.Greater(t, jitter, time.Duration(0), "recommended_apply_jitter must be > 0")
 }
 
-// TestApplyCoalescing_UnderRapidCommitBurst measures the commit watcher path
-// directly. It injects a short sequence of valid assignment._commit updates
-// after the fleet is stable and verifies that each worker can enter the apply
-// pipeline for several distinct versions inside one debounce-sized window.
-//
-// This isolates the remaining herd-capable path that AssignmentWatcherDebounce
-// does not cover: watchCommit processes every commit watcher update immediately
-// unless an apply is already in flight.
-func TestApplyCoalescing_UnderRapidCommitBurst(t *testing.T) {
-	if os.Getenv("PARTI_RUN_HERD_DIAGNOSTIC") != "1" {
-		t.Skip("set PARTI_RUN_HERD_DIAGNOSTIC=1 to run")
-	}
+// runRapidCommitBurstDiagnostic is the shared body for rapid-commit burst
+// diagnostics. It starts a small fleet, waits for stability, injects a burst
+// of rapid assignment._commit updates, and returns per-worker burst statistics
+// and a fleet-wide burst report. debounce sets AssignmentWatcherDebounce so
+// callers can compare the no-debounce (debounce=0) and debounced paths.
+func runRapidCommitBurstDiagnostic(t *testing.T, debounce time.Duration) (map[string]burstReport, fleetReport) {
+	t.Helper()
 
 	const (
 		numWorkers    = 5
@@ -469,7 +464,8 @@ func TestApplyCoalescing_UnderRapidCommitBurst(t *testing.T) {
 
 	cfg := testutil.FastTestConfig()
 	cfg.ApplyStartJitter = 0
-	cfg.AssignmentWatcherDebounce = 0
+	cfg.AssignmentWatcherDebounce = debounce
+	t.Logf("rapid commit burst diagnostic debounce=%s", debounce)
 
 	collectors := make([]*recordingBurstCollector, numWorkers)
 	for i := range collectors {
@@ -523,10 +519,44 @@ func TestApplyCoalescing_UnderRapidCommitBurst(t *testing.T) {
 		commitBurst.MultiWorkerVersions,
 	)
 
+	return results, commitBurst
+}
+
+// TestApplyCoalescing_UnderRapidCommitBurst measures the commit watcher path
+// directly. It injects a short sequence of valid assignment._commit updates
+// after the fleet is stable and verifies that each worker can enter the apply
+// pipeline for several distinct versions inside one debounce-sized window.
+//
+// This isolates the remaining herd-capable path that AssignmentWatcherDebounce
+// does not cover: watchCommit processes every commit watcher update immediately
+// unless an apply is already in flight.
+func TestApplyCoalescing_UnderRapidCommitBurst(t *testing.T) {
+	if os.Getenv("PARTI_RUN_HERD_DIAGNOSTIC") != "1" {
+		t.Skip("set PARTI_RUN_HERD_DIAGNOSTIC=1 to run")
+	}
+
+	results, commitBurst := runRapidCommitBurstDiagnostic(t, 0)
+
 	require.GreaterOrEqual(t, aggregateMaxBurstSize(results), 2,
 		"commit watcher path should expose a per-worker multi-version burst without commit debounce")
 	require.GreaterOrEqual(t, commitBurst.MultiWorkerVersions, 2,
 		"commit watcher path should expose multiple multi-worker commit-version fanouts")
+}
+
+// TestApplyCoalescing_UnderRapidCommitBurst_WithAssignmentDebounce proves that
+// setting AssignmentWatcherDebounce=100ms collapses the per-worker multi-version
+// burst: only the final commit version surfaces as a multi-worker fanout.
+func TestApplyCoalescing_UnderRapidCommitBurst_WithAssignmentDebounce(t *testing.T) {
+	if os.Getenv("PARTI_RUN_HERD_DIAGNOSTIC") != "1" {
+		t.Skip("set PARTI_RUN_HERD_DIAGNOSTIC=1 to run")
+	}
+
+	results, commitBurst := runRapidCommitBurstDiagnostic(t, 100*time.Millisecond)
+
+	require.LessOrEqual(t, aggregateMaxBurstSize(results), 1,
+		"commit debounce should collapse the per-worker multi-version burst")
+	require.LessOrEqual(t, commitBurst.MultiWorkerVersions, 1,
+		"commit debounce should leave only the final commit version as a multi-worker fanout")
 }
 
 func resetBurstCollectors(collectors []*recordingBurstCollector) {
