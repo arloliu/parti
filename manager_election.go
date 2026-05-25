@@ -232,6 +232,20 @@ func (m *Manager) monitorLeadership() {
 				err := m.election.RenewLeadership(renewCtx)
 				renewCancel()
 				if err != nil {
+					// Suppress the noisy error + spurious leadership-lost
+					// state transition on graceful shutdown: when Stop runs
+					// m.cancel(), renewCtx is already cancelled and renew
+					// returns ErrLeadershipLost: context.Canceled. Without
+					// this guard the tick would emit "failed to renew
+					// leadership", flip m.isLeader to false, log
+					// "lost leadership", AND fire OnLeadershipChanged(false)
+					// — the hook fire is the meaningful regression for any
+					// app that reacts to leadership loss. Stop's own
+					// ReleaseLeadership at manager.go is the authoritative
+					// leadership-release path on graceful shutdown.
+					if errors.Is(err, context.Canceled) && m.ctx.Err() != nil {
+						continue
+					}
 					m.logError("failed to renew leadership", "error", err)
 					// Feed into degraded circuit: ErrBucketNotFound or
 					// ErrStreamNotFound from the election bucket is the
@@ -259,6 +273,18 @@ func (m *Manager) monitorLeadership() {
 				isLeader, err := m.election.RequestLeadership(reqCtx, m.WorkerID(), leaseDuration)
 				reqCancel()
 				if err != nil {
+					// Suppress the noisy error on graceful shutdown: when Stop
+					// runs m.cancel(), reqCtx (which inherits from m.ctx) is
+					// already cancelled, so kv.Create returns context.Canceled
+					// wrapped as "failed to create leader key". This is benign
+					// — the next loop iteration exits via m.ctx.Done() — but
+					// without this guard it surfaces as a one-shot Error log
+					// at every graceful follower shutdown. Mirrors the same
+					// shutdown exception on the leader-renew path inside
+					// NATSElection (see internal/election/nats_election.go).
+					if errors.Is(err, context.Canceled) && m.ctx.Err() != nil {
+						continue
+					}
 					m.logError("failed to request leadership", "error", err)
 					// Feed into degraded circuit for the follower path:
 					// if the election bucket is gone, every follower will
