@@ -322,3 +322,299 @@ func (d *droppingWatcher) Stop() error {
 	d.closeOnce.Do(func() { close(d.updates) })
 	return nil
 }
+
+// ============================================================================
+// Commit watcher debounce tests
+// ============================================================================
+
+// fakeCommitEntryWithVersion returns a fake KV entry whose JSON value encodes an
+// AssignmentCommit with the given version. The worker list is set to a dummy peer
+// so the entry passes the "valid commit" check without involving this worker's ID.
+func fakeCommitEntryWithVersion(v int64) jetstream.KeyValueEntry {
+	b, _ := json.Marshal(types.AssignmentCommit{
+		Version:        v,
+		LeaderRevision: uint64(v),
+		Workers:        []string{"someone-else"},
+		Payloads:       map[string]types.AssignmentPayloadRef{},
+	})
+	return fakeVersionEntry{value: b}
+}
+
+// fakeCommitEntryFor returns a fake KV entry whose JSON value encodes an
+// AssignmentCommit that includes workerID with the given payloadHash. Additional
+// peer worker IDs may be supplied via members.
+func fakeCommitEntryFor(version int64, workerID, payloadHash string, members ...string) jetstream.KeyValueEntry {
+	payloads := map[string]types.AssignmentPayloadRef{
+		workerID: {PayloadHash: payloadHash},
+	}
+	workers := append([]string{workerID}, members...)
+	b, _ := json.Marshal(types.AssignmentCommit{
+		Version:        version,
+		LeaderRevision: uint64(version),
+		Workers:        workers,
+		Payloads:       payloads,
+	})
+	return fakeVersionEntry{value: b}
+}
+
+// TestCommitWatcher_DebouncesMultiVersionBurst delivers V=10..V=14 inside a
+// rapid burst with a 100 ms debounce window and asserts that only one apply
+// runs (the latest version, V=14).
+func TestCommitWatcher_DebouncesMultiVersionBurst(t *testing.T) {
+	const window = 100 * time.Millisecond
+	m, rh, _, _ := newTestManager(t)
+	m.cfg.AssignmentWatcherDebounce = window
+
+	watcher := newFakeKeyWatcher()
+	go func() {
+		_ = m.runCommitWatchSession(m.ctx, nil, watcher, nil, "assignment._commit")
+	}()
+
+	for v := int64(10); v <= 14; v++ {
+		watcher.ch <- fakeCommitEntryWithVersion(v)
+		time.Sleep(8 * time.Millisecond)
+	}
+
+	time.Sleep(window + 100*time.Millisecond)
+
+	require.Equal(t, int64(14), m.CurrentAssignment().Version)
+	require.Equal(t, int64(1), rh.applyCount.Load(), "debounce must collapse commit burst")
+}
+
+// TestCommitWatcher_DebounceResetsOnEachEntry verifies the idle-window
+// semantics: a steady drip of entries spaced just below the window must keep
+// the timer reset and NOT fire until the stream goes idle.
+func TestCommitWatcher_DebounceResetsOnEachEntry(t *testing.T) {
+	const window = 100 * time.Millisecond
+	m, rh, _, _ := newTestManager(t)
+	m.cfg.AssignmentWatcherDebounce = window
+
+	watcher := newFakeKeyWatcher()
+	go func() {
+		_ = m.runCommitWatchSession(m.ctx, nil, watcher, nil, "assignment._commit")
+	}()
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	v := int64(1)
+	for time.Now().Before(deadline) {
+		watcher.ch <- fakeCommitEntryWithVersion(v)
+		v++
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	require.Zero(t, rh.applyCount.Load(), "debounce must not fire while stream is busy")
+
+	time.Sleep(window + 100*time.Millisecond)
+	require.Equal(t, int64(1), rh.applyCount.Load(), "debounce must fire once after idle")
+}
+
+// TestCommitWatcher_DebounceCancelDoesNotFlush verifies that when m.ctx is
+// cancelled (simulating Stop) while a debounced commit is pending, the pending
+// commit is dropped and no apply runs.
+func TestCommitWatcher_DebounceCancelDoesNotFlush(t *testing.T) {
+	const window = 5 * time.Second
+	m, rh, _, _ := newTestManager(t)
+	m.cfg.AssignmentWatcherDebounce = window
+
+	watcher := newFakeKeyWatcher()
+	done := make(chan struct{})
+	go func() {
+		_ = m.runCommitWatchSession(m.ctx, nil, watcher, nil, "assignment._commit")
+		close(done)
+	}()
+
+	watcher.ch <- fakeCommitEntryWithVersion(99)
+	time.Sleep(50 * time.Millisecond)
+	m.cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("commit watch session did not exit after ctx cancel")
+	}
+
+	require.Zero(t, rh.applyCount.Load(), "pending commit must be dropped on ctx cancel")
+}
+
+// TestCommitWatcher_PendingCommitFlushesOnClose verifies that a watcher channel
+// close while a commit is pending still processes that pending commit exactly once.
+func TestCommitWatcher_PendingCommitFlushesOnClose(t *testing.T) {
+	const window = 100 * time.Millisecond
+	m, rh, _, _ := newTestManager(t)
+	m.cfg.AssignmentWatcherDebounce = window
+
+	watcher := newFakeKeyWatcher()
+	done := make(chan struct{})
+	go func() {
+		_ = m.runCommitWatchSession(m.ctx, nil, watcher, nil, "assignment._commit")
+		close(done)
+	}()
+
+	watcher.ch <- fakeCommitEntryWithVersion(42)
+	close(watcher.ch)
+
+	<-done
+	require.Equal(t, int64(42), m.CurrentAssignment().Version)
+	require.Equal(t, int64(1), rh.applyCount.Load(), "pending commit must flush on watcher close")
+}
+
+// TestCommitWatcher_DebounceFlushesOnPartitionSetChange pins the P0 invariant
+// that ownership-changing intermediate commits are NOT collapsed away. Two
+// commits with different Payloads[workerID].PayloadHash are delivered inside
+// the debounce window; the test asserts BOTH are processed (one force-flushed,
+// one timer-flushed).
+func TestCommitWatcher_DebounceFlushesOnPartitionSetChange(t *testing.T) {
+	const window = 100 * time.Millisecond
+	m, _, _, _ := newTestManager(t)
+	m.cfg.AssignmentWatcherDebounce = window
+	workerID := m.WorkerID()
+
+	// Route flushed commits through the hook so this test exercises the
+	// stage/flush decision tree without depending on a real payload KV.
+	var (
+		mu      sync.Mutex
+		flushed []*types.AssignmentCommit
+	)
+	m.testHookHandleCommitValue = func(c *types.AssignmentCommit) {
+		mu.Lock()
+		defer mu.Unlock()
+		flushed = append(flushed, c)
+	}
+
+	watcher := newFakeKeyWatcher()
+	go func() {
+		_ = m.runCommitWatchSession(m.ctx, nil, watcher, nil, "assignment._commit")
+	}()
+
+	// V=10: this worker owns hash="aaaa"
+	watcher.ch <- fakeCommitEntryFor(10, workerID, "aaaa")
+	time.Sleep(20 * time.Millisecond)
+
+	// V=11: this worker owns hash="bbbb" — partition-set change.
+	// stage() MUST force-flush V=10 before staging V=11 so the
+	// handoff diff for the intermediate change is observed.
+	watcher.ch <- fakeCommitEntryFor(11, workerID, "bbbb")
+
+	// Wait > window for the timer to flush V=11.
+	time.Sleep(window + 100*time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, flushed, 2,
+		"ownership-changing intermediate must not be collapsed away")
+	require.Equal(t, int64(10), flushed[0].Version,
+		"V=10 force-flushed before V=11 stages")
+	require.Equal(t, int64(11), flushed[1].Version,
+		"V=11 flushed by the timer after the idle window")
+	require.Equal(t, "bbbb", flushed[1].Payloads[workerID].PayloadHash)
+}
+
+// TestCommitWatcher_DebounceIgnoresOutOfOrderLowerVersion verifies that a lower
+// commit version arriving after a higher staged version does not replace the
+// pending higher version. This pins the >= guard in stage().
+func TestCommitWatcher_DebounceIgnoresOutOfOrderLowerVersion(t *testing.T) {
+	const window = 100 * time.Millisecond
+	m, rh, _, _ := newTestManager(t)
+	m.cfg.AssignmentWatcherDebounce = window
+
+	watcher := newFakeKeyWatcher()
+	go func() {
+		_ = m.runCommitWatchSession(m.ctx, nil, watcher, nil, "assignment._commit")
+	}()
+
+	watcher.ch <- fakeCommitEntryWithVersion(20)
+	time.Sleep(20 * time.Millisecond)
+	watcher.ch <- fakeCommitEntryWithVersion(15) // out-of-order, lower
+
+	time.Sleep(window + 100*time.Millisecond)
+
+	require.Equal(t, int64(1), rh.applyCount.Load())
+	require.Equal(t, int64(20), m.CurrentAssignment().Version,
+		"pending must not be overwritten by a lower-version entry")
+}
+
+// TestCommitWatcher_DebounceIgnoresOutOfOrderLowerVersionWithDifferentHash pins
+// the round-2 ordering fix: the version-order guard MUST run before the
+// workerAssignmentChanged flush-on-change check. A stale lower-version commit
+// with a different worker hash must NOT flush the newer pending or re-stage
+// itself.
+func TestCommitWatcher_DebounceIgnoresOutOfOrderLowerVersionWithDifferentHash(t *testing.T) {
+	const window = 100 * time.Millisecond
+	m, _, _, _ := newTestManager(t)
+	m.cfg.AssignmentWatcherDebounce = window
+	workerID := m.WorkerID()
+
+	// Use the hook so we can directly observe whether V=15 ever reaches
+	// the post-debounce dispatch surface. Under the round-2 ordering bug,
+	// V=15 would force-flush V=20 (dispatch sees V=20), then V=15 would
+	// be the new pending and timer-flush (dispatch sees V=15). That
+	// would produce dispatches = [V=20, V=15]. The correct ordering must
+	// produce dispatches = [V=20] — V=15 is dropped at the version guard
+	// before workerAssignmentChanged runs, so the new pending is never
+	// re-staged. Asserting applyCount alone does NOT discriminate: under
+	// the buggy path, handleCommitValueOnce would case-(a) no-op V=15
+	// (V=15 < cur.Version=V=20) but would still write V=15 to
+	// lastObservedCommit, mutating selector-visible state.
+	var (
+		mu         sync.Mutex
+		dispatches []*types.AssignmentCommit
+	)
+	m.testHookHandleCommitValue = func(c *types.AssignmentCommit) {
+		mu.Lock()
+		defer mu.Unlock()
+		dispatches = append(dispatches, c)
+	}
+
+	watcher := newFakeKeyWatcher()
+	go func() {
+		_ = m.runCommitWatchSession(m.ctx, nil, watcher, nil, "assignment._commit")
+	}()
+
+	watcher.ch <- fakeCommitEntryFor(20, workerID, "aaaa")
+	time.Sleep(20 * time.Millisecond)
+	watcher.ch <- fakeCommitEntryFor(15, workerID, "bbbb")
+
+	time.Sleep(window + 100*time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, dispatches, 1,
+		"lower-version must be dropped before reaching dispatch — "+
+			"never as a force-flush of pending nor as a re-stage")
+	require.Equal(t, int64(20), dispatches[0].Version,
+		"only V=20 was authoritative; V=15 must never be observed")
+	require.Equal(t, "aaaa", dispatches[0].Payloads[workerID].PayloadHash)
+}
+
+// TestWorkerAssignmentChanged is a focused unit test pinning the contract of
+// the workerAssignmentChanged predicate across schema-edge cases.
+func TestWorkerAssignmentChanged(t *testing.T) {
+	mk := func(ver int64, members []string, hash string) *types.AssignmentCommit {
+		c := &types.AssignmentCommit{Version: ver, Workers: members}
+		c.Payloads = map[string]types.AssignmentPayloadRef{}
+		for _, w := range members {
+			c.Payloads[w] = types.AssignmentPayloadRef{PayloadHash: hash}
+		}
+		return c
+	}
+	cases := []struct {
+		name string
+		prev *types.AssignmentCommit
+		next *types.AssignmentCommit
+		want bool
+	}{
+		{"both_absent", mk(1, []string{"other"}, "x"), mk(2, []string{"other"}, "x"), false},
+		{"present_to_absent", mk(1, []string{"me", "other"}, "x"), mk(2, []string{"other"}, "x"), true},
+		{"absent_to_present", mk(1, []string{"other"}, "x"), mk(2, []string{"me", "other"}, "x"), true},
+		{"present_same_hash", mk(1, []string{"me"}, "x"), mk(2, []string{"me"}, "x"), false},
+		{"present_different_hash", mk(1, []string{"me"}, "x"), mk(2, []string{"me"}, "y"), true},
+		{"nil_prev_present", nil, mk(2, []string{"me"}, "x"), true},
+		{"nil_prev_absent", nil, mk(2, []string{"other"}, "x"), false},
+		{"empty_payloads_present_in_workers", mk(1, []string{"me"}, "x"), &types.AssignmentCommit{Version: 2, Workers: []string{"me"}, Payloads: map[string]types.AssignmentPayloadRef{}}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, workerAssignmentChanged(tc.prev, tc.next, "me"))
+		})
+	}
+}
