@@ -341,19 +341,19 @@ func fakeCommitEntryWithVersion(v int64) jetstream.KeyValueEntry {
 }
 
 // fakeCommitEntryFor returns a fake KV entry whose JSON value encodes an
-// AssignmentCommit that includes workerID with the given payloadHash. Additional
-// peer worker IDs may be supplied via members.
-func fakeCommitEntryFor(version int64, workerID, payloadHash string, members ...string) jetstream.KeyValueEntry {
+// AssignmentCommit that includes workerID with the given payloadHash.
+func fakeCommitEntryFor(version int64, workerID, payloadHash string) jetstream.KeyValueEntry {
 	payloads := map[string]types.AssignmentPayloadRef{
 		workerID: {PayloadHash: payloadHash},
 	}
-	workers := append([]string{workerID}, members...)
+	workers := []string{workerID}
 	b, _ := json.Marshal(types.AssignmentCommit{
 		Version:        version,
 		LeaderRevision: uint64(version),
 		Workers:        workers,
 		Payloads:       payloads,
 	})
+
 	return fakeVersionEntry{value: b}
 }
 
