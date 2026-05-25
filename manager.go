@@ -222,6 +222,16 @@ type Manager struct {
 	// runAssignmentWatchSession goroutine and MUST NOT mutate it
 	// afterwards. The session reads the field from a single goroutine.
 	testHookHandleAssignment func(workerID string, entry jetstream.KeyValueEntry)
+
+	// testHookHandleCommitValue, when non-nil, is invoked instead of
+	// handleCommitValue from runCommitWatchSession's stage/flush paths
+	// (no-debounce immediate dispatch, force-flush on partition-set
+	// change, timer flush, and watcher-close flush). Set ONLY by tests
+	// in this package to assert commit debounce semantics without
+	// scaffolding a real assignment payload KV. Production code MUST
+	// NOT set this field. Same concurrency contract as
+	// testHookHandleAssignment: set before spawning runCommitWatchSession.
+	testHookHandleCommitValue func(commit *types.AssignmentCommit)
 }
 
 // assignmentCalculator defines the interface for partition assignment calculation.
