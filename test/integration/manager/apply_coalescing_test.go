@@ -527,9 +527,9 @@ func runRapidCommitBurstDiagnostic(t *testing.T, debounce time.Duration) (map[st
 // after the fleet is stable and verifies that each worker can enter the apply
 // pipeline for several distinct versions inside one debounce-sized window.
 //
-// This isolates the remaining herd-capable path that AssignmentWatcherDebounce
-// does not cover: watchCommit processes every commit watcher update immediately
-// unless an apply is already in flight.
+// This exercises the commit watcher path under a rapid commit burst with
+// AssignmentWatcherDebounce=0 — the "before" half of the before/after
+// proof. The "_WithAssignmentDebounce" counterpart proves the "after".
 func TestApplyCoalescing_UnderRapidCommitBurst(t *testing.T) {
 	if os.Getenv("PARTI_RUN_HERD_DIAGNOSTIC") != "1" {
 		t.Skip("set PARTI_RUN_HERD_DIAGNOSTIC=1 to run")

@@ -491,17 +491,27 @@ type Config struct {
 	ApplyStartJitter time.Duration `yaml:"applyStartJitter" default:"0" validate:"gte=0"`
 
 	// AssignmentWatcherDebounce is the idle-window duration used to coalesce
-	// rapid bursts of assignment-watcher events into a single apply. When > 0,
-	// runAssignmentWatchSession holds the latest received entry in a pending
-	// slot and (re)starts a timer of this duration on each delivery; the
-	// timer only fires when the watcher stream has been idle for the full
-	// window, at which point handleAssignmentEntry processes the pending
-	// entry exactly once.
+	// rapid bursts of assignment delivery watcher events into a single apply.
+	// It applies to both the legacy per-worker assignment alias watcher and
+	// the assignment._commit watcher. When > 0, each watcher path keeps the
+	// latest observed assignment target in a pending slot and processes it
+	// after the stream has been idle for the full window.
 	//
-	// A Raft re-election can publish V=N, V=N+1, ..., V=N+k inside a short
-	// window; without debouncing, all k+1 versions enter the apply pipeline
-	// and each invokes a full prepare/commit/stabilize handoff cycle. With
-	// debouncing, only the final (highest) version is applied.
+	// Early-flush conditions (commit watcher only): the pending commit is
+	// flushed BEFORE the idle window elapses when (a) the watcher channel
+	// closes mid-window, or (b) a same-or-higher commit arrives that
+	// changes this worker's effective partition set — either a Workers
+	// membership flip (this worker added or removed) or a
+	// Payloads[workerID].PayloadHash difference. Both shapes are treated
+	// as ownership transitions; debounce collapses only commits whose
+	// per-worker partition set is unchanged. This preserves the two-phase
+	// handoff invariant that every ownership transition for this worker is
+	// observed as a discrete apply. Stale lower-version commits arriving
+	// after a higher pending version are dropped without flushing pending.
+	// On context cancellation (Stop), the pending commit is dropped
+	// without flushing — see the alias watcher's matching shutdown
+	// semantics. The legacy alias watcher does NOT yet have the "flush on
+	// assignment change" rule; harmonization is a follow-up.
 	//
 	// Default 0 disables debouncing (preserves pre-PR-3 behavior). Recommended
 	// value derived from the apply-coalescing diagnostic
