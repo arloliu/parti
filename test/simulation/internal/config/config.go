@@ -219,6 +219,12 @@ type ChaosConfig struct {
 	// its expectations cannot converge — false convergence-missing
 	// failures would mask the real INV3 signal.
 	DisableSourceConvergenceDriver bool `yaml:"disable_source_convergence_driver"`
+
+	// LongDisconnectDurationOverride, when > 0, sets a fixed disconnect
+	// duration for network_disconnect_long events instead of the random
+	// 60-180s range. Phase 3 scenarios use 60s to stay below WorkerIDTTL
+	// (75s default) and avoid spurious claimLostShutdown.
+	LongDisconnectDurationOverride time.Duration `yaml:"long_disconnect_duration_override"`
 }
 
 // NATSConfig configures NATS connection.

@@ -1,0 +1,77 @@
+# Phase 3 — Long network disconnect (Gap 12): lease expiry → reassignment →
+# post-recovery convergence.
+#
+# Setup:
+#   - 5 workers, static partition source.
+#   - Single network_disconnect_long event near T+20-30s, duration 60s.
+#     HeartbeatTTL default = 15s; disconnect (60s) > HeartbeatTTL × 2 (30s),
+#     so the disconnected worker's lease expires and remaining workers must
+#     claim its partitions before reconnection.
+#   - cooldown=120s stops chaos at T+60s, ensuring exactly one disconnect
+#     event fires before chaos halts.
+#   - Total runtime 3 minutes: covers disconnect (60s) + recovery (~30s)
+#     with ~60s of post-recovery steady state for oracle validation.
+#
+# Invariants asserted:
+#   - INV1 (Gap 12): long_disconnect_reassignment_observed >= 1.
+#     The disconnected worker's partitions migrate to remaining workers within
+#     T_reassign = disconnect_duration + 30s.
+#   - INV2: post-recovery assignment is gap-free (unassigned=0, no snapshot
+#     overlap violations, zero double-leader observations).
+#   - INV3: slow-start assertions are suppressed for the disconnect-target
+#     worker only (per-worker scope, not cluster-wide).
+
+simulation:
+  duration: 3m
+  mode: all-in-one
+  # Chaos stops at T+60s (3m - 120s = 60s): ensures only one
+  # network_disconnect_long fires before cooldown kicks in.
+  cooldown: 120s
+
+nats:
+  mode: embedded
+
+partitions:
+  count: 10
+  message_rate_per_partition: 1
+  distribution: uniform
+
+producers:
+  count: 1
+
+workers:
+  count: 5
+  assignment_strategy: WeightedConsistentHash
+  processing_delay:
+    min: 1ms
+    max: 5ms
+
+chaos:
+  enabled: true
+  # First event fires at T+45-55s; cooldown stops chaos at T+60s (3m-120s)
+  # so at most one event fires before chaos halts.
+  interval: "45s-55s"
+  events:
+    - network_disconnect_long
+  # Fix disconnect duration at 60s to stay below WorkerIDTTL (75s default).
+  # Without this override the random 60-180s range can exceed WorkerIDTTL,
+  # causing the stable-ID claim to expire during the disconnect and firing
+  # claimLostShutdown on reconnect (Gap 8a — not in scope for Phase 3).
+  long_disconnect_duration_override: 60s
+
+coordinator:
+  # gap_aging must exceed HeartbeatTTL × 4 (60s) + election headroom.
+  # 120s: covers the full disconnect window plus reassignment + recovery.
+  gap_aging: 120s
+  slo:
+    enable_catch_up: true
+    # Returning worker must heal backlog within 60s of reconnecting.
+    catch_up_deadline: 60s
+    catch_up_percent: 99
+    # Worker is silent for the 60s disconnect window; treat the return as
+    # a recovery event after 20s of silence.
+    absence_threshold: 20s
+
+metrics:
+  prometheus:
+    enabled: false
