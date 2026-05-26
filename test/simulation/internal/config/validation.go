@@ -13,9 +13,13 @@ func validateConfig(cfg *Config) error { //nolint:cyclop,gocyclo
 		"producer":    true,
 		"worker":      true,
 		"coordinator": true,
+		// Phase 7a: process orchestrator — runs the coordinator and
+		// spawns the configured worker count as child processes whose
+		// stdout streams IPC NDJSON frames consumed by ProcessManager.
+		"process": true,
 	}
 	if !validModes[cfg.Simulation.Mode] {
-		return fmt.Errorf("invalid simulation mode: %s (must be one of: all-in-one, producer, worker, coordinator)", cfg.Simulation.Mode)
+		return fmt.Errorf("invalid simulation mode: %s (must be one of: all-in-one, producer, worker, coordinator, process)", cfg.Simulation.Mode)
 	}
 
 	// Validate simulation duration
