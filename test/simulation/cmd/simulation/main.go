@@ -103,6 +103,13 @@ func main() {
 	cooldown := flag.Duration("cooldown", 0, "Stop chaos and producers this long before end to allow healing (e.g., 30s). 0 disables")
 	// Stop on failure override
 	stopOnFailure := flag.Bool("stop-on-failure", false, "Stop simulation immediately on failure")
+	// Phase 7a: --mode overrides the YAML simulation.mode so the parent
+	// orchestrator (mode: process) can spawn the same binary with --mode
+	// worker / --mode producer without separate YAML files. --id sets the
+	// WORKER_ID/PRODUCER_ID env override the spawned process uses to
+	// identify itself.
+	modeOverride := flag.String("mode", "", "Override simulation.mode from config (e.g. worker, producer)")
+	idOverride := flag.String("id", "", "Set WORKER_ID/PRODUCER_ID for spawned worker/producer modes")
 	flag.Parse()
 
 	// Load config
@@ -127,6 +134,26 @@ func main() {
 	if *stopOnFailure {
 		cfg.Coordinator.StopOnFailure = true
 		log.Println("Overriding stop-on-failure from CLI flag: true")
+	}
+
+	// Apply --mode override (Phase 7a: parent orchestrator spawns children
+	// with --mode worker / --mode producer). Validation already ran on
+	// LoadConfig; mode strings beyond the allowed set fall through to the
+	// main switch's default-case error below.
+	if *modeOverride != "" {
+		cfg.Simulation.Mode = *modeOverride
+	}
+	// --id maps to WORKER_ID / PRODUCER_ID. The downstream runWorker /
+	// runProducer already prefer the env var; setting it here keeps the
+	// child-spawn path uniform with the env-only path used by chaos
+	// dispatchers in all-in-one mode.
+	if *idOverride != "" {
+		switch cfg.Simulation.Mode {
+		case "worker":
+			_ = os.Setenv("WORKER_ID", *idOverride)
+		case "producer":
+			_ = os.Setenv("PRODUCER_ID", *idOverride)
+		}
 	}
 
 	log.Printf("Starting simulation in %s mode", cfg.Simulation.Mode)
@@ -174,6 +201,8 @@ func main() {
 			runErr = runWorker(ctx, cfg)
 		case "coordinator":
 			runErr = runCoordinator(ctx, cfg)
+		case "process":
+			runErr = runProcessOrchestrator(ctx, cfg, *configPath)
 		default:
 			runErr = fmt.Errorf("unknown mode: %s", cfg.Simulation.Mode)
 		}
@@ -1051,10 +1080,23 @@ func runProducer(ctx context.Context, cfg *config.Config) error {
 }
 
 func runWorker(ctx context.Context, cfg *config.Config) error {
-	// Connect to NATS
-	ns, err := nats.Connect(cfg.NATS.URL)
+	// IMPORTANT: stdout is reserved as the IPC transport in process mode
+	// (the orchestrator's ProcessManager.ipcReader parses NDJSON frames
+	// from each child's stdout). Force the standard library logger onto
+	// stderr — its default is stderr too, but make it explicit so any
+	// future caller cannot inadvertently drown the IPC stream.
+	log.SetOutput(os.Stderr)
+
+	// Spawned children (mode: process orchestrator → --mode worker) read
+	// the parent's embedded-NATS ClientURL from SIM_NATS_URL. Fall back
+	// to cfg.NATS.URL for the legacy distributed standalone path.
+	natsURL := os.Getenv("SIM_NATS_URL")
+	if natsURL == "" {
+		natsURL = cfg.NATS.URL
+	}
+	ns, err := nats.Connect(natsURL)
 	if err != nil {
-		return fmt.Errorf("failed to connect to NATS: %w", err)
+		return fmt.Errorf("failed to connect to NATS at %s: %w", natsURL, err)
 	}
 	defer ns.Close()
 
@@ -1077,14 +1119,23 @@ func runWorker(ctx context.Context, cfg *config.Config) error {
 		weights = gen.GenerateWeights(cfg.Partitions.Count)
 	}
 
-	// Create worker
-	// Large buffer to prevent dropping reports during high load.
-	// With 100 workers processing messages from 1500 partitions, coordinator might lag.
-	reportCh := make(chan coordinator.ReceivedMessage, 100000)
 	workerID := os.Getenv("WORKER_ID")
 	if workerID == "" {
 		workerID = "worker-0"
 	}
+
+	// Phase 7a: route the four worker report channels through local
+	// emitter sinks that serialise each event as an IPC NDJSON frame on
+	// stdout. The orchestrator's ProcessManager.ipcReader fans the frames
+	// back into the coordinator's channels and per-worker observer.
+	//
+	// Buffers mirror the all-in-one path so chaos bursts (large
+	// assignment snapshots, post-takeover replay) cannot drop frames at
+	// the producing edge.
+	receivedCh := make(chan coordinator.ReceivedMessage, 100000)
+	assignmentsCh := make(chan coordinator.AssignmentReport, 1000)
+	startLatCh := make(chan coordinator.StartLatencyReport, 16)
+	degradedCh := make(chan coordinator.WorkerDegradedReport, 256)
 
 	workerCfg := worker.Config{
 		ID:                  workerID,
@@ -1095,7 +1146,10 @@ func runWorker(ctx context.Context, cfg *config.Config) error {
 		AssignmentStrategy:  cfg.Workers.AssignmentStrategy,
 		ProcessingDelayMin:  cfg.Workers.ProcessingDelay.Min,
 		ProcessingDelayMax:  cfg.Workers.ProcessingDelay.Max,
-		CoordinatorReportCh: reportCh,
+		CoordinatorReportCh: receivedCh,
+		AssignmentReportCh:  assignmentsCh,
+		StartLatencyCh:      startLatCh,
+		DegradedReportCh:    degradedCh,
 		MetricsCollector:    nil, // No metrics in standalone worker mode
 		ConsumerBatchSize:   cfg.Workers.ConsumerBatchSize,
 		HandlerConcurrency:  cfg.Workers.HandlerConcurrency,
@@ -1114,7 +1168,310 @@ func runWorker(ctx context.Context, cfg *config.Config) error {
 		return fmt.Errorf("failed to create worker: %w", err)
 	}
 
-	return w.Start(ctx)
+	// Wire IPC emitters BEFORE Start so any pre-stable events (initial
+	// assignment, start_latency) reach stdout. The emitters return when
+	// emitterCtx is cancelled below.
+	emitterCtx, emitterCancel := context.WithCancel(ctx)
+	defer emitterCancel()
+	startEmitters(emitterCtx, workerID, w, receivedCh, assignmentsCh, startLatCh, degradedCh)
+
+	if err := w.Start(ctx); err != nil {
+		return err
+	}
+
+	// Long-lived loop. Exit conditions:
+	//  - ctx cancelled (parent orchestrator shutdown, SIGKILL chaos path
+	//    surfaces here via context's deadline / parent close);
+	//  - the manager's state reaches StateShutdown (claimLostShutdown
+	//    self-stop path — Phase 7b's Gap 8a invariant).
+	//
+	// The state poll piggybacks on the same ticker the emitter uses for
+	// state/leader frames (250ms cadence). Bandwidth is trivial; the
+	// poll-vs-hook tradeoff is documented in the Phase 7a brief.
+	const exitPollInterval = 250 * time.Millisecond
+	ticker := time.NewTicker(exitPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			w.Stop()
+			return nil
+		case <-ticker.C:
+			// types.StateShutdown == 9 (see types/state.go). Use the
+			// same numeric value the coordinator's
+			// workerStateShutdown const carries so a future enum
+			// renumbering surfaces in both packages at once.
+			if w.WorkerStateInt() == int(types.StateShutdown) {
+				log.Printf("[%s] manager reached StateShutdown; runWorker exiting", workerID)
+				w.Stop()
+				return nil
+			}
+		}
+	}
+}
+
+// startEmitters launches the four channel-drain goroutines plus the periodic
+// state/leader ticker that together write NDJSON IPC frames to stdout. All
+// goroutines stop when ctx is cancelled.
+//
+// Each frame's stable_id field is filled lazily from w.StableWorkerID() so
+// the coordinator can correlate sim-side worker IDs with parti stable IDs
+// for the Phase 4 claim-loss ordering oracle.
+func startEmitters(ctx context.Context, workerID string, w *worker.Worker,
+	receivedCh <-chan coordinator.ReceivedMessage,
+	assignmentsCh <-chan coordinator.AssignmentReport,
+	startLatCh <-chan coordinator.StartLatencyReport,
+	degradedCh <-chan coordinator.WorkerDegradedReport,
+) {
+	emit := func(kind string, payload any) {
+		line, err := coordinator.EncodeIPCFrame(kind, workerID, w.StableWorkerID(), time.Now().UnixMilli(), payload)
+		if err != nil {
+			log.Printf("[%s] ipc encode kind=%s: %v", workerID, kind, err)
+			return
+		}
+		// Write directly to stdout; Stdout is line-buffered by the OS
+		// pipe so the orchestrator's bufio.Scanner sees each frame as
+		// soon as we finish the write.
+		if _, err := os.Stdout.WriteString(line); err != nil {
+			log.Printf("[%s] ipc stdout write kind=%s: %v", workerID, kind, err)
+		}
+	}
+
+	// received_message frames
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case rm, ok := <-receivedCh:
+				if !ok {
+					return
+				}
+				emit(coordinator.IPCKindReceivedMessage, coordinator.IPCPayloadReceivedMessage{
+					PartitionID:       rm.PartitionID,
+					PartitionSequence: rm.PartitionSequence,
+				})
+			}
+		}
+	}()
+
+	// assignment_report frames
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ar, ok := <-assignmentsCh:
+				if !ok {
+					return
+				}
+				emit(coordinator.IPCKindAssignmentReport, coordinator.IPCPayloadAssignmentReport{
+					Partitions: ar.Partitions,
+				})
+			}
+		}
+	}()
+
+	// start_latency frames
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case sl, ok := <-startLatCh:
+				if !ok {
+					return
+				}
+				emit(coordinator.IPCKindStartLatency, coordinator.IPCPayloadStartLatency{
+					LatencyMS:       sl.Latency.Milliseconds(),
+					IsInitialCohort: sl.IsInitialCohort,
+				})
+			}
+		}
+	}()
+
+	// degraded frames
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case dr, ok := <-degradedCh:
+				if !ok {
+					return
+				}
+				emit(coordinator.IPCKindDegraded, coordinator.IPCPayloadDegraded{
+					Reason: dr.Reason,
+				})
+			}
+		}
+	}()
+
+	// state + leader ticker. Emits every tick (even when the value has
+	// not changed) so the coordinator-side smoke oracle observes at
+	// least one of each kind within T_smoke even for workers that never
+	// transition past their initial state (the empty-cluster edge case).
+	go func() {
+		ticker := time.NewTicker(250 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				emit(coordinator.IPCKindState, coordinator.IPCPayloadState{State: w.WorkerStateInt()})
+				emit(coordinator.IPCKindLeader, coordinator.IPCPayloadLeader{IsLeader: w.IsLeader()})
+			}
+		}
+	}()
+}
+
+// runProcessOrchestrator is the parent process for Phase 7a "process" mode.
+//
+// Responsibilities:
+//   - bring up an embedded NATS server (or attach to the configured external
+//     one) and pre-create the parti coordination KV buckets, exactly like
+//     runAllInOne, so spawned worker children can claim their stable IDs
+//     and ensure assignment / handoff buckets without thundering the bucket
+//     creation path;
+//   - construct a Coordinator + GoroutineRegistry + the Phase 0 oracles
+//     (leader-uniqueness + state-reconcile poll the registry, which we
+//     populate with ProcessWorkerObserver shims via ProcessManager);
+//   - install ProcessIPCSinks on the ProcessManager so each child's stdout
+//     IPC stream fans into the coordinator;
+//   - spawn cfg.Workers.Count worker processes and block until the parent
+//     ctx ends. No producer / chaos integration in this scope; the smoke
+//     scenario asserts on lifecycle frames only (assignment_report,
+//     start_latency, state, leader) which fire independently of message
+//     traffic.
+//
+// Phase 7b (process-mode chaos dispatch) is deliberately out of scope for
+// this entrypoint — see the task report for follow-up.
+func runProcessOrchestrator(ctx context.Context, cfg *config.Config, cfgPath string) error { //nolint:cyclop,funlen,revive,gocyclo
+	// Bring up NATS exactly as runAllInOne does. The pre-create logic
+	// mirrors runAllInOne's bucket-readying block, minus the Phase 6
+	// handoff-MaxAge knob (the smoke scenario has no Phase 6 chaos).
+	var ns *nats.Conn
+	var embeddedServer *server.Server
+	var err error
+	if cfg.NATS.Mode == "embedded" {
+		srv, nc, eerr := natsutil.StartEmbeddedNATS()
+		if eerr != nil {
+			return fmt.Errorf("failed to start embedded NATS: %w", eerr)
+		}
+		embeddedServer = srv
+		ns = nc
+		if err := natsutil.CreateStream(nc, cfg.Partitions.Count); err != nil {
+			return fmt.Errorf("failed to create stream: %w", err)
+		}
+		// Publish the random-port ClientURL to env so spawned worker
+		// children connect to the parent's embedded server instead of
+		// trying to stand up their own (would race the port + double-
+		// init the JetStream stream / KV buckets).
+		_ = os.Setenv("SIM_NATS_URL", srv.ClientURL())
+	} else {
+		ns, err = nats.Connect(cfg.NATS.URL)
+		if err != nil {
+			return fmt.Errorf("failed to connect to NATS: %w", err)
+		}
+		_ = os.Setenv("SIM_NATS_URL", cfg.NATS.URL)
+	}
+	defer func() {
+		if ns != nil {
+			ns.Close()
+		}
+		if embeddedServer != nil {
+			embeddedServer.Shutdown()
+		}
+	}()
+
+	js, err := jetstream.New(ns)
+	if err != nil {
+		return fmt.Errorf("failed to get JetStream: %w", err)
+	}
+
+	// Pre-create coordination KV buckets so the concurrent worker-process
+	// startups don't thunder the create path. Same set runAllInOne uses.
+	{
+		pc := parti.DefaultConfig()
+		pc.KVBuckets.HandoffTTL = 0
+		timeBuckets := []struct {
+			name string
+			ttl  time.Duration
+		}{
+			{pc.KVBuckets.StableIDBucket, pc.WorkerIDTTL},
+			{pc.KVBuckets.ElectionBucket, pc.ElectionTimeout},
+			{pc.KVBuckets.HeartbeatBucket, pc.HeartbeatTTL},
+			{pc.KVBuckets.AssignmentBucket, pc.KVBuckets.AssignmentTTL},
+			{pc.KVBuckets.HandoffBucket, pc.KVBuckets.HandoffTTL},
+		}
+		for _, b := range timeBuckets {
+			bctx, bcancel := context.WithTimeout(ctx, 5*time.Second)
+			_, kerr := kvutil.EnsureKVBucket(bctx, js, b.name, b.ttl)
+			bcancel()
+			if kerr != nil {
+				return fmt.Errorf("failed to ensure KV bucket %s: %w", b.name, kerr)
+			}
+		}
+	}
+
+	// Coordinator + registry + oracles.
+	coord := coordinator.NewCoordinator(cfg.Partitions.Count, nil, coordinator.DupTraceSettings{}, cfg.Coordinator.StopOnFailure, cfg.Coordinator.FailureReportPath)
+	if cfg.Workers.Count > 0 {
+		coord.SetExpectedWorkers(cfg.Workers.Count)
+	}
+	registry := coordinator.NewGoroutineRegistry()
+	coord.EnableShutdownOracles(registry)
+	go coord.Start(ctx)
+
+	// IPC smoke oracle (Phase 7a gating; Phase 7b will read its counter).
+	smoke := coordinator.NewIPCSmokeOracle(30*time.Second, nil)
+	smoke.Run(ctx, 2*time.Second)
+
+	// ProcessManager + IPC sinks. The sinks share buffered channels with
+	// the coordinator so its existing processAssignments /
+	// receivedCh-drain goroutines pick up worker reports transparently.
+	processMgr := coordinator.NewProcessManager(os.Args[0], cfgPath)
+	processMgr.SetIPCSinks(&coordinator.ProcessIPCSinks{
+		Registry:    registry,
+		Received:    coord.GetReceivedChannel(),
+		Assignments: coord.GetAssignmentsChannel(),
+		StartLat:    coord.GetStartLatencyChannel(),
+		Degraded:    coord.GetDegradedReportsChannel(),
+		Smoke:       smoke,
+	})
+
+	// Spawn the worker children. Each carries WORKER_ID=worker-i via env;
+	// no StableID overrides in the smoke path.
+	for i := 0; i < cfg.Workers.Count; i++ {
+		workerID := fmt.Sprintf("worker-%d", i)
+		if err := processMgr.StartWorker(ctx, workerID); err != nil {
+			log.Printf("[process] failed to start %s: %v", workerID, err)
+		}
+	}
+
+	// Block until parent ctx ends, then stop children with a bounded
+	// SIGTERM-then-SIGKILL window. The defer above closes NATS last.
+	<-ctx.Done()
+	log.Println("[process] orchestrator stopping; killing worker children")
+	if err := processMgr.StopAll(5 * time.Second); err != nil {
+		log.Printf("[process] StopAll: %v", err)
+	}
+
+	// Final smoke evaluation before reporting counters.
+	smoke.Check()
+	seen := smoke.WorkersSeen()
+	counts := smoke.FrameCounts()
+	log.Printf("[process] smoke summary: workers_seen=%d expected=%d frame_counts=%v",
+		seen, cfg.Workers.Count, counts)
+	if v := smoke.Violations(); v > 0 {
+		return fmt.Errorf("ipc_smoke_violation=%d (workers_seen=%d frame_counts=%v)", v, seen, counts)
+	}
+	if seen < cfg.Workers.Count {
+		return fmt.Errorf("ipc_smoke_violation: only %d of %d workers ever emitted a frame", seen, cfg.Workers.Count)
+	}
+	log.Printf("[process] smoke check passed (workers=%d)", cfg.Workers.Count)
+	return nil
 }
 
 func runCoordinator(ctx context.Context, cfg *config.Config) error {

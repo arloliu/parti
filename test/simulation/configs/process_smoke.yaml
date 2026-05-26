@@ -1,0 +1,55 @@
+# Phase 7a process-mode IPC smoke scenario.
+#
+# Parent process (mode: process) brings up embedded NATS, pre-creates the
+# parti coordination KV buckets, spawns 2 worker child processes, and asserts
+# that within 30 s of each child's first IPC frame the parent has seen at
+# least one frame of EACH of the four lifecycle kinds: assignment_report,
+# start_latency, state, leader.
+#
+# No producer / no chaos: the smoke check only relies on worker lifecycle
+# events that fire independently of message traffic.
+
+simulation:
+  duration: 45s
+  mode: process
+
+nats:
+  mode: embedded
+  url: ""
+
+partitions:
+  count: 20
+  message_rate_per_partition: 0
+  distribution: uniform
+  weights:
+    exponential:
+      extreme_percent: 0.05
+      extreme_weight: 100
+      normal_weight: 1
+
+producers:
+  count: 0
+
+workers:
+  count: 2
+  assignment_strategy: WeightedConsistentHash
+  strategy_config: {}
+  processing_delay:
+    min: 0ms
+    max: 0ms
+
+coordinator:
+  buffer_size: 10000
+
+chaos:
+  enabled: false
+
+metrics:
+  prometheus:
+    enabled: false
+    port: 9090
+
+checkpoint:
+  enabled: false
+  interval: 1h
+  path: ./checkpoints
