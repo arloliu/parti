@@ -175,7 +175,23 @@ type ProcessWorkerObserver struct {
 	state    atomic.Int32
 	leader   atomic.Bool
 	stableID atomic.Pointer[string]
+	// suspended, when true, indicates the worker process is currently
+	// SIGSTOP'd (Phase 7b long-pause chaos). The IPC stream is frozen, so
+	// the cached IsLeader()/WorkerStateInt() values are stale.
+	// LeaderUniquenessWatcher polls IsLeader() across all live workers; if
+	// a frozen process is still reported as leader, a NEW leader elected
+	// by the live quorum would produce a false-positive double_leader
+	// observation. Hide the frozen worker from oracle polls by returning
+	// suspendedStateValue / IsLeader=false while suspended.
+	suspended atomic.Bool
 }
+
+// suspendedStateValue is returned by WorkerStateInt when the observer is
+// marked suspended. It is intentionally a value that none of the existing
+// state-machine watchers treat as either stable or shutdown so frozen
+// workers are simply ignored. -1 lies outside the production state enum
+// (0..9 per types/state.go) so future state additions cannot collide.
+const suspendedStateValue = -1
 
 // NewProcessWorkerObserver constructs an observer with zero values (state=0
 // = StateInit, leader=false, stableID="").
@@ -189,6 +205,9 @@ func (o *ProcessWorkerObserver) IsLeader() bool {
 	if o == nil {
 		return false
 	}
+	if o.suspended.Load() {
+		return false
+	}
 	return o.leader.Load()
 }
 
@@ -198,7 +217,21 @@ func (o *ProcessWorkerObserver) WorkerStateInt() int {
 	if o == nil {
 		return 0
 	}
+	if o.suspended.Load() {
+		return suspendedStateValue
+	}
 	return int(o.state.Load())
+}
+
+// SetSuspended toggles the observer's suspended flag. While suspended,
+// IsLeader returns false and WorkerStateInt returns suspendedStateValue so
+// registry-polling oracles ignore the frozen worker. Phase 7b drives this
+// from the SIGSTOP / SIGCONT chaos handlers.
+func (o *ProcessWorkerObserver) SetSuspended(s bool) {
+	if o == nil {
+		return
+	}
+	o.suspended.Store(s)
 }
 
 // StableWorkerID returns the most recent stable worker ID claimed by the

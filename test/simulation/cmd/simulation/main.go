@@ -43,6 +43,15 @@ var (
 	aioScaleUpOnce    int
 	aioMinWorkers     int
 	aioMaxWorkers     int
+
+	// procCfg holds the active config in process-orchestrator mode so chaos
+	// handlers can resolve per-worker StableID overrides without threading
+	// the config pointer through every dispatch surface.
+	procCfg *config.Config
+	// procNextWorkerIdx tracks the next sim-side worker ID to allocate for
+	// process-mode respawns (Phase 7b stableid_tiny_pool_respawn). The
+	// orchestrator initial spawn uses 0..count-1; the respawn picks count+.
+	procNextWorkerIdx int
 )
 
 // durationFromParams extracts a duration from a chaos params map, tolerating
@@ -1156,6 +1165,14 @@ func runWorker(ctx context.Context, cfg *config.Config) error {
 		AckWait:             cfg.Workers.AckWait,
 		MaxSubjects:         cfg.Workers.MaxSubjects,
 	}
+	// Apply cluster-wide WorkerIDTTL + any matching per_worker entry from
+	// the scenario config so process-mode worker children see the same
+	// pool semantics as all-in-one workers. Process-mode chaos
+	// (stableid_tiny_pool_respawn) additionally layers STABLEID_* env vars
+	// on top via applyStableIDEnv below — those win over the config (last
+	// write wins under override-if-set semantics).
+	applyWorkerOverrides(&workerCfg, cfg, workerID)
+
 	// Phase 4c: read STABLEID_* env vars and apply them as per-worker
 	// overrides. Parse failures are loud (return Start error) so silent
 	// fallback cannot mask scenario bugs.
@@ -1441,12 +1458,52 @@ func runProcessOrchestrator(ctx context.Context, cfg *config.Config, cfgPath str
 		Smoke:       smoke,
 	})
 
+	// Expose the active config to chaos handlers (process-mode equivalent
+	// of aioCfg) so handleProcessStableIDTinyPoolRespawn can resolve
+	// cfg.Workers.PerWorker[target_worker] → StableIDOverrides.
+	procCfg = cfg
+	defer func() { procCfg = nil }()
+	procNextWorkerIdx = cfg.Workers.Count - 1
+
 	// Spawn the worker children. Each carries WORKER_ID=worker-i via env;
-	// no StableID overrides in the smoke path.
+	// PerWorker overrides (when configured) are forwarded as STABLEID_* env
+	// vars so per_worker tiny-pool scenarios are reproducible in process
+	// mode (Phase 4c plumbing).
 	for i := 0; i < cfg.Workers.Count; i++ {
 		workerID := fmt.Sprintf("worker-%d", i)
-		if err := processMgr.StartWorker(ctx, workerID); err != nil {
-			log.Printf("[process] failed to start %s: %v", workerID, err)
+		var startErr error
+		if pw, ok := cfg.Workers.PerWorker[workerID]; ok {
+			startErr = processMgr.StartWorker(ctx, workerID, coordinator.StableIDOverrides{
+				Prefix: pw.WorkerIDPrefix,
+				Min:    pw.WorkerIDMin,
+				Max:    pw.WorkerIDMax,
+				TTL:    pw.WorkerIDTTL,
+			})
+		} else {
+			startErr = processMgr.StartWorker(ctx, workerID)
+		}
+		if startErr != nil {
+			log.Printf("[process] failed to start %s: %v", workerID, startErr)
+		}
+	}
+
+	// Phase 7b scheduled-events dispatcher: fire each scenario-scheduled
+	// event at its configured offset from the orchestrator's start. Mirrors
+	// the all-in-one dispatcher (runAllInOne above); routes through
+	// handleChaosEvent with goroutineRegistry=nil so the process-mode
+	// branch (worker_pause / worker_resume / stableid_tiny_pool_respawn)
+	// runs instead of the all-in-one fast-path.
+	if cfg.Chaos.Enabled || len(cfg.Chaos.ScheduledEvents) > 0 {
+		for _, sev := range cfg.Chaos.ScheduledEvents {
+			go func() {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(sev.At):
+				}
+				log.Printf("[ScheduledChaos] firing %s at +%v params=%v", sev.Event, sev.At, sev.Params)
+				handleChaosEvent(ctx, coord, coordinator.ChaosEvent(sev.Event), sev.Params, processMgr, nil, nil, nil)
+			}()
 		}
 	}
 
@@ -1464,11 +1521,30 @@ func runProcessOrchestrator(ctx context.Context, cfg *config.Config, cfgPath str
 	counts := smoke.FrameCounts()
 	log.Printf("[process] smoke summary: workers_seen=%d expected=%d frame_counts=%v",
 		seen, cfg.Workers.Count, counts)
+	// Phase 7b: surface Phase 0 / Phase 4 oracle counters for the
+	// long-SIGSTOP scenario. The oracles fire through the existing IPC →
+	// coordinator channels so process mode gets them for free; the
+	// dedicated log line + exit-code gating wires them into the scenario
+	// pass / fail signal.
+	claimLossOrderViol := coord.GetClaimLossOrderingViolations()
+	leaderViol := coord.GetDoubleLeaderObservations()
+	snapOverlap := coord.GetSnapshotOverlapCount()
+	log.Printf("[process] oracle counters: claim_loss_stop_ordering=%d leader_uniqueness=%d snapshot_overlap=%d",
+		claimLossOrderViol, leaderViol, snapOverlap)
 	if v := smoke.Violations(); v > 0 {
 		return fmt.Errorf("ipc_smoke_violation=%d (workers_seen=%d frame_counts=%v)", v, seen, counts)
 	}
 	if seen < cfg.Workers.Count {
 		return fmt.Errorf("ipc_smoke_violation: only %d of %d workers ever emitted a frame", seen, cfg.Workers.Count)
+	}
+	if claimLossOrderViol > 0 {
+		return fmt.Errorf("claim_loss_stop_ordering_violations=%d", claimLossOrderViol)
+	}
+	if leaderViol > 0 {
+		return fmt.Errorf("double_leader_observations=%d", leaderViol)
+	}
+	if snapOverlap > 0 {
+		return fmt.Errorf("snapshot_overlap_violations=%d", snapOverlap)
 	}
 	log.Printf("[process] smoke check passed (workers=%d)", cfg.Workers.Count)
 	return nil
@@ -1616,20 +1692,30 @@ func handleChaosEvent(
 		log.Println("[Chaos] process mode does not support network_disconnect_long; skipping")
 
 	case coordinator.WorkerPauseEvent:
-		// Simulate worker pause
-		duration, ok := params["duration"].(time.Duration)
-		if !ok {
-			log.Println("[Chaos] Invalid duration parameter for worker_pause event")
-			return
-		}
-		handleWorkerPause(duration, processMgr)
+		// Simulate worker pause. duration<=0 means "open-ended; driven by
+		// later worker_resume" (Phase 7b long-SIGSTOP scenario).
+		duration := durationFromParams(params, "duration", 0)
+		targetWorker, _ := params["target_worker"].(string)
+		handleWorkerPause(duration, processMgr, targetWorker)
+
+	case coordinator.WorkerResumeEvent:
+		// Phase 7b: drive SIGCONT for a previously open-ended worker_pause.
+		targetWorker, _ := params["target_worker"].(string)
+		handleWorkerResume(processMgr, targetWorker)
+
+	case coordinator.StableIDTinyPoolRespawnEvent:
+		// Phase 7b: process-mode same-pool replacement. Look up the target
+		// worker's StableID overrides from cfg.Workers.PerWorker and spawn a
+		// fresh child process pinned to the same tiny pool so its Claim
+		// performs the revision-bumping Update that moves the stable-ID key.
+		handleProcessStableIDTinyPoolRespawn(ctx, params, processMgr)
 
 	case coordinator.SlowConsumerEvent:
 		// SlowConsumer only works in all-in-one (goroutine) mode - skip in process mode
 		log.Println("[Chaos] slow_consumer event only supported in all-in-one mode")
 
 	case coordinator.BucketDeleteEvent, coordinator.BucketRecreateEvent, coordinator.BucketPeerTakeoverEvent,
-		coordinator.WatcherStallEvent, coordinator.StableIDClaimStealEvent, coordinator.StableIDTinyPoolRespawnEvent,
+		coordinator.WatcherStallEvent, coordinator.StableIDClaimStealEvent,
 		coordinator.ProducerDisconnectEvent, coordinator.AssignmentCASStormEvent, coordinator.AssignmentBucketDeleteEvent,
 		coordinator.HandoffOrphanClaimWriteEvent:
 		// Process-mode dispatch is intentionally a log-and-skip per the
@@ -1664,7 +1750,7 @@ func handleGoroutineChaos( //nolint:cyclop,gocyclo,funlen,revive // dispatch gro
 			log.Printf("[Chaos] Skipping %s: no active workers", event)
 			return
 		}
-	case coordinator.ScaleUpEvent, coordinator.ProducerCrashEvent, coordinator.BucketDeleteEvent, coordinator.BucketRecreateEvent, coordinator.WatcherStallEvent, coordinator.StableIDTinyPoolRespawnEvent, coordinator.ProducerDisconnectEvent, coordinator.AssignmentCASStormEvent, coordinator.AssignmentBucketDeleteEvent, coordinator.HandoffOrphanClaimWriteEvent:
+	case coordinator.ScaleUpEvent, coordinator.ProducerCrashEvent, coordinator.BucketDeleteEvent, coordinator.BucketRecreateEvent, coordinator.WatcherStallEvent, coordinator.StableIDTinyPoolRespawnEvent, coordinator.ProducerDisconnectEvent, coordinator.AssignmentCASStormEvent, coordinator.AssignmentBucketDeleteEvent, coordinator.HandoffOrphanClaimWriteEvent, coordinator.WorkerResumeEvent:
 		_ = 0 // Dummy op to make branch different
 	default:
 		// Fallback for any other events
@@ -1899,6 +1985,11 @@ func handleGoroutineChaos( //nolint:cyclop,gocyclo,funlen,revive // dispatch gro
 		// twophase.go:434-488 must skip ClaimStateStable claims.
 		obsWindow := durationFromParams(params, "observation_window", 60*time.Second)
 		handleHandoffOrphanClaimWrite(ctx, obsWindow)
+
+	case coordinator.WorkerResumeEvent:
+		// Phase 7b: process-mode only. All-in-one mode has no frozen-process
+		// equivalent (workers are goroutines), so this is a no-op here.
+		log.Println("[Chaos] worker_resume is process-mode only; skipping in all-in-one")
 
 	default:
 		log.Printf("[Chaos] Unknown event type: %s", event)
@@ -2409,11 +2500,19 @@ func handleNetworkDisconnect(duration time.Duration, processMgr *coordinator.Pro
 	})
 }
 
-// handleWorkerPause pauses a random worker process using SIGSTOP/SIGCONT.
-func handleWorkerPause(duration time.Duration, processMgr *coordinator.ProcessManager) {
-	log.Printf("[Chaos] Simulating worker pause for %v", duration)
+// handleWorkerPause pauses a worker process using SIGSTOP. When targetWorker
+// is non-empty, that specific worker is paused; otherwise a random running
+// worker is chosen. When duration > 0, a SIGCONT is scheduled via
+// time.AfterFunc; when duration <= 0, the pause is open-ended and the caller
+// is expected to drive a SIGCONT via a later worker_resume event (Phase 7b
+// long-SIGSTOP scenario).
+func handleWorkerPause(duration time.Duration, processMgr *coordinator.ProcessManager, targetWorker string) {
+	log.Printf("[Chaos] Simulating worker pause for %v target=%q", duration, targetWorker)
 
-	targetID := processMgr.SelectRandomWorker()
+	targetID := targetWorker
+	if targetID == "" {
+		targetID = processMgr.SelectRandomWorker()
+	}
 	if targetID == "" {
 		log.Println("[Chaos] No running workers to pause")
 		return
@@ -2425,12 +2524,78 @@ func handleWorkerPause(duration time.Duration, processMgr *coordinator.ProcessMa
 		return
 	}
 
+	if duration <= 0 {
+		log.Printf("[Chaos] Open-ended pause on %s; resume must be driven by worker_resume event", targetID)
+		return
+	}
+
 	time.AfterFunc(duration, func() {
 		log.Printf("[Chaos] Resuming worker %s (SIGCONT)", targetID)
 		if err := processMgr.SignalProcess(targetID, syscall.SIGCONT); err != nil {
 			log.Printf("[Chaos] Failed to resume worker %s: %v", targetID, err)
 		}
 	})
+}
+
+// handleProcessStableIDTinyPoolRespawn spawns a fresh worker process pinned
+// to the same tiny stable-ID pool as a previously-frozen target. Phase 7b
+// driver for the same-pool replacement step of the OS-signal Gap 8a chain:
+//
+//  1. Resolve cfg.Workers.PerWorker[target_worker] → StableIDOverrides.
+//  2. Allocate a new sim-side worker ID (procNextWorkerIdx++).
+//  3. ProcessManager.StartWorker(ctx, newID, overrides) — the spawned child
+//     process inherits SIM_NATS_URL from the orchestrator, runs through the
+//     production stableid.Claimer.Claim path, and wins the same stable ID
+//     via the revision-checked stale-takeover Update
+//     (internal/stableid/claimer.go:219-243).
+//
+// Must run strictly after staleThreshold = 3 * max(WorkerIDTTL/3, 100ms);
+// otherwise the replacement's Claim returns ErrNoAvailableID.
+func handleProcessStableIDTinyPoolRespawn(ctx context.Context, params map[string]any, processMgr *coordinator.ProcessManager) {
+	if procCfg == nil {
+		log.Println("[Chaos] stableid_tiny_pool_respawn: procCfg not initialized (not in process mode?)")
+		return
+	}
+	target, _ := params["target_worker"].(string)
+	if target == "" {
+		// Backward-compat alias used by the all-in-one scenarios.
+		target, _ = params["target_role"].(string)
+	}
+	if target == "" {
+		log.Println("[Chaos] stableid_tiny_pool_respawn: target_worker (or target_role) required; skipping")
+		return
+	}
+	override, ok := procCfg.Workers.PerWorker[target]
+	if !ok {
+		log.Printf("[Chaos] stableid_tiny_pool_respawn: no per_worker override for %q; skipping", target)
+		return
+	}
+	overrides := coordinator.StableIDOverrides{
+		Prefix: override.WorkerIDPrefix,
+		Min:    override.WorkerIDMin,
+		Max:    override.WorkerIDMax,
+		TTL:    override.WorkerIDTTL,
+	}
+	procNextWorkerIdx++
+	newID := fmt.Sprintf("worker-%d", procNextWorkerIdx)
+	log.Printf("[Chaos] stableid_tiny_pool_respawn: spawning %s with overrides=%+v (target=%s) at t=%v",
+		newID, overrides, target, time.Now().Format(time.RFC3339Nano))
+	if err := processMgr.StartWorker(ctx, newID, overrides); err != nil {
+		log.Printf("[Chaos] stableid_tiny_pool_respawn: failed to spawn %s: %v", newID, err)
+	}
+}
+
+// handleWorkerResume sends SIGCONT to a previously paused worker process.
+// Process-mode only; pairs with an open-ended (duration<=0) worker_pause.
+func handleWorkerResume(processMgr *coordinator.ProcessManager, targetWorker string) {
+	if targetWorker == "" {
+		log.Println("[Chaos] worker_resume requires target_worker; skipping")
+		return
+	}
+	log.Printf("[Chaos] Resuming worker %s (SIGCONT)", targetWorker)
+	if err := processMgr.SignalProcess(targetWorker, syscall.SIGCONT); err != nil {
+		log.Printf("[Chaos] Failed to resume worker %s: %v", targetWorker, err)
+	}
 }
 
 // handleLeaderGoroutineNetworkDisconnect implements the "Split Brain"

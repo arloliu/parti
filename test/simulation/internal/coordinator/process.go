@@ -483,6 +483,18 @@ func (pm *ProcessManager) SignalProcess(id string, sig syscall.Signal) error {
 		return fmt.Errorf("failed to send signal %s to %s: %w", sig, id, err)
 	}
 
+	// Phase 7b: when SIGSTOP / SIGCONT is sent to a worker, toggle the
+	// observer's suspended flag so registry-polling oracles don't read
+	// stale cached IsLeader()/state values from the frozen IPC stream.
+	if info.Observer != nil {
+		switch sig { //nolint:exhaustive // only SIGSTOP/SIGCONT alter the freeze state; other signals (SIGTERM/SIGKILL) are tracked via Status.
+		case syscall.SIGSTOP:
+			info.Observer.SetSuspended(true)
+		case syscall.SIGCONT:
+			info.Observer.SetSuspended(false)
+		}
+	}
+
 	return nil
 }
 
