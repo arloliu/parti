@@ -46,6 +46,24 @@ const (
 
 	// SlowConsumerEvent slows down message processing to simulate backpressure.
 	SlowConsumerEvent ChaosEvent = "slow_consumer"
+
+	// BucketDeleteEvent deletes a Parti-owned KV bucket out from under the
+	// running cluster, exercising the whole-bucket-loss degraded path
+	// (recordKVError → enterDegraded("bucket-unavailable:<bucket>")) and
+	// the epoch-fence path once the bucket is re-ensured by a worker.
+	BucketDeleteEvent ChaosEvent = "bucket_delete"
+
+	// BucketRecreateEvent deletes then immediately re-creates a Parti-owned
+	// KV bucket, exercising the bucket-recreate degraded path
+	// (monitorBucketEpochs → enterDegraded("bucket-recreated:<bucket>"))
+	// via a fresh stream Created timestamp.
+	BucketRecreateEvent ChaosEvent = "bucket_recreate"
+
+	// BucketPeerTakeoverEvent steals a specific worker's stable-ID claim
+	// key by Putting a fresh value at the worker's claim key, bumping the
+	// revision and forcing the victim's next renew to return ErrClaimLost
+	// (claimer.go:362-369), driving claimLostShutdown.
+	BucketPeerTakeoverEvent ChaosEvent = "bucket_peer_takeover"
 )
 
 // ChaosController manages chaos event injection.
@@ -227,6 +245,24 @@ func (cc *ChaosController) generateEventParams(event ChaosEvent) map[string]any 
 		params["multiplier"] = cc.rng.Intn(8) + 3 // 3-10x
 		params["duration"] = time.Duration(cc.rng.Intn(11)+5) * time.Second
 
+	case BucketDeleteEvent:
+		// Default to parti-stableid for delete: exercises the
+		// onClaimerError routing boundary (recordKVError vs
+		// claimLostShutdown). Scenarios override via InjectEventNow.
+		params["target_bucket"] = "parti-stableid"
+
+	case BucketRecreateEvent:
+		// Default to parti-assignment for recreate: exercises the
+		// epoch-fence path without forcing all workers into
+		// claim-lost shutdown (which happens when parti-stableid is
+		// recreated). Scenarios that want the stableid recreate path
+		// must pass target_bucket explicitly via InjectEventNow.
+		params["target_bucket"] = "parti-assignment"
+
+	case BucketPeerTakeoverEvent:
+		// Default target_worker "random" — handler picks a live worker.
+		params["target_worker"] = "random"
+
 	default:
 		// Unknown event type, return empty params
 	}
@@ -340,6 +376,12 @@ func (e ChaosEvent) String() string {
 		return "Worker Pause"
 	case SlowConsumerEvent:
 		return "Slow Consumer"
+	case BucketDeleteEvent:
+		return "Bucket Delete"
+	case BucketRecreateEvent:
+		return "Bucket Recreate"
+	case BucketPeerTakeoverEvent:
+		return "Bucket Peer Takeover"
 	default:
 		return fmt.Sprintf("Unknown Event: %s", string(e))
 	}

@@ -1,0 +1,44 @@
+simulation:
+  duration: 3m
+  mode: all-in-one
+
+nats:
+  mode: embedded
+
+partitions:
+  count: 10
+  message_rate_per_partition: 1
+  distribution: uniform
+
+producers:
+  count: 1
+
+workers:
+  count: 3
+  assignment_strategy: WeightedConsistentHash
+  processing_delay:
+    min: 1ms
+    max: 5ms
+
+chaos:
+  enabled: true
+  # Single chaos fire: min=30s ensures the cluster stabilizes first; the
+  # next inter-event interval is also 30-45s but the sim ends at 3m so a
+  # second fire is possible — that's OK, the oracle handles overlapping
+  # expectations and the first observation typically satisfies all
+  # registered expectations within their window.
+  interval: "30s-45s"
+  events:
+    - bucket_recreate
+
+coordinator:
+  gap_aging: 90s
+  slo:
+    enable_catch_up: true
+    catch_up_deadline: 45s
+    catch_up_percent: 99
+    absence_threshold: 5s
+
+metrics:
+  prometheus:
+    enabled: false

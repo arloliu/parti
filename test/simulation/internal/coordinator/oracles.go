@@ -3,6 +3,7 @@ package coordinator
 import (
 	"log"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -32,6 +33,11 @@ type WorkerObserver interface {
 // types/state.go: StateInit=0, StateClaimingID=1, StateElection=2,
 // StateWaitingAssignment=3, StateStable=4.
 const workerStateStable = 4
+
+// workerStateShutdown is the int value of parti.StateShutdown / types.StateShutdown.
+// types/state.go: ..., StateScaling=5, StateRebalancing=6, StateEmergency=7,
+// StateDegraded=8, StateShutdown=9.
+const workerStateShutdown = 9
 
 // ---------------------------------------------------------------------------
 // Shared report types
@@ -416,4 +422,237 @@ func (w *StateReconcileWatcher) Run(ctx interface{ Done() <-chan struct{} }, int
 // violations detected.
 func (w *StateReconcileWatcher) StateReconcileViolations() int64 {
 	return w.violations.Load()
+}
+
+// ---------------------------------------------------------------------------
+// Degraded-reason oracle (Phase 1)
+// ---------------------------------------------------------------------------
+
+// degradedExpectation records what a chaos-injected bucket primitive expects
+// to observe in the WorkerDegradedReport stream.
+//
+//   - reasonSubstrings: any one of these must appear as a substring of the
+//     reported Reason to count as "observed". Multiple substrings let the
+//     oracle accept either of the two production paths (recordKVError vs
+//     epoch-fence) without coupling to which fires first.
+//   - deadline: time.Time after which a missing observation is final.
+//   - targetWorker: peer-takeover only — the StableWorkerID expected to
+//     reach Shutdown; "" means any (used by whole-bucket primitives).
+//   - kind: human-readable chaos kind for log lines.
+type degradedExpectation struct {
+	kind             string
+	reasonSubstrings []string
+	deadline         time.Time
+	targetWorker     string
+	observedWorkers  map[string]struct{}
+	// claimLostExpected is true when the chaos kind is supposed to drive
+	// claimLostShutdown for exactly one worker (peer-takeover); false for
+	// whole-bucket primitives where claimLostShutdown is the WRONG path.
+	claimLostExpected bool
+	// completed is set true once an observation matched. Whole-bucket
+	// primitives still keep collecting observedWorkers until deadline so
+	// the count can be checked separately.
+	completed bool
+}
+
+// DegradedReasonOracle correlates active bucket-chaos expectations against the
+// WorkerDegradedReport stream and bumps three counters:
+//
+//   - expected_degraded_observed: an active expectation matched at least one
+//     report.
+//   - expected_degraded_missing: an expectation's deadline elapsed without
+//     a single matching report.
+//   - unexpected_claim_lost_shutdown: a worker reached Shutdown when no active
+//     expectation predicted it (i.e. the whole-bucket-loss path mis-routed
+//     into claimLostShutdown). Caller calls ObserveClaimLostShutdown from the
+//     worker-state observer.
+//
+// Concurrency: the oracle is safe under multi-producer ingest (one Ingest per
+// worker degraded hook) and a single periodic Sweep tick. All state is
+// mu-guarded except the atomic counters which are reads-only externally.
+type DegradedReasonOracle struct {
+	mu                          sync.Mutex
+	active                      []*degradedExpectation
+	expectedDegradedObserved    atomic.Int64
+	expectedDegradedMissing     atomic.Int64
+	unexpectedClaimLostShutdown atomic.Int64
+}
+
+// NewDegradedReasonOracle constructs an oracle ready to accept expectations.
+func NewDegradedReasonOracle() *DegradedReasonOracle {
+	return &DegradedReasonOracle{}
+}
+
+// ExpectAfter registers an expectation for the given chaos kind.
+//
+//   - kind: human label, e.g. "bucket_delete:parti-stableid"
+//   - reasonSubstrings: any one substring matches; e.g. for bucket_delete on
+//     stableid this is ["bucket-unavailable:", "bucket-recreated:parti-stableid"].
+//   - within: how long after now the expectation is valid; missing past
+//     deadline increments expected_degraded_missing.
+//   - targetWorker: stable-ID string for peer-takeover only; "" for whole-
+//     bucket primitives.
+//   - claimLostExpected: true for peer-takeover (exactly one worker should
+//     reach Shutdown), false for whole-bucket primitives.
+func (o *DegradedReasonOracle) ExpectAfter(kind string, reasonSubstrings []string, within time.Duration, targetWorker string, claimLostExpected bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	// Idempotency: if an active expectation already exists for the same
+	// (kind, targetWorker) tuple, extend its deadline rather than
+	// stacking a second expectation. Production OnDegraded hooks fire
+	// only on TRANSITION to degraded, so multiple chaos events of the
+	// same kind cannot satisfy multiple stacked expectations.
+	for _, exp := range o.active {
+		if exp.kind == kind && exp.targetWorker == targetWorker {
+			newDeadline := time.Now().Add(within)
+			if newDeadline.After(exp.deadline) {
+				exp.deadline = newDeadline
+			}
+			return
+		}
+	}
+	exp := &degradedExpectation{
+		kind:              kind,
+		reasonSubstrings:  append([]string(nil), reasonSubstrings...),
+		deadline:          time.Now().Add(within),
+		targetWorker:      targetWorker,
+		observedWorkers:   make(map[string]struct{}),
+		claimLostExpected: claimLostExpected,
+	}
+	o.active = append(o.active, exp)
+}
+
+// Ingest is the WorkerDegradedReport sink. Called from the coordinator's
+// degraded-report processing goroutine.
+func (o *DegradedReasonOracle) Ingest(r WorkerDegradedReport) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	now := time.Now()
+	for _, exp := range o.active {
+		if exp.completed && exp.claimLostExpected {
+			// peer-takeover only needs one match; skip
+			continue
+		}
+		if now.After(exp.deadline) {
+			continue
+		}
+		if !matchesAnySubstring(r.Reason, exp.reasonSubstrings) {
+			continue
+		}
+		if exp.targetWorker != "" && r.WorkerID != exp.targetWorker {
+			continue
+		}
+		if _, dup := exp.observedWorkers[r.WorkerID]; !dup {
+			exp.observedWorkers[r.WorkerID] = struct{}{}
+		}
+		if !exp.completed {
+			exp.completed = true
+			o.expectedDegradedObserved.Add(1)
+			log.Printf("[DegradedReasonOracle] OBSERVED kind=%s worker=%s reason=%s", exp.kind, r.WorkerID, r.Reason)
+		}
+	}
+}
+
+// ObserveClaimLostShutdown is called by the coordinator when it detects a
+// worker transitioned to Shutdown via the claim-lost path. The oracle
+// classifies the transition against active expectations:
+//
+//   - If an active peer-takeover expectation targets this worker, the
+//     transition is expected; ignored.
+//   - Otherwise, increments unexpected_claim_lost_shutdown.
+func (o *DegradedReasonOracle) ObserveClaimLostShutdown(workerID string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	now := time.Now()
+	for _, exp := range o.active {
+		if !exp.claimLostExpected {
+			continue
+		}
+		if now.After(exp.deadline.Add(5 * time.Second)) {
+			// allow a small grace beyond the degraded-observe deadline
+			continue
+		}
+		if exp.targetWorker == workerID {
+			log.Printf("[DegradedReasonOracle] CLAIM_LOST_OK worker=%s kind=%s", workerID, exp.kind)
+			return
+		}
+	}
+	log.Printf("[DegradedReasonOracle] UNEXPECTED_CLAIM_LOST worker=%s", workerID)
+	o.unexpectedClaimLostShutdown.Add(1)
+}
+
+// Sweep is called periodically; expectations whose deadline has elapsed
+// without observation are recorded as missing.
+func (o *DegradedReasonOracle) Sweep(now time.Time) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	kept := o.active[:0]
+	for _, exp := range o.active {
+		if now.Before(exp.deadline) {
+			kept = append(kept, exp)
+			continue
+		}
+		if !exp.completed {
+			log.Printf("[DegradedReasonOracle] MISSING kind=%s reasons=%v target=%s deadline=%v",
+				exp.kind, exp.reasonSubstrings, exp.targetWorker, exp.deadline.Format(time.RFC3339))
+			o.expectedDegradedMissing.Add(1)
+		}
+		// Drop completed/expired entries.
+	}
+	o.active = kept
+}
+
+// Run starts a background goroutine that calls Sweep at the given interval.
+// On ctx.Done it performs one final Sweep so deadlines that pass during the
+// shutdown window are still classified.
+func (o *DegradedReasonOracle) Run(ctx interface{ Done() <-chan struct{} }, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				// Final sweep to classify any expectations whose
+				// deadlines have already elapsed at shutdown time.
+				o.Sweep(time.Now())
+				return
+			case t := <-ticker.C:
+				o.Sweep(t)
+			}
+		}
+	}()
+}
+
+// ExpectedDegradedObserved returns the count of expectations that observed
+// at least one matching WorkerDegradedReport.
+func (o *DegradedReasonOracle) ExpectedDegradedObserved() int64 {
+	return o.expectedDegradedObserved.Load()
+}
+
+// ExpectedDegradedMissing returns the count of expectations whose deadlines
+// elapsed without a matching WorkerDegradedReport.
+func (o *DegradedReasonOracle) ExpectedDegradedMissing() int64 {
+	return o.expectedDegradedMissing.Load()
+}
+
+// UnexpectedClaimLostShutdown returns the count of claim-lost shutdowns that
+// were not predicted by any active peer-takeover expectation.
+func (o *DegradedReasonOracle) UnexpectedClaimLostShutdown() int64 {
+	return o.unexpectedClaimLostShutdown.Load()
+}
+
+// matchesAnySubstring returns true if any of subs appears as a substring of s.
+// Substring (not equality) so callers can match an entire "bucket-unavailable:"
+// family by passing only the family prefix.
+func matchesAnySubstring(s string, subs []string) bool {
+	for _, sub := range subs {
+		if sub == "" {
+			continue
+		}
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+
+	return false
 }

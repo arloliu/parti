@@ -134,6 +134,12 @@ type Coordinator struct {
 	snapshotOverlap *SnapshotOverlapClassifier
 	leaderUniq      *LeaderUniquenessWatcher
 	stateReconcile  *StateReconcileWatcher
+
+	// Phase 1: bucket-lifecycle chaos oracle. Lazy-initialized in
+	// EnableShutdownOracles so callers that already use Phase 0 oracles
+	// pick this one up automatically.
+	degradedReasonOracle *DegradedReasonOracle
+	degradedReportsCh    chan WorkerDegradedReport
 }
 
 // ownerSnapshot is an immutable view of partition→workers at a moment
@@ -240,6 +246,7 @@ func NewCoordinator(totalPartitions int, metricsCollector *metrics.Collector, du
 		assignmentsCh:           make(chan AssignmentReport, 1000),
 		stoppedWorkersCh:        make(chan string, 256),
 		startLatenciesCh:        make(chan StartLatencyReport, 256),
+		degradedReportsCh:       make(chan WorkerDegradedReport, 256),
 		initialStartLatencies:   make(map[string]time.Duration),
 		takeoverStartLatencies:  make(map[string]time.Duration),
 		slowStartBudgetInitial:  25 * time.Second, // sim ColdStartWindow(10s) + election + chaos-burst headroom
@@ -317,6 +324,47 @@ func (c *Coordinator) EnableShutdownOracles(registry *GoroutineRegistry) {
 	c.snapshotOverlap = NewSnapshotOverlapClassifier(5*time.Second, registry)
 	c.leaderUniq = NewLeaderUniquenessWatcher(registry)
 	c.stateReconcile = NewStateReconcileWatcher(registry, 30*time.Second)
+	c.degradedReasonOracle = NewDegradedReasonOracle()
+}
+
+// DegradedReasonOracle returns the Phase 1 oracle. nil if EnableShutdownOracles
+// was never called. Callers (chaos dispatch handlers) register expectations
+// via this accessor.
+func (c *Coordinator) DegradedReasonOracle() *DegradedReasonOracle {
+	return c.degradedReasonOracle
+}
+
+// GetDegradedReportsChannel returns the channel workers use to publish
+// WorkerDegradedReport events. The coordinator drains this channel and
+// forwards each report to the DegradedReasonOracle.
+func (c *Coordinator) GetDegradedReportsChannel() chan<- WorkerDegradedReport {
+	return c.degradedReportsCh
+}
+
+// GetExpectedDegradedObserved returns the Phase 1 oracle's "observed" counter.
+// Returns 0 if EnableShutdownOracles was never called.
+func (c *Coordinator) GetExpectedDegradedObserved() int64 {
+	if c.degradedReasonOracle == nil {
+		return 0
+	}
+	return c.degradedReasonOracle.ExpectedDegradedObserved()
+}
+
+// GetExpectedDegradedMissing returns the Phase 1 oracle's "missing" counter.
+func (c *Coordinator) GetExpectedDegradedMissing() int64 {
+	if c.degradedReasonOracle == nil {
+		return 0
+	}
+	return c.degradedReasonOracle.ExpectedDegradedMissing()
+}
+
+// GetUnexpectedClaimLostShutdown returns the Phase 1 oracle's claim-lost
+// shutdown counter.
+func (c *Coordinator) GetUnexpectedClaimLostShutdown() int64 {
+	if c.degradedReasonOracle == nil {
+		return 0
+	}
+	return c.degradedReasonOracle.UnexpectedClaimLostShutdown()
 }
 
 // GetSnapshotOverlapCount returns the total snapshot-overlap violations detected
@@ -504,6 +552,14 @@ func (c *Coordinator) Start(ctx context.Context) {
 	}
 	if c.stateReconcile != nil {
 		c.stateReconcile.Run(ctx, 10*time.Second)
+	}
+	if c.degradedReasonOracle != nil {
+		c.degradedReasonOracle.Run(ctx, 1*time.Second)
+		go c.processDegradedReports(ctx)
+		// Background watcher that classifies any worker transition to
+		// Shutdown state (manager State()==StateShutdown) for the
+		// claim-lost invariant.
+		go c.watchClaimLostShutdowns(ctx)
 	}
 
 	<-ctx.Done()
@@ -1663,6 +1719,73 @@ func (c *Coordinator) PruneStaleRecoveries(maxAge time.Duration) {
 			// Only prune if not currently recovering (though recovery should be pruned above)
 			if _, recovering := c.workerRecovery[id]; !recovering {
 				delete(c.workerLastSeen, id)
+			}
+		}
+	}
+}
+
+// processDegradedReports drains WorkerDegradedReport messages from
+// degradedReportsCh and forwards each to the DegradedReasonOracle.
+func (c *Coordinator) processDegradedReports(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case r := <-c.degradedReportsCh:
+			if c.degradedReasonOracle != nil {
+				c.degradedReasonOracle.Ingest(r)
+			}
+		}
+	}
+}
+
+// watchClaimLostShutdowns polls each registered worker's state. When a worker
+// first transitions to StateShutdown, the watcher informs the
+// DegradedReasonOracle so it can classify the transition as expected (a
+// peer-takeover-targeted worker) or unexpected (a whole-bucket-loss path
+// that mis-routed into claimLostShutdown).
+//
+// Polling cadence is 250ms — short enough to observe a shutdown well within
+// the WorkerIDTTL × 2 invariant window, long enough not to thrash.
+func (c *Coordinator) watchClaimLostShutdowns(ctx context.Context) {
+	if c.degradedReasonOracle == nil {
+		return
+	}
+	// registry is held by snapshotOverlap; pull it directly via the
+	// leaderUniq watcher which stores it explicitly.
+	if c.leaderUniq == nil {
+		return
+	}
+	registry := c.leaderUniq.registry
+	if registry == nil {
+		return
+	}
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	reported := make(map[string]struct{})
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for _, info := range registry.GetByType(WorkerGoroutine) {
+				obs, ok := info.Obj.(WorkerObserver)
+				if !ok {
+					continue
+				}
+				if obs.WorkerStateInt() != workerStateShutdown {
+					continue
+				}
+				wid := obs.StableWorkerID()
+				key := info.ID
+				if wid != "" {
+					key = wid
+				}
+				if _, seen := reported[key]; seen {
+					continue
+				}
+				reported[key] = struct{}{}
+				c.degradedReasonOracle.ObserveClaimLostShutdown(key)
 			}
 		}
 	}
