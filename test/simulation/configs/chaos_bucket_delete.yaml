@@ -1,0 +1,52 @@
+simulation:
+  # 3m so the WorkerIDTTL × 2 (=150s) detection budget fits with margin
+  # after the first chaos fires at T+30-45s.
+  duration: 3m
+  mode: all-in-one
+
+nats:
+  mode: embedded
+
+partitions:
+  count: 10
+  message_rate_per_partition: 1
+  distribution: uniform
+
+producers:
+  count: 1
+
+workers:
+  count: 3
+  assignment_strategy: WeightedConsistentHash
+  processing_delay:
+    min: 1ms
+    max: 5ms
+
+chaos:
+  enabled: true
+  # Long min interval delays the first fire to ~30s into the run, giving
+  # the cluster a stable baseline before the bucket-delete chaos starts.
+  # max=45s means the next fire after the first would be ~30-45s later
+  # (T+60-90s), which is acceptable — the oracle holds active
+  # expectations only for the 2 × WorkerIDTTL (=150s) window from the
+  # PRIOR fire, but registering a new identical expectation while one is
+  # active is benign (the oracle keeps all active and counts an
+  # observation against any of them).
+  interval: "30s-45s"
+  events:
+    - bucket_delete
+
+coordinator:
+  # Bucket delete causes a brief degraded window for ALL workers; widen
+  # gap_aging so the holes accumulated during the recovery cannot trip the
+  # gap classifier.
+  gap_aging: 90s
+  slo:
+    enable_catch_up: true
+    catch_up_deadline: 45s
+    catch_up_percent: 99
+    absence_threshold: 5s
+
+metrics:
+  prometheus:
+    enabled: false

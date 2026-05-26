@@ -449,6 +449,7 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 			ProcessingDelayMax:  cfg.Workers.ProcessingDelay.Max,
 			CoordinatorReportCh: coord.GetReceivedChannel(),
 			AssignmentReportCh:  coord.GetAssignmentsChannel(),
+			DegradedReportCh:    coord.GetDegradedReportsChannel(),
 			StartLatencyCh:      coord.GetStartLatencyChannel(),
 			MetricsCollector:    metricsCollector,
 			ConsumerBatchSize:   cfg.Workers.ConsumerBatchSize,
@@ -681,14 +682,17 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 				snapshotOverlaps := coord.GetSnapshotOverlapCount()
 				doubleLeaders := coord.GetDoubleLeaderObservations()
 				stateReconcileViol := coord.GetStateReconcileViolations()
-				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 {
+				expDegMissing := coord.GetExpectedDegradedMissing()
+				expDegObserved := coord.GetExpectedDegradedObserved()
+				unexpClaimLost := coord.GetUnexpectedClaimLostShutdown()
+				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 {
 					// Record error but proceed to ordered shutdown
-					invariantsErr = fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol)
+					invariantsErr = fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost)
 				}
 				if invariantsErr == nil {
-					log.Printf("Stability invariants passed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol)
+					log.Printf("Stability invariants passed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost)
 				} else {
 					log.Printf("Stability invariants failed: %v", invariantsErr)
 				}
@@ -737,9 +741,12 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 				snapshotOverlaps := coord.GetSnapshotOverlapCount()
 				doubleLeaders := coord.GetDoubleLeaderObservations()
 				stateReconcileViol := coord.GetStateReconcileViolations()
-				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 {
-					invariantsErr := fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol)
+				expDegMissing := coord.GetExpectedDegradedMissing()
+				expDegObserved := coord.GetExpectedDegradedObserved()
+				unexpClaimLost := coord.GetUnexpectedClaimLostShutdown()
+				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 {
+					invariantsErr := fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost)
 					// Emit the structured failure_report.json so CI artifacts
 					// include InconclusiveOwnerEvents / unobserved counters /
 					// FirstChaosEventAt — auditability that the new
@@ -1063,13 +1070,21 @@ func handleChaosEvent(
 		// SlowConsumer only works in all-in-one (goroutine) mode - skip in process mode
 		log.Println("[Chaos] slow_consumer event only supported in all-in-one mode")
 
+	case coordinator.BucketDeleteEvent, coordinator.BucketRecreateEvent, coordinator.BucketPeerTakeoverEvent:
+		// Process-mode dispatch is intentionally a log-and-skip per the
+		// plan's risk note (lines 386-388). Whole-bucket actions in
+		// process mode would need cross-process visibility into the
+		// worker JetStream contexts which the simulation does not
+		// currently provide.
+		log.Printf("[Chaos] %s event only supported in all-in-one mode", event)
+
 	default:
 		log.Printf("[Chaos] Unknown event type: %s", event)
 	}
 }
 
 // handleGoroutineChaos handles chaos events for goroutine-level (all-in-one mode).
-func handleGoroutineChaos( //nolint:cyclop,gocyclo
+func handleGoroutineChaos( //nolint:cyclop,gocyclo,funlen,revive // dispatch grows with each new chaos kind
 	ctx context.Context,
 	event coordinator.ChaosEvent,
 	params map[string]any,
@@ -1080,12 +1095,12 @@ func handleGoroutineChaos( //nolint:cyclop,gocyclo
 	// Guard: skip worker-related events when no active workers
 	activeWorkers := registry.GetActiveCount(coordinator.WorkerGoroutine)
 	switch event {
-	case coordinator.WorkerCrashEvent, coordinator.WorkerRestartEvent, coordinator.LeaderFailureEvent, coordinator.ScaleDownEvent, coordinator.NetworkDisconnectEvent, coordinator.NetworkDisconnectLeaderEvent, coordinator.WorkerPauseEvent, coordinator.SlowConsumerEvent:
+	case coordinator.WorkerCrashEvent, coordinator.WorkerRestartEvent, coordinator.LeaderFailureEvent, coordinator.ScaleDownEvent, coordinator.NetworkDisconnectEvent, coordinator.NetworkDisconnectLeaderEvent, coordinator.WorkerPauseEvent, coordinator.SlowConsumerEvent, coordinator.BucketPeerTakeoverEvent:
 		if activeWorkers == 0 {
 			log.Printf("[Chaos] Skipping %s: no active workers", event)
 			return
 		}
-	case coordinator.ScaleUpEvent, coordinator.ProducerCrashEvent:
+	case coordinator.ScaleUpEvent, coordinator.ProducerCrashEvent, coordinator.BucketDeleteEvent, coordinator.BucketRecreateEvent:
 		_ = 0 // Dummy op to make branch different
 	default:
 		// Fallback for any other events
@@ -1238,6 +1253,24 @@ func handleGoroutineChaos( //nolint:cyclop,gocyclo
 		} else {
 			log.Printf("[Chaos] Worker %s missing underlying object; cannot slow", target.ID)
 		}
+
+	case coordinator.BucketDeleteEvent:
+		bucket, _ := params["target_bucket"].(string)
+		if bucket == "" {
+			bucket = parti.DefaultConfig().KVBuckets.StableIDBucket
+		}
+		handleBucketDelete(ctx, bucket)
+
+	case coordinator.BucketRecreateEvent:
+		bucket, _ := params["target_bucket"].(string)
+		if bucket == "" {
+			bucket = parti.DefaultConfig().KVBuckets.AssignmentBucket
+		}
+		handleBucketRecreate(ctx, bucket)
+
+	case coordinator.BucketPeerTakeoverEvent:
+		target, _ := params["target_worker"].(string)
+		handleBucketPeerTakeover(ctx, registry, target)
 
 	default:
 		log.Printf("[Chaos] Unknown event type: %s", event)
@@ -1398,6 +1431,7 @@ func spawnAllInOneWorker(parent context.Context, workerID string) bool {
 		ProcessingDelayMax:          aioCfg.Workers.ProcessingDelay.Max,
 		CoordinatorReportCh:         aioCoord.GetReceivedChannel(),
 		AssignmentReportCh:          aioCoord.GetAssignmentsChannel(),
+		DegradedReportCh:            aioCoord.GetDegradedReportsChannel(),
 		StartLatencyCh:              aioCoord.GetStartLatencyChannel(),
 		MetricsCollector:            aioMetrics,
 		ConsumerBatchSize:           aioCfg.Workers.ConsumerBatchSize,
