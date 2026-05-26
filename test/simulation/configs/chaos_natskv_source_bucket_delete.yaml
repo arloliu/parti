@@ -1,0 +1,69 @@
+# Phase 2 composed scenario — NATSKV source + bucket_delete of the
+# source bucket.
+#
+# Asserts INV3: deleting the partition source bucket flips every worker's
+# source-unavailable hook (synthesized into a WorkerDegradedReport with
+# reason "source-unavailable:parti-sim-source" by the worker-side adapter
+# in worker.go). The Phase 1 DegradedReasonOracle observes the reports.
+#
+# bucket_delete defaults to parti-stableid; the scenario overrides this
+# via chaos.bucket_delete_target_override = parti-sim-source so each
+# bucket_delete fire actually wipes the partition source bucket.
+# The worker.go nats_kv adapter translates the SourceUnavailableHook
+# into a WorkerDegradedReport with reason "source-unavailable:parti-sim-source";
+# the DegradedReasonOracle observes one expectation per chaos fire.
+# watcher_stall continues to stress INV1.
+
+simulation:
+  duration: 4m
+  mode: all-in-one
+
+nats:
+  mode: embedded
+
+partitions:
+  count: 10
+  message_rate_per_partition: 1
+  distribution: uniform
+
+producers:
+  count: 1
+
+workers:
+  count: 5
+  assignment_strategy: WeightedConsistentHash
+  processing_delay:
+    min: 1ms
+    max: 5ms
+  partition_source: nats_kv
+  source_bucket: parti-sim-source
+  source_reconcile_interval: 5s
+
+chaos:
+  enabled: true
+  interval: "30s-45s"
+  events:
+    - watcher_stall
+    - bucket_delete
+  # Phase 2 INV3: override bucket_delete to target the source bucket.
+  # This routes the SourceUnavailableHook (synthesized into a
+  # WorkerDegradedReport by the worker.go nats_kv adapter) so the
+  # DegradedReasonOracle observes one expectation per chaos fire.
+  bucket_delete_target_override: parti-sim-source
+  # The source-convergence driver is incompatible with deleting the
+  # source bucket — its Update calls fail against the missing bucket and
+  # its expectations cannot converge. Suppress it; INV3 is verified via
+  # the DegradedReasonOracle's source-unavailable expectation instead.
+  disable_source_convergence_driver: true
+
+coordinator:
+  gap_aging: 90s
+  slo:
+    enable_catch_up: true
+    catch_up_deadline: 60s
+    catch_up_percent: 99
+    absence_threshold: 5s
+
+metrics:
+  prometheus:
+    enabled: false

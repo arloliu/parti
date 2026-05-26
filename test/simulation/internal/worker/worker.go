@@ -18,6 +18,7 @@ import (
 
 	"github.com/arloliu/parti/v2"
 	"github.com/arloliu/parti/v2/consumer"
+	"github.com/arloliu/parti/v2/kvutil"
 	"github.com/arloliu/parti/v2/source"
 	"github.com/arloliu/parti/v2/strategy"
 	"github.com/arloliu/parti/v2/test/simulation/internal/coordinator"
@@ -167,6 +168,27 @@ type Config struct {
 	// enters degraded mode. Optional — if nil, degraded events are only cached
 	// in the worker's atomic field (readable via DegradedReason()).
 	DegradedReportCh chan<- coordinator.WorkerDegradedReport
+
+	// PartitionSource selects the partition source backend:
+	//   - "static" (default): in-process source.NewStatic — the historical
+	//     behavior; no NATS interaction for partition discovery.
+	//   - "nats_kv": ensures a `parti-sim-source` KV bucket, seeds the
+	//     `partitions` single key via a transient source.NatsKV.Update
+	//     (codec parity with production), then constructs the worker's
+	//     runtime source via source.NewNatsKV. Each worker opens its own
+	//     watcher against the same bucket+key. Exercises the empirical
+	//     reconciler-as-load-bearing-recovery path (see project memory).
+	PartitionSource string
+
+	// SourceBucket is the KV bucket name used when PartitionSource ==
+	// "nats_kv". If empty, defaults to "parti-sim-source".
+	SourceBucket string
+
+	// SourceReconcileInterval overrides the NatsKV reconcile cadence when
+	// PartitionSource == "nats_kv". If 0, defaults to 5s (chosen so that
+	// reconcileInterval < watcher_stall duration < bucketUnavailableCooldown
+	// holds for the Phase 2 scenarios).
+	SourceReconcileInterval time.Duration
 }
 
 // NewWorker creates a new worker.
@@ -177,7 +199,7 @@ type Config struct {
 // Returns:
 //   - *Worker: Initialized worker
 //   - error: Error if initialization fails
-func NewWorker(cfg Config) (*Worker, error) { //nolint:cyclop
+func NewWorker(cfg Config) (*Worker, error) { //nolint:cyclop,gocyclo // dispatch grows with each new partition-source backend
 	// Safety net: AckWait must be supplied by the caller. The
 	// config.validateConfig pass enforces AckWait < Coordinator.GapAging,
 	// but a forgetful caller of NewWorker (e.g., a missing field in a
@@ -209,7 +231,10 @@ func NewWorker(cfg Config) (*Worker, error) { //nolint:cyclop
 			Weight: weight,
 		}
 	}
-	partitionSource := source.NewStatic(partitions)
+
+	// The partition source is constructed AFTER the Worker struct (below)
+	// so the WithLeadershipProbe closure can capture &worker for the
+	// "nats_kv" branch. See partitionSource construction further down.
 
 	// Create assignment strategy
 	var assignmentStrategy types.AssignmentStrategy
@@ -369,6 +394,88 @@ func NewWorker(cfg Config) (*Worker, error) { //nolint:cyclop
 
 	if cfg.MetricsCollector != nil {
 		dynamic.SetResolverMetrics(cfg.MetricsCollector.ResolverMetricsAdapter())
+	}
+
+	// Build partition source. The "nats_kv" branch captures the worker
+	// pointer in its leadership-probe and unavailable-hook closures so the
+	// hooks can resolve worker.manager.IsLeader at tick time (the manager
+	// itself is constructed below, but the closures are not invoked until
+	// after manager.Start). Mirrors the existing OnAssignmentChanged hook
+	// pattern at worker.go:400.
+	var partitionSource types.PartitionSource
+	switch cfg.PartitionSource {
+	case "", "static":
+		partitionSource = source.NewStatic(partitions)
+	case "nats_kv":
+		bucket := cfg.SourceBucket
+		if bucket == "" {
+			bucket = "parti-sim-source"
+		}
+		recon := cfg.SourceReconcileInterval
+		if recon <= 0 {
+			recon = 5 * time.Second
+		}
+		ensureCtx, ensureCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		kv, eerr := kvutil.EnsureKVBucket(ensureCtx, cfg.JS, bucket, 0)
+		ensureCancel()
+		if eerr != nil {
+			return nil, fmt.Errorf("failed to ensure source KV bucket %q: %w", bucket, eerr)
+		}
+		// Seed the SAME codec/CAS path as production NatsKV.Update by
+		// constructing a transient instance and invoking Update once.
+		// internal/partcodec is unreachable from this package, so the
+		// transient-instance approach is the only way to guarantee codec
+		// parity. Multiple workers seeding concurrently is benign: the
+		// initial slice is identical so CAS conflicts last-writer-wins on
+		// the same content.
+		seed := source.NewNatsKV(kv, "partitions", logger)
+		seedCtx, seedCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_ = seed.Update(seedCtx, partitions)
+		seedCancel()
+
+		// SourceUnavailableHook fires when the watcher restart loop or
+		// reconciler observes the bucket is gone. The production
+		// OnDegraded path does NOT trigger on source-bucket loss
+		// (see source/nats_kv.go:123-148), so the sim fans out a
+		// synthetic WorkerDegradedReport with reason
+		// "source-unavailable:<bucket>" so the coordinator oracles can
+		// observe it. Phase 2 INV3 (composed bucket_delete scenario)
+		// relies on this adapter.
+		workerID := cfg.ID
+		reportCh := cfg.DegradedReportCh
+		// NOTE: WithLeadershipProbe is intentionally NOT wired. When set,
+		// the source's reconcileLoop ignores WithReconcileInterval and
+		// uses leaderInterval=30s / followerInterval=5min instead — see
+		// source/nats_kv.go:1005-1014. For the Phase 2 NATSKV-source
+		// scenarios we want EVERY worker (leader or follower) to
+		// reconcile at the explicit 5s cadence so the watcher_stall and
+		// bucket_delete recovery paths can be observed within the
+		// scenario's 3-4 minute budget. The leadership probe is a
+		// production knob for reducing IOPS on followers in long-running
+		// clusters and is not load-bearing for these chaos tests.
+		// Documented as a follow-up: expose a per-source override so
+		// the probe can be wired without overriding the explicit
+		// reconcile interval.
+		partitionSource = source.NewNatsKV(kv, "partitions", logger,
+			source.WithReconcileInterval(recon),
+			source.WithUnavailableHook(func(err error) {
+				reason := fmt.Sprintf("source-unavailable:%s: %v", bucket, err)
+				if reportCh == nil {
+					return
+				}
+				select {
+				case reportCh <- coordinator.WorkerDegradedReport{
+					WorkerID: workerID,
+					Reason:   reason,
+					At:       time.Now(),
+				}:
+				default:
+					log.Printf("[%s] source-unavailable degraded channel full; dropping (%s)", workerID, reason)
+				}
+			}),
+		)
+	default:
+		return nil, fmt.Errorf("unsupported PartitionSource %q (allowed: static, nats_kv)", cfg.PartitionSource)
 	}
 
 	// Set up hooks to record metrics only (consumer updates handled by manager option)

@@ -64,6 +64,17 @@ const (
 	// revision and forcing the victim's next renew to return ErrClaimLost
 	// (claimer.go:362-369), driving claimLostShutdown.
 	BucketPeerTakeoverEvent ChaosEvent = "bucket_peer_takeover"
+
+	// WatcherStallEvent simulates a stalled KV watcher on the partition
+	// source bucket WITHOUT dropping the NATS connection. Implementation:
+	// repeatedly deletes the ephemeral JetStream consumers backing the
+	// `KV_parti-sim-source` stream's watchers across the duration window;
+	// the in-process watcher restart loop (watcherMaxAttempts=6, backoff
+	// 2s..30s) exhausts and the reconciler becomes the sole recovery path.
+	// All workers' watchers on the source stream are stalled simultaneously
+	// (one stream, N ephemeral consumers); `target_worker` is recorded but
+	// not honored (documented as a follow-up).
+	WatcherStallEvent ChaosEvent = "watcher_stall"
 )
 
 // ChaosController manages chaos event injection.
@@ -81,6 +92,10 @@ type ChaosController struct {
 	burstProbability float64 // probability to enter burst (0.0-1.0)
 	burstMode        bool    // currently in burst?
 	burstRemaining   int     // events left in current burst
+
+	// bucketDeleteTargetOverride, when non-empty, replaces the default
+	// bucket target for BucketDeleteEvent params.
+	bucketDeleteTargetOverride string
 }
 
 // ChaosConfig configures the chaos controller.
@@ -94,6 +109,13 @@ type ChaosConfig struct {
 	// Burst mode configuration
 	BurstEnabled     bool    // Enable burst mode for variable intensity
 	BurstProbability float64 // Probability to enter burst (0.0-1.0), default 0.2
+
+	// BucketDeleteTargetOverride, when non-empty, replaces the default
+	// "parti-stableid" target for BucketDeleteEvent's generated params.
+	// Phase 2 composed scenarios set this to "parti-sim-source" so the
+	// chaos deletes the partition-source bucket (exercising the source-
+	// unavailable adapter and INV3) instead of the stableid bucket.
+	BucketDeleteTargetOverride string
 }
 
 // NewChaosController creates a new chaos controller.
@@ -116,14 +138,15 @@ func NewChaosController(cfg ChaosConfig) *ChaosController {
 	}
 
 	return &ChaosController{
-		enabled:          cfg.Enabled,
-		events:           events,
-		minInterval:      cfg.MinInterval,
-		maxInterval:      cfg.MaxInterval,
-		eventCallback:    cfg.EventCallback,
-		rng:              rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec // Weak RNG acceptable for chaos simulation
-		burstEnabled:     cfg.BurstEnabled,
-		burstProbability: burstProb,
+		enabled:                    cfg.Enabled,
+		events:                     events,
+		minInterval:                cfg.MinInterval,
+		maxInterval:                cfg.MaxInterval,
+		eventCallback:              cfg.EventCallback,
+		rng:                        rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec // Weak RNG acceptable for chaos simulation
+		burstEnabled:               cfg.BurstEnabled,
+		burstProbability:           burstProb,
+		bucketDeleteTargetOverride: cfg.BucketDeleteTargetOverride,
 	}
 }
 
@@ -248,8 +271,14 @@ func (cc *ChaosController) generateEventParams(event ChaosEvent) map[string]any 
 	case BucketDeleteEvent:
 		// Default to parti-stableid for delete: exercises the
 		// onClaimerError routing boundary (recordKVError vs
-		// claimLostShutdown). Scenarios override via InjectEventNow.
-		params["target_bucket"] = "parti-stableid"
+		// claimLostShutdown). Scenarios override via InjectEventNow,
+		// OR via ChaosConfig.BucketDeleteTargetOverride for
+		// scenario-wide replacement (Phase 2 composed scenario).
+		if cc.bucketDeleteTargetOverride != "" {
+			params["target_bucket"] = cc.bucketDeleteTargetOverride
+		} else {
+			params["target_bucket"] = "parti-stableid"
+		}
 
 	case BucketRecreateEvent:
 		// Default to parti-assignment for recreate: exercises the
@@ -262,6 +291,16 @@ func (cc *ChaosController) generateEventParams(event ChaosEvent) map[string]any 
 	case BucketPeerTakeoverEvent:
 		// Default target_worker "random" — handler picks a live worker.
 		params["target_worker"] = "random"
+
+	case WatcherStallEvent:
+		// Default subject prefix targets the parti-sim-source KV stream;
+		// duration must exceed reconcileInterval (5s in NATSKV-source
+		// scenarios) AND outlive the watcherMaxAttempts × backoff window
+		// (>= ~30s) so the reconciler is the only viable recovery path,
+		// while staying under bucketUnavailableCooldown (30s default) to
+		// avoid spurious source-unavailable trips per INV2.
+		params["subject_prefix"] = "$KV.parti-sim-source.>"
+		params["duration"] = 45 * time.Second
 
 	default:
 		// Unknown event type, return empty params
@@ -382,6 +421,8 @@ func (e ChaosEvent) String() string {
 		return "Bucket Recreate"
 	case BucketPeerTakeoverEvent:
 		return "Bucket Peer Takeover"
+	case WatcherStallEvent:
+		return "Watcher Stall (KV source watcher)"
 	default:
 		return fmt.Sprintf("Unknown Event: %s", string(e))
 	}

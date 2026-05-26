@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -139,7 +140,13 @@ type Coordinator struct {
 	// EnableShutdownOracles so callers that already use Phase 0 oracles
 	// pick this one up automatically.
 	degradedReasonOracle *DegradedReasonOracle
-	degradedReportsCh    chan WorkerDegradedReport
+
+	// sourceConvergence is the Phase 2 oracle that asserts mid-run
+	// partition-source mutations propagate to every worker's
+	// AssignmentReport within T_converge. Built by EnableShutdownOracles
+	// and fed from processAssignments on each AssignmentReport.
+	sourceConvergence *SourceConvergenceOracle
+	degradedReportsCh chan WorkerDegradedReport
 }
 
 // ownerSnapshot is an immutable view of partition→workers at a moment
@@ -325,6 +332,42 @@ func (c *Coordinator) EnableShutdownOracles(registry *GoroutineRegistry) {
 	c.leaderUniq = NewLeaderUniquenessWatcher(registry)
 	c.stateReconcile = NewStateReconcileWatcher(registry, 30*time.Second)
 	c.degradedReasonOracle = NewDegradedReasonOracle()
+	c.sourceConvergence = NewSourceConvergenceOracle()
+}
+
+// SourceConvergenceOracle returns the Phase 2 oracle. nil if
+// EnableShutdownOracles was never called.
+func (c *Coordinator) SourceConvergenceOracle() *SourceConvergenceOracle {
+	return c.sourceConvergence
+}
+
+// GetSourceConvergenceObserved returns the count of source-convergence
+// expectations that completed within their deadline. Returns 0 if
+// EnableShutdownOracles was never called.
+func (c *Coordinator) GetSourceConvergenceObserved() int64 {
+	if c.sourceConvergence == nil {
+		return 0
+	}
+	return c.sourceConvergence.Observed()
+}
+
+// GetSourceConvergenceMissing returns the count of source-convergence
+// expectations whose deadlines elapsed without convergence.
+func (c *Coordinator) GetSourceConvergenceMissing() int64 {
+	if c.sourceConvergence == nil {
+		return 0
+	}
+	return c.sourceConvergence.Missing()
+}
+
+// GetSpuriousSourceUnavailable returns the count of source-unavailable
+// degraded reports that fired during an active expectation that disallowed
+// them (Phase 2 INV2 violation count).
+func (c *Coordinator) GetSpuriousSourceUnavailable() int64 {
+	if c.sourceConvergence == nil {
+		return 0
+	}
+	return c.sourceConvergence.SpuriousSourceUnavailable()
 }
 
 // DegradedReasonOracle returns the Phase 1 oracle. nil if EnableShutdownOracles
@@ -560,6 +603,9 @@ func (c *Coordinator) Start(ctx context.Context) {
 		// Shutdown state (manager State()==StateShutdown) for the
 		// claim-lost invariant.
 		go c.watchClaimLostShutdowns(ctx)
+	}
+	if c.sourceConvergence != nil {
+		c.sourceConvergence.Run(ctx, 1*time.Second)
 	}
 
 	<-ctx.Done()
@@ -1546,6 +1592,15 @@ func (c *Coordinator) processAssignments(ctx context.Context) { //nolint:gocyclo
 				}
 			}
 
+			// Phase 2: feed the source-convergence oracle on every
+			// assignment-derived snapshot. The oracle's CheckSnapshot is
+			// a cheap map walk; running it under the processAssignments
+			// goroutine keeps the oracle's view serialized with the
+			// authoritative workerAssignments map.
+			if c.sourceConvergence != nil {
+				c.sourceConvergence.CheckSnapshot(global)
+			}
+
 			// Compute unassigned with cold-start convergence gating plus soft expected-workers hint.
 			// Until full coverage is first achieved AND either we have seen all expected workers
 			// (when provided) or a small timeout elapses, we report unassigned=0 and defer
@@ -1734,6 +1789,12 @@ func (c *Coordinator) processDegradedReports(ctx context.Context) {
 		case r := <-c.degradedReportsCh:
 			if c.degradedReasonOracle != nil {
 				c.degradedReasonOracle.Ingest(r)
+			}
+			// Phase 2 INV2: source-unavailable degraded reports are
+			// classified by the source-convergence oracle (which knows
+			// whether the active expectation tolerated them or not).
+			if c.sourceConvergence != nil && strings.Contains(r.Reason, "source-unavailable:") {
+				c.sourceConvergence.ObserveSourceUnavailable(r.WorkerID, r.Reason)
 			}
 		}
 	}

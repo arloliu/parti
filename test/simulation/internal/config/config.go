@@ -89,6 +89,23 @@ type WorkersConfig struct {
 	// exceeds the oracle's hole-escalation window, producing false-positive gap escalations
 	// under chaos. Defaults to 30s.
 	AckWait time.Duration `yaml:"ack_wait"`
+
+	// PartitionSource selects the partition source backend used by each
+	// worker. Allowed values: "static" (default) or "nats_kv". The
+	// "nats_kv" path exercises the production source.NatsKV
+	// watcher+reconciler machinery and is the only mode that supports
+	// Phase 2's watcher_stall chaos primitive and source-convergence
+	// oracle.
+	PartitionSource string `yaml:"partition_source"`
+
+	// SourceBucket overrides the source KV bucket name when
+	// PartitionSource == "nats_kv". Defaults to "parti-sim-source".
+	SourceBucket string `yaml:"source_bucket"`
+
+	// SourceReconcileInterval overrides the NatsKV reconciler cadence.
+	// Default 5s for Phase 2 scenarios (chosen so reconcileInterval <
+	// watcher_stall duration < bucketUnavailableCooldown).
+	SourceReconcileInterval time.Duration `yaml:"source_reconcile_interval"`
 }
 
 // ProcessingDelayConfig configures message processing delay.
@@ -187,6 +204,21 @@ type ChaosConfig struct {
 	// Burst mode: periodic rapid-fire events followed by quiet periods
 	BurstEnabled     bool    `yaml:"burst_enabled"`     // Enable variable intensity
 	BurstProbability float64 `yaml:"burst_probability"` // 0.0-1.0, default 0.2 (20%)
+
+	// BucketDeleteTargetOverride, when non-empty, replaces the default
+	// "parti-stableid" target for bucket_delete chaos events. Used by
+	// Phase 2 composed scenarios to delete the partition-source bucket
+	// (e.g. "parti-sim-source") so INV3 — source-unavailable hook fires
+	// on every worker — is exercised.
+	BucketDeleteTargetOverride string `yaml:"bucket_delete_target_override"`
+
+	// DisableSourceConvergenceDriver, when true, suppresses the Phase 2
+	// source-convergence driver. Scenarios that delete the source bucket
+	// (composed bucket_delete on parti-sim-source) must set this to true
+	// because the driver's Update calls fail against a deleted bucket and
+	// its expectations cannot converge — false convergence-missing
+	// failures would mask the real INV3 signal.
+	DisableSourceConvergenceDriver bool `yaml:"disable_source_convergence_driver"`
 }
 
 // NATSConfig configures NATS connection.

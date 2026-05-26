@@ -46,6 +46,13 @@ func freshJS() (jetstream.JetStream, error) {
 	return jetstream.New(aioNS)
 }
 
+// isSimSourceBucket reports whether the bucket name corresponds to the
+// Phase 2 simulation partition-source bucket. Hard-coded to the default
+// to avoid threading the worker config through every chaos handler.
+func isSimSourceBucket(bucket string) bool {
+	return bucket == "parti-sim-source"
+}
+
 // bucketTTL returns the TTL to use when re-creating a bucket. Mirrors the
 // pre-create table at main.go:233-242 so the recreate restores the same
 // bucket configuration the cluster was using.
@@ -127,29 +134,31 @@ func handleBucketDelete(ctx context.Context, bucket string) {
 	if aioCoord != nil {
 		if o := aioCoord.DegradedReasonOracle(); o != nil {
 			pc := parti.DefaultConfig()
-			// The plan's "3 × OperationTimeout = 30s" assumes a
-			// "bucket-unavailable:" path which does not exist in
-			// production. The actual recordKVError trigger requires
-			// KVErrorThreshold (default 5) errors inside KVErrorWindow
-			// (default 30s), so a 30s budget is too tight given renew
-			// fires once per WorkerIDTTL/3. WorkerIDTTL × 2 is the
-			// realistic window for at least one worker to either
-			// accumulate threshold errors or for the epoch fence to
-			// fire after a peer re-ensures the bucket.
 			window := 2 * pc.WorkerIDTTL
-			// Production reasons (see manager_degraded.go:144 and
-			// manager_setup.go:687):
-			//   - "KV error threshold exceeded" — recordKVError path
-			//     after KVErrorThreshold connectivity/degrading-JS errors
-			//     accumulate in KVErrorWindow.
-			//   - "bucket-recreated:<bucket>" — monitorBucketEpochs
-			//     when the bucket is wiped and a peer re-ensures it
-			//     before this worker's renew misses the threshold.
-			// "bucket-unavailable:" (which the plan predicted) does NOT
-			// exist in production: that namespace lives in the source
-			// classifier (source/nats_kv.go:1217) but never reaches
-			// enterDegraded directly. We accept both production reasons.
-			subs := []string{"KV error threshold exceeded", "bucket-recreated:" + bucket}
+			var subs []string
+			switch {
+			case isSimSourceBucket(bucket):
+				// Phase 2 INV3: deleting the partition-source bucket does
+				// NOT route through manager.OnDegraded (the production
+				// SourceUnavailableHook is independent — see
+				// source/nats_kv.go:123-148). The sim's worker-side
+				// adapter (worker.go nats_kv branch) translates the hook
+				// into a synthetic WorkerDegradedReport with reason
+				// "source-unavailable:<bucket>". That's the only reason
+				// we expect; no recordKVError / bucket-recreated path
+				// applies.
+				subs = []string{"source-unavailable:" + bucket}
+			default:
+				// Production reasons (see manager_degraded.go:144 and
+				// manager_setup.go:687):
+				//   - "KV error threshold exceeded" — recordKVError path
+				//     after KVErrorThreshold connectivity/degrading-JS errors
+				//     accumulate in KVErrorWindow.
+				//   - "bucket-recreated:<bucket>" — monitorBucketEpochs
+				//     when the bucket is wiped and a peer re-ensures it
+				//     before this worker's renew misses the threshold.
+				subs = []string{"KV error threshold exceeded", "bucket-recreated:" + bucket}
+			}
 			o.ExpectAfter("bucket_delete:"+bucket, subs, window, "", false)
 		}
 	}

@@ -22,6 +22,7 @@ import (
 	"github.com/arloliu/parti/v2/test/simulation/internal/natsutil"
 	"github.com/arloliu/parti/v2/test/simulation/internal/producer"
 	"github.com/arloliu/parti/v2/test/simulation/internal/worker"
+	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -361,12 +362,13 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 		}
 
 		chaosConfig := coordinator.ChaosConfig{
-			Enabled:          cfg.Chaos.Enabled,
-			Events:           cfg.Chaos.Events,
-			MinInterval:      minInterval,
-			MaxInterval:      maxInterval,
-			BurstEnabled:     cfg.Chaos.BurstEnabled,
-			BurstProbability: cfg.Chaos.BurstProbability,
+			Enabled:                    cfg.Chaos.Enabled,
+			Events:                     cfg.Chaos.Events,
+			MinInterval:                minInterval,
+			MaxInterval:                maxInterval,
+			BurstEnabled:               cfg.Chaos.BurstEnabled,
+			BurstProbability:           cfg.Chaos.BurstProbability,
+			BucketDeleteTargetOverride: cfg.Chaos.BucketDeleteTargetOverride,
 			EventCallback: func(event coordinator.ChaosEvent, params map[string]any) {
 				// Mark the first chaos event so the classifier can route
 				// unobserved-owner duplicates into the post-chaos bucket.
@@ -465,6 +467,9 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 			GateNakJitter:               cfg.Workers.ProcessingGate.NakJitter,
 			GateDebug:                   cfg.Workers.ProcessingGate.Debug,
 			IsInitialCohort:             true,
+			PartitionSource:             cfg.Workers.PartitionSource,
+			SourceBucket:                cfg.Workers.SourceBucket,
+			SourceReconcileInterval:     cfg.Workers.SourceReconcileInterval,
 		}
 
 		w, err := worker.NewWorker(workerCfg)
@@ -558,6 +563,35 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 				}
 			}
 		}
+	}
+
+	// Phase 2: when running the NATSKV source mode, start the source-
+	// convergence driver. It periodically mutates the partition list via
+	// the same codec/CAS path as production NatsKV.Update and registers
+	// expectations against the coordinator's source-convergence oracle.
+	if cfg.Workers.PartitionSource == "nats_kv" && !cfg.Chaos.DisableSourceConvergenceDriver {
+		bucket := cfg.Workers.SourceBucket
+		if bucket == "" {
+			bucket = "parti-sim-source"
+		}
+		// Build the full partition slice (mirrors worker.NewWorker).
+		baseParts := make([]types.Partition, cfg.Partitions.Count)
+		for i := 0; i < cfg.Partitions.Count; i++ {
+			w := int64(1)
+			if i < len(weights) {
+				w = weights[i]
+			}
+			baseParts[i] = types.Partition{
+				Keys:   []string{fmt.Sprintf("%d", i)},
+				Weight: w,
+			}
+		}
+		// period: mutate every 60s so each expectation has time to
+		// converge (T_converge = 30s) AND the watcher_stall window
+		// (45s scheduled every 30-45s) overlaps at least one mutation.
+		// t_converge = max(reconcileInterval × 3, 30s) with the
+		// worker's default 5s reconcileInterval = 30s.
+		startSourceConvergenceDriver(ctx, bucket, baseParts, 60*time.Second, 30*time.Second)
 	}
 
 	// Start producers AFTER workers, with a brief grace period
@@ -685,14 +719,17 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 				expDegMissing := coord.GetExpectedDegradedMissing()
 				expDegObserved := coord.GetExpectedDegradedObserved()
 				unexpClaimLost := coord.GetUnexpectedClaimLostShutdown()
-				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 {
+				srcConvObserved := coord.GetSourceConvergenceObserved()
+				srcConvMissing := coord.GetSourceConvergenceMissing()
+				spuriousUnavail := coord.GetSpuriousSourceUnavailable()
+				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 {
 					// Record error but proceed to ordered shutdown
-					invariantsErr = fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost)
+					invariantsErr = fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail)
 				}
 				if invariantsErr == nil {
-					log.Printf("Stability invariants passed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost)
+					log.Printf("Stability invariants passed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail)
 				} else {
 					log.Printf("Stability invariants failed: %v", invariantsErr)
 				}
@@ -744,9 +781,12 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 				expDegMissing := coord.GetExpectedDegradedMissing()
 				expDegObserved := coord.GetExpectedDegradedObserved()
 				unexpClaimLost := coord.GetUnexpectedClaimLostShutdown()
-				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 {
-					invariantsErr := fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost)
+				srcConvObserved := coord.GetSourceConvergenceObserved()
+				srcConvMissing := coord.GetSourceConvergenceMissing()
+				spuriousUnavail := coord.GetSpuriousSourceUnavailable()
+				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 {
+					invariantsErr := fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail)
 					// Emit the structured failure_report.json so CI artifacts
 					// include InconclusiveOwnerEvents / unobserved counters /
 					// FirstChaosEventAt — auditability that the new
@@ -1070,7 +1110,7 @@ func handleChaosEvent(
 		// SlowConsumer only works in all-in-one (goroutine) mode - skip in process mode
 		log.Println("[Chaos] slow_consumer event only supported in all-in-one mode")
 
-	case coordinator.BucketDeleteEvent, coordinator.BucketRecreateEvent, coordinator.BucketPeerTakeoverEvent:
+	case coordinator.BucketDeleteEvent, coordinator.BucketRecreateEvent, coordinator.BucketPeerTakeoverEvent, coordinator.WatcherStallEvent:
 		// Process-mode dispatch is intentionally a log-and-skip per the
 		// plan's risk note (lines 386-388). Whole-bucket actions in
 		// process mode would need cross-process visibility into the
@@ -1100,7 +1140,7 @@ func handleGoroutineChaos( //nolint:cyclop,gocyclo,funlen,revive // dispatch gro
 			log.Printf("[Chaos] Skipping %s: no active workers", event)
 			return
 		}
-	case coordinator.ScaleUpEvent, coordinator.ProducerCrashEvent, coordinator.BucketDeleteEvent, coordinator.BucketRecreateEvent:
+	case coordinator.ScaleUpEvent, coordinator.ProducerCrashEvent, coordinator.BucketDeleteEvent, coordinator.BucketRecreateEvent, coordinator.WatcherStallEvent:
 		_ = 0 // Dummy op to make branch different
 	default:
 		// Fallback for any other events
@@ -1271,6 +1311,17 @@ func handleGoroutineChaos( //nolint:cyclop,gocyclo,funlen,revive // dispatch gro
 	case coordinator.BucketPeerTakeoverEvent:
 		target, _ := params["target_worker"].(string)
 		handleBucketPeerTakeover(ctx, registry, target)
+
+	case coordinator.WatcherStallEvent:
+		prefix, _ := params["subject_prefix"].(string)
+		if prefix == "" {
+			prefix = "$KV.parti-sim-source.>"
+		}
+		dur, ok := params["duration"].(time.Duration)
+		if !ok || dur <= 0 {
+			dur = 45 * time.Second
+		}
+		handleWatcherStall(ctx, prefix, dur)
 
 	default:
 		log.Printf("[Chaos] Unknown event type: %s", event)
@@ -1446,6 +1497,9 @@ func spawnAllInOneWorker(parent context.Context, workerID string) bool {
 		GateNakJitter:               aioCfg.Workers.ProcessingGate.NakJitter,
 		GateDebug:                   aioCfg.Workers.ProcessingGate.Debug,
 		IsInitialCohort:             false, // scale_up / restart is a takeover-cohort worker
+		PartitionSource:             aioCfg.Workers.PartitionSource,
+		SourceBucket:                aioCfg.Workers.SourceBucket,
+		SourceReconcileInterval:     aioCfg.Workers.SourceReconcileInterval,
 	}
 	w, err := worker.NewWorker(wcfg)
 	if err != nil {
