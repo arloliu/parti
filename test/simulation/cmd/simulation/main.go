@@ -362,13 +362,14 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 		}
 
 		chaosConfig := coordinator.ChaosConfig{
-			Enabled:                    cfg.Chaos.Enabled,
-			Events:                     cfg.Chaos.Events,
-			MinInterval:                minInterval,
-			MaxInterval:                maxInterval,
-			BurstEnabled:               cfg.Chaos.BurstEnabled,
-			BurstProbability:           cfg.Chaos.BurstProbability,
-			BucketDeleteTargetOverride: cfg.Chaos.BucketDeleteTargetOverride,
+			Enabled:                        cfg.Chaos.Enabled,
+			Events:                         cfg.Chaos.Events,
+			MinInterval:                    minInterval,
+			MaxInterval:                    maxInterval,
+			BurstEnabled:                   cfg.Chaos.BurstEnabled,
+			BurstProbability:               cfg.Chaos.BurstProbability,
+			BucketDeleteTargetOverride:     cfg.Chaos.BucketDeleteTargetOverride,
+			LongDisconnectDurationOverride: cfg.Chaos.LongDisconnectDurationOverride,
 			EventCallback: func(event coordinator.ChaosEvent, params map[string]any) {
 				// Mark the first chaos event so the classifier can route
 				// unobserved-owner duplicates into the post-chaos bucket.
@@ -722,14 +723,17 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 				srcConvObserved := coord.GetSourceConvergenceObserved()
 				srcConvMissing := coord.GetSourceConvergenceMissing()
 				spuriousUnavail := coord.GetSpuriousSourceUnavailable()
-				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 {
+				coord.CheckLongDisconnectExpectations()
+				ldReassignObserved := coord.GetLongDisconnectReassignmentObserved()
+				ldReassignMissing := coord.GetLongDisconnectReassignmentMissing()
+				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 {
 					// Record error but proceed to ordered shutdown
-					invariantsErr = fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail)
+					invariantsErr = fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing)
 				}
 				if invariantsErr == nil {
-					log.Printf("Stability invariants passed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail)
+					log.Printf("Stability invariants passed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing)
 				} else {
 					log.Printf("Stability invariants failed: %v", invariantsErr)
 				}
@@ -784,9 +788,12 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 				srcConvObserved := coord.GetSourceConvergenceObserved()
 				srcConvMissing := coord.GetSourceConvergenceMissing()
 				spuriousUnavail := coord.GetSpuriousSourceUnavailable()
-				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 {
-					invariantsErr := fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail)
+				coord.CheckLongDisconnectExpectations()
+				ldReassignObserved := coord.GetLongDisconnectReassignmentObserved()
+				ldReassignMissing := coord.GetLongDisconnectReassignmentMissing()
+				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 {
+					invariantsErr := fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing)
 					// Emit the structured failure_report.json so CI artifacts
 					// include InconclusiveOwnerEvents / unobserved counters /
 					// FirstChaosEventAt — auditability that the new
@@ -1097,6 +1104,11 @@ func handleChaosEvent(
 		// skip — the event is all-in-one only.
 		log.Println("[Chaos] process mode does not support leader-disconnect; skipping")
 
+	case coordinator.NetworkDisconnectLongEvent:
+		// Process-mode has no in-process Worker.Disconnect() surface.
+		// Skip — all-in-one only.
+		log.Println("[Chaos] process mode does not support network_disconnect_long; skipping")
+
 	case coordinator.WorkerPauseEvent:
 		// Simulate worker pause
 		duration, ok := params["duration"].(time.Duration)
@@ -1135,7 +1147,7 @@ func handleGoroutineChaos( //nolint:cyclop,gocyclo,funlen,revive // dispatch gro
 	// Guard: skip worker-related events when no active workers
 	activeWorkers := registry.GetActiveCount(coordinator.WorkerGoroutine)
 	switch event {
-	case coordinator.WorkerCrashEvent, coordinator.WorkerRestartEvent, coordinator.LeaderFailureEvent, coordinator.ScaleDownEvent, coordinator.NetworkDisconnectEvent, coordinator.NetworkDisconnectLeaderEvent, coordinator.WorkerPauseEvent, coordinator.SlowConsumerEvent, coordinator.BucketPeerTakeoverEvent:
+	case coordinator.WorkerCrashEvent, coordinator.WorkerRestartEvent, coordinator.LeaderFailureEvent, coordinator.ScaleDownEvent, coordinator.NetworkDisconnectEvent, coordinator.NetworkDisconnectLeaderEvent, coordinator.NetworkDisconnectLongEvent, coordinator.WorkerPauseEvent, coordinator.SlowConsumerEvent, coordinator.BucketPeerTakeoverEvent:
 		if activeWorkers == 0 {
 			log.Printf("[Chaos] Skipping %s: no active workers", event)
 			return
@@ -1262,6 +1274,9 @@ func handleGoroutineChaos( //nolint:cyclop,gocyclo,funlen,revive // dispatch gro
 
 	case coordinator.NetworkDisconnectLeaderEvent:
 		handleLeaderGoroutineNetworkDisconnect(registry, params)
+
+	case coordinator.NetworkDisconnectLongEvent:
+		handleLongGoroutineNetworkDisconnect(registry, params)
 
 	case coordinator.SlowConsumerEvent:
 		// Slow down a random worker's processing
@@ -1857,6 +1872,88 @@ func handleLeaderGoroutineNetworkDisconnect(
 	wobj.Disconnect()
 	time.AfterFunc(dur, func() {
 		log.Printf("[Chaos] Reconnecting LEADER worker %s", leader.ID)
+		wobj.Reconnect()
+	})
+}
+
+// handleLongGoroutineNetworkDisconnect implements the long-disconnect chaos
+// variant (Gap 12): pick a random worker, register a reassignment expectation,
+// suppress its slow-start assertion, disconnect it for 60–180s, then reconnect.
+//
+// Sequence (must be respected — advisor note, point 5):
+//  1. Register slow-start suppression BEFORE disconnect (coord.SuspendSlowStartAssertions).
+//  2. Register reassignment expectation BEFORE disconnect
+//     (coord.RegisterLongDisconnectExpectation) so the partition snapshot is
+//     captured before any reassignment has started.
+//  3. Call Worker.Disconnect().
+//  4. After dur elapses, call Worker.Reconnect().
+func handleLongGoroutineNetworkDisconnect(
+	registry *coordinator.GoroutineRegistry,
+	params map[string]any,
+) {
+	workers := registry.GetByType(coordinator.WorkerGoroutine)
+	if len(workers) == 0 {
+		log.Println("[Chaos] No active workers to long-disconnect")
+		return
+	}
+	target := workers[time.Now().UnixNano()%int64(len(workers))]
+	dur, ok := params["duration"].(time.Duration)
+	if !ok || dur <= 0 {
+		dur = 60 * time.Second
+	}
+	wobj, ok := target.Obj.(*worker.Worker)
+	if !ok {
+		log.Printf("[Chaos] Worker %s missing underlying object; cannot long-disconnect", target.ID)
+		return
+	}
+
+	// T_reassign = ElectionTimeout (default 10s) + OperationTimeout (default 5s) + buffer.
+	// Use dur + 30s as the reassignment deadline: the partitions must migrate
+	// before the disconnect window closes (dur) plus a generous scheduling buffer.
+	tReassign := dur + 30*time.Second
+
+	// 1. Suppress slow-start assertion for this worker (per-worker scope).
+	// Window = dur + recovery headroom.
+	suppressWindow := dur + 60*time.Second
+	if aioCoord != nil {
+		aioCoord.SuspendSlowStartAssertions(target.ID, suppressWindow)
+	}
+
+	// 2. Register reassignment expectation BEFORE disconnect so the partition
+	// snapshot is taken before any rebalance.
+	if aioCoord != nil {
+		aioCoord.RegisterLongDisconnectExpectation(target.ID, tReassign)
+	}
+
+	// 3. Suppress conditional claim-lost for the target worker.
+	// A long disconnect CAN cause the stable-ID key to expire server-side if:
+	//   time_since_last_renewal + disconnect_duration > WorkerIDTTL (75s)
+	// With renewal_interval = TTL/3 = 25s, a 60s disconnect has a non-zero
+	// probability of triggering claim-lost when the last renewal happened
+	// ≥15s before the disconnect. This is the Gap 8a mechanism deferred to
+	// Phase 4b/7b; here we tolerate it silently rather than assert it.
+	// SuppressClaimLostForWorker is optional (does NOT require claim-lost to
+	// fire) — unlike ExpectAfter which would penalize us if claim-lost doesn't
+	// fire (incrementing expectedDegradedMissing on expiry).
+	if aioCoord != nil {
+		if o := aioCoord.DegradedReasonOracle(); o != nil {
+			stableID := wobj.StableWorkerID()
+			if stableID != "" {
+				// Window = disconnect + reconnect + claimLostShutdown stop timeout (30s).
+				suppressWindow := dur + 60*time.Second
+				o.SuppressClaimLostForWorker(stableID, suppressWindow)
+				log.Printf("[Chaos] Suppressed claim-lost for %s (stable=%s window=%v)", target.ID, stableID, suppressWindow)
+			}
+		}
+	}
+
+	// 4. Disconnect.
+	log.Printf("[Chaos] Long-disconnecting worker %s for %v (reassign_deadline=%v)", target.ID, dur, tReassign)
+	wobj.Disconnect()
+
+	// 5. Reconnect after dur.
+	time.AfterFunc(dur, func() {
+		log.Printf("[Chaos] Reconnecting worker %s after long-disconnect (%v elapsed)", target.ID, dur)
 		wobj.Reconnect()
 	})
 }

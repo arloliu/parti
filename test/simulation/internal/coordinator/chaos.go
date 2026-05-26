@@ -75,6 +75,17 @@ const (
 	// (one stream, N ephemeral consumers); `target_worker` is recorded but
 	// not honored (documented as a follow-up).
 	WatcherStallEvent ChaosEvent = "watcher_stall"
+
+	// NetworkDisconnectLongEvent simulates a prolonged NATS connection loss
+	// (60–180s) on a random worker, outliving HeartbeatTTL × 2. This drives
+	// the full lease-expiry → reassignment → post-recovery convergence path
+	// (Gap 12). All-in-one mode only; process-mode dispatch logs and skips
+	// because the underlying Worker.Disconnect()/Reconnect() surface requires
+	// an in-process NetworkControl handle.
+	//
+	// Duration is drawn from [60s, 180s] by default and can be overridden
+	// via the `duration` param in InjectEventNow or via scenario config.
+	NetworkDisconnectLongEvent ChaosEvent = "network_disconnect_long"
 )
 
 // ChaosController manages chaos event injection.
@@ -96,6 +107,10 @@ type ChaosController struct {
 	// bucketDeleteTargetOverride, when non-empty, replaces the default
 	// bucket target for BucketDeleteEvent params.
 	bucketDeleteTargetOverride string
+
+	// longDisconnectDurationOverride, when > 0, replaces the random 60-180s
+	// duration for NetworkDisconnectLongEvent params.
+	longDisconnectDurationOverride time.Duration
 }
 
 // ChaosConfig configures the chaos controller.
@@ -116,6 +131,13 @@ type ChaosConfig struct {
 	// chaos deletes the partition-source bucket (exercising the source-
 	// unavailable adapter and INV3) instead of the stableid bucket.
 	BucketDeleteTargetOverride string
+
+	// LongDisconnectDurationOverride, when > 0, replaces the random 60-180s
+	// duration for NetworkDisconnectLongEvent. Phase 3 scenarios set this to
+	// a fixed value (e.g. 60s) to keep the disconnect below WorkerIDTTL (75s
+	// default) so the stable-ID claim does not expire and claimLostShutdown
+	// does not fire unexpectedly.
+	LongDisconnectDurationOverride time.Duration
 }
 
 // NewChaosController creates a new chaos controller.
@@ -138,15 +160,16 @@ func NewChaosController(cfg ChaosConfig) *ChaosController {
 	}
 
 	return &ChaosController{
-		enabled:                    cfg.Enabled,
-		events:                     events,
-		minInterval:                cfg.MinInterval,
-		maxInterval:                cfg.MaxInterval,
-		eventCallback:              cfg.EventCallback,
-		rng:                        rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec // Weak RNG acceptable for chaos simulation
-		burstEnabled:               cfg.BurstEnabled,
-		burstProbability:           burstProb,
-		bucketDeleteTargetOverride: cfg.BucketDeleteTargetOverride,
+		enabled:                        cfg.Enabled,
+		events:                         events,
+		minInterval:                    cfg.MinInterval,
+		maxInterval:                    cfg.MaxInterval,
+		eventCallback:                  cfg.EventCallback,
+		rng:                            rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec // Weak RNG acceptable for chaos simulation
+		burstEnabled:                   cfg.BurstEnabled,
+		burstProbability:               burstProb,
+		bucketDeleteTargetOverride:     cfg.BucketDeleteTargetOverride,
+		longDisconnectDurationOverride: cfg.LongDisconnectDurationOverride,
 	}
 }
 
@@ -253,6 +276,20 @@ func (cc *ChaosController) generateEventParams(event ChaosEvent) map[string]any 
 		// outages don't add new coverage but do produce flaky start-
 		// latency exceedances for chaos-delayed initial-cohort workers.
 		params["duration"] = time.Duration(cc.rng.Intn(11)+5) * time.Second
+
+	case NetworkDisconnectLongEvent:
+		// Disconnect for 60-180s, exceeding HeartbeatTTL (15s) × 2 = 30s.
+		// This forces lease expiry, reassignment to remaining workers, and
+		// post-reconnect convergence — the full Gap 12 scenario.
+		// Duration is capped below WorkerIDTTL (75s default) by scenario
+		// config override to avoid triggering claimLostShutdown (which
+		// requires duration > WorkerIDTTL to fire). When override is set,
+		// it replaces the random range entirely.
+		if cc.longDisconnectDurationOverride > 0 {
+			params["duration"] = cc.longDisconnectDurationOverride
+		} else {
+			params["duration"] = time.Duration(cc.rng.Intn(121)+60) * time.Second // 60–180s
+		}
 
 	case WorkerPauseEvent:
 		// Pause for 5-8 seconds to build backlog
@@ -423,6 +460,8 @@ func (e ChaosEvent) String() string {
 		return "Bucket Peer Takeover"
 	case WatcherStallEvent:
 		return "Watcher Stall (KV source watcher)"
+	case NetworkDisconnectLongEvent:
+		return "Network Disconnect Long (60-180s, lease expiry path)"
 	default:
 		return fmt.Sprintf("Unknown Event: %s", string(e))
 	}

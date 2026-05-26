@@ -147,6 +147,21 @@ type Coordinator struct {
 	// and fed from processAssignments on each AssignmentReport.
 	sourceConvergence *SourceConvergenceOracle
 	degradedReportsCh chan WorkerDegradedReport
+
+	// Phase 3: per-worker slow-start suppression for long-disconnect chaos.
+	// Workers listed here are excluded from SlowStartExceedances checks.
+	// Protected by startLatencyMu (same lock as the latency maps it gates).
+	suspendedSlowStart map[string]struct{}
+
+	// Phase 3: long-disconnect reassignment oracle.
+	// longDisconnectMu guards the expectations slice.
+	// Each expectation records: which worker was disconnected, which
+	// partitions it owned at disconnect time, and the deadline for
+	// reassignment to other workers.
+	longDisconnectMu                   sync.Mutex
+	longDisconnectExpectations         []*longDisconnectExpectation
+	longDisconnectReassignmentObserved int64 // atomic via longDisconnectMu
+	longDisconnectReassignmentMissing  int64 // set at CheckLongDisconnectExpectations call-time
 }
 
 // ownerSnapshot is an immutable view of partition→workers at a moment
@@ -977,17 +992,29 @@ func (c *Coordinator) printStartLatencyCohort(label string, samples map[string]t
 }
 
 // SlowStartExceedances returns the counts of workers that breached the
-// start-latency budget, per cohort. Used by the stability invariant check
-// at simulation shutdown.
+// start-latency budget, per cohort. Workers suppressed via
+// SuspendSlowStartAssertions are excluded from the check (per-worker scope:
+// long-disconnect chaos target only, not cluster-wide).
+// Used by the stability invariant check at simulation shutdown.
 func (c *Coordinator) SlowStartExceedances() (initial, takeover int) {
 	c.startLatencyMu.Lock()
 	defer c.startLatencyMu.Unlock()
-	for _, d := range c.initialStartLatencies {
+	for id, d := range c.initialStartLatencies {
+		if c.suspendedSlowStart != nil {
+			if _, suppressed := c.suspendedSlowStart[id]; suppressed {
+				continue
+			}
+		}
 		if c.slowStartBudgetInitial > 0 && d > c.slowStartBudgetInitial {
 			initial++
 		}
 	}
-	for _, d := range c.takeoverStartLatencies {
+	for id, d := range c.takeoverStartLatencies {
+		if c.suspendedSlowStart != nil {
+			if _, suppressed := c.suspendedSlowStart[id]; suppressed {
+				continue
+			}
+		}
 		if c.slowStartBudgetTakeover > 0 && d > c.slowStartBudgetTakeover {
 			takeover++
 		}
@@ -1575,6 +1602,10 @@ func (c *Coordinator) processAssignments(ctx context.Context) { //nolint:gocyclo
 			c.workerAssignments[ar.WorkerID] = set
 			c.rebuildOwnerSnapshotLocked()
 
+			// Phase 3: check long-disconnect reassignment expectations on
+			// every assignment snapshot so observations land promptly.
+			c.CheckLongDisconnectExpectations()
+
 			// Feed oracle classifiers with the fresh assignment snapshot.
 			if c.snapshotOverlap != nil {
 				c.snapshotOverlap.IngestAssignment(ar.WorkerID, ar.Partitions)
@@ -1850,4 +1881,143 @@ func (c *Coordinator) watchClaimLostShutdowns(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// longDisconnectExpectation tracks a single long-disconnect reassignment
+// expectation: the disconnected worker's partition set must migrate to OTHER
+// workers within the reassignment deadline.
+type longDisconnectExpectation struct {
+	workerID   string
+	partitions map[int]struct{} // partitions owned at disconnect time
+	deadline   time.Time
+	observed   bool
+	checked    bool
+}
+
+// SuspendSlowStartAssertions marks workerID as exempt from the slow-start
+// budget check in SlowStartExceedances for the current run. The window
+// duration is informational (logged); the suppression itself is unbounded
+// within the run because SlowStartExceedances is only evaluated at shutdown
+// and a reconnecting worker's latency sample was already recorded one-shot
+// at initial start (before the disconnect). Suppression prevents the
+// disconnect itself from generating a false-positive exceedance if the
+// worker was part of the initial cohort and chaos fired before its first
+// assignment landed.
+//
+// Per-worker scope: only the named workerID is suppressed, not the cluster.
+func (c *Coordinator) SuspendSlowStartAssertions(workerID string, window time.Duration) {
+	if workerID == "" {
+		return
+	}
+	c.startLatencyMu.Lock()
+	defer c.startLatencyMu.Unlock()
+	if c.suspendedSlowStart == nil {
+		c.suspendedSlowStart = make(map[string]struct{})
+	}
+	c.suspendedSlowStart[workerID] = struct{}{}
+	log.Printf("[Coordinator] Suspended slow-start assertions for worker %s (window=%v)", workerID, window)
+}
+
+// RegisterLongDisconnectExpectation registers an expectation that the named
+// worker's current partitions will migrate to other workers within deadline.
+// The partition snapshot is read from the immutable owner-snapshot (safe to
+// call from any goroutine). Must be called BEFORE calling Worker.Disconnect()
+// so the snapshot is captured before any reassignment begins.
+func (c *Coordinator) RegisterLongDisconnectExpectation(workerID string, deadline time.Duration) {
+	if workerID == "" {
+		return
+	}
+	// Snapshot the worker's partitions from the current owner snapshot.
+	snap := c.ownerSnap.Load()
+	owned := make(map[int]struct{})
+	if snap != nil {
+		for pid, owners := range snap.perPartition {
+			for _, o := range owners {
+				if o == workerID {
+					owned[pid] = struct{}{}
+					break
+				}
+			}
+		}
+	}
+	exp := &longDisconnectExpectation{
+		workerID:   workerID,
+		partitions: owned,
+		deadline:   time.Now().Add(deadline),
+	}
+	c.longDisconnectMu.Lock()
+	c.longDisconnectExpectations = append(c.longDisconnectExpectations, exp)
+	c.longDisconnectMu.Unlock()
+	log.Printf("[Coordinator] Registered long-disconnect expectation: worker=%s partitions=%d deadline=%v",
+		workerID, len(owned), deadline)
+}
+
+// CheckLongDisconnectExpectations evaluates all registered long-disconnect
+// expectations against the current owner snapshot. An expectation is
+// "observed" when every partition the disconnected worker owned has migrated
+// to at least one OTHER worker. An expectation is "missing" when its deadline
+// has elapsed without full migration. Safe to call from any goroutine.
+//
+// This is called periodically from processAssignments (on each
+// AssignmentReport) and also at shutdown before counters are read.
+func (c *Coordinator) CheckLongDisconnectExpectations() {
+	snap := c.ownerSnap.Load()
+	if snap == nil {
+		return
+	}
+	now := time.Now()
+	c.longDisconnectMu.Lock()
+	defer c.longDisconnectMu.Unlock()
+	for _, exp := range c.longDisconnectExpectations {
+		if exp.observed || exp.checked {
+			continue
+		}
+		if len(exp.partitions) == 0 {
+			// Worker had no partitions — trivially observed.
+			exp.observed = true
+			exp.checked = true
+			c.longDisconnectReassignmentObserved++
+			log.Printf("[Coordinator] Long-disconnect expectation trivially observed (no partitions): worker=%s", exp.workerID)
+			continue
+		}
+		// Count how many partitions have migrated to other workers.
+		migrated := 0
+		for pid := range exp.partitions {
+			owners := snap.perPartition[pid]
+			for _, o := range owners {
+				if o != exp.workerID {
+					migrated++
+					break
+				}
+			}
+		}
+		if migrated == len(exp.partitions) {
+			exp.observed = true
+			exp.checked = true
+			c.longDisconnectReassignmentObserved++
+			log.Printf("[Coordinator] Long-disconnect reassignment observed: worker=%s partitions=%d migrated=%d",
+				exp.workerID, len(exp.partitions), migrated)
+		} else if now.After(exp.deadline) {
+			exp.checked = true
+			c.longDisconnectReassignmentMissing++
+			log.Printf("[Coordinator] Long-disconnect reassignment MISSING: worker=%s partitions=%d migrated=%d deadline_elapsed",
+				exp.workerID, len(exp.partitions), migrated)
+		}
+	}
+}
+
+// GetLongDisconnectReassignmentObserved returns the count of long-disconnect
+// expectations where all partitions successfully migrated to other workers.
+func (c *Coordinator) GetLongDisconnectReassignmentObserved() int64 {
+	c.longDisconnectMu.Lock()
+	defer c.longDisconnectMu.Unlock()
+	return c.longDisconnectReassignmentObserved
+}
+
+// GetLongDisconnectReassignmentMissing returns the count of long-disconnect
+// expectations whose deadlines elapsed without full partition migration.
+func (c *Coordinator) GetLongDisconnectReassignmentMissing() int64 {
+	c.longDisconnectMu.Lock()
+	defer c.longDisconnectMu.Unlock()
+	return c.longDisconnectReassignmentMissing
 }

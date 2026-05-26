@@ -476,6 +476,13 @@ type DegradedReasonOracle struct {
 	expectedDegradedObserved    atomic.Int64
 	expectedDegradedMissing     atomic.Int64
 	unexpectedClaimLostShutdown atomic.Int64
+
+	// suppressedClaimLost maps stable worker IDs to the deadline before
+	// which a claimLostShutdown observation is silently tolerated (not
+	// counted as unexpected). Used by long-disconnect chaos to suppress
+	// the conditional claim-lost that can fire when the disconnect duration
+	// approaches WorkerIDTTL.
+	suppressedClaimLost map[string]time.Time
 }
 
 // NewDegradedReasonOracle constructs an oracle ready to accept expectations.
@@ -560,6 +567,31 @@ func (o *DegradedReasonOracle) Ingest(r WorkerDegradedReport) {
 //   - If an active peer-takeover expectation targets this worker, the
 //     transition is expected; ignored.
 //   - Otherwise, increments unexpected_claim_lost_shutdown.
+//
+// SuppressClaimLostForWorker registers a window during which a
+// claimLostShutdown observation for stableWorkerID is silently tolerated.
+// Used by long-disconnect chaos where claim-lost is a possible but not
+// guaranteed outcome (the stable-ID key MAY expire if the disconnect
+// duration approaches WorkerIDTTL - renewal_interval). Unlike ExpectAfter,
+// this does NOT require the claim-lost to fire, and does NOT increment
+// expectedDegradedMissing if it does not.
+func (o *DegradedReasonOracle) SuppressClaimLostForWorker(stableWorkerID string, within time.Duration) {
+	if stableWorkerID == "" {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.suppressedClaimLost == nil {
+		o.suppressedClaimLost = make(map[string]time.Time)
+	}
+	deadline := time.Now().Add(within)
+	// Extend if a later deadline already exists.
+	if existing, ok := o.suppressedClaimLost[stableWorkerID]; !ok || deadline.After(existing) {
+		o.suppressedClaimLost[stableWorkerID] = deadline
+	}
+	log.Printf("[DegradedReasonOracle] Suppressed claim-lost for worker %s until %v", stableWorkerID, deadline.Format(time.RFC3339))
+}
+
 func (o *DegradedReasonOracle) ObserveClaimLostShutdown(workerID string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -575,6 +607,15 @@ func (o *DegradedReasonOracle) ObserveClaimLostShutdown(workerID string) {
 		if exp.targetWorker == workerID {
 			log.Printf("[DegradedReasonOracle] CLAIM_LOST_OK worker=%s kind=%s", workerID, exp.kind)
 			return
+		}
+	}
+	// Check suppression window (long-disconnect conditional tolerance).
+	if o.suppressedClaimLost != nil {
+		if deadline, suppressed := o.suppressedClaimLost[workerID]; suppressed {
+			if now.Before(deadline) {
+				log.Printf("[DegradedReasonOracle] CLAIM_LOST_SUPPRESSED worker=%s (long-disconnect window)", workerID)
+				return
+			}
 		}
 	}
 	log.Printf("[DegradedReasonOracle] UNEXPECTED_CLAIM_LOST worker=%s", workerID)
