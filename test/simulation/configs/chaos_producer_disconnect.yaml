@@ -1,0 +1,60 @@
+# Phase 5 / Gap 10a — Producer network disconnect scenario.
+#
+# A single producer_disconnect event fires at T+30s, severing the producer's
+# dedicated NATS connection for 20s. The NATS client reconnects automatically
+# and the Producer.Reconnect() watchdog checks whether the publish loop resumes
+# within T_pub=5s post-reconnect.
+#
+# INV1: producer_resume_observed must be 1 after the run (no missing).
+# The gap/duplicate oracle (Phase 0) covers any workload message loss.
+
+simulation:
+  duration: 90s
+  mode: all-in-one
+
+nats:
+  mode: embedded
+
+partitions:
+  count: 10
+  message_rate_per_partition: 1
+  distribution: uniform
+
+producers:
+  count: 1
+
+workers:
+  count: 3
+  assignment_strategy: WeightedConsistentHash
+  processing_delay:
+    min: 1ms
+    max: 5ms
+
+chaos:
+  enabled: true
+  # Interval is irrelevant — all chaos fires via scheduled_events.
+  # min < max required by parser.
+  interval: "3600s-3601s"
+  events: []
+  scheduled_events:
+    # T+30s: disconnect producer for 20s.
+    # Reconnect fires at T+50s; watchdog checks at T+55s.
+    # Scenario ends at T+90s giving the cluster 35s to recover.
+    - at: 30s
+      event: producer_disconnect
+      params:
+        duration: 20s
+
+coordinator:
+  # Widen gap_aging: the 20s disconnect + 5s T_pub window means up to 25s
+  # of publish silence per partition. 60s gives comfortable margin.
+  gap_aging: 60s
+  slo:
+    enable_catch_up: true
+    catch_up_deadline: 30s
+    catch_up_percent: 99
+    absence_threshold: 5s
+
+metrics:
+  prometheus:
+    enabled: false

@@ -25,6 +25,20 @@ type Producer struct {
 	partitionSequences  map[int]int64
 	producerSequence    int64
 	started             atomic.Bool // Prevents multiple Start() calls
+
+	// networkControl is non-nil when this producer owns a dedicated
+	// NATS connection whose connectivity can be toggled. It is set by
+	// SetNetworkControl and used by Disconnect/Reconnect.
+	networkControl *NetworkControl
+
+	// publishedSinceReconnect is incremented on every successful js.Publish
+	// and atomically reset to 0 by Disconnect so the post-reconnect watchdog
+	// can detect whether the publish loop resumed within T_pub=5s.
+	publishedSinceReconnect atomic.Int64
+
+	// INV1 counters — incremented by the reconnect watchdog
+	resumeObserved atomic.Int64 // successful resume detected
+	resumeMissing  atomic.Int64 // T_pub window elapsed without a publish
 }
 
 // ReportMessage is sent to coordinator to track message sending.
@@ -74,6 +88,59 @@ func NewProducer(
 		producerSequence:    0,
 	}
 }
+
+// SetNetworkControl attaches a NetworkControl to this producer.
+// Must be called before the first Start() to ensure the dialer is wired.
+func (p *Producer) SetNetworkControl(nc *NetworkControl) {
+	p.networkControl = nc
+}
+
+// Disconnect simulates a network disconnect for the configured duration d.
+// It resets publishedSinceReconnect so the watchdog can detect resume.
+// After d it calls Reconnect automatically. Panics if no NetworkControl
+// is wired (call SetNetworkControl first).
+func (p *Producer) Disconnect(d time.Duration) {
+	if p.networkControl == nil {
+		log.Printf("[%s] Disconnect called but no NetworkControl wired; ignoring", p.id)
+		return
+	}
+	log.Printf("[%s] Simulating network disconnect for %v", p.id, d)
+	p.publishedSinceReconnect.Store(0)
+	p.networkControl.Disconnect()
+
+	time.AfterFunc(d, func() {
+		p.Reconnect()
+	})
+}
+
+// Reconnect restores network connectivity and starts the post-reconnect
+// watchdog. T_pub=5s: if no publish succeeds within that window,
+// resumeMissing is incremented; otherwise resumeObserved is incremented.
+func (p *Producer) Reconnect() {
+	if p.networkControl == nil {
+		return
+	}
+	log.Printf("[%s] Reconnecting network", p.id)
+	p.networkControl.Reconnect()
+
+	// Watchdog: wait T_pub=5s then check whether the publish loop resumed.
+	const tPub = 5 * time.Second
+	time.AfterFunc(tPub, func() {
+		if p.publishedSinceReconnect.Load() > 0 {
+			p.resumeObserved.Add(1)
+			log.Printf("[%s] INV1 producer_resume_observed: publish loop resumed within %v post-reconnect", p.id, tPub)
+		} else {
+			p.resumeMissing.Add(1)
+			log.Printf("[%s] INV1 producer_resume_missing: publish loop did NOT resume within %v post-reconnect", p.id, tPub)
+		}
+	})
+}
+
+// ResumeObserved returns the INV1 successful-resume counter.
+func (p *Producer) ResumeObserved() int64 { return p.resumeObserved.Load() }
+
+// ResumeMissing returns the INV1 failed-resume counter.
+func (p *Producer) ResumeMissing() int64 { return p.resumeMissing.Load() }
 
 // Start begins producing messages.
 // Safe to call multiple times; subsequent calls will be ignored if already started.
@@ -166,6 +233,9 @@ func (p *Producer) sendMessage(ctx context.Context, partitionID int) error {
 	if err != nil {
 		return fmt.Errorf("failed to publish message: %w", err)
 	}
+
+	// INV1: bump counter so post-reconnect watchdog can detect resume.
+	p.publishedSinceReconnect.Add(1)
 
 	// Record metrics
 	if p.metricsCollector != nil {

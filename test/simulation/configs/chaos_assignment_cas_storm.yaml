@@ -1,0 +1,62 @@
+# Phase 5 / Gap 10b — Assignment-publisher CAS storm scenario.
+#
+# A single assignment_cas_storm event fires at T+30s and runs for 10s.
+# A probe goroutine issues stale-revision Update calls against
+# assignment._commit in parti-assignment via a FRESH JetStream context,
+# racing the production leader's commit path.
+#
+# INV2 checks:
+#   - assignment_cas_storm_unexpected_panic must be 0.
+#   - SnapshotOverlapClassifier (Phase 0) must not flag alias/commit
+#     inconsistency — observed via the gap/overlap oracle.
+#   - No Manager panic or crash.
+
+simulation:
+  duration: 90s
+  mode: all-in-one
+
+nats:
+  mode: embedded
+
+partitions:
+  count: 10
+  message_rate_per_partition: 1
+  distribution: uniform
+
+producers:
+  count: 1
+
+workers:
+  count: 3
+  assignment_strategy: WeightedConsistentHash
+  processing_delay:
+    min: 1ms
+    max: 5ms
+
+chaos:
+  enabled: true
+  # Interval is irrelevant — all chaos fires via scheduled_events.
+  interval: "3600s-3601s"
+  events: []
+  scheduled_events:
+    # T+30s: start CAS storm for 10s (T+30s..T+40s).
+    # By T+30s the cluster has a stable leader that has committed at least
+    # one assignment, so the _commit key exists and the storm can race it.
+    - at: 30s
+      event: assignment_cas_storm
+      params:
+        duration: 10s
+
+coordinator:
+  # Widen gap_aging: CAS conflict storms can briefly delay assignment
+  # propagation, potentially causing short publish windows.
+  gap_aging: 60s
+  slo:
+    enable_catch_up: true
+    catch_up_deadline: 30s
+    catch_up_percent: 99
+    absence_threshold: 5s
+
+metrics:
+  prometheus:
+    enabled: false

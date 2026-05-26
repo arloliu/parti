@@ -103,6 +103,36 @@ const (
 	// Duration is drawn from [60s, 180s] by default and can be overridden
 	// via the `duration` param in InjectEventNow or via scenario config.
 	NetworkDisconnectLongEvent ChaosEvent = "network_disconnect_long"
+
+	// ProducerDisconnectEvent simulates a NATS network disconnect on the
+	// producer side (Gap 10a). It uses the producer's dedicated NetworkControl
+	// to sever the underlying TCP connection without touching the worker or
+	// manager connections. Duration is drawn from [10s, 30s] by default.
+	//
+	// INV1: the producer's publish loop must resume within T_pub=5s after
+	// reconnect; observed via producer_resume_observed counter. All-in-one
+	// only; process-mode logs and skips.
+	ProducerDisconnectEvent ChaosEvent = "producer_disconnect"
+
+	// AssignmentCASStormEvent spawns a competing KV writer goroutine that
+	// issues stale-revision Update calls against the assignment._commit key
+	// in the parti-assignment bucket for a configurable window (5–15s).
+	// The writer uses a FRESH JetStream context (dedicated probe handle
+	// pattern) so it cannot share cached state with the production manager.
+	//
+	// INV2: the leader's commit path either succeeds or returns
+	// ErrCommitCASFailed; no partial alias-without-commit state outlives the
+	// next successful commit. Observed via SnapshotOverlapClassifier (overlap
+	// = alias/commit inconsistency) and assignment_cas_storm_unexpected_panic
+	// counter (must be 0). All-in-one only; process-mode logs and skips.
+	AssignmentCASStormEvent ChaosEvent = "assignment_cas_storm"
+
+	// AssignmentBucketDeleteEvent is a named alias for BucketDeleteEvent
+	// with target_bucket fixed to the parti-assignment bucket (Gap 10b).
+	// Routing through the same handleBucketDelete primitive ensures INV3
+	// (DegradedReasonOracle) is wired automatically, and makes the scenario
+	// YAML self-documenting. All-in-one only; process-mode logs and skips.
+	AssignmentBucketDeleteEvent ChaosEvent = "assignment_bucket_delete"
 )
 
 // ChaosController manages chaos event injection.
@@ -334,12 +364,16 @@ func (cc *ChaosController) generateEventParams(event ChaosEvent) map[string]any 
 			params["target_bucket"] = "parti-stableid"
 		}
 
-	case BucketRecreateEvent:
-		// Default to parti-assignment for recreate: exercises the
-		// epoch-fence path without forcing all workers into
+	case BucketRecreateEvent, AssignmentBucketDeleteEvent:
+		// BucketRecreateEvent: default to parti-assignment for recreate —
+		// exercises the epoch-fence path without forcing all workers into
 		// claim-lost shutdown (which happens when parti-stableid is
-		// recreated). Scenarios that want the stableid recreate path
-		// must pass target_bucket explicitly via InjectEventNow.
+		// recreated). Scenarios that want the stableid recreate path must
+		// pass target_bucket explicitly via InjectEventNow.
+		//
+		// AssignmentBucketDeleteEvent: always targets parti-assignment
+		// (Gap 10b named alias). Fixed target makes scenario YAML self-
+		// documenting.
 		params["target_bucket"] = "parti-assignment"
 
 	case BucketPeerTakeoverEvent, StableIDClaimStealEvent:
@@ -362,6 +396,20 @@ func (cc *ChaosController) generateEventParams(event ChaosEvent) map[string]any 
 		// avoid spurious source-unavailable trips per INV2.
 		params["subject_prefix"] = "$KV.parti-sim-source.>"
 		params["duration"] = 45 * time.Second
+
+	case ProducerDisconnectEvent:
+		// Disconnect for 10–30s (Gap 10a). Upper bound is 30s so the
+		// disconnect does not swallow the entire scenario window; the
+		// NATS client will attempt reconnect across this window and the
+		// publish loop must resume within T_pub=5s post-reconnect (INV1).
+		params["duration"] = time.Duration(cc.rng.Intn(21)+10) * time.Second
+
+	case AssignmentCASStormEvent:
+		// Storm window 5–15s: enough to race several publisher commits
+		// without outlasting the scenario's measurement window. Use
+		// rng.Intn(10)+6 (6..15s) — functionally equivalent but a distinct
+		// expression from the NetworkDisconnect 5..15s range above.
+		params["duration"] = time.Duration(cc.rng.Intn(10)+6) * time.Second
 
 	default:
 		// Unknown event type, return empty params
@@ -490,6 +538,12 @@ func (e ChaosEvent) String() string {
 		return "Watcher Stall (KV source watcher)"
 	case NetworkDisconnectLongEvent:
 		return "Network Disconnect Long (60-180s, lease expiry path)"
+	case ProducerDisconnectEvent:
+		return "Producer Disconnect (10-30s, Gap 10a)"
+	case AssignmentCASStormEvent:
+		return "Assignment CAS Storm (competing _commit writer, Gap 10b)"
+	case AssignmentBucketDeleteEvent:
+		return "Assignment Bucket Delete (parti-assignment, Gap 10b alias)"
 	default:
 		return fmt.Sprintf("Unknown Event: %s", string(e))
 	}

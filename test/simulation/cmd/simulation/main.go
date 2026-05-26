@@ -45,6 +45,29 @@ var (
 	aioMaxWorkers     int
 )
 
+// durationFromParams extracts a duration from a chaos params map, tolerating
+// both time.Duration (set by ChaosController.generateEventParams) and string
+// (set by YAML scheduled_events params). Falls back to defaultDur when the
+// key is absent, the type is unrecognised, or the string parse fails.
+func durationFromParams(params map[string]any, key string, defaultDur time.Duration) time.Duration {
+	v, ok := params[key]
+	if !ok {
+		return defaultDur
+	}
+	switch d := v.(type) {
+	case time.Duration:
+		if d > 0 {
+			return d
+		}
+	case string:
+		if parsed, err := time.ParseDuration(d); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+
+	return defaultDur
+}
+
 // parseChaosInterval parses a chaos interval string like "10-30m" into min and max durations.
 func parseChaosInterval(interval string) (minDur, maxDur time.Duration, err error) {
 	parts := strings.Split(interval, "-")
@@ -630,15 +653,44 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 		}
 
 		producerID := fmt.Sprintf("producer-%d", i)
+
+		// Give each producer its own NATS connection + NetworkControl so
+		// ProducerDisconnectEvent (Phase 5 / Gap 10a) can sever only the
+		// producer's connection without touching worker or manager conns.
+		// The NetworkControl implements nats.CustomDialer.
+		prodNetCtrl := producer.NewNetworkControl()
+		var prodNC *nats.Conn
+		if cfg.NATS.Mode == "embedded" {
+			prodNC, err = nats.Connect(embeddedServer.ClientURL(),
+				nats.SetCustomDialer(prodNetCtrl),
+				nats.ReconnectWait(100*time.Millisecond),
+				nats.MaxReconnects(-1),
+			)
+		} else {
+			prodNC, err = nats.Connect(cfg.NATS.URL,
+				nats.SetCustomDialer(prodNetCtrl),
+				nats.ReconnectWait(100*time.Millisecond),
+				nats.MaxReconnects(-1),
+			)
+		}
+		if err != nil {
+			return fmt.Errorf("failed to create NATS connection for producer %d: %w", i, err)
+		}
+		prodJS, err := jetstream.New(prodNC)
+		if err != nil {
+			return fmt.Errorf("failed to create JetStream for producer %d: %w", i, err)
+		}
+
 		prod := producer.NewProducer(
 			producerID,
-			js,
+			prodJS,
 			partitionIDs,
 			partitionWeights,
 			cfg.Partitions.MessageRatePerPartition,
 			coord.GetSentChannel(),
 			metricsCollector,
 		)
+		prod.SetNetworkControl(prodNetCtrl)
 
 		// Create cancelable context for this producer
 		producerCtx, producerCancel := context.WithCancel(ctx)
@@ -747,14 +799,24 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 				ldReassignObserved := coord.GetLongDisconnectReassignmentObserved()
 				ldReassignMissing := coord.GetLongDisconnectReassignmentMissing()
 				claimLossOrderViol := coord.GetClaimLossOrderingViolations()
-				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || claimLossOrderViol > 0 {
+				// INV1/INV2 (Phase 5): aggregate producer-resume-missing and CAS-storm-panic counters.
+				var producerResumeMissing int64
+				if goroutineRegistry != nil {
+					for _, info := range goroutineRegistry.GetByType(coordinator.ProducerGoroutine) {
+						if p, ok := info.Obj.(*producer.Producer); ok {
+							producerResumeMissing += p.ResumeMissing()
+						}
+					}
+				}
+				casStormPanics := casStormUnexpectedPanics.Load()
+				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || claimLossOrderViol > 0 || producerResumeMissing > 0 || casStormPanics > 0 {
 					// Record error but proceed to ordered shutdown
-					invariantsErr = fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d claim_loss_stop_ordering_violations=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, claimLossOrderViol)
+					invariantsErr = fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, claimLossOrderViol, producerResumeMissing, casStormPanics)
 				}
 				if invariantsErr == nil {
-					log.Printf("Stability invariants passed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d claim_loss_stop_ordering_violations=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, claimLossOrderViol)
+					log.Printf("Stability invariants passed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, claimLossOrderViol, producerResumeMissing, casStormPanics)
 				} else {
 					log.Printf("Stability invariants failed: %v", invariantsErr)
 				}
@@ -813,9 +875,19 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 				ldReassignObserved := coord.GetLongDisconnectReassignmentObserved()
 				ldReassignMissing := coord.GetLongDisconnectReassignmentMissing()
 				claimLossOrderViol := coord.GetClaimLossOrderingViolations()
-				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || claimLossOrderViol > 0 {
-					invariantsErr := fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d claim_loss_stop_ordering_violations=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, claimLossOrderViol)
+				// INV1/INV2 (Phase 5): aggregate producer-resume-missing and CAS-storm-panic counters.
+				var producerResumeMissing int64
+				if goroutineRegistry != nil {
+					for _, info := range goroutineRegistry.GetByType(coordinator.ProducerGoroutine) {
+						if p, ok := info.Obj.(*producer.Producer); ok {
+							producerResumeMissing += p.ResumeMissing()
+						}
+					}
+				}
+				casStormPanics := casStormUnexpectedPanics.Load()
+				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || claimLossOrderViol > 0 || producerResumeMissing > 0 || casStormPanics > 0 {
+					invariantsErr := fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, claimLossOrderViol, producerResumeMissing, casStormPanics)
 					// Emit the structured failure_report.json so CI artifacts
 					// include InconclusiveOwnerEvents / unobserved counters /
 					// FirstChaosEventAt — auditability that the new
@@ -1150,12 +1222,16 @@ func handleChaosEvent(
 		// SlowConsumer only works in all-in-one (goroutine) mode - skip in process mode
 		log.Println("[Chaos] slow_consumer event only supported in all-in-one mode")
 
-	case coordinator.BucketDeleteEvent, coordinator.BucketRecreateEvent, coordinator.BucketPeerTakeoverEvent, coordinator.WatcherStallEvent, coordinator.StableIDClaimStealEvent, coordinator.StableIDTinyPoolRespawnEvent:
+	case coordinator.BucketDeleteEvent, coordinator.BucketRecreateEvent, coordinator.BucketPeerTakeoverEvent,
+		coordinator.WatcherStallEvent, coordinator.StableIDClaimStealEvent, coordinator.StableIDTinyPoolRespawnEvent,
+		coordinator.ProducerDisconnectEvent, coordinator.AssignmentCASStormEvent, coordinator.AssignmentBucketDeleteEvent:
 		// Process-mode dispatch is intentionally a log-and-skip per the
 		// plan's risk note (lines 386-388). Whole-bucket actions in
 		// process mode would need cross-process visibility into the
-		// worker JetStream contexts which the simulation does not
-		// currently provide. Phase 4c plumbing exists for the
+		// worker or manager JetStream contexts which the simulation does
+		// not currently provide. Phase 5 events additionally require
+		// in-process producer NetworkControl or aioNS handles unavailable
+		// in process mode. Phase 4c plumbing exists for the
 		// tiny-pool-respawn case so Phase 7b can wire it in process mode.
 		log.Printf("[Chaos] %s event only supported in all-in-one mode", event)
 
@@ -1181,7 +1257,7 @@ func handleGoroutineChaos( //nolint:cyclop,gocyclo,funlen,revive // dispatch gro
 			log.Printf("[Chaos] Skipping %s: no active workers", event)
 			return
 		}
-	case coordinator.ScaleUpEvent, coordinator.ProducerCrashEvent, coordinator.BucketDeleteEvent, coordinator.BucketRecreateEvent, coordinator.WatcherStallEvent, coordinator.StableIDTinyPoolRespawnEvent:
+	case coordinator.ScaleUpEvent, coordinator.ProducerCrashEvent, coordinator.BucketDeleteEvent, coordinator.BucketRecreateEvent, coordinator.WatcherStallEvent, coordinator.StableIDTinyPoolRespawnEvent, coordinator.ProducerDisconnectEvent, coordinator.AssignmentCASStormEvent, coordinator.AssignmentBucketDeleteEvent:
 		_ = 0 // Dummy op to make branch different
 	default:
 		// Fallback for any other events
@@ -1387,6 +1463,27 @@ func handleGoroutineChaos( //nolint:cyclop,gocyclo,funlen,revive // dispatch gro
 			dur = 45 * time.Second
 		}
 		handleWatcherStall(ctx, prefix, dur)
+
+	case coordinator.ProducerDisconnectEvent:
+		// Gap 10a: sever the producer's dedicated NATS connection.
+		// Use durationFromParams to handle both time.Duration (from
+		// generateEventParams) and string (from YAML scheduled_events).
+		dur := durationFromParams(params, "duration", 15*time.Second)
+		handleProducerDisconnect(registry, dur)
+
+	case coordinator.AssignmentCASStormEvent:
+		// Gap 10b: spawn a competing _commit writer using a fresh JS context.
+		dur := durationFromParams(params, "duration", 10*time.Second)
+		handleAssignmentCASStorm(ctx, dur)
+
+	case coordinator.AssignmentBucketDeleteEvent:
+		// Gap 10b alias: delete parti-assignment via the Phase 1 primitive
+		// so DegradedReasonOracle wiring is applied automatically.
+		bucket, _ := params["target_bucket"].(string)
+		if bucket == "" {
+			bucket = "parti-assignment"
+		}
+		handleBucketDelete(ctx, bucket)
 
 	default:
 		log.Printf("[Chaos] Unknown event type: %s", event)
