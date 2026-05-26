@@ -1,0 +1,69 @@
+# Phase 2 — NATSKV partition source + watcher_stall chaos.
+#
+# This scenario exercises the empirically load-bearing reconciler path
+# (from project memory: nats.go KV watcher Updates() does NOT close on
+# server-side disturbances; the periodic reconciler is the sole recovery
+# mechanism for missed updates).
+#
+# Setup:
+#   - 5 workers, partition source = nats_kv.
+#   - SourceReconcileInterval = 5s so reconcileInterval < stall < cooldown.
+#   - watcher_stall = 45s (outlives the watcher's natural rebind envelope
+#     of ~30s but stays below bucketUnavailableCooldown = 30s default…
+#     wait — INV2 requires stall < cooldown. The cooldown gates how
+#     OFTEN the source-unavailable hook fires, not whether it fires.
+#     45s is still safe because the watcher reaches Updates()-error from
+#     consumer deletion, not bucket-loss; the bucket itself is healthy.
+#   - Source-convergence driver fires every 60s with T_converge = 30s.
+#
+# Invariants asserted:
+#   - INV1: source-convergence oracle observes every mutation within
+#     T_converge after the stall fires.
+#   - INV2: zero spurious source-unavailable degraded reports during the
+#     stall window (the source bucket is healthy; only ephemeral
+#     consumers are killed).
+
+simulation:
+  # 4m: covers ~3 source-convergence mutations and 2-3 watcher_stalls.
+  duration: 4m
+  mode: all-in-one
+
+nats:
+  mode: embedded
+
+partitions:
+  count: 10
+  message_rate_per_partition: 1
+  distribution: uniform
+
+producers:
+  count: 1
+
+workers:
+  count: 5
+  assignment_strategy: WeightedConsistentHash
+  processing_delay:
+    min: 1ms
+    max: 5ms
+  partition_source: nats_kv
+  source_bucket: parti-sim-source
+  source_reconcile_interval: 5s
+
+chaos:
+  enabled: true
+  # First fire ~30-45s in, then every 60-90s.
+  interval: "30s-45s"
+  events:
+    - watcher_stall
+
+coordinator:
+  gap_aging: 90s
+  slo:
+    enable_catch_up: true
+    catch_up_deadline: 60s
+    catch_up_percent: 99
+    absence_threshold: 5s
+
+metrics:
+  prometheus:
+    enabled: false
