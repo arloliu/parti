@@ -1,0 +1,95 @@
+# Phase 6 / Gap 5 — Orphan stable-claim sweep-skip scenario (INV2).
+#
+# A synthetic stable handoff claim with an orphan owner (not in any
+# AssignmentReport) is written into parti-handoff at T+5s. The orphan
+# uses a sentinel partition ID ("chaos-orphan-partition") that cannot
+# collide with any real simulation partition (which are numeric strings
+# 0..N-1).
+#
+# The simulation then polls the same key over a window of at least
+# 2 × Handoff.SweepInterval (default 30s → 60s window). Any change to
+# the on-wire bytes (delete, owner reset, state change, revision bump)
+# increments orphan_stable_claim_drift and fails the run.
+#
+# This validates the sweeper's `if cur.State == ClaimStateStable { continue }`
+# clause (internal/assignment/handoff/twophase.go:434-488) and the
+# equivalent skip in handoffStartupHygiene (manager_handoff.go:75-125).
+# A second worker reaching StateStable mid-run also runs startup
+# hygiene — its skip clause is exercised by the same orphan.
+#
+# A scale_up + scale_down pair fires within the window to force Apply
+# cycles, which is the trigger that causes maybeSweepClaims to run
+# (twophase.go calls it on each Apply). Without forced Apply activity
+# a 3-worker steady-state run might not exercise the sweeper at all,
+# making "no drift" vacuously true.
+#
+# INV2: orphan_stable_claim_drift must be 0.
+
+simulation:
+  duration: 90s
+  mode: all-in-one
+
+nats:
+  mode: embedded
+
+partitions:
+  count: 10
+  message_rate_per_partition: 1
+  distribution: uniform
+
+producers:
+  count: 1
+
+workers:
+  count: 3
+  assignment_strategy: WeightedConsistentHash
+  # Required: the sweeper is part of the two-phase handoff coordinator,
+  # which only runs when two-phase handoff is enabled (manager.go gates
+  # setupHandoff on EnableTwoPhaseHandoff, driven by this flag at
+  # worker.go:308). Without this flag the orphan claim is written but
+  # the sweeper never runs and the invariant becomes vacuous.
+  enforce_exclusive_consumption: true
+  processing_delay:
+    min: 1ms
+    max: 5ms
+
+chaos:
+  enabled: true
+  interval: "3600s-3601s"
+  events: []
+  # Bound dynamic scale so the scale_up/scale_down pair has headroom.
+  min_workers: 2
+  max_workers: 6
+  scheduled_events:
+    # T+5s: write the orphan stable claim. Observation window is 70s
+    # (= ~2.3 × default 30s SweepInterval) so the watcher finishes well
+    # before the 90s scenario end.
+    - at: 5s
+      event: handoff_orphan_claim_write
+      params:
+        observation_window: 70s
+    # T+20s: scale up by 1 worker. Forces every existing worker to run
+    # Apply (rebalance) and thus invoke maybeSweepClaims.
+    - at: 20s
+      event: scale_up
+      params:
+        count: 1
+    # T+45s: scale back down. Another Apply cycle on every worker; the
+    # sweeper runs again (or its sweep-interval gate, run-once-per-30s,
+    # has expired since T+20s).
+    - at: 45s
+      event: scale_down
+      params:
+        count: 1
+
+coordinator:
+  gap_aging: 60s
+  slo:
+    enable_catch_up: true
+    catch_up_deadline: 30s
+    catch_up_percent: 99
+    absence_threshold: 5s
+
+metrics:
+  prometheus:
+    enabled: false

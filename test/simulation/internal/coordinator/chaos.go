@@ -133,6 +133,16 @@ const (
 	// (DegradedReasonOracle) is wired automatically, and makes the scenario
 	// YAML self-documenting. All-in-one only; process-mode logs and skips.
 	AssignmentBucketDeleteEvent ChaosEvent = "assignment_bucket_delete"
+
+	// HandoffOrphanClaimWriteEvent (Phase 6 / Gap 5) writes a synthetic
+	// stable handoff claim whose Owner is NOT in any current
+	// AssignmentReport. The orphan must survive the sweeper window
+	// (≥ 2 × Handoff.SweepInterval) because the sweeper at
+	// internal/assignment/handoff/twophase.go:434-488 unconditionally
+	// skips claims in ClaimStateStable. Any drift (deletion, owner reset,
+	// state change) increments orphan_stable_claim_drift and fails the
+	// scenario. All-in-one only; process-mode logs and skips.
+	HandoffOrphanClaimWriteEvent ChaosEvent = "handoff_orphan_claim_write"
 )
 
 // ChaosController manages chaos event injection.
@@ -411,6 +421,12 @@ func (cc *ChaosController) generateEventParams(event ChaosEvent) map[string]any 
 		// expression from the NetworkDisconnect 5..15s range above.
 		params["duration"] = time.Duration(cc.rng.Intn(10)+6) * time.Second
 
+	case HandoffOrphanClaimWriteEvent:
+		// Phase 6 / Gap 5 one-shot. Drift observation window defaults to
+		// 60s (= 2 × default Handoff.SweepInterval). Scenarios override
+		// via the YAML scheduled_events params.
+		params["observation_window"] = 60 * time.Second
+
 	default:
 		// Unknown event type, return empty params
 	}
@@ -502,6 +518,8 @@ func (cc *ChaosController) IsEnabled() bool {
 }
 
 // String returns a human-readable description of a chaos event.
+//
+//nolint:cyclop // exhaustive switch over chaos-event kinds; complexity grows linearly.
 func (e ChaosEvent) String() string {
 	switch e {
 	case WorkerCrashEvent:
@@ -544,6 +562,8 @@ func (e ChaosEvent) String() string {
 		return "Assignment CAS Storm (competing _commit writer, Gap 10b)"
 	case AssignmentBucketDeleteEvent:
 		return "Assignment Bucket Delete (parti-assignment, Gap 10b alias)"
+	case HandoffOrphanClaimWriteEvent:
+		return "Handoff Orphan Claim Write (Gap 5; stable-claim sweep skip)"
 	default:
 		return fmt.Sprintf("Unknown Event: %s", string(e))
 	}

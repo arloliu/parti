@@ -253,6 +253,21 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 		// apparent gaps. The manager's in-memory cfg.KVBuckets.HandoffTTL is
 		// purely advisory once the bucket exists.
 		pc.KVBuckets.HandoffTTL = 0
+		// Phase 6 / Gap 5: when chaos.handoff.precreate_maxage > 0, seed
+		// the handoff bucket with the configured MaxAge BEFORE any
+		// worker's manager runs. This emulates a handoff bucket created
+		// by an older parti version that still carries a MaxAge, so the
+		// manager's reconcileHandoffBucketMaxAge healing path
+		// (manager_setup.go:reconcileHandoffBucketMaxAge) is exercised.
+		// EnsureKVBucket is get-first, so the value passed here is what
+		// actually sticks on the backing stream.
+		handoffPrecreateMaxAge := cfg.Chaos.Handoff.PrecreateMaxAge
+		handoffTTL := pc.KVBuckets.HandoffTTL
+		if handoffPrecreateMaxAge > 0 {
+			handoffTTL = handoffPrecreateMaxAge
+			log.Printf("[Phase6] pre-creating handoff bucket %q with MaxAge=%v (scenario knob)",
+				pc.KVBuckets.HandoffBucket, handoffPrecreateMaxAge)
+		}
 		// Use short, independent timeouts per bucket to avoid blocking startup
 		timeBuckets := []struct {
 			name string
@@ -262,7 +277,7 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 			{pc.KVBuckets.ElectionBucket, pc.ElectionTimeout},
 			{pc.KVBuckets.HeartbeatBucket, pc.HeartbeatTTL},
 			{pc.KVBuckets.AssignmentBucket, pc.KVBuckets.AssignmentTTL},
-			{pc.KVBuckets.HandoffBucket, pc.KVBuckets.HandoffTTL},
+			{pc.KVBuckets.HandoffBucket, handoffTTL},
 		}
 		for _, b := range timeBuckets {
 			bctx, bcancel := context.WithTimeout(ctx, 5*time.Second)
@@ -270,6 +285,29 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 			bcancel()
 			if kerr != nil {
 				return fmt.Errorf("failed to ensure KV bucket %s: %w", b.name, kerr)
+			}
+		}
+		// Phase 6 / Gap 5: after seeding the handoff bucket with the
+		// scenario's PrecreateMaxAge, confirm the value actually stuck
+		// on the backing stream before any manager starts. If the
+		// inherited MaxAge is NOT what we requested, the downstream
+		// oracle is meaningless — log loudly so the run can be
+		// diagnosed. We use the same Status() → KeyValueBucketStatus
+		// surface the manager uses at manager_setup.go:kvStreamConfig.
+		if handoffPrecreateMaxAge > 0 {
+			vctx, vcancel := context.WithTimeout(ctx, 5*time.Second)
+			seeded, verr := readHandoffBucketMaxAge(vctx, js, pc.KVBuckets.HandoffBucket)
+			vcancel()
+			if verr != nil {
+				log.Printf("[Phase6] WARN: could not verify seeded MaxAge on %q: %v",
+					pc.KVBuckets.HandoffBucket, verr)
+			} else if seeded != handoffPrecreateMaxAge {
+				log.Printf("[Phase6] WARN: seeded MaxAge mismatch on %q: requested=%v actual=%v "+
+					"(get-first reused a pre-existing bucket; oracle may not fire)",
+					pc.KVBuckets.HandoffBucket, handoffPrecreateMaxAge, seeded)
+			} else {
+				log.Printf("[Phase6] seeded MaxAge=%v on %q confirmed; reconciler healing path armed",
+					seeded, pc.KVBuckets.HandoffBucket)
 			}
 		}
 	}
@@ -593,6 +631,11 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 		log.Printf("Recorded initial worker count: %d", cfg.Workers.Count)
 	}
 
+	// Phase 6 / Gap 5: fire the live-MaxAge oracle once any worker reaches
+	// StateStable. The reconciler runs during each manager's Start path,
+	// so a single Stable observation is sufficient to validate the heal.
+	startHandoffBucketMaxAgeOracle(ctx, goroutineRegistry)
+
 	// Optional: immediate scale-up via CLI flag
 	if aioScaleUpOnce > 0 {
 		spawnN := aioScaleUpOnce
@@ -809,14 +852,17 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 					}
 				}
 				casStormPanics := casStormUnexpectedPanics.Load()
-				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || claimLossOrderViol > 0 || producerResumeMissing > 0 || casStormPanics > 0 {
+				// Phase 6 / Gap 5 counters.
+				handoffMaxAgeViol := handoffBucketMaxAgeViolations.Load()
+				orphanClaimDrift := orphanStableClaimDrift.Load()
+				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || claimLossOrderViol > 0 || producerResumeMissing > 0 || casStormPanics > 0 || handoffMaxAgeViol > 0 || orphanClaimDrift > 0 {
 					// Record error but proceed to ordered shutdown
-					invariantsErr = fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, claimLossOrderViol, producerResumeMissing, casStormPanics)
+					invariantsErr = fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift)
 				}
 				if invariantsErr == nil {
-					log.Printf("Stability invariants passed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, claimLossOrderViol, producerResumeMissing, casStormPanics)
+					log.Printf("Stability invariants passed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift)
 				} else {
 					log.Printf("Stability invariants failed: %v", invariantsErr)
 				}
@@ -885,9 +931,12 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 					}
 				}
 				casStormPanics := casStormUnexpectedPanics.Load()
-				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || claimLossOrderViol > 0 || producerResumeMissing > 0 || casStormPanics > 0 {
-					invariantsErr := fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, claimLossOrderViol, producerResumeMissing, casStormPanics)
+				// Phase 6 / Gap 5 counters.
+				handoffMaxAgeViol := handoffBucketMaxAgeViolations.Load()
+				orphanClaimDrift := orphanStableClaimDrift.Load()
+				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || claimLossOrderViol > 0 || producerResumeMissing > 0 || casStormPanics > 0 || handoffMaxAgeViol > 0 || orphanClaimDrift > 0 {
+					invariantsErr := fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift)
 					// Emit the structured failure_report.json so CI artifacts
 					// include InconclusiveOwnerEvents / unobserved counters /
 					// FirstChaosEventAt — auditability that the new
@@ -1224,7 +1273,8 @@ func handleChaosEvent(
 
 	case coordinator.BucketDeleteEvent, coordinator.BucketRecreateEvent, coordinator.BucketPeerTakeoverEvent,
 		coordinator.WatcherStallEvent, coordinator.StableIDClaimStealEvent, coordinator.StableIDTinyPoolRespawnEvent,
-		coordinator.ProducerDisconnectEvent, coordinator.AssignmentCASStormEvent, coordinator.AssignmentBucketDeleteEvent:
+		coordinator.ProducerDisconnectEvent, coordinator.AssignmentCASStormEvent, coordinator.AssignmentBucketDeleteEvent,
+		coordinator.HandoffOrphanClaimWriteEvent:
 		// Process-mode dispatch is intentionally a log-and-skip per the
 		// plan's risk note (lines 386-388). Whole-bucket actions in
 		// process mode would need cross-process visibility into the
@@ -1257,7 +1307,7 @@ func handleGoroutineChaos( //nolint:cyclop,gocyclo,funlen,revive // dispatch gro
 			log.Printf("[Chaos] Skipping %s: no active workers", event)
 			return
 		}
-	case coordinator.ScaleUpEvent, coordinator.ProducerCrashEvent, coordinator.BucketDeleteEvent, coordinator.BucketRecreateEvent, coordinator.WatcherStallEvent, coordinator.StableIDTinyPoolRespawnEvent, coordinator.ProducerDisconnectEvent, coordinator.AssignmentCASStormEvent, coordinator.AssignmentBucketDeleteEvent:
+	case coordinator.ScaleUpEvent, coordinator.ProducerCrashEvent, coordinator.BucketDeleteEvent, coordinator.BucketRecreateEvent, coordinator.WatcherStallEvent, coordinator.StableIDTinyPoolRespawnEvent, coordinator.ProducerDisconnectEvent, coordinator.AssignmentCASStormEvent, coordinator.AssignmentBucketDeleteEvent, coordinator.HandoffOrphanClaimWriteEvent:
 		_ = 0 // Dummy op to make branch different
 	default:
 		// Fallback for any other events
@@ -1484,6 +1534,14 @@ func handleGoroutineChaos( //nolint:cyclop,gocyclo,funlen,revive // dispatch gro
 			bucket = "parti-assignment"
 		}
 		handleBucketDelete(ctx, bucket)
+
+	case coordinator.HandoffOrphanClaimWriteEvent:
+		// Phase 6 / Gap 5: one-shot. Write a synthetic stable claim with
+		// an orphan owner into parti-handoff and watch it for drift over
+		// at least 2 × SweepInterval. INV2: the sweeper at
+		// twophase.go:434-488 must skip ClaimStateStable claims.
+		obsWindow := durationFromParams(params, "observation_window", 60*time.Second)
+		handleHandoffOrphanClaimWrite(ctx, obsWindow)
 
 	default:
 		log.Printf("[Chaos] Unknown event type: %s", event)

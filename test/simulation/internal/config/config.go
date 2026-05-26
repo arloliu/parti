@@ -269,6 +269,21 @@ type ChaosConfig struct {
 	// (random chaos is insufficient because the respawn must land
 	// strictly after staleThreshold and BEFORE the next chaos turn).
 	ScheduledEvents []ScheduledChaosEvent `yaml:"scheduled_events"`
+
+	// Handoff carries Phase 6 / Gap 5 handoff-bucket scenario knobs.
+	Handoff HandoffChaosConfig `yaml:"handoff"`
+}
+
+// HandoffChaosConfig configures Phase 6 / Gap 5 handoff-bucket chaos primitives.
+type HandoffChaosConfig struct {
+	// PrecreateMaxAge, when > 0, pre-creates the handoff KV bucket
+	// (default name "parti-handoff") with this MaxAge BEFORE any worker
+	// starts. This exercises the manager's reconcileHandoffBucketMaxAge
+	// healing path (manager_setup.go:reconcileHandoffBucketMaxAge): the
+	// manager must clear the inherited MaxAge to 0 before Start returns.
+	// A non-zero live MaxAge after every worker reaches StateStable is an
+	// invariant violation (handoff_bucket_maxage_violation counter).
+	PrecreateMaxAge time.Duration `yaml:"precreate_maxage"`
 }
 
 // ScheduledChaosEvent is a one-shot scenario-scheduled chaos event.
