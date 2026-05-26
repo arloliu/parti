@@ -1,0 +1,94 @@
+# Phase 4b — StableID MaxAge / TTL expiry path (Gap 4 + Gap 8a).
+#
+# Combines Phase 3's network_disconnect_long with a SHORT cluster-wide
+# WorkerIDTTL (6s) and a tiny stable-ID pool on worker-0. Sequence:
+#
+#   t=15s: network_disconnect_long (60s) against worker-0. Heartbeats stop;
+#          claim renewal stalls. With WorkerIDTTL=6s,
+#          renewInterval=2s, staleThreshold=6s — well within the 60s
+#          window. The bucket's MaxAge (reconciled to WorkerIDTTL at every
+#          manager startup per manager_setup.go:352-428) expires the
+#          claim key.
+#   t=22s: stableid_tiny_pool_respawn against role=worker-0. Strictly
+#          later than t_disconnect + staleThreshold (=21s) so the
+#          dead worker's key is unambiguously stale. Strictly BEFORE
+#          the reconnect (t=75s). The fresh worker's Claim wins via
+#          stale-takeover Update.
+#   t=75s: worker-0 reconnects. Its next renewal observes ErrKeyExists
+#          → ErrClaimLost → claimLostShutdown. Manager reaches
+#          StateShutdown; no message served for any of worker-0's
+#          previously-assigned partitions after the Shutdown
+#          transition (Phase 4 ClaimLossOrderingOracle).
+#
+# Verified via Phase 0's StateReconcileWatcher, Worker.State() polling
+# (watchClaimLostShutdowns), and the Phase 4 ordering oracle.
+
+simulation:
+  duration: 120s
+  mode: all-in-one
+
+nats:
+  mode: embedded
+
+partitions:
+  count: 10
+  message_rate_per_partition: 1
+  distribution: uniform
+
+producers:
+  count: 1
+
+workers:
+  count: 3
+  assignment_strategy: WeightedConsistentHash
+  processing_delay:
+    min: 1ms
+    max: 5ms
+  # Cluster-wide TTL — every manager sharing parti-stableid MUST agree
+  # because each reconciles bucket MaxAge to its own WorkerIDTTL at
+  # startup. A divergent value would either be overwritten or fail Start.
+  worker_id_ttl: 16s
+  per_worker:
+    worker-0:
+      worker_id_prefix: freeze-victim
+      worker_id_min: 1
+      worker_id_max: 1
+      worker_id_ttl: 16s
+
+chaos:
+  enabled: true
+  # No random chaos — interval is irrelevant but parser requires min < max.
+  interval: "3600s-3601s"
+  events: []
+  min_workers: 1
+  # network_disconnect_long needs duration > WorkerIDTTL to drive the
+  # claim-loss path; 60s comfortably exceeds the 6s TTL.
+  long_disconnect_duration_override: 60s
+  scheduled_events:
+    # WorkerIDTTL=16s (HeartbeatTTL=15s validator floor).
+    # staleThreshold ≈ 16s; respawn must land strictly after t_disconnect
+    # + 16s and STRICTLY BEFORE reconnect (t_disconnect + 60s).
+    - at: 15s
+      event: network_disconnect_long
+      params:
+        target_worker: worker-0
+        duration: 60s
+        # Phase 4b — disable Phase 3's automatic claim-lost suppression
+        # so the oracle counts the claim-lost event as expected.
+        expect_claim_lost: true
+    - at: 33s
+      event: stableid_tiny_pool_respawn
+      params:
+        target_role: worker-0
+
+coordinator:
+  gap_aging: 90s
+  slo:
+    enable_catch_up: true
+    catch_up_deadline: 75s
+    catch_up_percent: 99
+    absence_threshold: 5s
+
+metrics:
+  prometheus:
+    enabled: false

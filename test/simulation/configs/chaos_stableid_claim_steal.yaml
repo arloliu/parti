@@ -1,0 +1,56 @@
+# Phase 4a — StableID claim-steal scenario.
+#
+# Dispatches the revision-bumping kv.Put against a random worker's
+# stable-ID claim key (parti-stableid bucket). The victim's next renewal
+# observes ErrKeyExists → stableid.ErrClaimLost → claimLostShutdown,
+# AFTER which the manager's revoke drives a zero-partition
+# UpdateWorkerConsumer call. The Phase 4 ClaimLossOrderingOracle pins
+# stop-before-revoke ordering AND verifies no post-shutdown message is
+# served for the victim's last-known assignment.
+#
+# Equivalent to chaos_bucket_peer_takeover.yaml under the Phase 4
+# plan-name alias; kept as a separate config so plan↔scenario mapping is
+# greppable.
+
+simulation:
+  duration: 90s
+  mode: all-in-one
+
+nats:
+  mode: embedded
+
+partitions:
+  count: 10
+  message_rate_per_partition: 1
+  distribution: uniform
+
+producers:
+  count: 1
+
+workers:
+  count: 3
+  assignment_strategy: WeightedConsistentHash
+  processing_delay:
+    min: 1ms
+    max: 5ms
+
+chaos:
+  enabled: true
+  interval: "20s-30s"
+  events:
+    - stableid_claim_steal
+  # claimLostShutdown does not auto-restart in all-in-one; hold at 2 so
+  # the cluster does not collapse if the victim never recovers.
+  min_workers: 2
+
+coordinator:
+  gap_aging: 90s
+  slo:
+    enable_catch_up: true
+    catch_up_deadline: 45s
+    catch_up_percent: 99
+    absence_threshold: 5s
+
+metrics:
+  prometheus:
+    enabled: false

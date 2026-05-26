@@ -389,6 +389,24 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 		go chaosCtrl.Start(cctx)
 		log.Printf("Chaos controller started (events: %v, interval: %v-%v)",
 			cfg.Chaos.Events, minInterval, maxInterval)
+
+		// Phase 4: scenario-scheduled one-shot events. Used to coordinate
+		// SIGKILL → stale-takeover-respawn pairs where random chaos timing
+		// is insufficient (the respawn MUST land strictly after the
+		// staleThreshold and BEFORE any other chaos turn).
+		for _, sev := range cfg.Chaos.ScheduledEvents {
+			go func() {
+				select {
+				case <-cctx.Done():
+					return
+				case <-time.After(sev.At):
+				}
+				log.Printf("[ScheduledChaos] firing %s at +%v params=%v", sev.Event, sev.At, sev.Params)
+				if chaosCtrl != nil {
+					chaosCtrl.InjectEventNow(coordinator.ChaosEvent(sev.Event), sev.Params)
+				}
+			}()
+		}
 	}
 
 	// Calculate partitions per producer (auto-distribute)
@@ -471,7 +489,9 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 			PartitionSource:             cfg.Workers.PartitionSource,
 			SourceBucket:                cfg.Workers.SourceBucket,
 			SourceReconcileInterval:     cfg.Workers.SourceReconcileInterval,
+			RevocationReportCh:          coord.GetRevocationReportsChannel(),
 		}
+		applyWorkerOverrides(&workerCfg, cfg, workerID)
 
 		w, err := worker.NewWorker(workerCfg)
 		if err != nil {
@@ -726,14 +746,15 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 				coord.CheckLongDisconnectExpectations()
 				ldReassignObserved := coord.GetLongDisconnectReassignmentObserved()
 				ldReassignMissing := coord.GetLongDisconnectReassignmentMissing()
-				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 {
+				claimLossOrderViol := coord.GetClaimLossOrderingViolations()
+				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || claimLossOrderViol > 0 {
 					// Record error but proceed to ordered shutdown
-					invariantsErr = fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing)
+					invariantsErr = fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d claim_loss_stop_ordering_violations=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, claimLossOrderViol)
 				}
 				if invariantsErr == nil {
-					log.Printf("Stability invariants passed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing)
+					log.Printf("Stability invariants passed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d claim_loss_stop_ordering_violations=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, claimLossOrderViol)
 				} else {
 					log.Printf("Stability invariants failed: %v", invariantsErr)
 				}
@@ -791,9 +812,10 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 				coord.CheckLongDisconnectExpectations()
 				ldReassignObserved := coord.GetLongDisconnectReassignmentObserved()
 				ldReassignMissing := coord.GetLongDisconnectReassignmentMissing()
-				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 {
-					invariantsErr := fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing)
+				claimLossOrderViol := coord.GetClaimLossOrderingViolations()
+				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || claimLossOrderViol > 0 {
+					invariantsErr := fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d claim_loss_stop_ordering_violations=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, claimLossOrderViol)
 					// Emit the structured failure_report.json so CI artifacts
 					// include InconclusiveOwnerEvents / unobserved counters /
 					// FirstChaosEventAt — auditability that the new
@@ -959,6 +981,12 @@ func runWorker(ctx context.Context, cfg *config.Config) error {
 		AckWait:             cfg.Workers.AckWait,
 		MaxSubjects:         cfg.Workers.MaxSubjects,
 	}
+	// Phase 4c: read STABLEID_* env vars and apply them as per-worker
+	// overrides. Parse failures are loud (return Start error) so silent
+	// fallback cannot mask scenario bugs.
+	if err := applyStableIDEnv(&workerCfg, os.Getenv); err != nil {
+		return fmt.Errorf("invalid STABLEID_* env: %w", err)
+	}
 
 	w, err := worker.NewWorker(workerCfg)
 	if err != nil {
@@ -1122,12 +1150,13 @@ func handleChaosEvent(
 		// SlowConsumer only works in all-in-one (goroutine) mode - skip in process mode
 		log.Println("[Chaos] slow_consumer event only supported in all-in-one mode")
 
-	case coordinator.BucketDeleteEvent, coordinator.BucketRecreateEvent, coordinator.BucketPeerTakeoverEvent, coordinator.WatcherStallEvent:
+	case coordinator.BucketDeleteEvent, coordinator.BucketRecreateEvent, coordinator.BucketPeerTakeoverEvent, coordinator.WatcherStallEvent, coordinator.StableIDClaimStealEvent, coordinator.StableIDTinyPoolRespawnEvent:
 		// Process-mode dispatch is intentionally a log-and-skip per the
 		// plan's risk note (lines 386-388). Whole-bucket actions in
 		// process mode would need cross-process visibility into the
 		// worker JetStream contexts which the simulation does not
-		// currently provide.
+		// currently provide. Phase 4c plumbing exists for the
+		// tiny-pool-respawn case so Phase 7b can wire it in process mode.
 		log.Printf("[Chaos] %s event only supported in all-in-one mode", event)
 
 	default:
@@ -1147,12 +1176,12 @@ func handleGoroutineChaos( //nolint:cyclop,gocyclo,funlen,revive // dispatch gro
 	// Guard: skip worker-related events when no active workers
 	activeWorkers := registry.GetActiveCount(coordinator.WorkerGoroutine)
 	switch event {
-	case coordinator.WorkerCrashEvent, coordinator.WorkerRestartEvent, coordinator.LeaderFailureEvent, coordinator.ScaleDownEvent, coordinator.NetworkDisconnectEvent, coordinator.NetworkDisconnectLeaderEvent, coordinator.NetworkDisconnectLongEvent, coordinator.WorkerPauseEvent, coordinator.SlowConsumerEvent, coordinator.BucketPeerTakeoverEvent:
+	case coordinator.WorkerCrashEvent, coordinator.WorkerRestartEvent, coordinator.LeaderFailureEvent, coordinator.ScaleDownEvent, coordinator.NetworkDisconnectEvent, coordinator.NetworkDisconnectLeaderEvent, coordinator.NetworkDisconnectLongEvent, coordinator.WorkerPauseEvent, coordinator.SlowConsumerEvent, coordinator.BucketPeerTakeoverEvent, coordinator.StableIDClaimStealEvent:
 		if activeWorkers == 0 {
 			log.Printf("[Chaos] Skipping %s: no active workers", event)
 			return
 		}
-	case coordinator.ScaleUpEvent, coordinator.ProducerCrashEvent, coordinator.BucketDeleteEvent, coordinator.BucketRecreateEvent, coordinator.WatcherStallEvent:
+	case coordinator.ScaleUpEvent, coordinator.ProducerCrashEvent, coordinator.BucketDeleteEvent, coordinator.BucketRecreateEvent, coordinator.WatcherStallEvent, coordinator.StableIDTinyPoolRespawnEvent:
 		_ = 0 // Dummy op to make branch different
 	default:
 		// Fallback for any other events
@@ -1160,6 +1189,16 @@ func handleGoroutineChaos( //nolint:cyclop,gocyclo,funlen,revive // dispatch gro
 
 	switch event {
 	case coordinator.WorkerCrashEvent:
+		// Phase 4: if the scenario passes an explicit target_worker AND
+		// no_restart=true, route to the no-restart variant so the
+		// stableid_tiny_pool_respawn scheduled later can take over the
+		// dead worker's stable-ID via the stale-takeover Update path.
+		targetWorker, _ := params["target_worker"].(string)
+		noRestart, _ := params["no_restart"].(bool)
+		if targetWorker != "" && noRestart {
+			handleTargetedWorkerCrash(registry, targetWorker, metricsCollector, checkpointMgr)
+			return
+		}
 		handleWorkerGoroutineCrash(ctx, registry, metricsCollector, checkpointMgr)
 
 	case coordinator.LeaderFailureEvent:
@@ -1323,9 +1362,20 @@ func handleGoroutineChaos( //nolint:cyclop,gocyclo,funlen,revive // dispatch gro
 		}
 		handleBucketRecreate(ctx, bucket)
 
-	case coordinator.BucketPeerTakeoverEvent:
+	case coordinator.BucketPeerTakeoverEvent, coordinator.StableIDClaimStealEvent:
+		// StableIDClaimStealEvent is the Phase 4 plan-name alias for
+		// BucketPeerTakeoverEvent — both fire the same revision-bumping
+		// kv.Put against the victim's stable-ID claim key.
 		target, _ := params["target_worker"].(string)
 		handleBucketPeerTakeover(ctx, registry, target)
+
+	case coordinator.StableIDTinyPoolRespawnEvent:
+		// Phase 4: spawn a fresh all-in-one worker into the dead worker's
+		// tiny stable-ID pool. The handler looks up the role's override
+		// from aioCfg.Workers.PerWorker (keyed by target_role, which is
+		// the dead worker's sim ID).
+		role, _ := params["target_role"].(string)
+		handleStableIDTinyPoolRespawn(ctx, registry, role)
 
 	case coordinator.WatcherStallEvent:
 		prefix, _ := params["subject_prefix"].(string)
@@ -1456,6 +1506,40 @@ func handleProducerGoroutineCrash(registry *coordinator.GoroutineRegistry) {
 	log.Printf("[Chaos] Updated producer count after crash: %d", newCount)
 }
 
+// applyWorkerOverrides applies cluster-wide WorkerIDTTL and per-worker
+// StableID overrides from the scenario config to wcfg, with per-worker
+// values winning over cluster-wide values winning over defaults. Each
+// override is set ONLY when non-zero so worker.NewWorker's override-if-set
+// semantics restore the sim default (e.g. "simulation-worker" / Max=999)
+// for unset fields.
+func applyWorkerOverrides(wcfg *worker.Config, scfg *config.Config, workerID string) {
+	if scfg == nil {
+		return
+	}
+	// Cluster-wide TTL (applies to ALL workers — required for MaxAge-expiry
+	// scenarios where every manager must agree on TTL).
+	if scfg.Workers.WorkerIDTTL > 0 {
+		wcfg.WorkerIDTTL = scfg.Workers.WorkerIDTTL
+	}
+	// Per-worker overrides take precedence over cluster-wide.
+	if scfg.Workers.PerWorker != nil {
+		if pw, ok := scfg.Workers.PerWorker[workerID]; ok {
+			if pw.WorkerIDPrefix != "" {
+				wcfg.WorkerIDPrefix = pw.WorkerIDPrefix
+			}
+			if pw.WorkerIDMin != 0 {
+				wcfg.WorkerIDMin = pw.WorkerIDMin
+			}
+			if pw.WorkerIDMax != 0 {
+				wcfg.WorkerIDMax = pw.WorkerIDMax
+			}
+			if pw.WorkerIDTTL != 0 {
+				wcfg.WorkerIDTTL = pw.WorkerIDTTL
+			}
+		}
+	}
+}
+
 // spawnAllInOneWorker creates, registers, and starts a new worker goroutine with the given ID.
 func spawnAllInOneWorker(parent context.Context, workerID string) bool {
 	if aioNS == nil || aioJS == nil || aioCfg == nil || aioCoord == nil || aioRegistry == nil || len(aioWeights) == 0 {
@@ -1515,7 +1599,9 @@ func spawnAllInOneWorker(parent context.Context, workerID string) bool {
 		PartitionSource:             aioCfg.Workers.PartitionSource,
 		SourceBucket:                aioCfg.Workers.SourceBucket,
 		SourceReconcileInterval:     aioCfg.Workers.SourceReconcileInterval,
+		RevocationReportCh:          aioCoord.GetRevocationReportsChannel(),
 	}
+	applyWorkerOverrides(&wcfg, aioCfg, workerID)
 	w, err := worker.NewWorker(wcfg)
 	if err != nil {
 		log.Printf("[ScaleUp] failed to create worker %s: %v", workerID, err)
@@ -1896,7 +1982,24 @@ func handleLongGoroutineNetworkDisconnect(
 		log.Println("[Chaos] No active workers to long-disconnect")
 		return
 	}
-	target := workers[time.Now().UnixNano()%int64(len(workers))]
+	// Phase 4b: allow scenario to pin an explicit target_worker (e.g.
+	// "worker-0") so the disconnect lands on the worker with the tiny-
+	// pool stable-ID. Empty / "random" falls back to random selection.
+	var target *coordinator.GoroutineInfo
+	if explicit, _ := params["target_worker"].(string); explicit != "" && explicit != "random" {
+		for i := range workers {
+			if workers[i].ID == explicit {
+				target = workers[i]
+				break
+			}
+		}
+		if target == nil {
+			log.Printf("[Chaos] long_disconnect: target_worker=%s not found; falling back to random", explicit)
+		}
+	}
+	if target == nil {
+		target = workers[time.Now().UnixNano()%int64(len(workers))]
+	}
 	dur, ok := params["duration"].(time.Duration)
 	if !ok || dur <= 0 {
 		dur = 60 * time.Second
@@ -1935,7 +2038,23 @@ func handleLongGoroutineNetworkDisconnect(
 	// SuppressClaimLostForWorker is optional (does NOT require claim-lost to
 	// fire) — unlike ExpectAfter which would penalize us if claim-lost doesn't
 	// fire (incrementing expectedDegradedMissing on expiry).
-	if aioCoord != nil {
+	// Phase 4b scenarios EXPECT claim-loss to fire (the whole point of
+	// chaos_stableid_maxage_expiry); they pass expect_claim_lost=true to
+	// disable the suppression AND register a positive expectation so the
+	// claim-lost is counted as observed (not just tolerated).
+	expectClaimLost, _ := params["expect_claim_lost"].(bool)
+	if aioCoord != nil && expectClaimLost {
+		if o := aioCoord.DegradedReasonOracle(); o != nil {
+			stableID := wobj.StableWorkerID()
+			if stableID != "" {
+				// Window = disconnect + claimLostShutdown stop timeout.
+				window := dur + 30*time.Second
+				o.ExpectAfter("network_disconnect_long:claim_lost:"+stableID, nil, window, stableID, true)
+				log.Printf("[Chaos] Expecting claim-lost for %s (stable=%s window=%v)", target.ID, stableID, window)
+			}
+		}
+	}
+	if aioCoord != nil && !expectClaimLost {
 		if o := aioCoord.DegradedReasonOracle(); o != nil {
 			stableID := wobj.StableWorkerID()
 			if stableID != "" {

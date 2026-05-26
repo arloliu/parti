@@ -74,15 +74,40 @@ func NewProcessManager(binary, configPath string) *ProcessManager {
 	}
 }
 
+// StableIDOverrides carries per-worker StableID pool config from the
+// chaos dispatcher into a process-mode worker spawn. The zero value
+// means "no overrides" and ProcessManager.StartWorker leaves the spawned
+// process to inherit cluster defaults from the YAML config.
+//
+// Non-zero fields are propagated via environment variables (STABLEID_PREFIX,
+// STABLEID_MIN, STABLEID_MAX, STABLEID_TTL); the spawned process's
+// runWorker parses them back into worker.Config fields, where
+// override-if-set semantics in worker.NewWorker preserve sim defaults for
+// the zero-value entries (test/simulation/internal/worker/worker.go).
+type StableIDOverrides struct {
+	Prefix string
+	Min    int
+	Max    int
+	TTL    time.Duration
+}
+
+// IsZero returns true when no fields are set; used by callers to decide
+// whether to append the four STABLEID_* env vars to the spawned cmd.Env.
+func (o StableIDOverrides) IsZero() bool {
+	return o.Prefix == "" && o.Min == 0 && o.Max == 0 && o.TTL == 0
+}
+
 // StartWorker starts a new worker process.
 //
 // Parameters:
 //   - ctx: Context for the command
 //   - id: Worker ID
+//   - overrides: Optional StableID pool overrides (Phase 4c). Zero value =
+//     no overrides; the spawned process inherits scenario defaults.
 //
 // Returns:
 //   - error: Error if start fails
-func (pm *ProcessManager) StartWorker(ctx context.Context, id string) error {
+func (pm *ProcessManager) StartWorker(ctx context.Context, id string, overrides ...StableIDOverrides) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
@@ -98,10 +123,8 @@ func (pm *ProcessManager) StartWorker(ctx context.Context, id string) error {
 		"--id", id,
 	)
 
-	// Set environment variables
-	cmd.Env = append(os.Environ(),
-		fmt.Sprintf("WORKER_ID=%s", id),
-	)
+	// Build environment.
+	cmd.Env = buildWorkerEnv(id, overrides...)
 
 	// Start the process
 	if err := cmd.Start(); err != nil {
@@ -124,6 +147,48 @@ func (pm *ProcessManager) StartWorker(ctx context.Context, id string) error {
 	log.Printf("[ProcessManager] Started worker %s (PID: %d)", id, cmd.Process.Pid)
 
 	return nil
+}
+
+// ExportedBuildWorkerEnv is a test-facing wrapper around the unexported
+// buildWorkerEnv. Used by cross-package tests (e.g. cmd/simulation
+// round-trip) to validate the env transport without forcing
+// buildWorkerEnv itself to be exported.
+func ExportedBuildWorkerEnv(id string, overrides ...StableIDOverrides) []string {
+	return buildWorkerEnv(id, overrides...)
+}
+
+// buildWorkerEnv composes the env slice passed to a spawned worker process.
+// Always sets WORKER_ID. When the first overrides entry is non-zero, also
+// sets STABLEID_PREFIX, STABLEID_MIN, STABLEID_MAX, STABLEID_TTL so the
+// spawned process's runWorker can plumb them into worker.Config.
+//
+// Extracted to a free function so a unit test can validate the env shape
+// without spawning a real process.
+func buildWorkerEnv(id string, overrides ...StableIDOverrides) []string {
+	env := append(os.Environ(),
+		fmt.Sprintf("WORKER_ID=%s", id),
+	)
+	if len(overrides) == 0 || overrides[0].IsZero() {
+		return env
+	}
+	o := overrides[0]
+	// Each field is only set when non-zero so the receiving worker.Config
+	// override-if-set semantics restore the appropriate sim default for
+	// any field the caller left unspecified.
+	if o.Prefix != "" {
+		env = append(env, fmt.Sprintf("STABLEID_PREFIX=%s", o.Prefix))
+	}
+	if o.Min != 0 {
+		env = append(env, fmt.Sprintf("STABLEID_MIN=%d", o.Min))
+	}
+	if o.Max != 0 {
+		env = append(env, fmt.Sprintf("STABLEID_MAX=%d", o.Max))
+	}
+	if o.TTL != 0 {
+		env = append(env, fmt.Sprintf("STABLEID_TTL=%s", o.TTL.String()))
+	}
+
+	return env
 }
 
 // StartProducer starts a new producer process.

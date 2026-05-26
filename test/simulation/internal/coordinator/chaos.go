@@ -76,6 +76,23 @@ const (
 	// not honored (documented as a follow-up).
 	WatcherStallEvent ChaosEvent = "watcher_stall"
 
+	// StableIDClaimStealEvent is the Phase 4 plan-name alias for
+	// BucketPeerTakeoverEvent. Both kinds dispatch to the same primitive
+	// (revision-bumping kv.Put against the victim's claim key in
+	// parti-stableid) — kept as a distinct constant so scenario YAML and
+	// plan terminology stay greppable.
+	StableIDClaimStealEvent ChaosEvent = "stableid_claim_steal"
+
+	// StableIDTinyPoolRespawnEvent spawns a fresh worker into the dead
+	// worker's tiny stable-ID pool, exercising the stale-takeover
+	// Update path in stableid.Claimer (claimer.go:219-243). The fresh
+	// worker MUST be scheduled strictly later than staleThreshold =
+	// 3 × max(WorkerIDTTL/3, 100ms) plus scheduler margin after the
+	// previous holder went offline; scheduling it inside TTL only
+	// returns ErrNoAvailableID (claimer.go:244-253). All-in-one mode
+	// only for Phase 4a; process-mode propagation handled by Phase 4c.
+	StableIDTinyPoolRespawnEvent ChaosEvent = "stableid_tiny_pool_respawn"
+
 	// NetworkDisconnectLongEvent simulates a prolonged NATS connection loss
 	// (60–180s) on a random worker, outliving HeartbeatTTL × 2. This drives
 	// the full lease-expiry → reassignment → post-recovery convergence path
@@ -325,9 +342,16 @@ func (cc *ChaosController) generateEventParams(event ChaosEvent) map[string]any 
 		// must pass target_bucket explicitly via InjectEventNow.
 		params["target_bucket"] = "parti-assignment"
 
-	case BucketPeerTakeoverEvent:
+	case BucketPeerTakeoverEvent, StableIDClaimStealEvent:
 		// Default target_worker "random" — handler picks a live worker.
 		params["target_worker"] = "random"
+
+	case StableIDTinyPoolRespawnEvent:
+		// Default target_role "" — scenario-driven via InjectEventNow.
+		// The handler will look up the role's WorkerID* overrides from
+		// the scenario config and respawn an all-in-one worker against
+		// the same tiny pool.
+		params["target_role"] = ""
 
 	case WatcherStallEvent:
 		// Default subject prefix targets the parti-sim-source KV stream;
@@ -458,6 +482,10 @@ func (e ChaosEvent) String() string {
 		return "Bucket Recreate"
 	case BucketPeerTakeoverEvent:
 		return "Bucket Peer Takeover"
+	case StableIDClaimStealEvent:
+		return "StableID Claim Steal (alias of bucket_peer_takeover)"
+	case StableIDTinyPoolRespawnEvent:
+		return "StableID Tiny Pool Respawn (stale-takeover)"
 	case WatcherStallEvent:
 		return "Watcher Stall (KV source watcher)"
 	case NetworkDisconnectLongEvent:

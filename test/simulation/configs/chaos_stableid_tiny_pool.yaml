@@ -1,0 +1,84 @@
+# Phase 4a — StableID tiny-pool stale-takeover scenario.
+#
+# 3 workers, one on a Min==Max==1 tiny pool with prefix "freeze-victim".
+# Scenario-scheduled events:
+#   1. t=20s:  worker_crash against worker-0 (target_worker + no_restart)
+#              so the dead worker's claim does NOT auto-rejoin inside TTL
+#              (which would return ErrNoAvailableID).
+#   2. t=27s:  stableid_tiny_pool_respawn with target_role=worker-0,
+#              i.e. 7s after the kill — STRICTLY later than
+#              staleThreshold = 3 * max(WorkerIDTTL/3, 100ms) = 6s with
+#              WorkerIDTTL=6s (renewInterval=2s, threshold=6s). The
+#              respawn's Claim wins via the stale-takeover Update path
+#              (internal/stableid/claimer.go:219-243). No double-claim;
+#              Phase 0 snapshot-overlap oracle pins this.
+#
+# WorkerIDTTL is cluster-wide because every manager sharing parti-stableid
+# reconciles the bucket's MaxAge to its own WorkerIDTTL at startup
+# (manager_setup.go:86-99, 352-428); divergent values would either be
+# overwritten or fail Start.
+
+simulation:
+  duration: 90s
+  mode: all-in-one
+
+nats:
+  mode: embedded
+
+partitions:
+  count: 10
+  message_rate_per_partition: 1
+  distribution: uniform
+
+producers:
+  count: 1
+
+workers:
+  count: 3
+  assignment_strategy: WeightedConsistentHash
+  processing_delay:
+    min: 1ms
+    max: 5ms
+  # Cluster-wide TTL — all managers must agree.
+  worker_id_ttl: 16s
+  per_worker:
+    worker-0:
+      worker_id_prefix: freeze-victim
+      worker_id_min: 1
+      worker_id_max: 1
+      worker_id_ttl: 16s
+
+chaos:
+  enabled: true
+  # No random chaos — interval is irrelevant because events list is empty
+  # but the parser requires min < max.
+  interval: "3600s-3601s"
+  events: []
+  min_workers: 1
+  scheduled_events:
+    # WorkerIDTTL=16s (HeartbeatTTL=15s is the validator floor).
+    # renewInterval = max(16/3, 100ms) ≈ 5.33s
+    # staleThreshold = 3 * renewInterval ≈ 16s
+    # Respawn at t_kill + 18s — strictly later than staleThreshold +
+    # scheduler margin so the dead claim is unambiguously stale.
+    - at: 20s
+      event: worker_crash
+      params:
+        target_worker: worker-0
+        no_restart: true
+    - at: 38s
+      event: stableid_tiny_pool_respawn
+      params:
+        target_role: worker-0
+
+coordinator:
+  gap_aging: 90s
+  slo:
+    enable_catch_up: true
+    catch_up_deadline: 45s
+    catch_up_percent: 99
+    absence_threshold: 5s
+
+metrics:
+  prometheus:
+    enabled: false
