@@ -44,6 +44,14 @@ const (
 	// WorkerPauseEvent temporarily pauses a worker's processing without removing it.
 	WorkerPauseEvent ChaosEvent = "worker_pause"
 
+	// WorkerResumeEvent resumes a previously-paused worker. Process-mode
+	// only: sends SIGCONT to the target worker process. Pair with a
+	// scheduled WorkerPauseEvent that disables auto-resume (duration<=0).
+	// Phase 7b scenarios use this to drive the long-SIGSTOP / same-pool
+	// replacement / SIGCONT sequence that exercises the returning-worker
+	// claim-loss self-stop path (manager_election.go:claimLostShutdown).
+	WorkerResumeEvent ChaosEvent = "worker_resume"
+
 	// SlowConsumerEvent slows down message processing to simulate backpressure.
 	SlowConsumerEvent ChaosEvent = "slow_consumer"
 
@@ -352,6 +360,14 @@ func (cc *ChaosController) generateEventParams(event ChaosEvent) map[string]any 
 		// Pause for 5-8 seconds to build backlog
 		params["duration"] = time.Duration(cc.rng.Intn(4)+5) * time.Second
 
+	case WorkerResumeEvent:
+		// Scenario-driven only. Random-cadence chaos never synthesizes
+		// WorkerResumeEvent (it pairs with an open-ended WorkerPauseEvent
+		// via scheduled_events). Mark the default target so a misrouted
+		// invocation logs an actionable message instead of silently
+		// SIGCONT'ing nothing.
+		params["target_worker"] = ""
+
 	case SlowConsumerEvent:
 		// Slow down processing by 3x-10x for 5-15 seconds. The upper bound is
 		// capped so that a slow window's accumulated backlog can drain within
@@ -540,6 +556,8 @@ func (e ChaosEvent) String() string {
 		return "Network Disconnect (Leader)"
 	case WorkerPauseEvent:
 		return "Worker Pause"
+	case WorkerResumeEvent:
+		return "Worker Resume (SIGCONT)"
 	case SlowConsumerEvent:
 		return "Slow Consumer"
 	case BucketDeleteEvent:

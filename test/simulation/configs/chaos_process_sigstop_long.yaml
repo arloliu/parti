@@ -1,0 +1,105 @@
+# Phase 7b — process-mode long-SIGSTOP / same-pool replacement scenario.
+#
+# Drives the OS-signal realisation of Gap 8a (returning-worker claim-loss
+# self-stop). The chaos sequence:
+#
+#   1. T+30s: worker_pause target_worker=worker-0 (SIGSTOP, no auto-resume).
+#      Freezes the OS process so its renew tick cannot run.
+#   2. T+50s: stableid_tiny_pool_respawn target_worker=worker-0.
+#      Coordinator spawns a fresh worker child (worker-3) pinned to the
+#      same {prefix=freeze-victim, min=max=1} tiny pool. The replacement's
+#      Manager.claimWorkerID → Claimer.Claim performs the revision-checked
+#      stale-takeover Update (internal/stableid/claimer.go:219-243).
+#   3. T+80s: worker_resume target_worker=worker-0 (SIGCONT).
+#      The unfrozen worker's next renew tick fails with
+#      jetstream.ErrKeyExists → ErrClaimLost; onClaimerError routes through
+#      claimLostShutdown (manager_election.go:83-122) and the manager
+#      drives StateShutdown.
+#
+# Timing math: WorkerIDTTL=16s → renewInterval=max(16/3, 100ms)≈5.33s →
+# staleThreshold=3*renewInterval≈16s. Wait at minimum 16s + scheduler
+# margin between SIGSTOP and the respawn; we use 20s. After respawn we
+# wait 30s for the replacement to Claim + boot + report assignment, then
+# SIGCONT.
+#
+# Invariants asserted (via runProcessOrchestrator's exit gating):
+#   - claim_loss_stop_ordering_violations = 0
+#   - double_leader_observations = 0
+#   - snapshot_overlap_violations = 0
+#   - ipc_smoke_violation = 0
+#
+# Sim worker IDs match runProcessOrchestrator's spawn format ("worker-%d");
+# per_worker keys MUST match.
+
+simulation:
+  duration: 3m
+  mode: process
+
+nats:
+  mode: embedded
+  url: ""
+
+partitions:
+  count: 12
+  message_rate_per_partition: 5
+  distribution: uniform
+  weights:
+    exponential:
+      extreme_percent: 0.05
+      extreme_weight: 100
+      normal_weight: 1
+
+producers:
+  count: 1
+
+workers:
+  count: 3
+  assignment_strategy: WeightedConsistentHash
+  strategy_config: {}
+  processing_delay:
+    min: 1ms
+    max: 5ms
+  # Cluster-wide WorkerIDTTL. HeartbeatTTL=15s is the production validator
+  # floor (manager_setup.go); WorkerIDTTL >= HeartbeatTTL is required so we
+  # use 16s.
+  worker_id_ttl: 16s
+  per_worker:
+    worker-0:
+      worker_id_prefix: freeze-victim
+      worker_id_min: 1
+      worker_id_max: 1
+      worker_id_ttl: 16s
+
+coordinator:
+  gap_aging: 180s
+
+chaos:
+  enabled: true
+  interval: "3600s-3601s"
+  events: []
+  min_workers: 1
+  scheduled_events:
+    - at: 30s
+      event: worker_pause
+      params:
+        target_worker: worker-0
+        # duration=0 => open-ended pause; resume driven by worker_resume.
+        duration: 0
+    - at: 50s
+      event: stableid_tiny_pool_respawn
+      params:
+        target_worker: worker-0
+    - at: 80s
+      event: worker_resume
+      params:
+        target_worker: worker-0
+
+metrics:
+  prometheus:
+    enabled: false
+    port: 9090
+
+checkpoint:
+  enabled: false
+  interval: 1h
+  path: ./checkpoints
