@@ -1,0 +1,75 @@
+# Phase 8 / Gap 9b — Election-bucket replica propagation (operator-precreated mode).
+#
+# The simulation pre-creates the election KV bucket (parti-election) with
+# chaos.storage.election_replicas_override=1 and Storage=FileStorage BEFORE
+# any worker starts. This emulates an operator who created the bucket with
+# an explicit replica count. The manager's get-first EnsureKV path
+# (kvutil.EnsureKVBucketWithRetry) opens the existing bucket and MUST preserve
+# the operator's Replicas setting.
+#
+# After all workers reach StateStable, the oracle (storage_chaos.go:
+# checkElectionReplicasOracle) reads the live stream config and asserts:
+#   Replicas(parti-election) == election_replicas_override
+#
+# A violation increments election_replicas_violation and fails the run.
+#
+# NOTE: election_replicas_override: 3 requires a multi-server NATS cluster.
+# Embedded NATS (single server) rejects Replicas > 1 with an error; the
+# simulation automatically falls back to Replicas=1 and logs a warning.
+# The assertion value is adjusted to match the server-accepted replica count,
+# so this scenario still catches a regression where replicas were silently
+# dropped to 0.
+#
+# To test Replicas=3 fully, run against a real 3-node NATS cluster:
+#   nats_mode: external
+#   nats_url: nats://node1:4222,nats://node2:4222,nats://node3:4222
+# and set election_replicas_override: 3.
+#
+# INV2 (Phase 8): election_replicas_violation must be 0.
+
+simulation:
+  duration: 60s
+  mode: all-in-one
+
+nats:
+  mode: embedded
+
+partitions:
+  count: 10
+  message_rate_per_partition: 1
+  distribution: uniform
+
+producers:
+  count: 1
+
+workers:
+  count: 3
+  assignment_strategy: WeightedConsistentHash
+  enforce_exclusive_consumption: true
+  processing_delay:
+    min: 1ms
+    max: 5ms
+
+chaos:
+  enabled: false
+  interval: "3600s-3601s"
+  events: []
+  storage:
+    # Pre-create the election bucket with this replica count before workers
+    # start. The manager's get-first path must preserve it.
+    # NOTE: embedded NATS (single server) falls back to Replicas=1; assertion
+    # uses the server-accepted value. For full Replicas=3 testing, use a
+    # 3-node NATS cluster and set this to 3.
+    election_replicas_override: 1
+
+coordinator:
+  gap_aging: 60s
+  slo:
+    enable_catch_up: true
+    catch_up_deadline: 30s
+    catch_up_percent: 99
+    absence_threshold: 5s
+
+metrics:
+  prometheus:
+    enabled: false

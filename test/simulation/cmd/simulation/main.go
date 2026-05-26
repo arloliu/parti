@@ -280,6 +280,13 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 
 	// Pre-create coordination KV buckets to avoid thundering herd on startup
 	// when many workers ensure the same buckets concurrently.
+	//
+	// Phase 8 / Gap 9: when chaos.storage.skip_bucket_precreate is true,
+	// the manager-owned coordination buckets (election, heartbeat,
+	// assignment, handoff) are NOT pre-created here. The manager's own
+	// Start path is then the only code that creates them, exercising its
+	// storage-type and TTL choices end-to-end. The StableID bucket is
+	// always pre-created because it is not manager-owned.
 	{
 		pc := parti.DefaultConfig()
 		// LOAD-BEARING: disable JetStream KV TTL for the handoff bucket in
@@ -306,25 +313,68 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 			log.Printf("[Phase6] pre-creating handoff bucket %q with MaxAge=%v (scenario knob)",
 				pc.KVBuckets.HandoffBucket, handoffPrecreateMaxAge)
 		}
-		// Use short, independent timeouts per bucket to avoid blocking startup
-		timeBuckets := []struct {
-			name string
-			ttl  time.Duration
-		}{
-			{pc.KVBuckets.StableIDBucket, pc.WorkerIDTTL},
-			{pc.KVBuckets.ElectionBucket, pc.ElectionTimeout},
-			{pc.KVBuckets.HeartbeatBucket, pc.HeartbeatTTL},
-			{pc.KVBuckets.AssignmentBucket, pc.KVBuckets.AssignmentTTL},
-			{pc.KVBuckets.HandoffBucket, handoffTTL},
+
+		skipPrecreate := cfg.Chaos.Storage.SkipBucketPrecreate
+		if skipPrecreate {
+			log.Printf("[Phase8] skip_bucket_precreate=true: manager-owned coordination buckets " +
+				"(election, heartbeat, assignment, handoff) will be created by the manager's " +
+				"own Start path. Only the StableID bucket is pre-created.")
 		}
-		for _, b := range timeBuckets {
+
+		// StableID bucket is always pre-created — not manager-owned.
+		{
 			bctx, bcancel := context.WithTimeout(ctx, 5*time.Second)
-			_, kerr := kvutil.EnsureKVBucket(bctx, js, b.name, b.ttl)
+			_, kerr := kvutil.EnsureKVBucket(bctx, js, pc.KVBuckets.StableIDBucket, pc.WorkerIDTTL)
 			bcancel()
 			if kerr != nil {
-				return fmt.Errorf("failed to ensure KV bucket %s: %w", b.name, kerr)
+				return fmt.Errorf("failed to ensure KV bucket %s: %w", pc.KVBuckets.StableIDBucket, kerr)
 			}
 		}
+
+		if !skipPrecreate {
+			// Phase 8 / Gap 9b: when election_replicas_override > 0,
+			// pre-create the election bucket with the configured replica
+			// count so the manager's get-first open preserves it.
+			electionReplicasOverride := cfg.Chaos.Storage.ElectionReplicasOverride
+			if electionReplicasOverride > 0 {
+				pctx, pcancel := context.WithTimeout(ctx, 10*time.Second)
+				actualReplicas, perr := precreateElectionBucketWithReplicas(pctx, js, electionReplicasOverride)
+				pcancel()
+				if perr != nil {
+					return fmt.Errorf("failed to pre-create election bucket with replicas=%d: %w", electionReplicasOverride, perr)
+				}
+				// Store the accepted replica count so the post-start oracle
+				// asserts against the actual value (not the requested one,
+				// which may have been clamped by a single-server NATS).
+				storageElectionReplicasWant.Store(int64(actualReplicas))
+				log.Printf("[Phase8/INV2] election bucket pre-created with Replicas=%d; oracle will assert %d",
+					electionReplicasOverride, actualReplicas)
+			}
+
+			// Use short, independent timeouts per bucket to avoid blocking startup
+			timeBuckets := []struct {
+				name string
+				ttl  time.Duration
+			}{
+				{pc.KVBuckets.ElectionBucket, pc.ElectionTimeout},
+				{pc.KVBuckets.HeartbeatBucket, pc.HeartbeatTTL},
+				{pc.KVBuckets.AssignmentBucket, pc.KVBuckets.AssignmentTTL},
+				{pc.KVBuckets.HandoffBucket, handoffTTL},
+			}
+			for _, b := range timeBuckets {
+				// Skip election if already pre-created with specific replicas.
+				if electionReplicasOverride > 0 && b.name == pc.KVBuckets.ElectionBucket {
+					continue
+				}
+				bctx, bcancel := context.WithTimeout(ctx, 5*time.Second)
+				_, kerr := kvutil.EnsureKVBucket(bctx, js, b.name, b.ttl)
+				bcancel()
+				if kerr != nil {
+					return fmt.Errorf("failed to ensure KV bucket %s: %w", b.name, kerr)
+				}
+			}
+		}
+
 		// Phase 6 / Gap 5: after seeding the handoff bucket with the
 		// scenario's PrecreateMaxAge, confirm the value actually stuck
 		// on the backing stream before any manager starts. If the
@@ -332,7 +382,7 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 		// oracle is meaningless — log loudly so the run can be
 		// diagnosed. We use the same Status() → KeyValueBucketStatus
 		// surface the manager uses at manager_setup.go:kvStreamConfig.
-		if handoffPrecreateMaxAge > 0 {
+		if !skipPrecreate && handoffPrecreateMaxAge > 0 {
 			vctx, vcancel := context.WithTimeout(ctx, 5*time.Second)
 			seeded, verr := readHandoffBucketMaxAge(vctx, js, pc.KVBuckets.HandoffBucket)
 			vcancel()
@@ -674,6 +724,43 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 	// so a single Stable observation is sufficient to validate the heal.
 	startHandoffBucketMaxAgeOracle(ctx, goroutineRegistry)
 
+	// Phase 8 / Gap 9: fire the storage-type oracle once any worker
+	// reaches StateStable (skip_bucket_precreate mode only).
+	if cfg.Chaos.Storage.SkipBucketPrecreate {
+		startStorageTypeOracle(ctx, goroutineRegistry)
+	}
+
+	// Phase 8 / Gap 9b: fire the election-replicas oracle once all
+	// workers reach StateStable (election_replicas_override mode only).
+	if cfg.Chaos.Storage.ElectionReplicasOverride > 0 {
+		startElectionReplicasOracle(ctx, goroutineRegistry, cfg.Workers.Count)
+	}
+
+	// Phase 8 / Gap 13: start the burst-after-quiet KV-op rate sampler
+	// when the scenario configures a quiet baseline duration. The sampler
+	// is started here (before producers/workers emit traffic) so the quiet
+	// window measurement begins at the same time as the simulation.
+	// The burst window samples the 30s after the scale_up event fires.
+	if cfg.Simulation.BurstAfterQuiet.QuietDuration > 0 {
+		multiplier := cfg.Chaos.Storage.KvOpRateCeilingMultiplier
+		burstAt := cfg.Simulation.BurstAfterQuiet.BurstAt
+		burstWindow := cfg.Simulation.BurstAfterQuiet.BurstWindow
+		if burstAt <= 0 {
+			burstAt = cfg.Simulation.BurstAfterQuiet.QuietDuration
+		}
+		if burstWindow <= 0 {
+			burstWindow = 30 * time.Second
+		}
+		go burstAfterQuietSampler(
+			ctx,
+			embeddedServer,
+			cfg.Simulation.BurstAfterQuiet.QuietDuration,
+			burstAt,
+			burstWindow,
+			multiplier,
+		)
+	}
+
 	// Optional: immediate scale-up via CLI flag
 	if aioScaleUpOnce > 0 {
 		spawnN := aioScaleUpOnce
@@ -893,14 +980,18 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 				// Phase 6 / Gap 5 counters.
 				handoffMaxAgeViol := handoffBucketMaxAgeViolations.Load()
 				orphanClaimDrift := orphanStableClaimDrift.Load()
-				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || claimLossOrderViol > 0 || producerResumeMissing > 0 || casStormPanics > 0 || handoffMaxAgeViol > 0 || orphanClaimDrift > 0 {
+				// Phase 8 / Gap 9 + Gap 13 counters.
+				storageTypeViol := storageTypeViolations.Load()
+				electionReplicasViol := electionReplicasViolations.Load()
+				kvOpRateCeilingViol := kvOpRateCeilingViolations.Load()
+				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || claimLossOrderViol > 0 || producerResumeMissing > 0 || casStormPanics > 0 || handoffMaxAgeViol > 0 || orphanClaimDrift > 0 || storageTypeViol > 0 || electionReplicasViol > 0 || kvOpRateCeilingViol > 0 {
 					// Record error but proceed to ordered shutdown
-					invariantsErr = fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift)
+					invariantsErr = fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d storage_type_violation=%d election_replicas_violation=%d kv_op_rate_ceiling_violation=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift, storageTypeViol, electionReplicasViol, kvOpRateCeilingViol)
 				}
 				if invariantsErr == nil {
-					log.Printf("Stability invariants passed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift)
+					log.Printf("Stability invariants passed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d storage_type_violation=%d election_replicas_violation=%d kv_op_rate_ceiling_violation=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift, storageTypeViol, electionReplicasViol, kvOpRateCeilingViol)
 				} else {
 					log.Printf("Stability invariants failed: %v", invariantsErr)
 				}
@@ -972,9 +1063,13 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 				// Phase 6 / Gap 5 counters.
 				handoffMaxAgeViol := handoffBucketMaxAgeViolations.Load()
 				orphanClaimDrift := orphanStableClaimDrift.Load()
-				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || claimLossOrderViol > 0 || producerResumeMissing > 0 || casStormPanics > 0 || handoffMaxAgeViol > 0 || orphanClaimDrift > 0 {
-					invariantsErr := fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift)
+				// Phase 8 / Gap 9 + Gap 13 counters.
+				storageTypeViol := storageTypeViolations.Load()
+				electionReplicasViol := electionReplicasViolations.Load()
+				kvOpRateCeilingViol := kvOpRateCeilingViolations.Load()
+				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || claimLossOrderViol > 0 || producerResumeMissing > 0 || casStormPanics > 0 || handoffMaxAgeViol > 0 || orphanClaimDrift > 0 || storageTypeViol > 0 || electionReplicasViol > 0 || kvOpRateCeilingViol > 0 {
+					invariantsErr := fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d storage_type_violation=%d election_replicas_violation=%d kv_op_rate_ceiling_violation=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift, storageTypeViol, electionReplicasViol, kvOpRateCeilingViol)
 					// Emit the structured failure_report.json so CI artifacts
 					// include InconclusiveOwnerEvents / unobserved counters /
 					// FirstChaosEventAt — auditability that the new

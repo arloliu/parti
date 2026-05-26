@@ -1,0 +1,86 @@
+# Phase 8 / Gap 13 — Burst-after-quiet KV-op rate scenario.
+#
+# 3 workers run quietly for 60s (baseline window), then a scale_up event
+# fires adding 17 workers (total ~20). The simulation samples NATS InMsgs +
+# OutMsgs during both windows as a proxy for KV-operation throughput, then
+# asserts the burst-window rate does not exceed:
+#
+#   ceiling = quiet_rate × kv_op_rate_ceiling_multiplier
+#
+# The default multiplier is 5.0 (loose first-run sentinel; tunable). After
+# the first run establishes an empirical quiet baseline and burst rate, the
+# multiplier should be tightened to ~1.5 (tight bound) or whatever the
+# production target is.
+#
+# Counter kv_op_rate_ceiling_violation is incremented when burst > ceiling.
+# For the first run it is expected to be 0 (no explosion); adjust the
+# multiplier downward once the empirical numbers are known.
+#
+# INV3 (Phase 8): kv_op_rate_ceiling_violation must be 0 at the default 5.0
+# multiplier. Log lines from [Phase8/INV3] show the empirical quiet/burst
+# rates for multiplier calibration.
+#
+# TUNING: Set chaos.storage.kv_op_rate_ceiling_multiplier to 1.5 after the
+# first run has confirmed the baseline. The value 5.0 is intentionally loose
+# to avoid false positives on the first empirical run.
+
+simulation:
+  duration: 120s
+  mode: all-in-one
+  # Quiet window: first 60s, then scale_up fires at 70s (10s after quiet ends).
+  # Burst window: 30s starting at 70s (the scale_up event offset).
+  burst_after_quiet:
+    quiet_duration: 60s
+    burst_at: 70s
+    burst_window: 30s
+
+nats:
+  mode: embedded
+
+partitions:
+  count: 20
+  message_rate_per_partition: 1
+  distribution: uniform
+
+producers:
+  count: 1
+
+workers:
+  count: 3
+  assignment_strategy: WeightedConsistentHash
+  enforce_exclusive_consumption: true
+  processing_delay:
+    min: 1ms
+    max: 5ms
+
+chaos:
+  enabled: true
+  # No random chaos; only the scheduled scale_up at t=70s.
+  interval: "3600s-3601s"
+  events: []
+  min_workers: 3
+  max_workers: 20
+  scheduled_events:
+    # Scale from 3 → 20 workers at t=70s (10s after the quiet window ends).
+    # count=17 adds 17 workers; together with the initial 3 = 20 total.
+    - at: 70s
+      event: scale_up
+      params:
+        count: 17
+  storage:
+    # KV-op rate ceiling multiplier (tunable). Default 5.0 is a loose first-
+    # run sentinel. After empirical calibration, tighten to ~1.5.
+    # Set to 0 to use the default 5.0.
+    kv_op_rate_ceiling_multiplier: 5.0
+
+coordinator:
+  gap_aging: 120s
+  slo:
+    enable_catch_up: true
+    catch_up_deadline: 60s
+    catch_up_percent: 99
+    absence_threshold: 5s
+
+metrics:
+  prometheus:
+    enabled: false
