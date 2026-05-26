@@ -1,0 +1,66 @@
+# Phase 8 / Gap 9a — Storage-type assertion (manager-create path).
+#
+# The simulation pre-create loop is suppressed for the four manager-owned
+# coordination buckets (election, heartbeat, assignment, handoff) by setting
+# chaos.storage.skip_bucket_precreate=true. The manager's own Start path
+# (manager_setup.go:setupKVBuckets) is then the ONLY code that creates these
+# buckets, exercising its storage-type choices end-to-end.
+#
+# After the first worker reaches StateStable, the oracle (storage_chaos.go:
+# checkStorageTypeOracle) reads each bucket's live stream config via
+# kv.Status → *KeyValueBucketStatus → StreamInfo().Config.Storage and asserts:
+#   - parti-election:   StorageType == FileStorage
+#   - parti-assignment: StorageType == FileStorage
+#   - parti-handoff:    StorageType == FileStorage
+#
+# A violation increments storage_type_violation and fails the run.
+#
+# INV1 (Phase 8): storage_type_violation must be 0.
+#
+# Mutation test (exit-criteria verification):
+#   Change manager_setup.go:152 from jetstream.FileStorage to
+#   jetstream.MemoryStorage and re-run — INV1 must flip to > 0.
+
+simulation:
+  duration: 60s
+  mode: all-in-one
+
+nats:
+  mode: embedded
+
+partitions:
+  count: 10
+  message_rate_per_partition: 1
+  distribution: uniform
+
+producers:
+  count: 1
+
+workers:
+  count: 3
+  assignment_strategy: WeightedConsistentHash
+  enforce_exclusive_consumption: true
+  processing_delay:
+    min: 1ms
+    max: 5ms
+
+chaos:
+  enabled: false
+  interval: "3600s-3601s"
+  events: []
+  storage:
+    # Suppress the simulation's pre-create loop for manager-owned buckets.
+    # The manager's Start path is now the only bucket-create path.
+    skip_bucket_precreate: true
+
+coordinator:
+  gap_aging: 60s
+  slo:
+    enable_catch_up: true
+    catch_up_deadline: 30s
+    catch_up_percent: 99
+    absence_threshold: 5s
+
+metrics:
+  prometheus:
+    enabled: false

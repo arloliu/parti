@@ -28,6 +28,24 @@ type SimulationConfig struct {
 	// Cooldown stops chaos and producers this long before the end to allow healing.
 	// When unset or 0, cooldown is disabled. CLI flag -cooldown overrides this value.
 	Cooldown time.Duration `yaml:"cooldown"`
+
+	// BurstAfterQuiet configures Phase 8 / Gap 13 burst-after-quiet
+	// KV-op rate sampling. When QuietDuration > 0, the sampler is activated.
+	BurstAfterQuiet BurstAfterQuietConfig `yaml:"burst_after_quiet"`
+}
+
+// BurstAfterQuietConfig configures the Phase 8 / Gap 13 burst-after-quiet
+// KV-op rate sampling windows.
+type BurstAfterQuietConfig struct {
+	// QuietDuration is the length of the quiet baseline window. When > 0,
+	// the burst-after-quiet sampler is activated. Typically 60s.
+	QuietDuration time.Duration `yaml:"quiet_duration"`
+	// BurstAt is the offset from simulation start at which the burst window
+	// begins. This should coincide with (or shortly after) the scale_up
+	// chaos event fires. Defaults to QuietDuration if unset.
+	BurstAt time.Duration `yaml:"burst_at"`
+	// BurstWindow is the duration of the burst sampling window. Defaults to 30s.
+	BurstWindow time.Duration `yaml:"burst_window"`
 }
 
 // PartitionsConfig configures partition count and distribution.
@@ -272,6 +290,10 @@ type ChaosConfig struct {
 
 	// Handoff carries Phase 6 / Gap 5 handoff-bucket scenario knobs.
 	Handoff HandoffChaosConfig `yaml:"handoff"`
+
+	// Storage carries Phase 8 / Gap 9 storage-assertion and
+	// burst-after-quiet (Gap 13) scenario knobs.
+	Storage StorageChaosConfig `yaml:"storage"`
 }
 
 // HandoffChaosConfig configures Phase 6 / Gap 5 handoff-bucket chaos primitives.
@@ -284,6 +306,51 @@ type HandoffChaosConfig struct {
 	// A non-zero live MaxAge after every worker reaches StateStable is an
 	// invariant violation (handoff_bucket_maxage_violation counter).
 	PrecreateMaxAge time.Duration `yaml:"precreate_maxage"`
+}
+
+// StorageChaosConfig configures Phase 8 / Gap 9 storage-assertion scenario knobs.
+type StorageChaosConfig struct {
+	// SkipBucketPrecreate, when true, suppresses the simulation's
+	// pre-create loop for the four manager-owned coordination buckets
+	// (election, heartbeat, assignment, handoff). The manager's own
+	// Start path is then the only code path that creates these buckets,
+	// exercising its storage-type and TTL choices end-to-end. After at
+	// least one worker reaches StateStable the simulation asserts:
+	//   - StorageType(parti-election) == FileStorage
+	//   - StorageType(parti-assignment) == FileStorage
+	//   - StorageType(parti-handoff) == FileStorage
+	// A violation increments storage_type_violation and fails the run.
+	//
+	// NOTE: the StableID bucket is still pre-created regardless of this
+	// flag because it is NOT created by the manager (it is created by the
+	// stableid claimer which does not carry a storage-type choice, so
+	// asserting on it here would be a different concern).
+	SkipBucketPrecreate bool `yaml:"skip_bucket_precreate"`
+
+	// ElectionReplicasOverride, when > 0, pre-creates the election KV
+	// bucket (parti-election) with this replica count AND
+	// Storage=FileStorage BEFORE any worker starts. This exercises the
+	// "operator-precreated" path: the manager's get-first EnsureKV opens
+	// the existing bucket (preserving the operator's Replicas setting).
+	// After all workers reach StateStable the simulation asserts
+	// Replicas == ElectionReplicasOverride on the live stream.
+	// A violation increments election_replicas_violation.
+	//
+	// NOTE: Replicas > 1 requires a multi-server NATS cluster. Embedded
+	// NATS (single server) rejects Replicas > 1 with an error; the
+	// simulation falls back to Replicas=1 in that case and documents the
+	// limitation. The assertion value is adjusted to match the actual
+	// accepted value, so the test still catches a regression where
+	// replicas were silently dropped from 1 to 0.
+	ElectionReplicasOverride int `yaml:"election_replicas_override"`
+
+	// KvOpRateCeilingMultiplier is the multiplier applied to the
+	// per-worker quiet-window KV-op rate to derive the burst-window
+	// ceiling. Default 0 means "use 5.0" (clearly-broken regression
+	// signal). Tune this after the first run has established a baseline.
+	// A value of 1.5 is the tight bound; 5.0 is the conservative first-
+	// run default.
+	KvOpRateCeilingMultiplier float64 `yaml:"kv_op_rate_ceiling_multiplier"`
 }
 
 // ScheduledChaosEvent is a one-shot scenario-scheduled chaos event.
