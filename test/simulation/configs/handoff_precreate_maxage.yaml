@@ -1,0 +1,64 @@
+# Phase 6 / Gap 5 — Handoff bucket MaxAge reconciler scenario (INV1).
+#
+# The handoff KV bucket (parti-handoff) is pre-created with a non-zero
+# MaxAge (5m) BEFORE any worker's manager runs. This emulates a bucket
+# created by an older parti version or by external tooling that did not
+# know stable ownership claims must never expire. Each manager's Start
+# path calls reconcileHandoffBucketMaxAge (manager_setup.go), which MUST
+# clear the inherited MaxAge to 0 before Start returns success.
+#
+# After at least one worker reaches StateStable, the simulation reads
+# the live stream config via the SAME surface the manager uses
+# (kv.Status → *KeyValueBucketStatus → StreamInfo().Config.MaxAge from
+# a fresh JS handle) and asserts MaxAge == 0. A non-zero value
+# increments handoff_bucket_maxage_violation and fails the run.
+#
+# INV1: handoff_bucket_maxage_violation must be 0.
+
+simulation:
+  duration: 60s
+  mode: all-in-one
+
+nats:
+  mode: embedded
+
+partitions:
+  count: 10
+  message_rate_per_partition: 1
+  distribution: uniform
+
+producers:
+  count: 1
+
+workers:
+  count: 3
+  assignment_strategy: WeightedConsistentHash
+  # Required: the manager's reconcileHandoffBucketMaxAge only runs when
+  # two-phase handoff is enabled (setupHandoff is gated on
+  # EnableTwoPhaseHandoff, which is driven by enforce_exclusive_consumption
+  # in the simulation worker wiring at worker.go:308).
+  enforce_exclusive_consumption: true
+  processing_delay:
+    min: 1ms
+    max: 5ms
+
+chaos:
+  enabled: false
+  interval: "3600s-3601s"
+  events: []
+  handoff:
+    # Phase 6 / Gap 5 knob: seed parti-handoff with a non-zero MaxAge
+    # before workers start so reconcileHandoffBucketMaxAge has work to do.
+    precreate_maxage: 5m
+
+coordinator:
+  gap_aging: 60s
+  slo:
+    enable_catch_up: true
+    catch_up_deadline: 30s
+    catch_up_percent: 99
+    absence_threshold: 5s
+
+metrics:
+  prometheus:
+    enabled: false
