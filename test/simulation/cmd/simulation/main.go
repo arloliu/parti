@@ -309,10 +309,13 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 		cfg.Coordinator.SLO.CatchUpPercent,
 		cfg.Coordinator.SLO.AbsenceThreshold,
 	)
-	go coord.Start(ctx)
-
-	// Create goroutine registry for all-in-one mode chaos
+	// Create goroutine registry for all-in-one mode chaos.
+	// Must be created BEFORE coord.Start so EnableShutdownOracles can attach
+	// the registry to the oracle watchers before the coordinator's goroutines start.
 	goroutineRegistry := coordinator.NewGoroutineRegistry()
+	coord.EnableShutdownOracles(goroutineRegistry)
+
+	go coord.Start(ctx)
 
 	// Create checkpoint manager if enabled
 	var checkpointMgr *coordinator.CheckpointManager
@@ -675,14 +678,17 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 				concurrent := tr.GetConcurrentOwnersViolationCount()
 				inconclusive := tr.GetOwnershipInconclusiveCount()
 				_, unobservedPost := tr.GetOwnershipUnobservedCounts()
-				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 {
+				snapshotOverlaps := coord.GetSnapshotOverlapCount()
+				doubleLeaders := coord.GetDoubleLeaderObservations()
+				stateReconcileViol := coord.GetStateReconcileViolations()
+				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 {
 					// Record error but proceed to ordered shutdown
-					invariantsErr = fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost)
+					invariantsErr = fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol)
 				}
 				if invariantsErr == nil {
-					log.Printf("Stability invariants passed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost)
+					log.Printf("Stability invariants passed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol)
 				} else {
 					log.Printf("Stability invariants failed: %v", invariantsErr)
 				}
@@ -728,9 +734,12 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 				concurrent := tr.GetConcurrentOwnersViolationCount()
 				inconclusive := tr.GetOwnershipInconclusiveCount()
 				_, unobservedPost := tr.GetOwnershipUnobservedCounts()
-				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 {
-					invariantsErr := fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost)
+				snapshotOverlaps := coord.GetSnapshotOverlapCount()
+				doubleLeaders := coord.GetDoubleLeaderObservations()
+				stateReconcileViol := coord.GetStateReconcileViolations()
+				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 {
+					invariantsErr := fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol)
 					// Emit the structured failure_report.json so CI artifacts
 					// include InconclusiveOwnerEvents / unobserved counters /
 					// FirstChaosEventAt — auditability that the new

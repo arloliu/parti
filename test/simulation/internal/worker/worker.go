@@ -86,6 +86,11 @@ type Worker struct {
 
 	// slow consumer simulation (processing multiplier)
 	processingMultiplier atomic.Int32
+
+	// degradedReason caches the most recent OnDegraded reason string.
+	// Written by the OnDegraded hook; read by DegradedReason().
+	degradedReason   atomic.Pointer[string]
+	degradedReportCh chan<- coordinator.WorkerDegradedReport
 }
 
 // SetNetworkControl sets the network control for this worker.
@@ -158,6 +163,10 @@ type Config struct {
 	// Carried through to StartLatencyReport so the coordinator's classifier
 	// can pick the right budget without depending on channel-receive timing.
 	IsInitialCohort bool
+	// DegradedReportCh receives a WorkerDegradedReport each time this worker
+	// enters degraded mode. Optional — if nil, degraded events are only cached
+	// in the worker's atomic field (readable via DegradedReason()).
+	DegradedReportCh chan<- coordinator.WorkerDegradedReport
 }
 
 // NewWorker creates a new worker.
@@ -251,6 +260,7 @@ func NewWorker(cfg Config) (*Worker, error) { //nolint:cyclop
 		handlerConcurrency:  cfg.HandlerConcurrency,
 		consumerBatchSize:   cfg.ConsumerBatchSize,
 		isInitialCohort:     cfg.IsInitialCohort,
+		degradedReportCh:    cfg.DegradedReportCh,
 	}
 
 	perSubMaxAckPending := max(worker.consumerBatchSize*2,
@@ -362,7 +372,10 @@ func NewWorker(cfg Config) (*Worker, error) { //nolint:cyclop
 	}
 
 	// Set up hooks to record metrics only (consumer updates handled by manager option)
-	hooks := &types.Hooks{OnAssignmentChanged: worker.handleAssignmentChanged}
+	hooks := &types.Hooks{
+		OnAssignmentChanged: worker.handleAssignmentChanged,
+		OnDegraded:          worker.handleDegraded,
+	}
 	// Create manager with hooks
 	manager, err := parti.NewManager(&partiCfg, js, partitionSource, assignmentStrategy,
 		parti.WithLogger(logger),
@@ -707,6 +720,55 @@ func (w *Worker) IsLeader() bool {
 		return false
 	}
 	return w.manager.IsLeader()
+}
+
+// WorkerStateInt returns the current manager state as an int (castable to parti.State /
+// types.State). Returns 0 (StateInit) if the manager is nil.
+// Implements coordinator.WorkerObserver.
+func (w *Worker) WorkerStateInt() int {
+	if w.manager == nil {
+		return 0
+	}
+	return int(w.manager.State())
+}
+
+// StableWorkerID returns the stable worker ID claimed by the manager, or "" if
+// the manager is nil or the ID has not yet been claimed.
+// Implements coordinator.WorkerObserver.
+func (w *Worker) StableWorkerID() string {
+	if w.manager == nil {
+		return ""
+	}
+	return w.manager.WorkerID()
+}
+
+// DegradedReason returns the most recently cached degraded reason captured by
+// the OnDegraded hook, or "" if the worker has not entered degraded mode.
+func (w *Worker) DegradedReason() string {
+	p := w.degradedReason.Load()
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+// handleDegraded is the OnDegraded hook implementation. It caches the reason in
+// the atomic field and fans out a non-blocking send to DegradedReportCh if set.
+func (w *Worker) handleDegraded(_ context.Context, reason string) error {
+	w.degradedReason.Store(&reason)
+	if w.degradedReportCh != nil {
+		select {
+		case w.degradedReportCh <- coordinator.WorkerDegradedReport{
+			WorkerID: w.StableWorkerID(),
+			Reason:   reason,
+			At:       time.Now(),
+		}:
+		default:
+			log.Printf("[%s] degradedReportCh full, dropping degraded event (reason=%s)", w.id, reason)
+		}
+	}
+
+	return nil
 }
 
 // Stop gracefully stops the worker.

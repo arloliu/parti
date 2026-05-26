@@ -129,6 +129,11 @@ type Coordinator struct {
 	// report writer, external observers via FirstChaosEventAt).
 	chaosOnce         sync.Once
 	firstChaosEventAt atomic.Pointer[time.Time]
+
+	// Shutdown oracles — nil until EnableShutdownOracles is called.
+	snapshotOverlap *SnapshotOverlapClassifier
+	leaderUniq      *LeaderUniquenessWatcher
+	stateReconcile  *StateReconcileWatcher
 }
 
 // ownerSnapshot is an immutable view of partition→workers at a moment
@@ -293,6 +298,54 @@ func (c *Coordinator) MarkChaosStarted() {
 		c.firstChaosEventAt.Store(&now)
 	})
 	c.tracker.MarkChaosStarted()
+	if c.leaderUniq != nil {
+		c.leaderUniq.MarkChaosStarted()
+	}
+	if c.stateReconcile != nil {
+		c.stateReconcile.MarkChaosStarted()
+	}
+}
+
+// EnableShutdownOracles constructs the three foundation oracles (snapshot-overlap,
+// leader-uniqueness, state-reconcile) and attaches them to the coordinator.
+// Must be called BEFORE coord.Start(). Idempotent — subsequent calls are no-ops.
+// registry is the GoroutineRegistry that maps worker IDs to *worker.Worker objects.
+func (c *Coordinator) EnableShutdownOracles(registry *GoroutineRegistry) {
+	if c.snapshotOverlap != nil {
+		return
+	}
+	c.snapshotOverlap = NewSnapshotOverlapClassifier(5*time.Second, registry)
+	c.leaderUniq = NewLeaderUniquenessWatcher(registry)
+	c.stateReconcile = NewStateReconcileWatcher(registry, 30*time.Second)
+}
+
+// GetSnapshotOverlapCount returns the total snapshot-overlap violations detected
+// by the oracle. Returns 0 if EnableShutdownOracles was never called.
+func (c *Coordinator) GetSnapshotOverlapCount() int64 {
+	if c.snapshotOverlap == nil {
+		return 0
+	}
+	return c.snapshotOverlap.ViolationCount()
+}
+
+// GetDoubleLeaderObservations returns the total (pre-chaos) double-leader
+// observations detected by the oracle. Returns 0 if EnableShutdownOracles
+// was never called.
+func (c *Coordinator) GetDoubleLeaderObservations() int64 {
+	if c.leaderUniq == nil {
+		return 0
+	}
+	return c.leaderUniq.DoubleLeaderObservations()
+}
+
+// GetStateReconcileViolations returns the total (pre-chaos) state-reconcile
+// violations detected by the oracle. Returns 0 if EnableShutdownOracles was
+// never called.
+func (c *Coordinator) GetStateReconcileViolations() int64 {
+	if c.stateReconcile == nil {
+		return 0
+	}
+	return c.stateReconcile.StateReconcileViolations()
 }
 
 // FirstChaosEventAt returns the timestamp captured when MarkChaosStarted
@@ -443,6 +496,14 @@ func (c *Coordinator) Start(ctx context.Context) {
 	// the same goroutine's view of baselineLocked (no cross-goroutine races).
 	if c.metricsCollector != nil && c.totalPartitions > 0 {
 		go c.processAssignments(ctx)
+	}
+
+	// Start shutdown oracle background pollers (no-ops when oracles are nil).
+	if c.leaderUniq != nil {
+		c.leaderUniq.Run(ctx, 500*time.Millisecond)
+	}
+	if c.stateReconcile != nil {
+		c.stateReconcile.Run(ctx, 10*time.Second)
 	}
 
 	<-ctx.Done()
@@ -1173,6 +1234,9 @@ func (c *Coordinator) processReceivedMessages(ctx context.Context) {
 			if c.catchUpEnabled {
 				c.processCatchUpActivity(msg.WorkerID)
 			}
+			if c.stateReconcile != nil {
+				c.stateReconcile.RecordMessage(msg.WorkerID, msg.PartitionID)
+			}
 			// Track active (actual) owner by last processor seen per partition
 			c.ownersMu.Lock()
 			c.activeOwners[msg.PartitionID] = msg.WorkerID
@@ -1360,6 +1424,9 @@ func (c *Coordinator) processAssignments(ctx context.Context) { //nolint:gocyclo
 			}
 			delete(c.workerAssignments, wid)
 			c.rebuildOwnerSnapshotLocked()
+			if c.snapshotOverlap != nil {
+				c.snapshotOverlap.ForgetWorker(wid)
+			}
 			if c.baselineLocked && c.totalPartitions > 0 {
 				fresh := make(map[int]string, c.totalPartitions)
 				for id, wset := range c.workerAssignments {
@@ -1405,6 +1472,15 @@ func (c *Coordinator) processAssignments(ctx context.Context) { //nolint:gocyclo
 			}
 			c.workerAssignments[ar.WorkerID] = set
 			c.rebuildOwnerSnapshotLocked()
+
+			// Feed oracle classifiers with the fresh assignment snapshot.
+			if c.snapshotOverlap != nil {
+				c.snapshotOverlap.IngestAssignment(ar.WorkerID, ar.Partitions)
+				c.snapshotOverlap.Check(time.Now())
+			}
+			if c.stateReconcile != nil {
+				c.stateReconcile.RecordAssignment(ar.WorkerID, ar.Partitions, time.Now())
+			}
 
 			// Build global set.
 			global := make(map[int]struct{})
