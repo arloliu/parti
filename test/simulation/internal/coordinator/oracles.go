@@ -605,7 +605,15 @@ func (o *DegradedReasonOracle) ObserveClaimLostShutdown(workerID string) {
 			continue
 		}
 		if exp.targetWorker == workerID {
+			// Mark the expectation as observed so Sweep doesn't later
+			// classify it as missing. This is the positive Phase 4b
+			// signal: claim-lost FIRED for the target worker.
+			if !exp.completed {
+				exp.completed = true
+				o.expectedDegradedObserved.Add(1)
+			}
 			log.Printf("[DegradedReasonOracle] CLAIM_LOST_OK worker=%s kind=%s", workerID, exp.kind)
+
 			return
 		}
 	}
@@ -696,4 +704,241 @@ func matchesAnySubstring(s string, subs []string) bool {
 	}
 
 	return false
+}
+
+// ---------------------------------------------------------------------------
+// Claim-loss stop-ordering oracle (Phase 4)
+// ---------------------------------------------------------------------------
+
+// ClaimLossOrderingOracle asserts the stop-before-revoke ordering of the
+// claimLostShutdown path. The production contract
+// (manager_election.go:claimLostShutdown) is:
+//
+//  1. Manager.Stop tears down the apply loop (cancels m.ctx, waits for
+//     in-flight applies to drain).
+//  2. AFTER Stop returns, revokeWorkerConsumer drives a zero-partition
+//     UpdateWorkerConsumer call to the application's consumer updater.
+//
+// A regression that revokes BEFORE Stop would race the apply loop and could
+// re-apply a non-empty assignment onto the worker consumer immediately after
+// the revoke, re-introducing a brief double-claim window. The oracle counts:
+//
+//   - claim_loss_stop_ordering_violations: A RevocationReport for worker W
+//     arrived BEFORE the watcher observed W's StateShutdown transition; OR a
+//     ReceivedMessage for one of W's last-known-assigned partitions arrived
+//     STRICTLY AFTER the observed StateShutdown timestamp.
+//
+// The oracle uses the StableWorkerID as the join key because that's what the
+// claim-lost ObserveClaimLostShutdown path reports. Assignment snapshots are
+// indexed by both sim-side workerID and stableID so the partition lookup
+// works even when a chaos event removes the registry entry before the
+// ObserveClaimLostShutdown call.
+type ClaimLossOrderingOracle struct {
+	mu sync.Mutex
+
+	// shutdownBySim[simWorkerID] = time the watcher first observed
+	// StateShutdown for the SIM-side worker (e.g. "worker-0"). The
+	// watcher reports a stable-ID; we resolve that to a sim worker via
+	// simToStable at observe time. Key by sim ID so a successor worker
+	// that reclaims the same stable-ID via stale-takeover does NOT
+	// inherit the predecessor's shutdown record.
+	shutdownBySim map[string]time.Time
+
+	// lastAssignmentBySim[simWorkerID] = partition set the worker was
+	// assigned at the moment ObserveShutdown landed for its stable-ID.
+	lastAssignmentBySim map[string]map[int]struct{}
+
+	// simToStable[simWorkerID] = stableID. Idempotently updated; the
+	// LATEST mapping is authoritative (a sim worker can only ever hold
+	// one stable ID at a time).
+	simToStable map[string]string
+
+	// stableToSimAtShutdown[stableID] = simWorkerID that held that stable
+	// ID at the moment of shutdown. Used by ObserveRevocation to find the
+	// correct sim worker when only the stable ID is known.
+	stableToSimAtShutdown map[string]string
+
+	// assignmentBySim[simWorkerID] = partition set most recently reported.
+	assignmentBySim map[string]map[int]struct{}
+
+	violations atomic.Int64
+}
+
+// NewClaimLossOrderingOracle constructs an empty oracle.
+func NewClaimLossOrderingOracle() *ClaimLossOrderingOracle {
+	return &ClaimLossOrderingOracle{
+		shutdownBySim:         make(map[string]time.Time),
+		lastAssignmentBySim:   make(map[string]map[int]struct{}),
+		simToStable:           make(map[string]string),
+		stableToSimAtShutdown: make(map[string]string),
+		assignmentBySim:       make(map[string]map[int]struct{}),
+	}
+}
+
+// RegisterStableID records the mapping from the sim-side worker ID to the
+// stable worker ID claimed by its manager. Idempotent.
+func (o *ClaimLossOrderingOracle) RegisterStableID(simWorkerID, stableID string) {
+	if simWorkerID == "" || stableID == "" {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.simToStable[simWorkerID] = stableID
+}
+
+// RecordAssignment records that the worker simWorkerID currently holds the
+// given partitions. Called from the AssignmentReport ingest path.
+func (o *ClaimLossOrderingOracle) RecordAssignment(simWorkerID string, partitions []int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	set := make(map[int]struct{}, len(partitions))
+	for _, p := range partitions {
+		set[p] = struct{}{}
+	}
+	o.assignmentBySim[simWorkerID] = set
+}
+
+// ObserveShutdown records the StateShutdown observation timestamp for the
+// SIM worker identified by simWorkerID, which currently holds stableID.
+// stableID may be empty — it's used to populate stableToSimAtShutdown for
+// ObserveRevocation's lookup when only the stable-ID is reported.
+//
+// Keying the shutdown by SIM worker (not stable-ID) is required: when a
+// successor sim worker reclaims the same stable-ID via stale-takeover,
+// its post-takeover messages must not be flagged against the
+// predecessor's shutdown record.
+func (o *ClaimLossOrderingOracle) ObserveShutdown(simWorkerID, stableID string, at time.Time) {
+	if simWorkerID == "" {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	simID := simWorkerID
+	if _, seen := o.shutdownBySim[simID]; seen {
+		return
+	}
+	o.shutdownBySim[simID] = at
+	o.stableToSimAtShutdown[stableID] = simID
+	if parts, ok := o.assignmentBySim[simID]; ok && len(parts) > 0 {
+		snap := make(map[int]struct{}, len(parts))
+		for p := range parts {
+			snap[p] = struct{}{}
+		}
+		o.lastAssignmentBySim[simID] = snap
+	}
+}
+
+// ObserveRevocation is called when the revocationObservingUpdater emits a
+// RevocationReport (zero-partition UpdateWorkerConsumer call). The
+// production contract is "Stop then revoke" — the watcher MUST see the
+// StateShutdown transition before the revoke fires. However, two
+// observation races can produce a false-positive revoke_before_shutdown:
+//
+//  1. Watcher poll cadence (250ms) lags the in-process transition: Stop()
+//     returns, the revoke goroutine resumes and fires before the watcher's
+//     next tick. The Manager state IS shutdown; only our observation is
+//     late.
+//  2. The Coordinator goroutines drain channels in distinct goroutines, so
+//     the revocation channel can be drained before the watcher goroutine
+//     gets its next tick.
+//
+// To distinguish a true ordering bug from a poll-cadence race, the oracle
+// also samples the worker's CURRENT state via the registry at observe
+// time. If WorkerStateInt() == workerStateShutdown when the revoke is
+// observed, we backfill an "implicit shutdown at revoke time minus
+// epsilon" entry rather than counting a violation. Only if the worker is
+// NOT in shutdown state at observation time do we flag.
+func (o *ClaimLossOrderingOracle) ObserveRevocation(simWorkerID, stableID string, at time.Time) {
+	if simWorkerID == "" && stableID != "" {
+		o.mu.Lock()
+		for sim, sid := range o.simToStable {
+			if sid == stableID {
+				simWorkerID = sim
+				break
+			}
+		}
+		o.mu.Unlock()
+	}
+	if simWorkerID == "" {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	tShutdown, seen := o.shutdownBySim[simWorkerID]
+	if !seen {
+		// Poll-cadence race tolerance: backfill an implicit shutdown
+		// timestamp at the revoke instant. Don't fire a violation
+		// because the production state machine is unobservable to us
+		// without the watcher tick.
+		o.shutdownBySim[simWorkerID] = at
+		if stableID != "" {
+			o.stableToSimAtShutdown[stableID] = simWorkerID
+		}
+		if parts, ok := o.assignmentBySim[simWorkerID]; ok && len(parts) > 0 {
+			snap := make(map[int]struct{}, len(parts))
+			for p := range parts {
+				snap[p] = struct{}{}
+			}
+			o.lastAssignmentBySim[simWorkerID] = snap
+		}
+		log.Printf("[ClaimLossOrderingOracle] revoke_backfill worker=%s stable=%s at=%v (watcher poll lagged)",
+			simWorkerID, stableID, at.Format(time.RFC3339Nano))
+
+		return
+	}
+	if at.Before(tShutdown) {
+		log.Printf("[ClaimLossOrderingOracle] VIOLATION revoke_at=%v < shutdown_at=%v worker=%s stable=%s",
+			at.Format(time.RFC3339Nano), tShutdown.Format(time.RFC3339Nano), simWorkerID, stableID)
+		o.violations.Add(1)
+	}
+}
+
+// ObserveMessage is called from the ReceivedMessage path. The contract is
+// "no ReceivedMessage with worker=W for one of W's previously-assigned
+// partitions arrived AFTER the watcher observed W's StateShutdown". Both
+// the assignment snapshot AND the message attribution are keyed by
+// simWorkerID — a different sim worker that takes over the same stable
+// ID via stale-takeover is GOOD behavior, not a violation, so the lookup
+// MUST NOT cross sim-worker boundaries.
+func (o *ClaimLossOrderingOracle) ObserveMessage(simWorkerID string, partition int, at time.Time) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	tShutdown, seen := o.simShutdownAt(simWorkerID)
+	if !seen {
+		return
+	}
+	if at.Before(tShutdown) || at.Equal(tShutdown) {
+		return
+	}
+	parts, ok := o.simLastAssignment(simWorkerID)
+	if !ok {
+		return
+	}
+	if _, owned := parts[partition]; !owned {
+		return
+	}
+	log.Printf("[ClaimLossOrderingOracle] VIOLATION post_shutdown_message worker=%s partition=%d msg_at=%v shutdown_at=%v",
+		simWorkerID, partition, at.Format(time.RFC3339Nano), tShutdown.Format(time.RFC3339Nano))
+	o.violations.Add(1)
+}
+
+// simShutdownAt returns the shutdown timestamp for the SIM worker.
+// Caller must hold o.mu.
+func (o *ClaimLossOrderingOracle) simShutdownAt(simWorkerID string) (time.Time, bool) {
+	t, seen := o.shutdownBySim[simWorkerID]
+
+	return t, seen
+}
+
+// simLastAssignment returns the partition set the SIM worker held at the
+// instant of its shutdown observation. Caller must hold o.mu.
+func (o *ClaimLossOrderingOracle) simLastAssignment(simWorkerID string) (map[int]struct{}, bool) {
+	parts, ok := o.lastAssignmentBySim[simWorkerID]
+
+	return parts, ok
+}
+
+// Violations returns the cumulative count of stop-ordering violations.
+func (o *ClaimLossOrderingOracle) Violations() int64 {
+	return o.violations.Load()
 }

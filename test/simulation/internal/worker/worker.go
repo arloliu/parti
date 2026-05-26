@@ -92,6 +92,13 @@ type Worker struct {
 	// Written by the OnDegraded hook; read by DegradedReason().
 	degradedReason   atomic.Pointer[string]
 	degradedReportCh chan<- coordinator.WorkerDegradedReport
+
+	// revocationReportCh receives a RevocationReport when the manager
+	// drives a zero-partition UpdateWorkerConsumer call. Wired via
+	// revocationObservingUpdater so the Phase 4 ordering oracle can see
+	// the revoke event (OnAssignmentChanged does NOT fire on the
+	// claim-loss revoke path).
+	revocationReportCh chan<- coordinator.RevocationReport
 }
 
 // SetNetworkControl sets the network control for this worker.
@@ -189,6 +196,26 @@ type Config struct {
 	// reconcileInterval < watcher_stall duration < bucketUnavailableCooldown
 	// holds for the Phase 2 scenarios).
 	SourceReconcileInterval time.Duration
+
+	// Phase 4: per-worker StableID pool overrides. Each field is consulted
+	// with override-if-set semantics: when the field is the zero value
+	// ("" / 0), the simulation default is used (prefix="simulation-worker",
+	// max=999, min=0, ttl=parti.DefaultConfig().WorkerIDTTL). When non-
+	// zero, the caller's value wins and overrides the sim default. This is
+	// the load-bearing semantic that lets tiny-pool / freeze-victim chaos
+	// scenarios carry a Min==Max==1 pool through worker construction
+	// without NewWorker silently restoring the broad pool.
+	WorkerIDPrefix string
+	WorkerIDMin    int
+	WorkerIDMax    int
+	WorkerIDTTL    time.Duration
+
+	// RevocationReportCh receives a RevocationReport each time the manager
+	// drives a zero-partition UpdateWorkerConsumer call (Phase 4 ordering
+	// oracle). The signal is needed because OnAssignmentChanged does NOT
+	// fire on claim-loss revoke (revokeWorkerConsumer bypasses the apply
+	// loop and the hook). Optional; nil channel disables the signal.
+	RevocationReportCh chan<- coordinator.RevocationReport
 }
 
 // NewWorker creates a new worker.
@@ -248,10 +275,34 @@ func NewWorker(cfg Config) (*Worker, error) { //nolint:cyclop,gocyclo // dispatc
 		assignmentStrategy = strategy.NewConsistentHash()
 	}
 
-	// Use default config and customize
+	// Use default config and customize.
+	//
+	// Phase 4 override-if-set semantics: the hardcoded defaults
+	// ("simulation-worker" / Max=999) apply ONLY when the corresponding
+	// cfg.WorkerID* field is the zero value. A non-zero config field WINS.
+	// This is what lets tiny-pool / freeze-victim scenarios carry a
+	// Min==Max==1 pool through worker construction without NewWorker
+	// silently restoring the broad pool. WorkerIDMin and WorkerIDTTL are
+	// not hardcoded by the sim (they default via parti.DefaultConfig());
+	// they're still mirrored as override-if-set for symmetry so scenario
+	// configs can shorten TTL for MaxAge-expiry tests.
 	partiCfg := parti.DefaultConfig()
-	partiCfg.WorkerIDPrefix = "simulation-worker"
-	partiCfg.WorkerIDMax = 999 // Support up to 1000 workers
+	if cfg.WorkerIDPrefix != "" {
+		partiCfg.WorkerIDPrefix = cfg.WorkerIDPrefix
+	} else {
+		partiCfg.WorkerIDPrefix = "simulation-worker"
+	}
+	if cfg.WorkerIDMax != 0 {
+		partiCfg.WorkerIDMax = cfg.WorkerIDMax
+	} else {
+		partiCfg.WorkerIDMax = 999 // Support up to 1000 workers
+	}
+	if cfg.WorkerIDMin != 0 {
+		partiCfg.WorkerIDMin = cfg.WorkerIDMin
+	}
+	if cfg.WorkerIDTTL != 0 {
+		partiCfg.WorkerIDTTL = cfg.WorkerIDTTL
+	}
 	// Enable two-phase handoff only when exclusive consumption is requested.
 	// This publishes ownership claims to KV so the Processing Gate can enforce exclusivity.
 	partiCfg.EnableTwoPhaseHandoff = cfg.EnforceExclusiveConsumption
@@ -286,6 +337,7 @@ func NewWorker(cfg Config) (*Worker, error) { //nolint:cyclop,gocyclo // dispatc
 		consumerBatchSize:   cfg.ConsumerBatchSize,
 		isInitialCohort:     cfg.IsInitialCohort,
 		degradedReportCh:    cfg.DegradedReportCh,
+		revocationReportCh:  cfg.RevocationReportCh,
 	}
 
 	perSubMaxAckPending := max(worker.consumerBatchSize*2,
@@ -390,7 +442,15 @@ func NewWorker(cfg Config) (*Worker, error) { //nolint:cyclop,gocyclo // dispatc
 		return nil, fmt.Errorf("failed to create consumer.Dynamic: %w", err)
 	}
 	worker.dynamic = dynamic
-	worker.updater = dynamic
+	// Wrap the inner updater so zero-partition UpdateWorkerConsumer calls
+	// emit a RevocationReport (Phase 4 ordering oracle). The wrapper is
+	// transparent for non-zero calls.
+	worker.updater = &revocationObservingUpdater{
+		inner:    dynamic,
+		workerID: worker.id,
+		stableFn: worker.StableWorkerID,
+		ch:       worker.revocationReportCh,
+	}
 
 	if cfg.MetricsCollector != nil {
 		dynamic.SetResolverMetrics(cfg.MetricsCollector.ResolverMetricsAdapter())
@@ -900,4 +960,44 @@ func (w *Worker) Stop() {
 	}
 
 	w.started.Store(false)
+}
+
+// revocationObservingUpdater is a transparent wrapper around the inner
+// WorkerConsumerUpdater that emits a RevocationReport on each zero-partition
+// UpdateWorkerConsumer call. Used by the Phase 4 ordering oracle to detect the
+// claim-loss revoke event (manager_election.go:79 revokeWorkerConsumer →
+// UpdateWorkerConsumer(workerID, nil)). The revoke happens AFTER Manager.Stop
+// has torn down the apply loop, so OnAssignmentChanged is NOT fired for it.
+//
+// Forwards all calls unchanged; the report send is best-effort (non-blocking
+// drop if the channel is full or nil).
+type revocationObservingUpdater struct {
+	inner    parti.WorkerConsumerUpdater
+	workerID string
+	stableFn func() string
+	ch       chan<- coordinator.RevocationReport
+}
+
+// UpdateWorkerConsumer delegates to inner and, if partitions is empty, emits a
+// RevocationReport. Returning the inner's error preserves end-to-end behavior.
+func (r *revocationObservingUpdater) UpdateWorkerConsumer(ctx context.Context, workerID string, partitions []parti.Partition) error {
+	err := r.inner.UpdateWorkerConsumer(ctx, workerID, partitions)
+	if len(partitions) == 0 && r.ch != nil {
+		stableID := ""
+		if r.stableFn != nil {
+			stableID = r.stableFn()
+		}
+		report := coordinator.RevocationReport{
+			WorkerID:       r.workerID,
+			StableWorkerID: stableID,
+			At:             time.Now(),
+		}
+		select {
+		case r.ch <- report:
+		default:
+			// Drop if buffer full; the oracle prefers no-block over hangs.
+		}
+	}
+
+	return err
 }

@@ -106,6 +106,29 @@ type WorkersConfig struct {
 	// Default 5s for Phase 2 scenarios (chosen so reconcileInterval <
 	// watcher_stall duration < bucketUnavailableCooldown).
 	SourceReconcileInterval time.Duration `yaml:"source_reconcile_interval"`
+
+	// WorkerIDTTL overrides parti.WorkerIDTTL for ALL workers in this
+	// simulation. Required for MaxAge-expiry tests (Phase 4b) because
+	// every manager sharing the StableID bucket must agree on TTL —
+	// each manager reconciles the bucket's MaxAge to its own WorkerIDTTL
+	// at startup, so divergent values would either be overwritten or
+	// fail Start. When 0, parti.DefaultConfig().WorkerIDTTL applies.
+	WorkerIDTTL time.Duration `yaml:"worker_id_ttl"`
+
+	// PerWorker provides per-worker StableID pool overrides for Phase 4
+	// tiny-pool scenarios. Keyed by sim worker ID (e.g. "worker-0").
+	// Workers not listed inherit the cluster-wide defaults.
+	PerWorker map[string]PerWorkerConfig `yaml:"per_worker"`
+}
+
+// PerWorkerConfig configures per-worker StableID pool overrides. Each
+// non-zero field overrides the corresponding sim default with
+// override-if-set semantics (worker.go:NewWorker).
+type PerWorkerConfig struct {
+	WorkerIDPrefix string        `yaml:"worker_id_prefix"`
+	WorkerIDMin    int           `yaml:"worker_id_min"`
+	WorkerIDMax    int           `yaml:"worker_id_max"`
+	WorkerIDTTL    time.Duration `yaml:"worker_id_ttl"`
 }
 
 // ProcessingDelayConfig configures message processing delay.
@@ -225,6 +248,40 @@ type ChaosConfig struct {
 	// 60-180s range. Phase 3 scenarios use 60s to stay below WorkerIDTTL
 	// (75s default) and avoid spurious claimLostShutdown.
 	LongDisconnectDurationOverride time.Duration `yaml:"long_disconnect_duration_override"`
+
+	// TinyPoolTarget names the sim-side worker ID (e.g. "worker-0") that
+	// the tiny-pool / MaxAge-expiry chaos primitives target. Required by
+	// Phase 4a (chaos_stableid_tiny_pool) and Phase 4b
+	// (chaos_stableid_maxage_expiry). The corresponding entry in
+	// workers.per_worker provides the pool overrides.
+	TinyPoolTarget string `yaml:"tiny_pool_target"`
+
+	// TinyPoolRespawnAfter is the offset from kill / disconnect at which
+	// the chaos dispatcher schedules a fresh stableid_tiny_pool_respawn
+	// event. Must be STRICTLY greater than staleThreshold =
+	// 3 * max(WorkerIDTTL/3, 100ms) plus scheduler margin; for
+	// WorkerIDTTL=6s the recommended value is 7s.
+	TinyPoolRespawnAfter time.Duration `yaml:"tiny_pool_respawn_after"`
+
+	// ScheduledEvents lists chaos events to fire at fixed offsets from
+	// the simulation start. Each entry executes exactly once. Used by
+	// Phase 4 scenarios that must coordinate a SIGKILL + respawn pair
+	// (random chaos is insufficient because the respawn must land
+	// strictly after staleThreshold and BEFORE the next chaos turn).
+	ScheduledEvents []ScheduledChaosEvent `yaml:"scheduled_events"`
+}
+
+// ScheduledChaosEvent is a one-shot scenario-scheduled chaos event.
+type ScheduledChaosEvent struct {
+	// At is the offset from the simulation start at which to fire.
+	At time.Duration `yaml:"at"`
+	// Event is the chaos event kind (e.g. "worker_crash",
+	// "stableid_tiny_pool_respawn", "network_disconnect_long").
+	Event string `yaml:"event"`
+	// Params are passed verbatim to the dispatcher. Common keys:
+	// "target_worker" / "target_role" (sim worker ID),
+	// "duration" (time.Duration string).
+	Params map[string]any `yaml:"params"`
 }
 
 // NATSConfig configures NATS connection.

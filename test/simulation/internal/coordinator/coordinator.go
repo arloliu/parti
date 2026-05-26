@@ -141,6 +141,14 @@ type Coordinator struct {
 	// pick this one up automatically.
 	degradedReasonOracle *DegradedReasonOracle
 
+	// Phase 4: claim-loss stop-before-revoke ordering oracle. Wired via
+	// EnableShutdownOracles. Consumes shutdown observations from
+	// watchClaimLostShutdowns, revocation reports from
+	// revocationReportsCh, assignment reports from processAssignments,
+	// and ReceivedMessage frames from the message ingest path.
+	claimLossOrdering   *ClaimLossOrderingOracle
+	revocationReportsCh chan RevocationReport
+
 	// sourceConvergence is the Phase 2 oracle that asserts mid-run
 	// partition-source mutations propagate to every worker's
 	// AssignmentReport within T_converge. Built by EnableShutdownOracles
@@ -228,6 +236,23 @@ type ReceivedMessage struct {
 type AssignmentReport struct {
 	WorkerID   string
 	Partitions []int
+}
+
+// RevocationReport is emitted when the manager drives a zero-partition
+// UpdateWorkerConsumer call. The claim-loss self-stop path
+// (manager_election.go:revokeWorkerConsumer) bypasses OnAssignmentChanged
+// and reaches the embedding application's WorkerConsumerUpdater directly;
+// the simulation wraps that updater so the chaos oracle can observe the
+// revoke event and assert it landed AFTER the manager's StateShutdown
+// transition (Phase 4 INV2).
+//
+// WorkerID is the simulation-side worker ID (e.g. "worker-3"); StableWorkerID
+// is the parti stable ID claimed by the manager (e.g. "simulation-worker-7"),
+// captured at observe time.
+type RevocationReport struct {
+	WorkerID       string
+	StableWorkerID string
+	At             time.Time
 }
 
 // StartLatencyReport reports the latency from Worker.Start() to the first
@@ -348,6 +373,31 @@ func (c *Coordinator) EnableShutdownOracles(registry *GoroutineRegistry) {
 	c.stateReconcile = NewStateReconcileWatcher(registry, 30*time.Second)
 	c.degradedReasonOracle = NewDegradedReasonOracle()
 	c.sourceConvergence = NewSourceConvergenceOracle()
+	c.claimLossOrdering = NewClaimLossOrderingOracle()
+	c.revocationReportsCh = make(chan RevocationReport, 256)
+}
+
+// ClaimLossOrderingOracle returns the Phase 4 ordering oracle. nil if
+// EnableShutdownOracles was never called.
+func (c *Coordinator) ClaimLossOrderingOracle() *ClaimLossOrderingOracle {
+	return c.claimLossOrdering
+}
+
+// GetRevocationReportsChannel returns the channel sim-side updaters use to
+// publish RevocationReport events (zero-partition UpdateWorkerConsumer calls).
+// nil if EnableShutdownOracles was never called.
+func (c *Coordinator) GetRevocationReportsChannel() chan<- RevocationReport {
+	return c.revocationReportsCh
+}
+
+// GetClaimLossOrderingViolations returns the cumulative count of
+// stop-before-revoke ordering violations. Returns 0 if EnableShutdownOracles
+// was never called.
+func (c *Coordinator) GetClaimLossOrderingViolations() int64 {
+	if c.claimLossOrdering == nil {
+		return 0
+	}
+	return c.claimLossOrdering.Violations()
 }
 
 // SourceConvergenceOracle returns the Phase 2 oracle. nil if
@@ -618,6 +668,13 @@ func (c *Coordinator) Start(ctx context.Context) {
 		// Shutdown state (manager State()==StateShutdown) for the
 		// claim-lost invariant.
 		go c.watchClaimLostShutdowns(ctx)
+	}
+	if c.claimLossOrdering != nil {
+		// Drain revocation reports from the sim-side updater wrapper and
+		// forward them to the Phase 4 ordering oracle. Also periodically
+		// refresh sim → stable-ID mappings from the worker registry.
+		go c.processRevocationReports(ctx)
+		go c.refreshStableIDMappings(ctx)
 	}
 	if c.sourceConvergence != nil {
 		c.sourceConvergence.Run(ctx, 1*time.Second)
@@ -1366,6 +1423,9 @@ func (c *Coordinator) processReceivedMessages(ctx context.Context) {
 			if c.stateReconcile != nil {
 				c.stateReconcile.RecordMessage(msg.WorkerID, msg.PartitionID)
 			}
+			if c.claimLossOrdering != nil {
+				c.claimLossOrdering.ObserveMessage(msg.WorkerID, msg.PartitionID, time.Now())
+			}
 			// Track active (actual) owner by last processor seen per partition
 			c.ownersMu.Lock()
 			c.activeOwners[msg.PartitionID] = msg.WorkerID
@@ -1613,6 +1673,9 @@ func (c *Coordinator) processAssignments(ctx context.Context) { //nolint:gocyclo
 			}
 			if c.stateReconcile != nil {
 				c.stateReconcile.RecordAssignment(ar.WorkerID, ar.Partitions, time.Now())
+			}
+			if c.claimLossOrdering != nil {
+				c.claimLossOrdering.RecordAssignment(ar.WorkerID, ar.Partitions)
 			}
 
 			// Build global set.
@@ -1878,6 +1941,59 @@ func (c *Coordinator) watchClaimLostShutdowns(ctx context.Context) {
 				}
 				reported[key] = struct{}{}
 				c.degradedReasonOracle.ObserveClaimLostShutdown(key)
+				if c.claimLossOrdering != nil {
+					if wid != "" {
+						c.claimLossOrdering.RegisterStableID(info.ID, wid)
+					}
+					c.claimLossOrdering.ObserveShutdown(info.ID, wid, time.Now())
+				}
+			}
+		}
+	}
+}
+
+// processRevocationReports drains RevocationReport events from the sim-side
+// updater wrapper and forwards each to the Phase 4 ordering oracle.
+func (c *Coordinator) processRevocationReports(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case r := <-c.revocationReportsCh:
+			if c.claimLossOrdering != nil {
+				if r.StableWorkerID != "" {
+					c.claimLossOrdering.RegisterStableID(r.WorkerID, r.StableWorkerID)
+				}
+				c.claimLossOrdering.ObserveRevocation(r.WorkerID, r.StableWorkerID, r.At)
+			}
+		}
+	}
+}
+
+// refreshStableIDMappings periodically scans the registry and registers each
+// live worker's stable ID with the ordering oracle. Required because the
+// ordering oracle's join key is the stable ID but assignment reports and
+// received-message frames are keyed by the sim-side worker ID.
+func (c *Coordinator) refreshStableIDMappings(ctx context.Context) {
+	if c.leaderUniq == nil || c.leaderUniq.registry == nil || c.claimLossOrdering == nil {
+		return
+	}
+	registry := c.leaderUniq.registry
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for _, info := range registry.GetByType(WorkerGoroutine) {
+				obs, ok := info.Obj.(WorkerObserver)
+				if !ok {
+					continue
+				}
+				if sid := obs.StableWorkerID(); sid != "" {
+					c.claimLossOrdering.RegisterStableID(info.ID, sid)
+				}
 			}
 		}
 	}
