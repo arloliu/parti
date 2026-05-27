@@ -97,12 +97,12 @@ cfg := &parti.Config{
 | `WorkerIDPrefix` | `"worker"` | Prefix for generated worker IDs          |
 | `WorkerIDMin`    | `0`        | First ID number in the pool              |
 | `WorkerIDMax`    | `999`      | Last ID number in the pool               |
-| `WorkerIDTTL`    | `75s`      | How long an ID claim remains valid       |
+| `WorkerIDTTL`    | `75s`      | How long an ID claim remains valid (must be `>= HeartbeatTTL`) |
 
 ### Recommendations
 
 - **WorkerIDMax**: Set to at least 2x expected peak worker count
-- **WorkerIDTTL**: 3-5x HeartbeatTTL (default 75s is 5x the default HeartbeatTTL)
+- **WorkerIDTTL**: 3-5x HeartbeatTTL (default 75s is 5x the default HeartbeatTTL); must be `>= HeartbeatTTL` or Start fails validation
 - **WorkerIDPrefix**: Use application name for multi-app clusters
 
 ---

@@ -2082,6 +2082,16 @@ func (c *Coordinator) watchClaimLostShutdowns(ctx context.Context) {
 				if obs.WorkerStateInt() != workerStateShutdown {
 					continue
 				}
+				// Gate on the real production claim-loss signal. Manager.Stop
+				// terminates at StateShutdown for graceful Stop AND for the
+				// claimLostShutdown self-stop path; state alone cannot tell
+				// them apart. The OnError hook latches true only when the
+				// claimer surfaces stableid.ErrClaimLost
+				// (manager_election.go:117), which is the unique production
+				// claim-loss marker.
+				if !obs.ClaimLostObserved() {
+					continue
+				}
 				wid := obs.StableWorkerID()
 				key := info.ID
 				if wid != "" {
@@ -2091,6 +2101,7 @@ func (c *Coordinator) watchClaimLostShutdowns(ctx context.Context) {
 					continue
 				}
 				reported[key] = struct{}{}
+				log.Printf("[watchClaimLostShutdowns] state=Shutdown claim_lost=true stable=%s sim=%s", key, info.ID)
 				c.degradedReasonOracle.ObserveClaimLostShutdown(key)
 				if c.claimLossOrdering != nil {
 					if wid != "" {

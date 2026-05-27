@@ -27,6 +27,11 @@ type WorkerObserver interface {
 	// StableWorkerID returns the stable worker ID claimed by the manager, or ""
 	// if not yet claimed.
 	StableWorkerID() string
+	// ClaimLostObserved reports whether the worker has seen a real
+	// stableid.ErrClaimLost from the production claim-loss path. Used by
+	// watchClaimLostShutdowns to distinguish real claim-loss shutdowns
+	// from graceful Stop transitions (both terminate in StateShutdown).
+	ClaimLostObserved() bool
 }
 
 // workerStateStable is the int value of parti.StateStable / types.StateStable.

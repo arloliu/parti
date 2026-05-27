@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -261,6 +262,24 @@ func dispatchMode(ctx context.Context, cfg *config.Config, configPath string, co
 	default:
 		return fmt.Errorf("unknown mode: %s", cfg.Simulation.Mode)
 	}
+}
+
+// scenarioIncidentalClaimLossTolerated reports whether the scenario's chaos
+// profile can produce incidental REAL claim-loss events that are not the
+// invariant being tested. Currently limited to chaos_comprehensive, whose
+// short network_disconnect events occasionally race with the stableid
+// renewal cycle (renewal_interval = WorkerIDTTL/3 = 25s by default) and
+// drive a real claim-loss with no chaos-side suppression registered.
+// With the OnError-based ClaimLostObserved gate the oracle now fires only
+// on real claim-loss, but chaos_comprehensive's diffuse-chaos design
+// makes pre-registering suppression on every disruption infeasible without
+// changing the scenario semantics. Until that follow-up lands we
+// tolerate unexpected_claim_lost_shutdown for chaos_comprehensive only.
+// The Phase 4 ClaimLossOrderingOracle counter (claim_loss_stop_ordering_violations)
+// stays gated everywhere — its post-shutdown-message signal points at
+// genuine consumer-drain ordering issues worth surfacing.
+func scenarioIncidentalClaimLossTolerated(cfgPath string) bool {
+	return filepath.Base(cfgPath) == "chaos_comprehensive.yaml"
 }
 
 func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldown time.Duration) error { //nolint:cyclop,revive,gocyclo,nolintlint
@@ -1029,8 +1048,7 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 						ldStrictViol++
 					}
 				}
-				claimLossGate := scenarioHasClaimLossChaos(cfg)
-				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || (claimLossGate && unexpClaimLost > 0) || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || (claimLossGate && claimLossOrderViol > 0) || producerResumeMissing > 0 || casStormPanics > 0 || handoffMaxAgeViol > 0 || orphanClaimDrift > 0 || storageTypeViol > 0 || electionReplicasViol > 0 || kvOpRateCeilingViol > 0 || revocationDropped > 0 || ldStrictViol > 0 {
+				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || (!scenarioIncidentalClaimLossTolerated(cfgPath) && unexpClaimLost > 0) || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || claimLossOrderViol > 0 || producerResumeMissing > 0 || casStormPanics > 0 || handoffMaxAgeViol > 0 || orphanClaimDrift > 0 || storageTypeViol > 0 || electionReplicasViol > 0 || kvOpRateCeilingViol > 0 || revocationDropped > 0 || ldStrictViol > 0 {
 					// Record error but proceed to ordered shutdown
 					invariantsErr = fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d long_disconnect_reassignment_inconclusive=%d long_disconnect_skipped=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d storage_type_violation=%d election_replicas_violation=%d kv_op_rate_ceiling_violation=%d revocation_report_dropped=%d",
 						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, ldReassignInconclusive, ldSkipped, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift, storageTypeViol, electionReplicasViol, kvOpRateCeilingViol, revocationDropped)
@@ -1141,8 +1159,7 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 						ldStrictViol++
 					}
 				}
-				claimLossGate := scenarioHasClaimLossChaos(cfg)
-				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || (claimLossGate && unexpClaimLost > 0) || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || (claimLossGate && claimLossOrderViol > 0) || producerResumeMissing > 0 || casStormPanics > 0 || handoffMaxAgeViol > 0 || orphanClaimDrift > 0 || storageTypeViol > 0 || electionReplicasViol > 0 || kvOpRateCeilingViol > 0 || revocationDropped > 0 || ldStrictViol > 0 {
+				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || (!scenarioIncidentalClaimLossTolerated(cfgPath) && unexpClaimLost > 0) || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || claimLossOrderViol > 0 || producerResumeMissing > 0 || casStormPanics > 0 || handoffMaxAgeViol > 0 || orphanClaimDrift > 0 || storageTypeViol > 0 || electionReplicasViol > 0 || kvOpRateCeilingViol > 0 || revocationDropped > 0 || ldStrictViol > 0 {
 					invariantsErr := fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d long_disconnect_reassignment_inconclusive=%d long_disconnect_skipped=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d storage_type_violation=%d election_replicas_violation=%d kv_op_rate_ceiling_violation=%d revocation_report_dropped=%d",
 						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, ldReassignInconclusive, ldSkipped, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift, storageTypeViol, electionReplicasViol, kvOpRateCeilingViol, revocationDropped)
 					// Emit the structured failure_report.json so CI artifacts
@@ -1735,7 +1752,7 @@ func runProcessOrchestrator(ctx context.Context, cfg *config.Config, cfgPath str
 	if seen < cfg.Workers.Count {
 		return fmt.Errorf("ipc_smoke_violation: only %d of %d workers ever emitted a frame", seen, cfg.Workers.Count)
 	}
-	if scenarioHasClaimLossChaos(cfg) && claimLossOrderViol > 0 {
+	if claimLossOrderViol > 0 {
 		return fmt.Errorf("claim_loss_stop_ordering_violations=%d", claimLossOrderViol)
 	}
 	if leaderViol > 0 {
@@ -2956,53 +2973,6 @@ func scenarioHasScheduledEvent(cfg *config.Config, want coordinator.ChaosEvent) 
 // long_disconnect_reassignment_inconclusive == 0, and
 // long_disconnect_skipped == 0. Scenarios that never schedule one
 // are exempt from this gate.
-// scenarioHasClaimLossChaos reports whether the configured scenario
-// deliberately drives a claim-loss event — one where a worker loses
-// its stable-ID claim to a peer (stableid_claim_steal /
-// bucket_peer_takeover), is respawned out of a tiny pool
-// (stableid_tiny_pool_respawn), is explicitly resumed from a long
-// SIGSTOP (worker_resume), or suffers a long network disconnect
-// (network_disconnect_long). Only these scenarios may enforce the
-// DegradedReasonOracle's unexpected_claim_lost_shutdown and
-// ClaimLossOrderingOracle's claim_loss_stop_ordering_violations as
-// hard shutdown gates; diffuse chaos runs (e.g. chaos_comprehensive,
-// which schedules worker_pause without a paired resume) still log the
-// counters but cannot fail on them.
-//
-// worker_pause is deliberately NOT in the trigger set: it is used
-// diffusely by chaos_comprehensive / chaos_roundrobin to drive
-// transient stalls, and the resulting claim-loss is a legitimate
-// side-effect rather than the scenario's targeted invariant.
-func scenarioHasClaimLossChaos(cfg *config.Config) bool {
-	if cfg == nil {
-		return false
-	}
-	// Deliberately a partial trigger set; events not listed
-	// (worker_pause, worker_crash, etc.) are exempt from the claim-loss
-	// failure gate by design.
-	triggers := map[coordinator.ChaosEvent]struct{}{ //nolint:exhaustive // partial trigger set is intentional
-		coordinator.StableIDClaimStealEvent:      {},
-		coordinator.BucketPeerTakeoverEvent:      {},
-		coordinator.StableIDTinyPoolRespawnEvent: {},
-		coordinator.WorkerResumeEvent:            {},
-		coordinator.NetworkDisconnectLongEvent:   {},
-	}
-	for _, sev := range cfg.Chaos.ScheduledEvents {
-		if _, ok := triggers[coordinator.ChaosEvent(sev.Event)]; ok {
-			return true
-		}
-	}
-	if cfg.Chaos.Enabled {
-		for _, ev := range cfg.Chaos.Events {
-			if _, ok := triggers[coordinator.ChaosEvent(ev)]; ok {
-				return true
-			}
-		}
-	}
-
-	return false
-}
-
 func scenarioHasLongDisconnect(cfg *config.Config) bool {
 	if cfg == nil {
 		return false

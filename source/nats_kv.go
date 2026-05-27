@@ -964,7 +964,9 @@ func (s *NatsKV) onWatcherRetryExhausted(err error) {
 // partition list from KV and applies any changes missed by the watcher.
 //
 // When WithLeadershipProbe is set, the cadence switches between leader (30s)
-// and follower (5min) on each tick. WithReconcileInterval(0) disables polling.
+// and follower (5min) on each tick — the fixed WithReconcileInterval value
+// is ignored, including a 0 sentinel. Polling is disabled only when
+// WithReconcileInterval(0) is set AND no leadership probe is wired.
 func (s *NatsKV) reconcileLoop(ctx context.Context) {
 	if s.reconcileInterval <= 0 && s.leadershipProbe == nil {
 		return

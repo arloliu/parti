@@ -916,7 +916,7 @@ type Config struct {
     WorkerIDPrefix string        // Prefix for worker IDs (default: "worker")
     WorkerIDMin    int           // Minimum ID number (default: 0)
     WorkerIDMax    int           // Maximum ID number (default: 999)
-    WorkerIDTTL    time.Duration // TTL for ID claims (default: 75s)
+    WorkerIDTTL    time.Duration // TTL for ID claims (default: 75s; must be >= HeartbeatTTL)
 
     // Heartbeat Configuration
     HeartbeatInterval time.Duration // Heartbeat publish interval (default: 5s)

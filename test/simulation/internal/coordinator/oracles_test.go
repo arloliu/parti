@@ -290,11 +290,13 @@ type stubWorker struct {
 	leader         bool
 	state          int // raw int so we don't import parti here
 	stableWorkerID string
+	claimLost      bool
 }
 
-func (s *stubWorker) IsLeader() bool         { return s.leader }
-func (s *stubWorker) WorkerStateInt() int    { return s.state }
-func (s *stubWorker) StableWorkerID() string { return s.stableWorkerID }
+func (s *stubWorker) IsLeader() bool          { return s.leader }
+func (s *stubWorker) WorkerStateInt() int     { return s.state }
+func (s *stubWorker) StableWorkerID() string  { return s.stableWorkerID }
+func (s *stubWorker) ClaimLostObserved() bool { return s.claimLost }
 
 // stateStableValue mirrors parti.StateStable (== 4 per types/state.go).
 // Hardcoded to avoid a circular import: coordinator_test → worker → coordinator.

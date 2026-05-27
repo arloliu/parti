@@ -18,6 +18,7 @@ import (
 
 	"github.com/arloliu/parti/v2"
 	"github.com/arloliu/parti/v2/consumer"
+	"github.com/arloliu/parti/v2/internal/stableid"
 	"github.com/arloliu/parti/v2/kvutil"
 	"github.com/arloliu/parti/v2/source"
 	"github.com/arloliu/parti/v2/strategy"
@@ -92,6 +93,13 @@ type Worker struct {
 	// Written by the OnDegraded hook; read by DegradedReason().
 	degradedReason   atomic.Pointer[string]
 	degradedReportCh chan<- coordinator.WorkerDegradedReport
+
+	// claimLostObserved is set true once the OnError hook receives a
+	// stableid.ErrClaimLost surfaced from the production claim-loss path
+	// (manager_election.go:117). The sim claim-loss oracle reads this via
+	// ClaimLostObserved() so it can distinguish a real claim-loss
+	// shutdown from a graceful Stop — both terminate in StateShutdown.
+	claimLostObserved atomic.Bool
 
 	// revocationReportCh receives a RevocationReport when the manager
 	// drives a zero-partition UpdateWorkerConsumer call. Wired via
@@ -552,6 +560,7 @@ func NewWorker(cfg Config) (*Worker, error) { //nolint:cyclop,gocyclo // dispatc
 	hooks := &types.Hooks{
 		OnAssignmentChanged: worker.handleAssignmentChanged,
 		OnDegraded:          worker.handleDegraded,
+		OnError:             worker.handleError,
 	}
 	// Create manager with hooks
 	manager, err := parti.NewManager(&partiCfg, js, partitionSource, assignmentStrategy,
@@ -638,7 +647,16 @@ func (w *Worker) Start(ctx context.Context) error {
 	// to cancel m.ctx (created from context.Background, not w.ctx). The
 	// shard goroutines started above select on w.ctx.Done(), so
 	// w.cancel() is also required to prevent them leaking.
-	if err := <-w.manager.WaitState(parti.StateStable, 30*time.Second); err != nil {
+	//
+	// Timeout matches partiCfg.StartupTimeout (120s above) so the sim's
+	// failure path is engaged only when the manager's own soft watchdog
+	// would also have declared the worker degraded. A shorter sim-side
+	// timeout produces a flaky "manager did not reach StateStable" path
+	// on chaos scenarios that perturb the cold-start cohort
+	// (sim-discovered Issue 2): chaos firing during the first ~30s of
+	// chaos_comprehensive can stretch the worker's wait through
+	// rebalance churn even though the manager itself recovers.
+	if err := <-w.manager.WaitState(parti.StateStable, 120*time.Second); err != nil {
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		_ = w.manager.Stop(stopCtx)
 		stopCancel()
@@ -927,6 +945,29 @@ func (w *Worker) DegradedReason() string {
 		return ""
 	}
 	return *p
+}
+
+// ClaimLostObserved reports whether the OnError hook has seen a
+// stableid.ErrClaimLost from the production claim-loss path. The sim
+// claim-loss oracle uses this as the discriminator between a real
+// claim-loss shutdown and a graceful Manager.Stop() — both terminate
+// in StateShutdown, so state alone is not a sufficient signal.
+// Implements coordinator.WorkerObserver.
+func (w *Worker) ClaimLostObserved() bool {
+	return w.claimLostObserved.Load()
+}
+
+// handleError is the OnError hook implementation. It captures
+// stableid.ErrClaimLost surfaced by manager_election.go:117 so the
+// claim-loss oracle can distinguish real claim-loss shutdowns from
+// graceful Stop transitions. Other errors are ignored here — the
+// degraded path already covers the broader error surface.
+func (w *Worker) handleError(_ context.Context, err error) error {
+	if errors.Is(err, stableid.ErrClaimLost) {
+		w.claimLostObserved.Store(true)
+	}
+
+	return nil
 }
 
 // handleDegraded is the OnDegraded hook implementation. It caches the reason in

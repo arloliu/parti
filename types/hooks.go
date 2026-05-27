@@ -9,8 +9,12 @@ import "context"
 // context which will be cancelled during shutdown.
 //
 // IMPORTANT: Hook execution behavior:
-//   - Hooks run concurrently and may not complete before Stop() returns
-//   - The context passed to hooks is cancelled when manager stops
+//   - Hooks run concurrently in background goroutines tracked by the
+//     manager's WaitGroup. Stop() waits for in-flight hooks up to the
+//     caller-supplied shutdown context's deadline; hooks still running
+//     when that deadline expires are not waited for.
+//   - The context passed to hooks is the manager's lifecycle context,
+//     cancelled at the start of Stop()
 //   - Hook errors are logged but don't fail manager operations
 //
 // Best practices for hook implementation:
