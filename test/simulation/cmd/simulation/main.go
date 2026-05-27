@@ -997,14 +997,36 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 				electionReplicasViol := electionReplicasViolations.Load()
 				kvOpRateCeilingViol := kvOpRateCeilingViolations.Load()
 				revocationDropped := coord.GetRevocationReportDropped()
-				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || claimLossOrderViol > 0 || producerResumeMissing > 0 || casStormPanics > 0 || handoffMaxAgeViol > 0 || orphanClaimDrift > 0 || storageTypeViol > 0 || electionReplicasViol > 0 || kvOpRateCeilingViol > 0 || revocationDropped > 0 {
+				// Phase 3 strict long-disconnect gate: only enforced when the
+				// scenario actually configures network_disconnect_long (via
+				// scheduled_events or chaos.events). Otherwise observed=0 is
+				// normal and must not fail the run.
+				ldSkipped := coord.GetLongDisconnectSkipped()
+				var ldStrictViol int
+				if scenarioHasLongDisconnect(cfg) {
+					if ldReassignObserved == 0 {
+						log.Print("[Phase3] STRICT GATE FAIL: long_disconnect_reassignment_observed=0 — scenario enables network_disconnect_long but no firing produced a real reassignment observation")
+						ldStrictViol++
+					}
+					if ldReassignInconclusive > 0 {
+						log.Printf("[Phase3] STRICT GATE FAIL: long_disconnect_reassignment_inconclusive=%d — target owned zero partitions at expectation time; the chaos firing proved nothing",
+							ldReassignInconclusive)
+						ldStrictViol++
+					}
+					if ldSkipped > 0 {
+						log.Printf("[Phase3] STRICT GATE FAIL: long_disconnect_skipped=%d — chaos handler skipped firing because no worker held non-empty owners; the scenario expected the chaos to fire",
+							ldSkipped)
+						ldStrictViol++
+					}
+				}
+				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || claimLossOrderViol > 0 || producerResumeMissing > 0 || casStormPanics > 0 || handoffMaxAgeViol > 0 || orphanClaimDrift > 0 || storageTypeViol > 0 || electionReplicasViol > 0 || kvOpRateCeilingViol > 0 || revocationDropped > 0 || ldStrictViol > 0 {
 					// Record error but proceed to ordered shutdown
-					invariantsErr = fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d storage_type_violation=%d election_replicas_violation=%d kv_op_rate_ceiling_violation=%d revocation_report_dropped=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift, storageTypeViol, electionReplicasViol, kvOpRateCeilingViol, revocationDropped)
+					invariantsErr = fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d long_disconnect_reassignment_inconclusive=%d long_disconnect_skipped=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d storage_type_violation=%d election_replicas_violation=%d kv_op_rate_ceiling_violation=%d revocation_report_dropped=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, ldReassignInconclusive, ldSkipped, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift, storageTypeViol, electionReplicasViol, kvOpRateCeilingViol, revocationDropped)
 				}
 				if invariantsErr == nil {
-					log.Printf("Stability invariants passed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d storage_type_violation=%d election_replicas_violation=%d kv_op_rate_ceiling_violation=%d revocation_report_dropped=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift, storageTypeViol, electionReplicasViol, kvOpRateCeilingViol, revocationDropped)
+					log.Printf("Stability invariants passed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d long_disconnect_reassignment_inconclusive=%d long_disconnect_skipped=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d storage_type_violation=%d election_replicas_violation=%d kv_op_rate_ceiling_violation=%d revocation_report_dropped=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, ldReassignInconclusive, ldSkipped, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift, storageTypeViol, electionReplicasViol, kvOpRateCeilingViol, revocationDropped)
 				} else {
 					log.Printf("Stability invariants failed: %v", invariantsErr)
 				}
@@ -1086,9 +1108,31 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 				electionReplicasViol := electionReplicasViolations.Load()
 				kvOpRateCeilingViol := kvOpRateCeilingViolations.Load()
 				revocationDropped := coord.GetRevocationReportDropped()
-				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || claimLossOrderViol > 0 || producerResumeMissing > 0 || casStormPanics > 0 || handoffMaxAgeViol > 0 || orphanClaimDrift > 0 || storageTypeViol > 0 || electionReplicasViol > 0 || kvOpRateCeilingViol > 0 || revocationDropped > 0 {
-					invariantsErr := fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d storage_type_violation=%d election_replicas_violation=%d kv_op_rate_ceiling_violation=%d revocation_report_dropped=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift, storageTypeViol, electionReplicasViol, kvOpRateCeilingViol, revocationDropped)
+				// Phase 3 strict long-disconnect gate: only enforced when the
+				// scenario actually configures network_disconnect_long (via
+				// scheduled_events or chaos.events). Otherwise observed=0 is
+				// normal and must not fail the run.
+				ldSkipped := coord.GetLongDisconnectSkipped()
+				var ldStrictViol int
+				if scenarioHasLongDisconnect(cfg) {
+					if ldReassignObserved == 0 {
+						log.Print("[Phase3] STRICT GATE FAIL: long_disconnect_reassignment_observed=0 — scenario enables network_disconnect_long but no firing produced a real reassignment observation")
+						ldStrictViol++
+					}
+					if ldReassignInconclusive > 0 {
+						log.Printf("[Phase3] STRICT GATE FAIL: long_disconnect_reassignment_inconclusive=%d — target owned zero partitions at expectation time; the chaos firing proved nothing",
+							ldReassignInconclusive)
+						ldStrictViol++
+					}
+					if ldSkipped > 0 {
+						log.Printf("[Phase3] STRICT GATE FAIL: long_disconnect_skipped=%d — chaos handler skipped firing because no worker held non-empty owners; the scenario expected the chaos to fire",
+							ldSkipped)
+						ldStrictViol++
+					}
+				}
+				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || claimLossOrderViol > 0 || producerResumeMissing > 0 || casStormPanics > 0 || handoffMaxAgeViol > 0 || orphanClaimDrift > 0 || storageTypeViol > 0 || electionReplicasViol > 0 || kvOpRateCeilingViol > 0 || revocationDropped > 0 || ldStrictViol > 0 {
+					invariantsErr := fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d long_disconnect_reassignment_inconclusive=%d long_disconnect_skipped=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d storage_type_violation=%d election_replicas_violation=%d kv_op_rate_ceiling_violation=%d revocation_report_dropped=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, ldReassignInconclusive, ldSkipped, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift, storageTypeViol, electionReplicasViol, kvOpRateCeilingViol, revocationDropped)
 					// Emit the structured failure_report.json so CI artifacts
 					// include InconclusiveOwnerEvents / unobserved counters /
 					// FirstChaosEventAt — auditability that the new
@@ -1690,6 +1734,26 @@ func runProcessOrchestrator(ctx context.Context, cfg *config.Config, cfgPath str
 	}
 	if revocationDropped > 0 {
 		return fmt.Errorf("revocation_report_dropped=%d (Phase 4 ordering oracle lost its only negative signal)", revocationDropped)
+	}
+	// Phase 3 strict long-disconnect gate (mirrors all-in-one): only
+	// enforced when the scenario configures network_disconnect_long.
+	// Process mode does not currently dispatch network_disconnect_long
+	// (see chaos.go switch above) so observed will always be 0 — the
+	// gate exists for symmetry / future support.
+	if scenarioHasLongDisconnect(cfg) {
+		coord.CheckLongDisconnectExpectations()
+		ldObs := coord.GetLongDisconnectReassignmentObserved()
+		ldInc := coord.GetLongDisconnectReassignmentInconclusive()
+		ldSkip := coord.GetLongDisconnectSkipped()
+		if ldObs == 0 {
+			return fmt.Errorf("long_disconnect_reassignment_observed=0 — scenario enables network_disconnect_long but no firing produced a real reassignment observation (inconclusive=%d skipped=%d)", ldInc, ldSkip)
+		}
+		if ldInc > 0 {
+			return fmt.Errorf("long_disconnect_reassignment_inconclusive=%d — target owned zero partitions at expectation time", ldInc)
+		}
+		if ldSkip > 0 {
+			return fmt.Errorf("long_disconnect_skipped=%d — chaos handler skipped firing despite scenario enabling it", ldSkip)
+		}
 	}
 	// Phase 7b positive gates: only required when the scenario actually
 	// scheduled a worker_resume event (the only path that increments these
@@ -2871,6 +2935,33 @@ func scenarioHasScheduledEvent(cfg *config.Config, want coordinator.ChaosEvent) 
 	return false
 }
 
+// scenarioHasLongDisconnect reports whether the configured scenario
+// could fire a network_disconnect_long event — either via the random
+// chaos ticker (cfg.Chaos.Events listing "network_disconnect_long")
+// or via an explicit scheduled_events entry. Used by both final
+// gates: scenarios that deliberately enable long-disconnect MUST end
+// with long_disconnect_reassignment_observed > 0,
+// long_disconnect_reassignment_inconclusive == 0, and
+// long_disconnect_skipped == 0. Scenarios that never schedule one
+// are exempt from this gate.
+func scenarioHasLongDisconnect(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	if scenarioHasScheduledEvent(cfg, coordinator.NetworkDisconnectLongEvent) {
+		return true
+	}
+	if cfg.Chaos.Enabled {
+		for _, ev := range cfg.Chaos.Events {
+			if coordinator.ChaosEvent(ev) == coordinator.NetworkDisconnectLongEvent {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 // workerStateShutdownInt mirrors coordinator.workerStateShutdown (the int
 // value of parti.StateShutdown). Hardcoded here to avoid importing an
 // internal const; kept in sync via the same types/state.go reference.
@@ -3019,7 +3110,13 @@ func handleLongGoroutineNetworkDisconnect(
 			log.Printf("[Chaos] long_disconnect: selected target=%s (had non-empty owner snapshot)", target.ID)
 		default:
 			log.Printf("[Chaos] long_disconnect: WARN no worker currently owns any partitions in the owner snapshot; " +
-				"skipping this chaos firing — the reassignment expectation would be vacuous (empty→empty)")
+				"skipping this chaos firing — the reassignment expectation would be vacuous (empty→empty). " +
+				"Incrementing long_disconnect_skipped; scenarios that explicitly schedule/enable " +
+				"network_disconnect_long will fail the final gate on a non-zero skip count.")
+			if aioCoord != nil {
+				aioCoord.IncLongDisconnectSkipped()
+			}
+
 			return
 		}
 	}
