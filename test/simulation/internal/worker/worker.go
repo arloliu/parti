@@ -98,7 +98,8 @@ type Worker struct {
 	// revocationObservingUpdater so the Phase 4 ordering oracle can see
 	// the revoke event (OnAssignmentChanged does NOT fire on the
 	// claim-loss revoke path).
-	revocationReportCh chan<- coordinator.RevocationReport
+	revocationReportCh     chan<- coordinator.RevocationReport
+	revocationReportDropFn func()
 }
 
 // SetNetworkControl sets the network control for this worker.
@@ -216,6 +217,13 @@ type Config struct {
 	// fire on claim-loss revoke (revokeWorkerConsumer bypasses the apply
 	// loop and the hook). Optional; nil channel disables the signal.
 	RevocationReportCh chan<- coordinator.RevocationReport
+
+	// RevocationReportDropFn, if non-nil, is invoked when a RevocationReport
+	// could not be enqueued onto RevocationReportCh because the channel was
+	// full. The orchestrator gates on the cumulative drop count so the
+	// Phase 4 ordering oracle never silently loses its only negative
+	// signal under stress.
+	RevocationReportDropFn func()
 }
 
 // NewWorker creates a new worker.
@@ -321,23 +329,24 @@ func NewWorker(cfg Config) (*Worker, error) { //nolint:cyclop,gocyclo // dispatc
 
 	// Create worker struct first so we can reference it in hooks
 	worker := &Worker{
-		id:                  cfg.ID,
-		nc:                  cfg.NC,
-		js:                  cfg.JS,
-		cfg:                 &partiCfg,
-		processingDelayMin:  cfg.ProcessingDelayMin,
-		processingDelayMax:  cfg.ProcessingDelayMax,
-		coordinatorReportCh: cfg.CoordinatorReportCh,
-		assignmentReportCh:  cfg.AssignmentReportCh,
-		startLatencyCh:      cfg.StartLatencyCh,
-		metricsCollector:    cfg.MetricsCollector,
-		logger:              logger,
-		currentPartitions:   0,
-		handlerConcurrency:  cfg.HandlerConcurrency,
-		consumerBatchSize:   cfg.ConsumerBatchSize,
-		isInitialCohort:     cfg.IsInitialCohort,
-		degradedReportCh:    cfg.DegradedReportCh,
-		revocationReportCh:  cfg.RevocationReportCh,
+		id:                     cfg.ID,
+		nc:                     cfg.NC,
+		js:                     cfg.JS,
+		cfg:                    &partiCfg,
+		processingDelayMin:     cfg.ProcessingDelayMin,
+		processingDelayMax:     cfg.ProcessingDelayMax,
+		coordinatorReportCh:    cfg.CoordinatorReportCh,
+		assignmentReportCh:     cfg.AssignmentReportCh,
+		startLatencyCh:         cfg.StartLatencyCh,
+		metricsCollector:       cfg.MetricsCollector,
+		logger:                 logger,
+		currentPartitions:      0,
+		handlerConcurrency:     cfg.HandlerConcurrency,
+		consumerBatchSize:      cfg.ConsumerBatchSize,
+		isInitialCohort:        cfg.IsInitialCohort,
+		degradedReportCh:       cfg.DegradedReportCh,
+		revocationReportCh:     cfg.RevocationReportCh,
+		revocationReportDropFn: cfg.RevocationReportDropFn,
 	}
 
 	perSubMaxAckPending := max(worker.consumerBatchSize*2,
@@ -450,6 +459,7 @@ func NewWorker(cfg Config) (*Worker, error) { //nolint:cyclop,gocyclo // dispatc
 		workerID: worker.id,
 		stableFn: worker.StableWorkerID,
 		ch:       worker.revocationReportCh,
+		onDrop:   worker.revocationReportDropFn,
 	}
 
 	if cfg.MetricsCollector != nil {
@@ -976,6 +986,11 @@ type revocationObservingUpdater struct {
 	workerID string
 	stableFn func() string
 	ch       chan<- coordinator.RevocationReport
+	// onDrop, if non-nil, is invoked whenever a report cannot be enqueued
+	// (channel full). Wired to coordinator.IncRevocationReportDropped so the
+	// orchestrator can fail closed instead of silently losing the only
+	// negative signal feeding the Phase 4 ordering oracle.
+	onDrop func()
 }
 
 // UpdateWorkerConsumer delegates to inner and, if partitions is empty, emits a
@@ -995,7 +1010,16 @@ func (r *revocationObservingUpdater) UpdateWorkerConsumer(ctx context.Context, w
 		select {
 		case r.ch <- report:
 		default:
-			// Drop if buffer full; the oracle prefers no-block over hangs.
+			// Drop if buffer full; the channel is sized at 4096 (see
+			// EnableShutdownOracles) so an actual drop indicates the
+			// coordinator-side drain is wedged. Surface the drop via
+			// onDrop so the orchestrator fails closed — Phase 4
+			// ordering depends on this signal.
+			log.Printf("[revocationObservingUpdater] revocation_report_dropped worker=%s stable=%s buffer_full",
+				r.workerID, stableID)
+			if r.onDrop != nil {
+				r.onDrop()
+			}
 		}
 	}
 

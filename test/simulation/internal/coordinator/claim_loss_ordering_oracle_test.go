@@ -22,17 +22,90 @@ func TestClaimLossOrderingOracle_StopBeforeRevoke_NoViolation(t *testing.T) {
 	}
 }
 
-// TestClaimLossOrderingOracle_RevokeWithoutShutdownObservation_Backfills
-// verifies that a revoke arriving without a prior watcher-observed
-// Shutdown is backfilled (NOT counted as a violation) — the watcher poll
-// cadence races the in-process Stop→revoke sequence, so a missing
-// Shutdown observation at revoke time is a race, not a real ordering bug.
-func TestClaimLossOrderingOracle_RevokeWithoutShutdownObservation_Backfills(t *testing.T) {
+// TestClaimLossOrderingOracle_RevokeWithoutShutdownObservation_NoSampler_Backfills
+// verifies the legacy code path: when NO state sampler is installed, the
+// oracle preserves the original tolerate-and-backfill behavior. This branch
+// is kept for the no-coordinator unit tests; production wiring always
+// installs a sampler so the silent-pass regression cannot recur.
+func TestClaimLossOrderingOracle_RevokeWithoutShutdownObservation_NoSampler_Backfills(t *testing.T) {
 	o := NewClaimLossOrderingOracle()
 	o.RegisterStableID("worker-0", "freeze-victim-1")
 	o.ObserveRevocation("worker-0", "freeze-victim-1", time.Now())
 	if got := o.Violations(); got != 0 {
-		t.Fatalf("expected 0 violations (backfill path), got %d", got)
+		t.Fatalf("expected 0 violations (no-sampler backfill path), got %d", got)
+	}
+}
+
+// TestClaimLossOrderingOracle_RevokeBeforeShutdown_StateShutdownNow_Backfills
+// is the (a) regression test from the post-impl review: when a revoke
+// arrives before the watcher observed Shutdown, the sampler is consulted
+// and reports the worker IS currently in Shutdown. The watcher merely
+// lagged; this is the legitimate poll-cadence race the backfill exists
+// for. NO violation expected.
+func TestClaimLossOrderingOracle_RevokeBeforeShutdown_StateShutdownNow_Backfills(t *testing.T) {
+	o := NewClaimLossOrderingOracle()
+	o.RegisterStableID("worker-0", "freeze-victim-1")
+	// Sampler reports the worker is RIGHT NOW in shutdown state.
+	o.SetStateSampler(func(simWorkerID string) (int, bool) {
+		if simWorkerID == "worker-0" {
+			return workerStateShutdown, true
+		}
+		return 0, false
+	})
+	o.ObserveRevocation("worker-0", "freeze-victim-1", time.Now())
+	if got := o.Violations(); got != 0 {
+		t.Fatalf("expected 0 violations when sampler confirms shutdown, got %d", got)
+	}
+}
+
+// TestClaimLossOrderingOracle_RevokeBeforeShutdown_StateStableNow_Backfills
+// is the (b) regression test, REVISED in response to the empirical
+// finding from chaos_network_disconnect_long: the production
+// UpdateWorkerConsumer(workerID, nil) revoke surface is DUAL-PURPOSE —
+// it carries both claimLostShutdown -> revokeWorkerConsumer (the
+// regression case) and the apply loop's legitimate rebalance-to-empty
+// (manager.go cold-empty bootstrap; leader-driven reassignment dropping
+// a worker to zero partitions). State stays Stable for the rebalance
+// case. Counting a revoke-while-Stable as a violation produces false
+// positives on every long-disconnect / scale-down test.
+//
+// The sharp negative signal for Stop-before-revoke is the
+// post-shutdown ObserveMessage check (received_message for a previously-
+// owned partition arriving strictly AFTER an observed Shutdown), which
+// is unambiguous because rebalance does NOT generate post-Shutdown
+// traffic for previously-owned partitions.
+func TestClaimLossOrderingOracle_RevokeBeforeShutdown_StateStableNow_Backfills(t *testing.T) {
+	o := NewClaimLossOrderingOracle()
+	o.RegisterStableID("worker-0", "freeze-victim-1")
+	// Sampler reports the worker is RIGHT NOW in stable state (rebalance path).
+	o.SetStateSampler(func(simWorkerID string) (int, bool) {
+		if simWorkerID == "worker-0" {
+			return workerStateStable, true
+		}
+
+		return 0, false
+	})
+	o.ObserveRevocation("worker-0", "freeze-victim-1", time.Now())
+	if got := o.Violations(); got != 0 {
+		t.Fatalf("expected 0 violations (rebalance-to-empty revoke path), got %d", got)
+	}
+}
+
+// TestClaimLossOrderingOracle_RevokeBeforeShutdown_SamplerUnknown_Backfills
+// covers the sampler-installed-but-worker-unknown branch. Tolerated
+// (audit-only via the log line) for the same reason as the StableNow
+// case — the unknown could be either a missed-Shutdown or a
+// rebalance-to-empty whose ProcessWorker entry has already been
+// unregistered.
+func TestClaimLossOrderingOracle_RevokeBeforeShutdown_SamplerUnknown_Backfills(t *testing.T) {
+	o := NewClaimLossOrderingOracle()
+	o.RegisterStableID("worker-0", "freeze-victim-1")
+	o.SetStateSampler(func(simWorkerID string) (int, bool) {
+		return 0, false // worker no longer in registry
+	})
+	o.ObserveRevocation("worker-0", "freeze-victim-1", time.Now())
+	if got := o.Violations(); got != 0 {
+		t.Fatalf("expected 0 violations (sampler-unknown audit-only path), got %d", got)
 	}
 }
 

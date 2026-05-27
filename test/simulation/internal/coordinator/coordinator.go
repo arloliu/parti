@@ -146,8 +146,25 @@ type Coordinator struct {
 	// watchClaimLostShutdowns, revocation reports from
 	// revocationReportsCh, assignment reports from processAssignments,
 	// and ReceivedMessage frames from the message ingest path.
-	claimLossOrdering   *ClaimLossOrderingOracle
-	revocationReportsCh chan RevocationReport
+	claimLossOrdering       *ClaimLossOrderingOracle
+	revocationReportsCh     chan RevocationReport
+	revocationReportDropped atomic.Int64
+
+	// processSIGSTOPReturningShutdownObserved is the Phase 7b positive
+	// gate for the long-SIGSTOP / claim-loss returning-worker invariant.
+	// Incremented when the original (SIGSTOPped) worker's observer
+	// reaches workerStateShutdown AFTER SIGCONT, proving the production
+	// claim-loss → claimLostShutdown → StateShutdown path actually ran.
+	// Orchestrator gates this counter > 0; a zero value fails the run.
+	processSIGSTOPReturningShutdownObserved atomic.Int64
+
+	// processSIGSTOPReplacementAssignmentObserved is the Phase 7b
+	// pre-SIGCONT gate: incremented when the replacement worker (the one
+	// spawned by stableid_tiny_pool_respawn) has reported a non-empty
+	// assignment snapshot. Orchestrator gates this counter > 0 to prove
+	// the wait-for-condition resume actually saw the replacement claim
+	// partitions before SIGCONT.
+	processSIGSTOPReplacementAssignmentObserved atomic.Int64
 
 	// sourceConvergence is the Phase 2 oracle that asserts mid-run
 	// partition-source mutations propagate to every worker's
@@ -170,6 +187,11 @@ type Coordinator struct {
 	longDisconnectExpectations         []*longDisconnectExpectation
 	longDisconnectReassignmentObserved int64 // atomic via longDisconnectMu
 	longDisconnectReassignmentMissing  int64 // set at CheckLongDisconnectExpectations call-time
+	// longDisconnectReassignmentInconclusive: target worker owned zero
+	// partitions when the expectation was registered, so the empty→empty
+	// transition proves nothing. Previously counted as a (trivial)
+	// observed; now surfaced so the orchestrator can tell the diff.
+	longDisconnectReassignmentInconclusive int64 // protected by longDisconnectMu
 }
 
 // ownerSnapshot is an immutable view of partition→workers at a moment
@@ -374,13 +396,82 @@ func (c *Coordinator) EnableShutdownOracles(registry *GoroutineRegistry) {
 	c.degradedReasonOracle = NewDegradedReasonOracle()
 	c.sourceConvergence = NewSourceConvergenceOracle()
 	c.claimLossOrdering = NewClaimLossOrderingOracle()
-	c.revocationReportsCh = make(chan RevocationReport, 256)
+	// Install a state sampler so ObserveRevocation can distinguish a
+	// poll-cadence race (legitimate backfill) from a true Stop-before-
+	// revoke ordering bug. The sampler reads the same registry the
+	// leader-uniqueness watcher uses, so production wiring is consistent
+	// across phases.
+	c.claimLossOrdering.SetStateSampler(func(simWorkerID string) (int, bool) {
+		reg := registry
+		if reg == nil {
+			return 0, false
+		}
+		for _, info := range reg.GetByType(WorkerGoroutine) {
+			if info.ID != simWorkerID {
+				continue
+			}
+			obs, ok := info.Obj.(WorkerObserver)
+			if !ok {
+				return 0, false
+			}
+
+			return obs.WorkerStateInt(), true
+		}
+
+		return 0, false
+	})
+	// Buffer sized to absorb burst revocation reports during cluster-wide
+	// chaos events. Drops fall to revocationReportDropped (logged via
+	// revocationReportSink) so the orchestrator can fail closed.
+	c.revocationReportsCh = make(chan RevocationReport, 4096)
 }
 
 // ClaimLossOrderingOracle returns the Phase 4 ordering oracle. nil if
 // EnableShutdownOracles was never called.
 func (c *Coordinator) ClaimLossOrderingOracle() *ClaimLossOrderingOracle {
 	return c.claimLossOrdering
+}
+
+// IncProcessSIGSTOPReturningShutdownObserved increments the Phase 7b
+// returning-worker shutdown counter. Called by the worker_resume handler
+// once it has confirmed the previously-SIGSTOPped worker reached
+// workerStateShutdown after SIGCONT.
+func (c *Coordinator) IncProcessSIGSTOPReturningShutdownObserved() {
+	c.processSIGSTOPReturningShutdownObserved.Add(1)
+}
+
+// GetProcessSIGSTOPReturningShutdownObserved returns the cumulative
+// returning-worker shutdown observation count.
+func (c *Coordinator) GetProcessSIGSTOPReturningShutdownObserved() int64 {
+	return c.processSIGSTOPReturningShutdownObserved.Load()
+}
+
+// IncProcessSIGSTOPReplacementAssignmentObserved increments the Phase 7b
+// pre-SIGCONT replacement-claim counter. Called when the resume handler
+// observes the replacement worker's assignment snapshot become non-empty.
+func (c *Coordinator) IncProcessSIGSTOPReplacementAssignmentObserved() {
+	c.processSIGSTOPReplacementAssignmentObserved.Add(1)
+}
+
+// GetProcessSIGSTOPReplacementAssignmentObserved returns the cumulative
+// replacement-assignment observation count.
+func (c *Coordinator) GetProcessSIGSTOPReplacementAssignmentObserved() int64 {
+	return c.processSIGSTOPReplacementAssignmentObserved.Load()
+}
+
+// IncRevocationReportDropped is invoked by the sim-side
+// revocationObservingUpdater when a RevocationReport could not be enqueued
+// because the buffered channel was full. The orchestrator gates on this
+// counter: any drop means the Phase 4 ordering oracle lost its only negative
+// signal under stress.
+func (c *Coordinator) IncRevocationReportDropped() {
+	c.revocationReportDropped.Add(1)
+}
+
+// GetRevocationReportDropped returns the cumulative count of dropped
+// RevocationReport sends. Reported in the orchestrator final gate.
+func (c *Coordinator) GetRevocationReportDropped() int64 {
+	return c.revocationReportDropped.Load()
 }
 
 // GetRevocationReportsChannel returns the channel sim-side updaters use to
@@ -652,6 +743,18 @@ func (c *Coordinator) Start(ctx context.Context) {
 	// the same goroutine's view of baselineLocked (no cross-goroutine races).
 	if c.metricsCollector != nil && c.totalPartitions > 0 {
 		go c.processAssignments(ctx)
+	}
+	// processWorkerAssignmentTracker: lightweight per-worker partition-count
+	// tracker that runs even when metricsCollector is nil (process mode).
+	// Needed for Phase 7b's worker_resume wait-for-condition resume —
+	// PartitionsOwnedBy reads ownerSnap which is otherwise only populated
+	// by processAssignments. This tracker maintains a simple in-place
+	// owner snapshot from the same AssignmentReport channel; when
+	// processAssignments is also running it merely loses the race
+	// harmlessly (last writer wins; both produce the same snapshot from
+	// the same input stream).
+	if c.metricsCollector == nil && c.totalPartitions > 0 {
+		go c.processWorkerAssignmentTracker(ctx)
 	}
 
 	// Start shutdown oracle background pollers (no-ops when oracles are nil).
@@ -1595,6 +1698,46 @@ func (c *Coordinator) runMetricsTicker(ctx context.Context) {
 	}
 }
 
+// processWorkerAssignmentTracker is a minimal AssignmentReport drain that
+// keeps c.workerAssignments + ownerSnap fresh in process mode (where
+// metricsCollector is nil and the heavier processAssignments goroutine is
+// not started). It is solely a feeder for PartitionsOwnedBy /
+// CurrentOwnersOf — no metric writes, no SLO tracking. Phase 7b's
+// worker_resume wait-for-condition gate depends on this snapshot to
+// decide when the replacement worker has won partitions.
+func (c *Coordinator) processWorkerAssignmentTracker(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ar := <-c.assignmentsCh:
+			// Sole writer of c.workerAssignments in process mode
+			// (processAssignments is gated off when metricsCollector
+			// is nil — see Start). rebuildOwnerSnapshotLocked names
+			// "Locked" by convention for processAssignments which
+			// runs single-goroutine; we maintain the same invariant
+			// here by being the only goroutine that mutates the map.
+			set := make(map[int]struct{}, len(ar.Partitions))
+			for _, p := range ar.Partitions {
+				set[p] = struct{}{}
+			}
+			c.workerAssignments[ar.WorkerID] = set
+			c.rebuildOwnerSnapshotLocked()
+			// Forward to the Phase 4 ordering oracle so its assignment
+			// snapshot tracks live state (otherwise its
+			// lastAssignmentBySim never populates in process mode).
+			if c.claimLossOrdering != nil {
+				c.claimLossOrdering.RecordAssignment(ar.WorkerID, ar.Partitions)
+			}
+			// Snapshot-overlap classifier ingests assignments too;
+			// keep it fed in process mode.
+			if c.snapshotOverlap != nil {
+				c.snapshotOverlap.IngestAssignment(ar.WorkerID, ar.Partitions)
+			}
+		}
+	}
+}
+
 func (c *Coordinator) processAssignments(ctx context.Context) { //nolint:gocyclo,cyclop
 	// Periodic evaluator to update Stable Locality even without new assignment events
 	ticker := time.NewTicker(c.stableQuietWindow)
@@ -2068,6 +2211,29 @@ func (c *Coordinator) RegisterLongDisconnectExpectation(workerID string, deadlin
 		workerID, len(owned), deadline)
 }
 
+// PartitionsOwnedBy returns the partitions currently attributed to workerID
+// in the latest owner snapshot. Returns nil if the snapshot has not yet been
+// initialized. Used by Phase 3 long-disconnect target selection to avoid
+// picking a worker whose partition set is empty (would yield a trivial
+// no-op "observation").
+func (c *Coordinator) PartitionsOwnedBy(workerID string) []int {
+	snap := c.ownerSnap.Load()
+	if snap == nil || !snap.initialized {
+		return nil
+	}
+	var out []int
+	for pid, owners := range snap.perPartition {
+		for _, o := range owners {
+			if o == workerID {
+				out = append(out, pid)
+				break
+			}
+		}
+	}
+
+	return out
+}
+
 // CheckLongDisconnectExpectations evaluates all registered long-disconnect
 // expectations against the current owner snapshot. An expectation is
 // "observed" when every partition the disconnected worker owned has migrated
@@ -2089,11 +2255,17 @@ func (c *Coordinator) CheckLongDisconnectExpectations() {
 			continue
 		}
 		if len(exp.partitions) == 0 {
-			// Worker had no partitions — trivially observed.
-			exp.observed = true
+			// Worker had no partitions when the expectation was registered:
+			// the empty→empty transition proves nothing about reassignment.
+			// Mark inconclusive (audit signal) rather than observed.
+			// Phase 3's positive INV1 invariant
+			// (long_disconnect_reassignment_observed >= 1) is therefore
+			// NOT satisfiable by a zero-partition target; the chaos
+			// handler is now responsible for selecting a worker with a
+			// non-empty owner set (see handleLongGoroutineNetworkDisconnect).
 			exp.checked = true
-			c.longDisconnectReassignmentObserved++
-			log.Printf("[Coordinator] Long-disconnect expectation trivially observed (no partitions): worker=%s", exp.workerID)
+			c.longDisconnectReassignmentInconclusive++
+			log.Printf("[Coordinator] Long-disconnect expectation INCONCLUSIVE (target owned zero partitions at disconnect): worker=%s", exp.workerID)
 			continue
 		}
 		// Count how many partitions have migrated to other workers.
@@ -2136,4 +2308,13 @@ func (c *Coordinator) GetLongDisconnectReassignmentMissing() int64 {
 	c.longDisconnectMu.Lock()
 	defer c.longDisconnectMu.Unlock()
 	return c.longDisconnectReassignmentMissing
+}
+
+// GetLongDisconnectReassignmentInconclusive returns the count of long-disconnect
+// expectations marked inconclusive because the disconnected worker owned zero
+// partitions at expectation-register time (empty→empty proves nothing).
+func (c *Coordinator) GetLongDisconnectReassignmentInconclusive() int64 {
+	c.longDisconnectMu.Lock()
+	defer c.longDisconnectMu.Unlock()
+	return c.longDisconnectReassignmentInconclusive
 }

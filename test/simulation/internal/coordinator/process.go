@@ -54,6 +54,13 @@ type ProcessInfo struct {
 	// Nil for non-worker processes or when the orchestrator did not request
 	// IPC ingest.
 	Observer *ProcessWorkerObserver
+	// killRequested is set true by KillProcess BEFORE sending SIGKILL so
+	// monitorProcess can distinguish an intentional kill from an
+	// unexpected crash. Without this flag, monitorProcess's
+	// Cmd.Wait()-returns-error path unconditionally rewrites the Status
+	// to StatusCrashed even after KillProcess set StatusKilled, masking
+	// the operator-driven kill as a crash. Protected by ProcessManager.mu.
+	killRequested bool
 }
 
 // ProcessStatus represents the status of a process.
@@ -441,6 +448,13 @@ func (pm *ProcessManager) KillProcess(id string) error {
 
 	log.Printf("[ProcessManager] Killing %s %s with SIGKILL", info.Type, id)
 
+	// Mark killRequested BEFORE sending SIGKILL so monitorProcess's
+	// post-Wait branch can preserve StatusKilled instead of overwriting
+	// the intentional kill as StatusCrashed.
+	pm.mu.Lock()
+	info.killRequested = true
+	pm.mu.Unlock()
+
 	// Send SIGKILL
 	if err := info.Cmd.Process.Kill(); err != nil {
 		return fmt.Errorf("failed to kill %s: %w", id, err)
@@ -615,10 +629,17 @@ func (pm *ProcessManager) monitorProcess(id string) {
 
 	pm.mu.Lock()
 	info.Stopped = time.Now()
-	if err != nil {
+	switch {
+	case info.killRequested:
+		// KillProcess set StatusKilled before sending SIGKILL.
+		// Cmd.Wait will return a non-nil error (signal: killed); do
+		// NOT downgrade the intentional kill to StatusCrashed.
+		info.Status = StatusKilled
+		log.Printf("[ProcessManager] %s %s exited (intentional SIGKILL); wait_err=%v", info.Type, id, err)
+	case err != nil:
 		info.Status = StatusCrashed
 		log.Printf("[ProcessManager] %s %s crashed: %v", info.Type, id, err)
-	} else {
+	default:
 		info.Status = StatusStopped
 		log.Printf("[ProcessManager] %s %s exited normally", info.Type, id)
 	}

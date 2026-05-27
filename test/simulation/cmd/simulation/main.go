@@ -52,6 +52,12 @@ var (
 	// process-mode respawns (Phase 7b stableid_tiny_pool_respawn). The
 	// orchestrator initial spawn uses 0..count-1; the respawn picks count+.
 	procNextWorkerIdx int
+	// procLastReplacementWorkerID records the sim-side ID of the most
+	// recently spawned stableid_tiny_pool_respawn replacement so the
+	// worker_resume wait-for-condition handler can target its assignment
+	// snapshot before SIGCONT. Empty if no replacement has spawned this
+	// run. Process-mode only.
+	procLastReplacementWorkerID string
 )
 
 // durationFromParams extracts a duration from a chaos params map, tolerating
@@ -639,6 +645,7 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 			SourceBucket:                cfg.Workers.SourceBucket,
 			SourceReconcileInterval:     cfg.Workers.SourceReconcileInterval,
 			RevocationReportCh:          coord.GetRevocationReportsChannel(),
+			RevocationReportDropFn:      coord.IncRevocationReportDropped,
 		}
 		applyWorkerOverrides(&workerCfg, cfg, workerID)
 
@@ -966,6 +973,11 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 				coord.CheckLongDisconnectExpectations()
 				ldReassignObserved := coord.GetLongDisconnectReassignmentObserved()
 				ldReassignMissing := coord.GetLongDisconnectReassignmentMissing()
+				ldReassignInconclusive := coord.GetLongDisconnectReassignmentInconclusive()
+				if ldReassignInconclusive > 0 {
+					log.Printf("[Phase3] long_disconnect_reassignment_inconclusive=%d (target owned zero partitions at expectation time; audit-only)",
+						ldReassignInconclusive)
+				}
 				claimLossOrderViol := coord.GetClaimLossOrderingViolations()
 				// INV1/INV2 (Phase 5): aggregate producer-resume-missing and CAS-storm-panic counters.
 				var producerResumeMissing int64
@@ -984,14 +996,15 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 				storageTypeViol := storageTypeViolations.Load()
 				electionReplicasViol := electionReplicasViolations.Load()
 				kvOpRateCeilingViol := kvOpRateCeilingViolations.Load()
-				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || claimLossOrderViol > 0 || producerResumeMissing > 0 || casStormPanics > 0 || handoffMaxAgeViol > 0 || orphanClaimDrift > 0 || storageTypeViol > 0 || electionReplicasViol > 0 || kvOpRateCeilingViol > 0 {
+				revocationDropped := coord.GetRevocationReportDropped()
+				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || claimLossOrderViol > 0 || producerResumeMissing > 0 || casStormPanics > 0 || handoffMaxAgeViol > 0 || orphanClaimDrift > 0 || storageTypeViol > 0 || electionReplicasViol > 0 || kvOpRateCeilingViol > 0 || revocationDropped > 0 {
 					// Record error but proceed to ordered shutdown
-					invariantsErr = fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d storage_type_violation=%d election_replicas_violation=%d kv_op_rate_ceiling_violation=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift, storageTypeViol, electionReplicasViol, kvOpRateCeilingViol)
+					invariantsErr = fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d storage_type_violation=%d election_replicas_violation=%d kv_op_rate_ceiling_violation=%d revocation_report_dropped=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift, storageTypeViol, electionReplicasViol, kvOpRateCeilingViol, revocationDropped)
 				}
 				if invariantsErr == nil {
-					log.Printf("Stability invariants passed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d storage_type_violation=%d election_replicas_violation=%d kv_op_rate_ceiling_violation=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift, storageTypeViol, electionReplicasViol, kvOpRateCeilingViol)
+					log.Printf("Stability invariants passed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d storage_type_violation=%d election_replicas_violation=%d kv_op_rate_ceiling_violation=%d revocation_report_dropped=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift, storageTypeViol, electionReplicasViol, kvOpRateCeilingViol, revocationDropped)
 				} else {
 					log.Printf("Stability invariants failed: %v", invariantsErr)
 				}
@@ -1049,6 +1062,11 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 				coord.CheckLongDisconnectExpectations()
 				ldReassignObserved := coord.GetLongDisconnectReassignmentObserved()
 				ldReassignMissing := coord.GetLongDisconnectReassignmentMissing()
+				ldReassignInconclusive := coord.GetLongDisconnectReassignmentInconclusive()
+				if ldReassignInconclusive > 0 {
+					log.Printf("[Phase3] long_disconnect_reassignment_inconclusive=%d (target owned zero partitions at expectation time; audit-only)",
+						ldReassignInconclusive)
+				}
 				claimLossOrderViol := coord.GetClaimLossOrderingViolations()
 				// INV1/INV2 (Phase 5): aggregate producer-resume-missing and CAS-storm-panic counters.
 				var producerResumeMissing int64
@@ -1067,9 +1085,10 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 				storageTypeViol := storageTypeViolations.Load()
 				electionReplicasViol := electionReplicasViolations.Load()
 				kvOpRateCeilingViol := kvOpRateCeilingViolations.Load()
-				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || claimLossOrderViol > 0 || producerResumeMissing > 0 || casStormPanics > 0 || handoffMaxAgeViol > 0 || orphanClaimDrift > 0 || storageTypeViol > 0 || electionReplicasViol > 0 || kvOpRateCeilingViol > 0 {
-					invariantsErr := fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d storage_type_violation=%d election_replicas_violation=%d kv_op_rate_ceiling_violation=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift, storageTypeViol, electionReplicasViol, kvOpRateCeilingViol)
+				revocationDropped := coord.GetRevocationReportDropped()
+				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || claimLossOrderViol > 0 || producerResumeMissing > 0 || casStormPanics > 0 || handoffMaxAgeViol > 0 || orphanClaimDrift > 0 || storageTypeViol > 0 || electionReplicasViol > 0 || kvOpRateCeilingViol > 0 || revocationDropped > 0 {
+					invariantsErr := fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d storage_type_violation=%d election_replicas_violation=%d kv_op_rate_ceiling_violation=%d revocation_report_dropped=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift, storageTypeViol, electionReplicasViol, kvOpRateCeilingViol, revocationDropped)
 					// Emit the structured failure_report.json so CI artifacts
 					// include InconclusiveOwnerEvents / unobserved counters /
 					// FirstChaosEventAt — auditability that the new
@@ -1457,8 +1476,12 @@ func startEmitters(ctx context.Context, workerID string, w *worker.Worker,
 //     start_latency, state, leader) which fire independently of message
 //     traffic.
 //
-// Phase 7b (process-mode chaos dispatch) is deliberately out of scope for
-// this entrypoint — see the task report for follow-up.
+// Phase 7b (process-mode chaos dispatch) IS in scope: scheduled chaos
+// events (worker_pause / worker_resume / stableid_tiny_pool_respawn)
+// are dispatched below via handleChaosEvent with goroutineRegistry=nil
+// so the process-mode branch runs instead of the all-in-one fast-path.
+// Producer-mode integration remains out of scope (see chaos_process_sigstop_long.yaml
+// LIMITATION note).
 func runProcessOrchestrator(ctx context.Context, cfg *config.Config, cfgPath string) error { //nolint:cyclop,funlen,revive,gocyclo
 	// Bring up NATS exactly as runAllInOne does. The pre-create logic
 	// mirrors runAllInOne's bucket-readying block, minus the Phase 6
@@ -1536,8 +1559,18 @@ func runProcessOrchestrator(ctx context.Context, cfg *config.Config, cfgPath str
 	coord.EnableShutdownOracles(registry)
 	go coord.Start(ctx)
 
-	// IPC smoke oracle (Phase 7a gating; Phase 7b will read its counter).
-	smoke := coordinator.NewIPCSmokeOracle(30*time.Second, nil)
+	// IPC smoke oracle (Phase 7a gating; Phase 7b reads its counter).
+	// Scenario-tunable via process.smoke_window; default 30s preserves the
+	// historical behavior. Cold-NATS / race-build runs that legitimately
+	// take >30s to emit a first assignment_report can bump this to 60s+
+	// without weakening the lifecycle assertion — the window is per-worker
+	// and counts from each worker's first observed frame.
+	smokeWindow := cfg.Process.SmokeWindow
+	if smokeWindow <= 0 {
+		smokeWindow = 30 * time.Second
+	}
+	log.Printf("[process] IPC smoke window: %v (default 30s; set process.smoke_window to override)", smokeWindow)
+	smoke := coordinator.NewIPCSmokeOracle(smokeWindow, nil)
 	smoke.Run(ctx, 2*time.Second)
 
 	// ProcessManager + IPC sinks. The sinks share buffered channels with
@@ -1597,6 +1630,15 @@ func runProcessOrchestrator(ctx context.Context, cfg *config.Config, cfgPath str
 				case <-time.After(sev.At):
 				}
 				log.Printf("[ScheduledChaos] firing %s at +%v params=%v", sev.Event, sev.At, sev.Params)
+				// MarkChaosStarted BEFORE dispatch so any
+				// transient post-event observations
+				// (double-leader during SIGSTOP/SIGCONT, etc.)
+				// land in the informational post-chaos bucket
+				// rather than the fail-run counter. Mirrors the
+				// all-in-one ChaosController hook at main.go:534.
+				if coord != nil {
+					coord.MarkChaosStarted()
+				}
 				handleChaosEvent(ctx, coord, coordinator.ChaosEvent(sev.Event), sev.Params, processMgr, nil, nil, nil)
 			}()
 		}
@@ -1624,8 +1666,13 @@ func runProcessOrchestrator(ctx context.Context, cfg *config.Config, cfgPath str
 	claimLossOrderViol := coord.GetClaimLossOrderingViolations()
 	leaderViol := coord.GetDoubleLeaderObservations()
 	snapOverlap := coord.GetSnapshotOverlapCount()
-	log.Printf("[process] oracle counters: claim_loss_stop_ordering=%d leader_uniqueness=%d snapshot_overlap=%d",
-		claimLossOrderViol, leaderViol, snapOverlap)
+	revocationDropped := coord.GetRevocationReportDropped()
+	replacementAssignObs := coord.GetProcessSIGSTOPReplacementAssignmentObserved()
+	returningShutdownObs := coord.GetProcessSIGSTOPReturningShutdownObserved()
+	log.Printf("[process] oracle counters: claim_loss_stop_ordering=%d leader_uniqueness=%d snapshot_overlap=%d "+
+		"revocation_report_dropped=%d process_sigstop_replacement_assignment_observed=%d "+
+		"process_sigstop_returning_shutdown_observed=%d",
+		claimLossOrderViol, leaderViol, snapOverlap, revocationDropped, replacementAssignObs, returningShutdownObs)
 	if v := smoke.Violations(); v > 0 {
 		return fmt.Errorf("ipc_smoke_violation=%d (workers_seen=%d frame_counts=%v)", v, seen, counts)
 	}
@@ -1641,7 +1688,23 @@ func runProcessOrchestrator(ctx context.Context, cfg *config.Config, cfgPath str
 	if snapOverlap > 0 {
 		return fmt.Errorf("snapshot_overlap_violations=%d", snapOverlap)
 	}
+	if revocationDropped > 0 {
+		return fmt.Errorf("revocation_report_dropped=%d (Phase 4 ordering oracle lost its only negative signal)", revocationDropped)
+	}
+	// Phase 7b positive gates: only required when the scenario actually
+	// scheduled a worker_resume event (the only path that increments these
+	// counters). Detect by scanning cfg.Chaos.ScheduledEvents for
+	// WorkerResumeEvent; if present, both counters MUST be > 0.
+	if scenarioHasScheduledEvent(cfg, coordinator.WorkerResumeEvent) {
+		if replacementAssignObs == 0 {
+			return errors.New("process_sigstop_replacement_assignment_observed=0 — replacement worker never reported non-empty assignment before SIGCONT")
+		}
+		if returningShutdownObs == 0 {
+			return errors.New("process_sigstop_returning_shutdown_observed=0 — returning worker never reached StateShutdown after SIGCONT")
+		}
+	}
 	log.Printf("[process] smoke check passed (workers=%d)", cfg.Workers.Count)
+
 	return nil
 }
 
@@ -1795,8 +1858,13 @@ func handleChaosEvent(
 
 	case coordinator.WorkerResumeEvent:
 		// Phase 7b: drive SIGCONT for a previously open-ended worker_pause.
+		// Wait-for-condition variant: before SIGCONT, block until the
+		// replacement worker has emitted a non-empty assignment snapshot
+		// (proof the claim-loss invariant can actually fire on resume).
+		// On timeout the handler does NOT SIGCONT — leaves the target
+		// frozen so the failure is diagnosable.
 		targetWorker, _ := params["target_worker"].(string)
-		handleWorkerResume(processMgr, targetWorker)
+		handleWorkerResume(ctx, coord, processMgr, params, targetWorker)
 
 	case coordinator.StableIDTinyPoolRespawnEvent:
 		// Phase 7b: process-mode same-pool replacement. Look up the target
@@ -2298,6 +2366,7 @@ func spawnAllInOneWorker(parent context.Context, workerID string) bool {
 		SourceBucket:                aioCfg.Workers.SourceBucket,
 		SourceReconcileInterval:     aioCfg.Workers.SourceReconcileInterval,
 		RevocationReportCh:          aioCoord.GetRevocationReportsChannel(),
+		RevocationReportDropFn:      aioCoord.IncRevocationReportDropped,
 	}
 	applyWorkerOverrides(&wcfg, aioCfg, workerID)
 	w, err := worker.NewWorker(wcfg)
@@ -2677,19 +2746,176 @@ func handleProcessStableIDTinyPoolRespawn(ctx context.Context, params map[string
 		newID, overrides, target, time.Now().Format(time.RFC3339Nano))
 	if err := processMgr.StartWorker(ctx, newID, overrides); err != nil {
 		log.Printf("[Chaos] stableid_tiny_pool_respawn: failed to spawn %s: %v", newID, err)
+		return
 	}
+	procLastReplacementWorkerID = newID
 }
 
-// handleWorkerResume sends SIGCONT to a previously paused worker process.
-// Process-mode only; pairs with an open-ended (duration<=0) worker_pause.
-func handleWorkerResume(processMgr *coordinator.ProcessManager, targetWorker string) {
+// handleWorkerResume drives the Phase 7b wait-for-condition SIGCONT.
+//
+// The Phase 7b long-SIGSTOP scenario requires three positive observations
+// before the original target is unfrozen, otherwise the run silently
+// passes on absence-of-failure rather than presence-of-correct-behavior:
+//
+//  1. The replacement worker (spawned by stableid_tiny_pool_respawn) has
+//     a non-empty assignment snapshot — proves the production
+//     stale-takeover claim path actually moved the stable-ID key and
+//     the new manager won the election. Without this gate, SIGCONT
+//     might fire before the replacement claims anything, in which case
+//     the returning worker's claim-loss invariant is vacuously
+//     satisfied.
+//  2. SIGCONT is sent only after (1). On (1) timeout the handler logs
+//     loudly and DOES NOT SIGCONT — leaves the target frozen so the
+//     failure is diagnosable in the live process tree.
+//  3. After SIGCONT the handler polls the original target's observer
+//     until WorkerStateInt() == workerStateShutdown (the claim-loss
+//     onClaimerError → claimLostShutdown path landed). On success it
+//     bumps process_sigstop_returning_shutdown_observed; the
+//     orchestrator gates that counter > 0.
+//
+// All deadlines are bounded so a wedged run cannot hang past
+// cfg.Simulation.Duration.
+//
+// params optionally carries scenario knobs:
+//   - replacement_wait: max time to wait for replacement assignment
+//     snapshot (default 30s).
+//   - shutdown_wait: max time to wait for returning worker shutdown
+//     after SIGCONT (default 60s — the claim-loss path has a 30s stop
+//     timeout per claimLostShutdown).
+func handleWorkerResume(
+	ctx context.Context,
+	coord *coordinator.Coordinator,
+	processMgr *coordinator.ProcessManager,
+	params map[string]any,
+	targetWorker string,
+) {
 	if targetWorker == "" {
 		log.Println("[Chaos] worker_resume requires target_worker; skipping")
 		return
 	}
+	if processMgr == nil {
+		log.Println("[Chaos] worker_resume requires process manager; skipping")
+		return
+	}
+
+	replacementWait := durationFromParams(params, "replacement_wait", 30*time.Second)
+	shutdownWait := durationFromParams(params, "shutdown_wait", 60*time.Second)
+
+	replacement := procLastReplacementWorkerID
+	if replacement == "" || coord == nil {
+		log.Printf("[Chaos] worker_resume: no replacement worker recorded (replacement=%q coord_nil=%v); "+
+			"SIGCONT will fire WITHOUT positive replacement-claim gate; "+
+			"scenario invariants cannot be proven", replacement, coord == nil)
+	} else {
+		log.Printf("[Chaos] worker_resume: waiting up to %v for replacement worker %s to report non-empty assignment "+
+			"before SIGCONT on %s", replacementWait, replacement, targetWorker)
+		waitCtx, cancel := context.WithTimeout(ctx, replacementWait)
+		gotAssignment := waitForNonEmptyAssignment(waitCtx, coord, replacement)
+		cancel()
+		if !gotAssignment {
+			log.Printf("[Chaos] worker_resume: TIMEOUT waiting %v for replacement %s to claim partitions; "+
+				"NOT sending SIGCONT to %s (leaves the target frozen for live diagnosis). "+
+				"Phase 7b positive gate will fail (process_sigstop_replacement_assignment_observed=0).",
+				replacementWait, replacement, targetWorker)
+			return
+		}
+		coord.IncProcessSIGSTOPReplacementAssignmentObserved()
+		log.Printf("[Chaos] worker_resume: replacement %s observed with non-empty assignment; proceeding to SIGCONT %s",
+			replacement, targetWorker)
+	}
+
 	log.Printf("[Chaos] Resuming worker %s (SIGCONT)", targetWorker)
 	if err := processMgr.SignalProcess(targetWorker, syscall.SIGCONT); err != nil {
 		log.Printf("[Chaos] Failed to resume worker %s: %v", targetWorker, err)
+		return
+	}
+
+	// Phase 7b positive returning-worker gate: poll the target observer
+	// until WorkerStateInt() == workerStateShutdown. The claim-loss path
+	// (manager_election.go:onClaimerError → claimLostShutdown) drives the
+	// state machine to Shutdown after the next renew tick fails with
+	// jetstream.ErrKeyExists. shutdownWait bounds the wait.
+	if coord == nil {
+		return
+	}
+	go func() {
+		waitCtx, cancel := context.WithTimeout(ctx, shutdownWait)
+		defer cancel()
+		if observeStateEquals(waitCtx, processMgr, targetWorker, workerStateShutdownInt) {
+			coord.IncProcessSIGSTOPReturningShutdownObserved()
+			log.Printf("[Chaos] worker_resume: returning worker %s observed in StateShutdown (Phase 7b positive gate satisfied)",
+				targetWorker)
+			return
+		}
+		log.Printf("[Chaos] worker_resume: TIMEOUT after %v waiting for %s to reach StateShutdown; "+
+			"Phase 7b returning-shutdown gate will FAIL", shutdownWait, targetWorker)
+	}()
+}
+
+// scenarioHasScheduledEvent reports whether the configured scenario
+// explicitly schedules an event of the given kind. Used by
+// runProcessOrchestrator's final gate to make the Phase 7b positive
+// counters required only on scenarios that drive worker_resume — other
+// process-mode scenarios (e.g. process_smoke) intentionally never
+// increment them and must not be failed by this gate.
+func scenarioHasScheduledEvent(cfg *config.Config, want coordinator.ChaosEvent) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, sev := range cfg.Chaos.ScheduledEvents {
+		if coordinator.ChaosEvent(sev.Event) == want {
+			return true
+		}
+	}
+
+	return false
+}
+
+// workerStateShutdownInt mirrors coordinator.workerStateShutdown (the int
+// value of parti.StateShutdown). Hardcoded here to avoid importing an
+// internal const; kept in sync via the same types/state.go reference.
+const workerStateShutdownInt = 9
+
+// waitForNonEmptyAssignment polls the coordinator's owner snapshot until
+// the worker workerID owns at least one partition, or ctx is done.
+// Returns true if a non-empty snapshot was observed.
+func waitForNonEmptyAssignment(ctx context.Context, coord *coordinator.Coordinator, workerID string) bool {
+	if coord == nil {
+		return false
+	}
+	tick := time.NewTicker(250 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if owned := coord.PartitionsOwnedBy(workerID); len(owned) > 0 {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-tick.C:
+		}
+	}
+}
+
+// observeStateEquals polls the ProcessWorkerObserver for the given worker
+// until its WorkerStateInt() equals wantState, or ctx is done. Returns
+// true if the state was observed.
+func observeStateEquals(ctx context.Context, processMgr *coordinator.ProcessManager, workerID string, wantState int) bool {
+	if processMgr == nil {
+		return false
+	}
+	tick := time.NewTicker(250 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		info, ok := processMgr.GetProcessInfo(workerID)
+		if ok && info.Observer != nil && info.Observer.WorkerStateInt() == wantState {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-tick.C:
+		}
 	}
 }
 
@@ -2745,6 +2971,8 @@ func handleLeaderGoroutineNetworkDisconnect(
 //     captured before any reassignment has started.
 //  3. Call Worker.Disconnect().
 //  4. After dur elapses, call Worker.Reconnect().
+//
+//nolint:cyclop // sequential chaos handler: select target → register expectations → disconnect/reconnect; splitting hurts readability.
 func handleLongGoroutineNetworkDisconnect(
 	registry *coordinator.GoroutineRegistry,
 	params map[string]any,
@@ -2766,11 +2994,34 @@ func handleLongGoroutineNetworkDisconnect(
 			}
 		}
 		if target == nil {
-			log.Printf("[Chaos] long_disconnect: target_worker=%s not found; falling back to random", explicit)
+			log.Printf("[Chaos] long_disconnect: target_worker=%s not found; falling back to non-empty random", explicit)
 		}
 	}
 	if target == nil {
-		target = workers[time.Now().UnixNano()%int64(len(workers))]
+		// Prefer workers with a non-empty current assignment so the
+		// reassignment-observed invariant (Phase 3 INV1) can actually
+		// fire. Random pick among workers with len(owned)>0; fall back
+		// to plain random (with a loud warning) only when no worker
+		// owns any partitions, which means the owner snapshot has not
+		// initialized yet — proceeding would yield an inconclusive
+		// expectation.
+		var nonEmpty []*coordinator.GoroutineInfo
+		if aioCoord != nil {
+			for i := range workers {
+				if owned := aioCoord.PartitionsOwnedBy(workers[i].ID); len(owned) > 0 {
+					nonEmpty = append(nonEmpty, workers[i])
+				}
+			}
+		}
+		switch {
+		case len(nonEmpty) > 0:
+			target = nonEmpty[time.Now().UnixNano()%int64(len(nonEmpty))]
+			log.Printf("[Chaos] long_disconnect: selected target=%s (had non-empty owner snapshot)", target.ID)
+		default:
+			log.Printf("[Chaos] long_disconnect: WARN no worker currently owns any partitions in the owner snapshot; " +
+				"skipping this chaos firing — the reassignment expectation would be vacuous (empty→empty)")
+			return
+		}
 	}
 	dur, ok := params["duration"].(time.Duration)
 	if !ok || dur <= 0 {

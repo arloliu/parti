@@ -45,6 +45,14 @@ var storageTypeViolations atomic.Int64
 // match the operator-precreated value.
 var electionReplicasViolations atomic.Int64
 
+// electionReplicasUnderflow is an audit-only counter incremented when the
+// server-accepted replica count after pre-create is strictly less than the
+// requested value. Does NOT fail the run on its own (single-server NATS
+// legitimately clamps to 1) — surfaces the silent-clamp case so a regression
+// where the server returns 0 cannot be silently absorbed by the assertion
+// baseline.
+var electionReplicasUnderflow atomic.Int64
+
 // kvOpRateCeilingViolations is the Phase 8 / Gap 13 INV3 counter: must
 // remain 0 (or is informational when the multiplier is set to a loose
 // first-run sentinel). Incremented when the burst-window KV-op rate exceeds
@@ -193,11 +201,37 @@ func precreateElectionBucketWithReplicas(ctx context.Context, js jetstream.JetSt
 
 		return replicas, nil // assume requested value
 	}
-	if actual != replicas {
+	// Reject impossible readback values. Replicas=0 is the silent-clamp
+	// regression the post-impl review flagged: if the server (or a future
+	// JetStream bug) reports 0, accepting it as the assertion baseline lets
+	// the live-check pass on 0==0 even though the production manager would
+	// definitely fail to elect. Fail loud during pre-create.
+	if actual <= 0 {
+		return 0, fmt.Errorf("pre-create election bucket %q: server reported Replicas=%d after create "+
+			"(requested=%d); refusing to use a non-positive baseline (silent-clamp regression)",
+			bucket, actual, replicas)
+	}
+	if actual < replicas {
+		// Audit signal: server clamped silently (single-server NATS does
+		// this legitimately). Surface via dedicated counter so a future
+		// regression that drops further isn't masked by the warning log
+		// alone.
+		electionReplicasUnderflow.Add(1)
 		log.Printf("[Phase8/INV2] WARN: pre-created election bucket %q with Replicas=%d but server reports Replicas=%d "+
-			"(server clamped; assertion will use actual=%d)", bucket, replicas, actual, actual)
+			"(server clamped; assertion will use actual=%d; electionReplicasUnderflow incremented)",
+			bucket, replicas, actual, actual)
+	} else if actual > replicas {
+		log.Printf("[Phase8/INV2] note: pre-created election bucket %q with Replicas=%d but server reports Replicas=%d",
+			bucket, replicas, actual)
 	} else {
 		log.Printf("[Phase8/INV2] pre-created election bucket %q with Replicas=%d (FileStorage)", bucket, replicas)
+	}
+
+	// Normalize to a minimum of 1 — defensive in case a future readback
+	// surface evolves to allow 0 again. With the >0 guard above this is a
+	// no-op today; kept as belt-and-suspenders.
+	if actual < 1 {
+		actual = 1
 	}
 
 	return actual, nil

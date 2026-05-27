@@ -66,3 +66,55 @@ func TestProcessManager_SignalProcess(t *testing.T) {
 	// sleep command returns error when terminated by signal, so it might be marked as crashed
 	require.Contains(t, []ProcessStatus{StatusStopped, StatusCrashed}, info.Status)
 }
+
+// TestProcessManager_KillProcess_PreservesStatusKilled is the regression
+// test for the P2 post-impl-review finding: KillProcess set StatusKilled,
+// but monitorProcess later called Cmd.Wait, observed the non-nil
+// "signal: killed" error, and unconditionally overwrote the status to
+// StatusCrashed. The killRequested flag now distinguishes the intentional
+// kill so the final terminal status remains StatusKilled.
+func TestProcessManager_KillProcess_PreservesStatusKilled(t *testing.T) {
+	binary, err := exec.LookPath("sleep")
+	require.NoError(t, err)
+
+	pm := NewProcessManager(binary, "dummy_config")
+	ctx := t.Context()
+
+	cmd := exec.CommandContext(ctx, "sleep", "30")
+	err = cmd.Start()
+	require.NoError(t, err)
+
+	id := "test-kill-preserve"
+	exited := make(chan struct{})
+	pm.mu.Lock()
+	pm.processes[id] = &ProcessInfo{
+		ID:      id,
+		Type:    WorkerProcess,
+		Cmd:     cmd,
+		Started: time.Now(),
+		Status:  StatusRunning,
+		exited:  exited,
+		// readerDone left nil — no IPC capture in this test.
+	}
+	pm.mu.Unlock()
+
+	// Start the monitor goroutine that races KillProcess: it will call
+	// Cmd.Wait, observe "signal: killed", and (with the fix) preserve
+	// StatusKilled.
+	go pm.monitorProcess(id)
+
+	err = pm.KillProcess(id)
+	require.NoError(t, err)
+
+	// Wait for the monitor goroutine to finalise the status.
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("monitorProcess did not finalise status within 5s")
+	}
+
+	info, exists := pm.GetProcessInfo(id)
+	require.True(t, exists)
+	require.Equal(t, StatusKilled, info.Status,
+		"intentional SIGKILL must preserve StatusKilled even after Cmd.Wait observes the signal-killed error")
+}
