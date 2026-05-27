@@ -945,31 +945,43 @@ func (o *ClaimLossOrderingOracle) ObserveRevocation(simWorkerID, stableID string
 		// frame for a previously-assigned partition arriving STRICTLY
 		// AFTER an observed Shutdown unambiguously demonstrates the
 		// invariant break, with no ambiguity from rebalance traffic.
-		// post-impl-review v1 P0 #1 follow-up: sampler is still wired
-		// (drives the log reason) so a future redesign with a
-		// claim-loss-only discriminator can flip the violation gate on
-		// without rewiring.
-		_ = samplerKnown
-		o.shutdownBySim[simWorkerID] = at
-		if stableID != "" {
-			o.stableToSimAtShutdown[stableID] = simWorkerID
-		}
-		if parts, ok := o.assignmentBySim[simWorkerID]; ok && len(parts) > 0 {
-			snap := make(map[int]struct{}, len(parts))
-			for p := range parts {
-				snap[p] = struct{}{}
-			}
-			o.lastAssignmentBySim[simWorkerID] = snap
-		}
+		// post-impl-review v2 P1 #1 fix: only backfill shutdownBySim when
+		// the sampler CONFIRMS the worker is currently in Shutdown (the
+		// poll-cadence race the backfill was originally for) OR when no
+		// sampler is installed (legacy behavior, preserved for unit-test
+		// setups without a coordinator). When a sampler is installed but
+		// reports a non-shutdown state (Stable / rebalance / lag) OR
+		// reports unknown, we leave the revoke audit-only: NO write to
+		// shutdownBySim, so later ObserveMessage frames for these
+		// partitions DO NOT spuriously trip the post_shutdown_message
+		// gate. The only post-shutdown violation that fires is one
+		// preceded by a REAL ObserveShutdown.
 		reason := "no_sampler"
+		backfill := sampler == nil
 		switch {
 		case sampler != nil && samplerInShutdown:
 			reason = "sampler_confirms_shutdown"
-		case sampler != nil:
+			backfill = true
+		case sampler != nil && samplerKnown:
 			reason = "sampler_reports_non_shutdown_rebalance_or_lag"
+		case sampler != nil:
+			reason = "sampler_reports_unknown"
 		}
-		log.Printf("[ClaimLossOrderingOracle] revoke_backfill worker=%s stable=%s at=%v reason=%s",
-			simWorkerID, stableID, at.Format(time.RFC3339Nano), reason)
+		if backfill {
+			o.shutdownBySim[simWorkerID] = at
+			if stableID != "" {
+				o.stableToSimAtShutdown[stableID] = simWorkerID
+			}
+			if parts, ok := o.assignmentBySim[simWorkerID]; ok && len(parts) > 0 {
+				snap := make(map[int]struct{}, len(parts))
+				for p := range parts {
+					snap[p] = struct{}{}
+				}
+				o.lastAssignmentBySim[simWorkerID] = snap
+			}
+		}
+		log.Printf("[ClaimLossOrderingOracle] revoke_backfill worker=%s stable=%s at=%v reason=%s backfilled=%t",
+			simWorkerID, stableID, at.Format(time.RFC3339Nano), reason, backfill)
 
 		return
 	}

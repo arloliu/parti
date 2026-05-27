@@ -192,6 +192,14 @@ type Coordinator struct {
 	// transition proves nothing. Previously counted as a (trivial)
 	// observed; now surfaced so the orchestrator can tell the diff.
 	longDisconnectReassignmentInconclusive int64 // protected by longDisconnectMu
+	// longDisconnectSkipped counts how many times the long-disconnect
+	// chaos handler skipped a firing because no worker held a non-empty
+	// owner snapshot at the moment of firing. A Phase 3 scenario that
+	// explicitly schedules / enables network_disconnect_long expects at
+	// least one firing; a silent skip would let a run pass with
+	// observed=0. Surfaced so the final gate can fail loudly when the
+	// chaos was supposed to happen but world state prevented it.
+	longDisconnectSkipped int64 // protected by longDisconnectMu
 }
 
 // ownerSnapshot is an immutable view of partition→workers at a moment
@@ -2317,4 +2325,24 @@ func (c *Coordinator) GetLongDisconnectReassignmentInconclusive() int64 {
 	c.longDisconnectMu.Lock()
 	defer c.longDisconnectMu.Unlock()
 	return c.longDisconnectReassignmentInconclusive
+}
+
+// IncLongDisconnectSkipped records that the long-disconnect chaos
+// handler skipped a firing because no worker currently owned any
+// partitions in the coordinator's owner snapshot. Scenarios that
+// explicitly schedule or enable network_disconnect_long should treat a
+// non-zero skip count as a failure: the chaos was supposed to fire and
+// the world state prevented it.
+func (c *Coordinator) IncLongDisconnectSkipped() {
+	c.longDisconnectMu.Lock()
+	c.longDisconnectSkipped++
+	c.longDisconnectMu.Unlock()
+}
+
+// GetLongDisconnectSkipped returns the count of skipped long-disconnect
+// firings; see IncLongDisconnectSkipped.
+func (c *Coordinator) GetLongDisconnectSkipped() int64 {
+	c.longDisconnectMu.Lock()
+	defer c.longDisconnectMu.Unlock()
+	return c.longDisconnectSkipped
 }

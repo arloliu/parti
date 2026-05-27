@@ -109,6 +109,68 @@ func TestClaimLossOrderingOracle_RevokeBeforeShutdown_SamplerUnknown_Backfills(t
 	}
 }
 
+// TestClaimLossOrderingOracle_RevokeStableThenLaterMessage_NoViolation
+// proves the rebalance path stays clean even when a later message
+// arrives for a previously-revoked partition. This is the P1 regression
+// from post-impl review v2: the v1 fix silently wrote shutdownBySim on
+// a sampler-Stable revoke, which then poisoned ObserveMessage and made
+// a legitimate "leader reassigns the partition back to this worker"
+// rebalance look like post_shutdown_message traffic.
+func TestClaimLossOrderingOracle_RevokeStableThenLaterMessage_NoViolation(t *testing.T) {
+	o := NewClaimLossOrderingOracle()
+	o.RegisterStableID("worker-0", "freeze-victim-1")
+	o.RecordAssignment("worker-0", []int{1, 2, 3})
+	o.SetStateSampler(func(simWorkerID string) (int, bool) {
+		if simWorkerID == "worker-0" {
+			return workerStateStable, true
+		}
+
+		return 0, false
+	})
+	t0 := time.Now()
+	// Rebalance-to-empty revoke (sampler reports Stable).
+	o.ObserveRevocation("worker-0", "freeze-victim-1", t0)
+	// Leader reassigns the same partition back to worker-0 and a
+	// message arrives well after the revoke. Must NOT count as a
+	// post-shutdown violation — no real Shutdown was observed.
+	o.RecordAssignment("worker-0", []int{1, 2, 3})
+	o.ObserveMessage("worker-0", 2, t0.Add(500*time.Millisecond))
+	if got := o.Violations(); got != 0 {
+		t.Fatalf("rebalance-then-message path: expected 0 violations, got %d", got)
+	}
+}
+
+// TestClaimLossOrderingOracle_RevokeStableThenRealShutdownThenMessage_Violation
+// proves the post-shutdown gate STILL fires when a real Shutdown is
+// observed after a sampler-Stable revoke. The earlier audit-only
+// revoke must not mask a later, genuine Stop-before-revoke regression
+// signal.
+func TestClaimLossOrderingOracle_RevokeStableThenRealShutdownThenMessage_Violation(t *testing.T) {
+	o := NewClaimLossOrderingOracle()
+	o.RegisterStableID("worker-0", "freeze-victim-1")
+	o.RecordAssignment("worker-0", []int{1, 2, 3})
+	o.SetStateSampler(func(simWorkerID string) (int, bool) {
+		if simWorkerID == "worker-0" {
+			return workerStateStable, true
+		}
+
+		return 0, false
+	})
+	t0 := time.Now()
+	// Audit-only sampler-Stable revoke.
+	o.ObserveRevocation("worker-0", "freeze-victim-1", t0)
+	// Real shutdown observed later, with the worker still holding the
+	// same partitions at the time of the shutdown snapshot.
+	o.RecordAssignment("worker-0", []int{1, 2, 3})
+	tShut := t0.Add(1 * time.Second)
+	o.ObserveShutdown("worker-0", "freeze-victim-1", tShut)
+	// Post-shutdown message for an owned partition → violation.
+	o.ObserveMessage("worker-0", 2, tShut.Add(100*time.Millisecond))
+	if got := o.Violations(); got != 1 {
+		t.Fatalf("real shutdown then post-shutdown message: expected 1 violation, got %d", got)
+	}
+}
+
 // TestClaimLossOrderingOracle_RevokeTimestampBeforeShutdown_Violation
 // verifies the defensive check: if both signals fire but the revoke
 // timestamp PRECEDES the shutdown timestamp, that's still a violation
