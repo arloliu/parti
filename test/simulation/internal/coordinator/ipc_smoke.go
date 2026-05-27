@@ -185,6 +185,10 @@ type ProcessWorkerObserver struct {
 	// observation. Hide the frozen worker from oracle polls by returning
 	// suspendedStateValue / IsLeader=false while suspended.
 	suspended atomic.Bool
+	// claimLost mirrors the worker's ClaimLostObserved signal, set via
+	// SetClaimLostObserved when the IPC stream surfaces a real
+	// stableid.ErrClaimLost from the spawned worker's OnError hook.
+	claimLost atomic.Bool
 }
 
 // suspendedStateValue is returned by WorkerStateInt when the observer is
@@ -266,4 +270,24 @@ func (o *ProcessWorkerObserver) SetStableID(id string) {
 		return
 	}
 	o.stableID.Store(&id)
+}
+
+// ClaimLostObserved reports whether the spawned worker has surfaced a
+// stableid.ErrClaimLost via its OnError hook (forwarded over IPC).
+// Implements WorkerObserver.
+func (o *ProcessWorkerObserver) ClaimLostObserved() bool {
+	if o == nil {
+		return false
+	}
+
+	return o.claimLost.Load()
+}
+
+// SetClaimLostObserved records that the spawned worker reported a real
+// claim-loss event. The IPC reader latches this true and never clears it.
+func (o *ProcessWorkerObserver) SetClaimLostObserved() {
+	if o == nil {
+		return
+	}
+	o.claimLost.Store(true)
 }

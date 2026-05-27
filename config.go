@@ -353,7 +353,9 @@ type Config struct {
 	WorkerIDMax int `yaml:"workerIdMax" default:"999" validate:"gtefield=WorkerIDMin"`
 
 	// WorkerIDTTL is how long a worker ID claim remains valid in the key-value store.
-	// Must be greater than HeartbeatTTL. Renewal writes one KV op per worker every
+	// Must be >= HeartbeatTTL (validated via the `gtefield=HeartbeatTTL` tag below;
+	// setting WorkerIDTTL below HeartbeatTTL causes Manager.Start to fail
+	// validation). Renewal writes one KV op per worker every
 	// WorkerIDTTL/3, so longer values reduce steady-state IOPS at the cost of slower
 	// ID reclamation after a worker exits.
 	// Recommended: 3-5x HeartbeatTTL. Default 75s is 5x the default HeartbeatTTL (15s).
