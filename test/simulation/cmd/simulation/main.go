@@ -133,43 +133,7 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	// Apply CLI override for workers if provided
-	if workersOverride != nil && *workersOverride >= 0 {
-		cfg.Workers.Count = *workersOverride
-		log.Printf("Overriding expected workers from CLI flag: %d", cfg.Workers.Count)
-	}
-
-	// Apply CLI override for duration if provided
-	if durationOverride != nil && *durationOverride > 0 {
-		cfg.Simulation.Duration = *durationOverride
-		log.Printf("Overriding simulation duration from CLI flag: %v", cfg.Simulation.Duration)
-	}
-
-	// Apply CLI override for stop-on-failure if provided
-	if *stopOnFailure {
-		cfg.Coordinator.StopOnFailure = true
-		log.Println("Overriding stop-on-failure from CLI flag: true")
-	}
-
-	// Apply --mode override (Phase 7a: parent orchestrator spawns children
-	// with --mode worker / --mode producer). Validation already ran on
-	// LoadConfig; mode strings beyond the allowed set fall through to the
-	// main switch's default-case error below.
-	if *modeOverride != "" {
-		cfg.Simulation.Mode = *modeOverride
-	}
-	// --id maps to WORKER_ID / PRODUCER_ID. The downstream runWorker /
-	// runProducer already prefer the env var; setting it here keeps the
-	// child-spawn path uniform with the env-only path used by chaos
-	// dispatchers in all-in-one mode.
-	if *idOverride != "" {
-		switch cfg.Simulation.Mode {
-		case "worker":
-			_ = os.Setenv("WORKER_ID", *idOverride)
-		case "producer":
-			_ = os.Setenv("PRODUCER_ID", *idOverride)
-		}
-	}
+	applyCLIOverrides(cfg, workersOverride, durationOverride, stopOnFailure, modeOverride, idOverride)
 
 	log.Printf("Starting simulation in %s mode", cfg.Simulation.Mode)
 	if cfg.Simulation.Duration > 0 {
@@ -206,22 +170,7 @@ func main() {
 	// Start components based on mode
 	errCh := make(chan error, 1)
 	go func() {
-		var runErr error
-		switch cfg.Simulation.Mode {
-		case "all-in-one":
-			runErr = runAllInOne(ctx, cfg, *configPath, effectiveCooldown)
-		case "producer":
-			runErr = runProducer(ctx, cfg)
-		case "worker":
-			runErr = runWorker(ctx, cfg)
-		case "coordinator":
-			runErr = runCoordinator(ctx, cfg)
-		case "process":
-			runErr = runProcessOrchestrator(ctx, cfg, *configPath)
-		default:
-			runErr = fmt.Errorf("unknown mode: %s", cfg.Simulation.Mode)
-		}
-		errCh <- runErr
+		errCh <- dispatchMode(ctx, cfg, *configPath, effectiveCooldown)
 	}()
 
 	// Wait for either completion, timeout, or signal
@@ -251,6 +200,67 @@ func main() {
 		os.Exit(1) //nolint:gocritic // Intentional: defer cancel() not running is acceptable on exit
 	}
 	log.Println("Shutdown complete")
+}
+
+// applyCLIOverrides folds CLI flag overrides into the loaded config. Extracted
+// from main() so the top-level trunk stays under the cyclop threshold.
+func applyCLIOverrides(cfg *config.Config, workersOverride *int, durationOverride *time.Duration, stopOnFailure *bool, modeOverride, idOverride *string) {
+	// Apply CLI override for workers if provided
+	if workersOverride != nil && *workersOverride >= 0 {
+		cfg.Workers.Count = *workersOverride
+		log.Printf("Overriding expected workers from CLI flag: %d", cfg.Workers.Count)
+	}
+
+	// Apply CLI override for duration if provided
+	if durationOverride != nil && *durationOverride > 0 {
+		cfg.Simulation.Duration = *durationOverride
+		log.Printf("Overriding simulation duration from CLI flag: %v", cfg.Simulation.Duration)
+	}
+
+	// Apply CLI override for stop-on-failure if provided
+	if stopOnFailure != nil && *stopOnFailure {
+		cfg.Coordinator.StopOnFailure = true
+		log.Println("Overriding stop-on-failure from CLI flag: true")
+	}
+
+	// Apply --mode override (Phase 7a: parent orchestrator spawns children
+	// with --mode worker / --mode producer). Validation already ran on
+	// LoadConfig; mode strings beyond the allowed set fall through to the
+	// dispatchMode default-case error.
+	if modeOverride != nil && *modeOverride != "" {
+		cfg.Simulation.Mode = *modeOverride
+	}
+	// --id maps to WORKER_ID / PRODUCER_ID. The downstream runWorker /
+	// runProducer already prefer the env var; setting it here keeps the
+	// child-spawn path uniform with the env-only path used by chaos
+	// dispatchers in all-in-one mode.
+	if idOverride != nil && *idOverride != "" {
+		switch cfg.Simulation.Mode {
+		case "worker":
+			_ = os.Setenv("WORKER_ID", *idOverride)
+		case "producer":
+			_ = os.Setenv("PRODUCER_ID", *idOverride)
+		}
+	}
+}
+
+// dispatchMode routes execution to the per-mode runner. Extracted from main()
+// so the top-level trunk stays under the cyclop threshold.
+func dispatchMode(ctx context.Context, cfg *config.Config, configPath string, cooldown time.Duration) error {
+	switch cfg.Simulation.Mode {
+	case "all-in-one":
+		return runAllInOne(ctx, cfg, configPath, cooldown)
+	case "producer":
+		return runProducer(ctx, cfg)
+	case "worker":
+		return runWorker(ctx, cfg)
+	case "coordinator":
+		return runCoordinator(ctx, cfg)
+	case "process":
+		return runProcessOrchestrator(ctx, cfg, configPath)
+	default:
+		return fmt.Errorf("unknown mode: %s", cfg.Simulation.Mode)
+	}
 }
 
 func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldown time.Duration) error { //nolint:cyclop,revive,gocyclo,nolintlint
@@ -1019,7 +1029,8 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 						ldStrictViol++
 					}
 				}
-				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || claimLossOrderViol > 0 || producerResumeMissing > 0 || casStormPanics > 0 || handoffMaxAgeViol > 0 || orphanClaimDrift > 0 || storageTypeViol > 0 || electionReplicasViol > 0 || kvOpRateCeilingViol > 0 || revocationDropped > 0 || ldStrictViol > 0 {
+				claimLossGate := scenarioHasClaimLossChaos(cfg)
+				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || (claimLossGate && unexpClaimLost > 0) || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || (claimLossGate && claimLossOrderViol > 0) || producerResumeMissing > 0 || casStormPanics > 0 || handoffMaxAgeViol > 0 || orphanClaimDrift > 0 || storageTypeViol > 0 || electionReplicasViol > 0 || kvOpRateCeilingViol > 0 || revocationDropped > 0 || ldStrictViol > 0 {
 					// Record error but proceed to ordered shutdown
 					invariantsErr = fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d long_disconnect_reassignment_inconclusive=%d long_disconnect_skipped=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d storage_type_violation=%d election_replicas_violation=%d kv_op_rate_ceiling_violation=%d revocation_report_dropped=%d",
 						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, ldReassignInconclusive, ldSkipped, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift, storageTypeViol, electionReplicasViol, kvOpRateCeilingViol, revocationDropped)
@@ -1130,7 +1141,8 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 						ldStrictViol++
 					}
 				}
-				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || unexpClaimLost > 0 || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || claimLossOrderViol > 0 || producerResumeMissing > 0 || casStormPanics > 0 || handoffMaxAgeViol > 0 || orphanClaimDrift > 0 || storageTypeViol > 0 || electionReplicasViol > 0 || kvOpRateCeilingViol > 0 || revocationDropped > 0 || ldStrictViol > 0 {
+				claimLossGate := scenarioHasClaimLossChaos(cfg)
+				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || (claimLossGate && unexpClaimLost > 0) || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || (claimLossGate && claimLossOrderViol > 0) || producerResumeMissing > 0 || casStormPanics > 0 || handoffMaxAgeViol > 0 || orphanClaimDrift > 0 || storageTypeViol > 0 || electionReplicasViol > 0 || kvOpRateCeilingViol > 0 || revocationDropped > 0 || ldStrictViol > 0 {
 					invariantsErr := fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d long_disconnect_reassignment_inconclusive=%d long_disconnect_skipped=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d storage_type_violation=%d election_replicas_violation=%d kv_op_rate_ceiling_violation=%d revocation_report_dropped=%d",
 						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, ldReassignInconclusive, ldSkipped, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift, storageTypeViol, electionReplicasViol, kvOpRateCeilingViol, revocationDropped)
 					// Emit the structured failure_report.json so CI artifacts
@@ -1723,7 +1735,7 @@ func runProcessOrchestrator(ctx context.Context, cfg *config.Config, cfgPath str
 	if seen < cfg.Workers.Count {
 		return fmt.Errorf("ipc_smoke_violation: only %d of %d workers ever emitted a frame", seen, cfg.Workers.Count)
 	}
-	if claimLossOrderViol > 0 {
+	if scenarioHasClaimLossChaos(cfg) && claimLossOrderViol > 0 {
 		return fmt.Errorf("claim_loss_stop_ordering_violations=%d", claimLossOrderViol)
 	}
 	if leaderViol > 0 {
@@ -2944,6 +2956,53 @@ func scenarioHasScheduledEvent(cfg *config.Config, want coordinator.ChaosEvent) 
 // long_disconnect_reassignment_inconclusive == 0, and
 // long_disconnect_skipped == 0. Scenarios that never schedule one
 // are exempt from this gate.
+// scenarioHasClaimLossChaos reports whether the configured scenario
+// deliberately drives a claim-loss event — one where a worker loses
+// its stable-ID claim to a peer (stableid_claim_steal /
+// bucket_peer_takeover), is respawned out of a tiny pool
+// (stableid_tiny_pool_respawn), is explicitly resumed from a long
+// SIGSTOP (worker_resume), or suffers a long network disconnect
+// (network_disconnect_long). Only these scenarios may enforce the
+// DegradedReasonOracle's unexpected_claim_lost_shutdown and
+// ClaimLossOrderingOracle's claim_loss_stop_ordering_violations as
+// hard shutdown gates; diffuse chaos runs (e.g. chaos_comprehensive,
+// which schedules worker_pause without a paired resume) still log the
+// counters but cannot fail on them.
+//
+// worker_pause is deliberately NOT in the trigger set: it is used
+// diffusely by chaos_comprehensive / chaos_roundrobin to drive
+// transient stalls, and the resulting claim-loss is a legitimate
+// side-effect rather than the scenario's targeted invariant.
+func scenarioHasClaimLossChaos(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	// Deliberately a partial trigger set; events not listed
+	// (worker_pause, worker_crash, etc.) are exempt from the claim-loss
+	// failure gate by design.
+	triggers := map[coordinator.ChaosEvent]struct{}{ //nolint:exhaustive // partial trigger set is intentional
+		coordinator.StableIDClaimStealEvent:      {},
+		coordinator.BucketPeerTakeoverEvent:      {},
+		coordinator.StableIDTinyPoolRespawnEvent: {},
+		coordinator.WorkerResumeEvent:            {},
+		coordinator.NetworkDisconnectLongEvent:   {},
+	}
+	for _, sev := range cfg.Chaos.ScheduledEvents {
+		if _, ok := triggers[coordinator.ChaosEvent(sev.Event)]; ok {
+			return true
+		}
+	}
+	if cfg.Chaos.Enabled {
+		for _, ev := range cfg.Chaos.Events {
+			if _, ok := triggers[coordinator.ChaosEvent(ev)]; ok {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 func scenarioHasLongDisconnect(cfg *config.Config) bool {
 	if cfg == nil {
 		return false

@@ -136,6 +136,7 @@ func (o *IPCSmokeOracle) FrameCounts() map[string]int {
 			counts[k]++
 		}
 	}
+
 	return counts
 }
 
@@ -245,12 +246,13 @@ func (o *ProcessWorkerObserver) StableWorkerID() string {
 	if p == nil {
 		return ""
 	}
+
 	return *p
 }
 
 // SetState records a new state observation.
 func (o *ProcessWorkerObserver) SetState(state int) {
-	o.state.Store(int32(state))
+	o.state.Store(int32(state)) //nolint:gosec // bounded parti.State enum (0..9)
 }
 
 // SetLeader records a new leader observation.
