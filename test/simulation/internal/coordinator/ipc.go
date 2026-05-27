@@ -15,6 +15,7 @@ package coordinator
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -119,6 +120,7 @@ func EncodeIPCFrame(kind, workerID, stableID string, atMS int64, payload any) (s
 	if err != nil {
 		return "", fmt.Errorf("ipc envelope marshal: %w", err)
 	}
+
 	return IPCSentinel + string(out) + "\n", nil
 }
 
@@ -140,13 +142,10 @@ func DecodeIPCLine(line string) (*IPCFrame, error) {
 	if frame.V != IPCSchemaVersion {
 		return nil, fmt.Errorf("ipc schema mismatch: got v=%d, want v=%d", frame.V, IPCSchemaVersion)
 	}
+
 	return &frame, nil
 }
 
 // ErrNotIPC signals that a stdout line lacked the IPC sentinel prefix and
 // should be routed to the log passthrough rather than the IPC reader.
-var ErrNotIPC = errNotIPC{}
-
-type errNotIPC struct{}
-
-func (errNotIPC) Error() string { return "not an IPC frame (no sentinel prefix)" }
+var ErrNotIPC = errors.New("not an IPC frame (no sentinel prefix)")

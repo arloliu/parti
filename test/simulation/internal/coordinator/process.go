@@ -419,6 +419,7 @@ func (pm *ProcessManager) StopProcess(id string, timeout time.Duration) error {
 		}
 		pm.mu.Unlock()
 		log.Printf("[ProcessManager] %s %s stopped", info.Type, id)
+
 		return nil
 	case <-time.After(timeout):
 		log.Printf("[ProcessManager] Timeout waiting for %s %s, force killing", info.Type, id)
@@ -682,6 +683,7 @@ func (pm *ProcessManager) ipcReader(workerID string, pipe io.ReadCloser, readerD
 				continue
 			}
 			log.Printf("[ProcessManager] worker=%s ipc decode error: %v line=%q", workerID, err, line)
+
 			continue
 		}
 		pm.dispatchIPCFrame(workerID, frame, sinks, observer)
@@ -710,92 +712,134 @@ func (pm *ProcessManager) dispatchIPCFrame(workerID string, frame *IPCFrame, sin
 	}
 	switch frame.Kind {
 	case IPCKindReceivedMessage:
-		var p IPCPayloadReceivedMessage
-		if err := json.Unmarshal(frame.Payload, &p); err != nil {
-			log.Printf("[ProcessManager] worker=%s decode received_message: %v", workerID, err)
-			return
-		}
-		if sinks.Received != nil {
-			select {
-			case sinks.Received <- ReceivedMessage{
-				PartitionID:       p.PartitionID,
-				PartitionSequence: p.PartitionSequence,
-				WorkerID:          workerID,
-			}:
-			default:
-				log.Printf("[ProcessManager] worker=%s received channel full; dropping frame", workerID)
-			}
-		}
+		pm.dispatchReceivedMessage(workerID, frame, sinks)
 	case IPCKindAssignmentReport:
-		var p IPCPayloadAssignmentReport
-		if err := json.Unmarshal(frame.Payload, &p); err != nil {
-			log.Printf("[ProcessManager] worker=%s decode assignment_report: %v", workerID, err)
-			return
-		}
-		if sinks.Assignments != nil {
-			select {
-			case sinks.Assignments <- AssignmentReport{
-				WorkerID:   workerID,
-				Partitions: p.Partitions,
-			}:
-			default:
-				log.Printf("[ProcessManager] worker=%s assignments channel full; dropping frame", workerID)
-			}
-		}
+		pm.dispatchAssignmentReport(workerID, frame, sinks)
 	case IPCKindStartLatency:
-		var p IPCPayloadStartLatency
-		if err := json.Unmarshal(frame.Payload, &p); err != nil {
-			log.Printf("[ProcessManager] worker=%s decode start_latency: %v", workerID, err)
-			return
-		}
-		if sinks.StartLat != nil {
-			select {
-			case sinks.StartLat <- StartLatencyReport{
-				WorkerID:        workerID,
-				Latency:         time.Duration(p.LatencyMS) * time.Millisecond,
-				IsInitialCohort: p.IsInitialCohort,
-			}:
-			default:
-				log.Printf("[ProcessManager] worker=%s start_lat channel full; dropping frame", workerID)
-			}
-		}
+		pm.dispatchStartLatency(workerID, frame, sinks)
 	case IPCKindState:
-		var p IPCPayloadState
-		if err := json.Unmarshal(frame.Payload, &p); err != nil {
-			log.Printf("[ProcessManager] worker=%s decode state: %v", workerID, err)
-			return
-		}
-		if observer != nil {
-			observer.SetState(p.State)
-		}
+		pm.dispatchStateFrame(workerID, frame, observer)
 	case IPCKindLeader:
-		var p IPCPayloadLeader
-		if err := json.Unmarshal(frame.Payload, &p); err != nil {
-			log.Printf("[ProcessManager] worker=%s decode leader: %v", workerID, err)
-			return
-		}
-		if observer != nil {
-			observer.SetLeader(p.IsLeader)
-		}
+		pm.dispatchLeaderFrame(workerID, frame, observer)
 	case IPCKindDegraded:
-		var p IPCPayloadDegraded
-		if err := json.Unmarshal(frame.Payload, &p); err != nil {
-			log.Printf("[ProcessManager] worker=%s decode degraded: %v", workerID, err)
-			return
-		}
-		if sinks.Degraded != nil {
-			select {
-			case sinks.Degraded <- WorkerDegradedReport{
-				WorkerID: frame.StableID,
-				Reason:   p.Reason,
-				At:       frameAt,
-			}:
-			default:
-				log.Printf("[ProcessManager] worker=%s degraded channel full; dropping frame", workerID)
-			}
-		}
+		pm.dispatchDegradedFrame(workerID, frame, sinks, frameAt)
 	default:
 		log.Printf("[ProcessManager] worker=%s unknown IPC kind=%q", workerID, frame.Kind)
+	}
+}
+
+// dispatchReceivedMessage decodes an IPCKindReceivedMessage payload and
+// forwards it to sinks.Received. Extracted from dispatchIPCFrame.
+func (pm *ProcessManager) dispatchReceivedMessage(workerID string, frame *IPCFrame, sinks *ProcessIPCSinks) {
+	var p IPCPayloadReceivedMessage
+	if err := json.Unmarshal(frame.Payload, &p); err != nil {
+		log.Printf("[ProcessManager] worker=%s decode received_message: %v", workerID, err)
+
+		return
+	}
+	if sinks.Received != nil {
+		select {
+		case sinks.Received <- ReceivedMessage{
+			PartitionID:       p.PartitionID,
+			PartitionSequence: p.PartitionSequence,
+			WorkerID:          workerID,
+		}:
+		default:
+			log.Printf("[ProcessManager] worker=%s received channel full; dropping frame", workerID)
+		}
+	}
+}
+
+// dispatchAssignmentReport decodes an IPCKindAssignmentReport payload and
+// forwards it to sinks.Assignments. Extracted from dispatchIPCFrame.
+func (pm *ProcessManager) dispatchAssignmentReport(workerID string, frame *IPCFrame, sinks *ProcessIPCSinks) {
+	var p IPCPayloadAssignmentReport
+	if err := json.Unmarshal(frame.Payload, &p); err != nil {
+		log.Printf("[ProcessManager] worker=%s decode assignment_report: %v", workerID, err)
+
+		return
+	}
+	if sinks.Assignments != nil {
+		select {
+		case sinks.Assignments <- AssignmentReport{
+			WorkerID:   workerID,
+			Partitions: p.Partitions,
+		}:
+		default:
+			log.Printf("[ProcessManager] worker=%s assignments channel full; dropping frame", workerID)
+		}
+	}
+}
+
+// dispatchStartLatency decodes an IPCKindStartLatency payload and forwards
+// it to sinks.StartLat. Extracted from dispatchIPCFrame.
+func (pm *ProcessManager) dispatchStartLatency(workerID string, frame *IPCFrame, sinks *ProcessIPCSinks) {
+	var p IPCPayloadStartLatency
+	if err := json.Unmarshal(frame.Payload, &p); err != nil {
+		log.Printf("[ProcessManager] worker=%s decode start_latency: %v", workerID, err)
+
+		return
+	}
+	if sinks.StartLat != nil {
+		select {
+		case sinks.StartLat <- StartLatencyReport{
+			WorkerID:        workerID,
+			Latency:         time.Duration(p.LatencyMS) * time.Millisecond,
+			IsInitialCohort: p.IsInitialCohort,
+		}:
+		default:
+			log.Printf("[ProcessManager] worker=%s start_lat channel full; dropping frame", workerID)
+		}
+	}
+}
+
+// dispatchStateFrame decodes an IPCKindState payload and updates observer.
+// Extracted from dispatchIPCFrame.
+func (pm *ProcessManager) dispatchStateFrame(workerID string, frame *IPCFrame, observer *ProcessWorkerObserver) {
+	var p IPCPayloadState
+	if err := json.Unmarshal(frame.Payload, &p); err != nil {
+		log.Printf("[ProcessManager] worker=%s decode state: %v", workerID, err)
+
+		return
+	}
+	if observer != nil {
+		observer.SetState(p.State)
+	}
+}
+
+// dispatchLeaderFrame decodes an IPCKindLeader payload and updates observer.
+// Extracted from dispatchIPCFrame.
+func (pm *ProcessManager) dispatchLeaderFrame(workerID string, frame *IPCFrame, observer *ProcessWorkerObserver) {
+	var p IPCPayloadLeader
+	if err := json.Unmarshal(frame.Payload, &p); err != nil {
+		log.Printf("[ProcessManager] worker=%s decode leader: %v", workerID, err)
+
+		return
+	}
+	if observer != nil {
+		observer.SetLeader(p.IsLeader)
+	}
+}
+
+// dispatchDegradedFrame decodes an IPCKindDegraded payload and forwards it to
+// sinks.Degraded. Extracted from dispatchIPCFrame.
+func (pm *ProcessManager) dispatchDegradedFrame(workerID string, frame *IPCFrame, sinks *ProcessIPCSinks, frameAt time.Time) {
+	var p IPCPayloadDegraded
+	if err := json.Unmarshal(frame.Payload, &p); err != nil {
+		log.Printf("[ProcessManager] worker=%s decode degraded: %v", workerID, err)
+
+		return
+	}
+	if sinks.Degraded != nil {
+		select {
+		case sinks.Degraded <- WorkerDegradedReport{
+			WorkerID: frame.StableID,
+			Reason:   p.Reason,
+			At:       frameAt,
+		}:
+		default:
+			log.Printf("[ProcessManager] worker=%s degraded channel full; dropping frame", workerID)
+		}
 	}
 }
 
