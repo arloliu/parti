@@ -214,3 +214,234 @@ jobs:
             failure_report.json
             tmp/gate-on.log
             tmp/gate-on-attempt*.log
+
+  # ---------------------------------------------------------------------------
+  # Sim-coverage-hardening per-pillar jobs (added 2026-05-27).
+  #
+  # Each job runs a small group of related scenarios sequentially in one
+  # job so per-pillar runner-minutes stay bounded but the six pillars run
+  # in parallel across runners. Scenarios use FIXED scheduled_events (not
+  # random chaos), so they should pass deterministically without the
+  # retry pattern the random-chaos jobs above use. If any scenario flakes
+  # under runner load, raise its timeout first; only add retries if a
+  # specific scenario has demonstrated non-determinism.
+  # ---------------------------------------------------------------------------
+
+  sim-bucket-lifecycle:
+    runs-on: ubuntu-latest
+    # 3 scenarios × ~3m + setup ≈ 11m worst case; 15m gives headroom.
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Build Simulation
+        run: go build -o tmp/simulation ./test/simulation/cmd/simulation
+      - name: Run Bucket Lifecycle Scenarios
+        # Phase 1 — exercises the manager's onClaimerError routing
+        # boundary (peer-takeover vs whole-bucket-loss) plus the
+        # bucket-recreate epoch fence.
+        run: |
+          set -e
+          for scn in chaos_bucket_delete chaos_bucket_recreate chaos_bucket_peer_takeover; do
+            echo "::group::${scn}"
+            ./tmp/simulation \
+              --config "test/simulation/configs/${scn}.yaml" \
+              --stop-on-failure=false \
+              2>&1 | tee "tmp/${scn}.log"
+            echo "::endgroup::"
+          done
+      - name: Upload Failure Report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-bucket-lifecycle-failure
+          path: |
+            failure_report.json
+            tmp/chaos_bucket_*.log
+
+  sim-natskv-source:
+    runs-on: ubuntu-latest
+    # 2 scenarios × 4m + setup ≈ 9m worst case; 13m gives headroom.
+    timeout-minutes: 13
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Build Simulation
+        run: go build -o tmp/simulation ./test/simulation/cmd/simulation
+      - name: Run NATSKV Source Scenarios
+        # Phase 2 — exercises the empirically load-bearing reconciler
+        # recovery path in internal/source/nats_kv.go and the composed
+        # bucket-delete error surface.
+        run: |
+          set -e
+          for scn in chaos_natskv_source chaos_natskv_source_bucket_delete; do
+            echo "::group::${scn}"
+            ./tmp/simulation \
+              --config "test/simulation/configs/${scn}.yaml" \
+              --stop-on-failure=false \
+              2>&1 | tee "tmp/${scn}.log"
+            echo "::endgroup::"
+          done
+      - name: Upload Failure Report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-natskv-source-failure
+          path: |
+            failure_report.json
+            tmp/chaos_natskv_*.log
+
+  sim-claim-loss-coverage:
+    runs-on: ubuntu-latest
+    # 4 scenarios: 3m + 90s + 90s + 2m ≈ 8m + setup ≈ 10m; 14m gives headroom.
+    timeout-minutes: 14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Build Simulation
+        run: go build -o tmp/simulation ./test/simulation/cmd/simulation
+      - name: Run Claim-Loss & Long-Disconnect Scenarios
+        # Phase 3 (Gap 12) + Phase 4 (Gaps 3, 4, 8a-AIO) — long-disconnect
+        # reassignment, direct stable-ID claim steal, tiny-pool stale
+        # takeover, and MaxAge-expiry returning-worker self-stop.
+        run: |
+          set -e
+          for scn in chaos_network_disconnect_long chaos_stableid_claim_steal chaos_stableid_tiny_pool chaos_stableid_maxage_expiry; do
+            echo "::group::${scn}"
+            ./tmp/simulation \
+              --config "test/simulation/configs/${scn}.yaml" \
+              --stop-on-failure=false \
+              2>&1 | tee "tmp/${scn}.log"
+            echo "::endgroup::"
+          done
+      - name: Upload Failure Report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-claim-loss-coverage-failure
+          path: |
+            failure_report.json
+            tmp/chaos_network_disconnect_long.log
+            tmp/chaos_stableid_*.log
+
+  sim-publisher-handoff:
+    runs-on: ubuntu-latest
+    # 4 scenarios: 90s + 90s + 60s + 90s ≈ 6m + setup ≈ 7m; 11m gives headroom.
+    timeout-minutes: 11
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Build Simulation
+        run: go build -o tmp/simulation ./test/simulation/cmd/simulation
+      - name: Run Publisher & Handoff Scenarios
+        # Phase 5 (Gaps 10a, 10b) + Phase 6 (Gap 5) — producer disconnect,
+        # assignment-commit CAS storm, handoff bucket MaxAge contract,
+        # orphan stable-claim drift.
+        run: |
+          set -e
+          for scn in chaos_producer_disconnect chaos_assignment_cas_storm handoff_precreate_maxage handoff_orphan_stable_claim; do
+            echo "::group::${scn}"
+            ./tmp/simulation \
+              --config "test/simulation/configs/${scn}.yaml" \
+              --stop-on-failure=false \
+              2>&1 | tee "tmp/${scn}.log"
+            echo "::endgroup::"
+          done
+      - name: Upload Failure Report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-publisher-handoff-failure
+          path: |
+            failure_report.json
+            tmp/chaos_producer_*.log
+            tmp/chaos_assignment_*.log
+            tmp/handoff_*.log
+
+  sim-process-mode:
+    runs-on: ubuntu-latest
+    # 2 scenarios: 45s + 4m ≈ 5m + setup ≈ 6m; 10m gives headroom.
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Build Simulation
+        run: go build -o tmp/simulation ./test/simulation/cmd/simulation
+      - name: Run Process-Mode Scenarios
+        # Phase 7 (Gaps 8b, 8c, 8a-OS) — process-mode IPC smoke +
+        # SIGSTOP claim-loss takeover with same-pool replacement.
+        run: |
+          set -e
+          for scn in process_smoke chaos_process_sigstop_long; do
+            echo "::group::${scn}"
+            ./tmp/simulation \
+              --config "test/simulation/configs/${scn}.yaml" \
+              --stop-on-failure=false \
+              2>&1 | tee "tmp/${scn}.log"
+            echo "::endgroup::"
+          done
+      - name: Upload Failure Report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-process-mode-failure
+          path: |
+            failure_report.json
+            tmp/process_smoke.log
+            tmp/chaos_process_sigstop_long.log
+
+  sim-storage-residuals:
+    runs-on: ubuntu-latest
+    # 3 scenarios: ~60s each ≈ 4m + setup ≈ 5m; 9m gives headroom.
+    timeout-minutes: 9
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Build Simulation
+        run: go build -o tmp/simulation ./test/simulation/cmd/simulation
+      - name: Run Storage & Burst Scenarios
+        # Phase 8 (Gaps 9, 13) — manager create-time StorageType assertion,
+        # operator-precreated replicas, burst-after-quiet KV-op ceiling.
+        run: |
+          set -e
+          for scn in storage_assertion storage_replicas_operator burst_after_quiet; do
+            echo "::group::${scn}"
+            ./tmp/simulation \
+              --config "test/simulation/configs/${scn}.yaml" \
+              --stop-on-failure=false \
+              2>&1 | tee "tmp/${scn}.log"
+            echo "::endgroup::"
+          done
+      - name: Upload Failure Report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-storage-residuals-failure
+          path: |
+            failure_report.json
+            tmp/storage_*.log
+            tmp/burst_*.log
