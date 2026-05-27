@@ -19,6 +19,20 @@ type Config struct {
 	NATS        NATSConfig        `yaml:"nats"`
 	Metrics     MetricsConfig     `yaml:"metrics"`
 	Checkpoint  CheckpointConfig  `yaml:"checkpoint"`
+	Process     ProcessConfig     `yaml:"process"`
+}
+
+// ProcessConfig configures runProcessOrchestrator (Phase 7a/7b).
+type ProcessConfig struct {
+	// SmokeWindow is the per-worker window for the IPC smoke oracle.
+	// Within this window of each worker's first observed IPC frame the
+	// orchestrator must have seen one of every lifecycle kind
+	// (assignment_report, start_latency, state, leader). Defaults to 30s
+	// when unset. On slow startups (cold embedded NATS, race-build
+	// scenarios) bumping to 60s avoids false failures because state/leader
+	// ticker frames can legitimately start the budget clock before
+	// assignment_report arrives.
+	SmokeWindow time.Duration `yaml:"smoke_window"`
 }
 
 // SimulationConfig configures the simulation runtime.

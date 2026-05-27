@@ -10,7 +10,14 @@
 #      same {prefix=freeze-victim, min=max=1} tiny pool. The replacement's
 #      Manager.claimWorkerID → Claimer.Claim performs the revision-checked
 #      stale-takeover Update (internal/stableid/claimer.go:219-243).
-#   3. T+80s: worker_resume target_worker=worker-0 (SIGCONT).
+#   3. T+80s: worker_resume target_worker=worker-0.
+#      WAIT-FOR-CONDITION (post-impl-review v1 P0 #2): the resume handler
+#      blocks until worker-3 (the replacement) reports a non-empty
+#      assignment snapshot, then sends SIGCONT. On replacement-wait
+#      timeout the handler does NOT SIGCONT — the target stays frozen
+#      so the failure is diagnosable in the live process tree. After
+#      SIGCONT the handler polls worker-0's observer until
+#      WorkerStateInt() == StateShutdown(9) bounded by shutdown_wait.
 #      The unfrozen worker's next renew tick fails with
 #      jetstream.ErrKeyExists → ErrClaimLost; onClaimerError routes through
 #      claimLostShutdown (manager_election.go:83-122) and the manager
@@ -18,21 +25,40 @@
 #
 # Timing math: WorkerIDTTL=16s → renewInterval=max(16/3, 100ms)≈5.33s →
 # staleThreshold=3*renewInterval≈16s. Wait at minimum 16s + scheduler
-# margin between SIGSTOP and the respawn; we use 20s. After respawn we
-# wait 30s for the replacement to Claim + boot + report assignment, then
-# SIGCONT.
+# margin between SIGSTOP and the respawn; we use 20s. The fixed at:80s
+# is preserved as a SCHEDULING anchor (chaos dispatcher fires the event
+# at this offset), but the actual SIGCONT now blocks on the wait gate.
 #
 # Invariants asserted (via runProcessOrchestrator's exit gating):
 #   - claim_loss_stop_ordering_violations = 0
 #   - double_leader_observations = 0
 #   - snapshot_overlap_violations = 0
 #   - ipc_smoke_violation = 0
+#   - revocation_report_dropped = 0
+#   - process_sigstop_replacement_assignment_observed >= 1
+#     (replacement saw partitions before SIGCONT)
+#   - process_sigstop_returning_shutdown_observed >= 1
+#     (original target reached StateShutdown after SIGCONT)
+#
+# LIMITATION (post-impl-review v1 P0 #2 follow-up): the runProcessOrchestrator
+# entrypoint does NOT spawn producers (see runProcessOrchestrator GoDoc:
+# "No producer / chaos integration in this scope"). Therefore the
+# original Gap 8a clause "no `received_message` for previously-assigned
+# partitions after the returning worker reaches Shutdown" is NOT
+# asserted by this scenario — without a producer there is no
+# received_message stream to gate. Wiring producers into
+# runProcessOrchestrator is non-trivial and tracked as a separate
+# follow-up; the claim-loss → claimLostShutdown half of the invariant
+# is fully gated by process_sigstop_returning_shutdown_observed above.
 #
 # Sim worker IDs match runProcessOrchestrator's spawn format ("worker-%d");
 # per_worker keys MUST match.
 
 simulation:
-  duration: 3m
+  # 4m headroom: SIGCONT can fire as late as T+80s + 30s (replacement wait)
+  # = T+110s; shutdown_wait adds up to 60s = T+170s; leave ≥30s post-event
+  # tail for the orchestrator to harvest oracle counters before ctx ends.
+  duration: 4m
   mode: process
 
 nats:
@@ -93,6 +119,17 @@ chaos:
       event: worker_resume
       params:
         target_worker: worker-0
+        # Replacement-claim wait gate (post-impl-review P0 #2): block up
+        # to this long for worker-3 to report a non-empty assignment
+        # snapshot before SIGCONT fires on worker-0. On timeout the
+        # handler does NOT SIGCONT (leaves worker-0 frozen for live
+        # diagnosis) and the run fails on
+        # process_sigstop_replacement_assignment_observed=0.
+        replacement_wait: 30s
+        # Returning-worker shutdown wait gate: poll worker-0's observer
+        # after SIGCONT until StateShutdown is reported. 60s covers the
+        # claim-loss path's 30s stop timeout plus boot/renew latency.
+        shutdown_wait: 60s
 
 metrics:
   prometheus:

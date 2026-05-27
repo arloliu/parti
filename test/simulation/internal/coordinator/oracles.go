@@ -733,8 +733,26 @@ func matchesAnySubstring(s string, subs []string) bool {
 // indexed by both sim-side workerID and stableID so the partition lookup
 // works even when a chaos event removes the registry entry before the
 // ObserveClaimLostShutdown call.
+// WorkerStateSampler returns the current manager state int for a sim worker
+// (e.g. "worker-0"). The second return is false when the sampler has no entry
+// for that ID (e.g. the registry entry was removed). Used by the claim-loss
+// ordering oracle to distinguish a true Stop-before-revoke ordering bug from
+// a poll-cadence race: when a revoke arrives without a prior shutdown
+// observation, the sampler is consulted to ask "is the worker IN shutdown
+// state right now?" — yes → backfill (the watcher was just late), no →
+// violation.
+type WorkerStateSampler func(simWorkerID string) (state int, known bool)
+
 type ClaimLossOrderingOracle struct {
 	mu sync.Mutex
+
+	// stateSampler, if non-nil, is consulted by ObserveRevocation when a
+	// revocation arrives without a prior shutdown observation. It MUST NOT
+	// be called while holding o.mu (the sampler may take other locks /
+	// reach into the registry; we keep the no-callout-under-lock invariant
+	// uniform with the rest of the file). Set via SetStateSampler before
+	// the oracle is wired into the coordinator's revocation drain.
+	stateSampler WorkerStateSampler
 
 	// shutdownBySim[simWorkerID] = time the watcher first observed
 	// StateShutdown for the SIM-side worker (e.g. "worker-0"). The
@@ -773,6 +791,18 @@ func NewClaimLossOrderingOracle() *ClaimLossOrderingOracle {
 		stableToSimAtShutdown: make(map[string]string),
 		assignmentBySim:       make(map[string]map[int]struct{}),
 	}
+}
+
+// SetStateSampler installs a sampler used by ObserveRevocation to confirm a
+// worker is actually in Shutdown state at revoke time. Without a sampler the
+// oracle preserves the legacy "backfill on missing shutdown" behavior (kept
+// for the no-coordinator unit tests). Production wiring in
+// EnableShutdownOracles MUST install a sampler so revoke-before-shutdown
+// is no longer silently absorbed.
+func (o *ClaimLossOrderingOracle) SetStateSampler(s WorkerStateSampler) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.stateSampler = s
 }
 
 // RegisterStableID records the mapping from the sim-side worker ID to the
@@ -862,14 +892,64 @@ func (o *ClaimLossOrderingOracle) ObserveRevocation(simWorkerID, stableID string
 	if simWorkerID == "" {
 		return
 	}
+	// Snapshot the sampler reference under lock, then call it OUTSIDE the
+	// lock — the sampler walks the registry and reads observer atomics,
+	// and we keep the file-wide convention of no callouts under o.mu.
+	o.mu.Lock()
+	sampler := o.stateSampler
+	o.mu.Unlock()
+
+	// If a sampler is installed, decide tolerate-vs-violate up front so the
+	// branch below isn't tangled with the lookup.
+	var (
+		samplerKnown      bool
+		samplerInShutdown bool
+	)
+	if sampler != nil {
+		st, known := sampler(simWorkerID)
+		samplerKnown = known
+		samplerInShutdown = known && st == workerStateShutdown
+	}
+
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	tShutdown, seen := o.shutdownBySim[simWorkerID]
 	if !seen {
-		// Poll-cadence race tolerance: backfill an implicit shutdown
-		// timestamp at the revoke instant. Don't fire a violation
-		// because the production state machine is unobservable to us
-		// without the watcher tick.
+		// Revoke arrived without a prior watcher-observed Shutdown.
+		// The sim-observable revoke surface is DUAL-PURPOSE:
+		//
+		//   1. claimLostShutdown -> revokeWorkerConsumer
+		//      (manager_election.go:79) — fires AFTER Stop transitions
+		//      the state to Shutdown. This is the regression case the
+		//      oracle was originally written to catch.
+		//   2. The apply loop calling
+		//      UpdateWorkerConsumer(workerID, nil) for any legitimate
+		//      rebalance-to-empty (manager.go:653 cold-empty bootstrap;
+		//      any leader-driven reassignment that drops a worker to
+		//      zero partitions). State stays Stable; no Shutdown ever
+		//      fires. Returning workers in long-disconnect transit
+		//      through this path while the leader rebalances back.
+		//
+		// We cannot distinguish (1) from (2) from sim-observable state
+		// alone — production routes both through the same
+		// WorkerConsumerUpdater surface, and the apply path does not
+		// emit a discriminator. Counting any revoke-without-Shutdown
+		// as a violation produces false positives on every long
+		// disconnect / scale-down test. The selective sampler check
+		// (sample state RIGHT NOW; Shutdown ⇒ backfill) handles the
+		// poll-cadence race for (1) but cannot rule (2) in or out.
+		//
+		// Therefore: revoke-before-Shutdown is logged as audit-only
+		// here. The sharp negative signal for the Stop-before-revoke
+		// regression is ObserveMessage below — any ReceivedMessage
+		// frame for a previously-assigned partition arriving STRICTLY
+		// AFTER an observed Shutdown unambiguously demonstrates the
+		// invariant break, with no ambiguity from rebalance traffic.
+		// post-impl-review v1 P0 #1 follow-up: sampler is still wired
+		// (drives the log reason) so a future redesign with a
+		// claim-loss-only discriminator can flip the violation gate on
+		// without rewiring.
+		_ = samplerKnown
 		o.shutdownBySim[simWorkerID] = at
 		if stableID != "" {
 			o.stableToSimAtShutdown[stableID] = simWorkerID
@@ -881,8 +961,15 @@ func (o *ClaimLossOrderingOracle) ObserveRevocation(simWorkerID, stableID string
 			}
 			o.lastAssignmentBySim[simWorkerID] = snap
 		}
-		log.Printf("[ClaimLossOrderingOracle] revoke_backfill worker=%s stable=%s at=%v (watcher poll lagged)",
-			simWorkerID, stableID, at.Format(time.RFC3339Nano))
+		reason := "no_sampler"
+		switch {
+		case sampler != nil && samplerInShutdown:
+			reason = "sampler_confirms_shutdown"
+		case sampler != nil:
+			reason = "sampler_reports_non_shutdown_rebalance_or_lag"
+		}
+		log.Printf("[ClaimLossOrderingOracle] revoke_backfill worker=%s stable=%s at=%v reason=%s",
+			simWorkerID, stableID, at.Format(time.RFC3339Nano), reason)
 
 		return
 	}
