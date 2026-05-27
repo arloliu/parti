@@ -612,17 +612,15 @@ func TestLeaderElection_NoOrphansOnFailover(t *testing.T) {
 	// Wait for all workers to reach Stable state
 	cluster.WaitForStableState(10 * time.Second)
 
-	// Verify initial state: all 20 partitions assigned
-	initialPartitions := make(map[string]bool)
-	for _, worker := range cluster.Workers {
-		assignment := worker.CurrentAssignment()
-		for _, part := range assignment.Partitions {
-			for _, key := range part.Keys {
-				initialPartitions[key] = true
-			}
-		}
-	}
-	require.Len(t, initialPartitions, 20, "all 20 partitions should be assigned initially")
+	// Verify initial state: all 20 partitions assigned. Assignment publication
+	// and follower consumption can lag the Stable transition under parallel
+	// load, so poll until all 20 are observed (matches the failover-round
+	// pattern below).
+	var initialPartitions map[string]bool
+	require.Eventually(t, func() bool {
+		initialPartitions = collectAlivePartitionKeys(cluster.Workers)
+		return len(initialPartitions) == 20
+	}, 10*time.Second, 100*time.Millisecond, "all 20 partitions should be assigned initially")
 	t.Logf("Initial state: %d partitions assigned across %d workers",
 		len(initialPartitions), len(cluster.Workers))
 
