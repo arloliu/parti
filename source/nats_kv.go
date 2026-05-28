@@ -75,6 +75,9 @@ type NatsKVOption func(*NatsKV)
 // line when this state is detected so the operational consequence is
 // visible at first deploy.
 //
+// Disabling the reconciler also disables bucket delete+recreate recovery:
+// see reconcileOnce for the recovery boundary.
+//
 // Parameters:
 //   - d: Reconcile interval (0 disables; default 30s)
 //
@@ -217,17 +220,39 @@ type NatsKV struct {
 	mu         sync.RWMutex
 	partitions []types.Partition
 	revision   uint64 // last observed KV revision
-	known      bool   // false only before any KV event; true once any event arrives (including delete/purge)
-	watcher    jetstream.KeyWatcher
-	ctx        context.Context    //nolint:containedctx // lifecycle context stored by design
-	cancel     context.CancelFunc //nolint:containedctx // paired with ctx
-	running    bool
-	listeners  []*natsKVListener
-	wg         sync.WaitGroup // tracks all source-owned goroutines; Stop waits on this
+	// applyGen increments under s.mu every time applyLocalLocked accepts an entry
+	// (passes the stale gate), regardless of whether content changed. It lets the
+	// reconcile reset path detect that local state advanced between its
+	// confirmatory read and the reset lock — even when the new value lands at a
+	// revision numerically equal to the old baseline (the bucket-recreate ABA),
+	// which a revision-number comparison alone cannot distinguish.
+	applyGen  uint64
+	known     bool // false only before any KV event; true once any event arrives (including delete/purge)
+	watcher   jetstream.KeyWatcher
+	ctx       context.Context    //nolint:containedctx // lifecycle context stored by design
+	cancel    context.CancelFunc //nolint:containedctx // paired with ctx
+	running   bool
+	listeners []*natsKVListener
+	wg        sync.WaitGroup // tracks all source-owned goroutines; Stop waits on this
 
 	// watchFn is the constructor used to start a KV watcher. Tests may replace
 	// this field to inject a fake watcher. Production code uses kv.Watch.
 	watchFn func(ctx context.Context) (jetstream.KeyWatcher, error)
+
+	// decodeFn decodes a KV value into a partition list. Indirected through a
+	// field (like watchFn) so tests can observe decode invocations. Production
+	// uses partcodec.Decode.
+	decodeFn func(data []byte) ([]types.Partition, error)
+
+	// Reconcile skip-guard cache. Accessed ONLY by reconcileOnce, which runs on
+	// the single reconcileLoop goroutine, so these need no mutex. They identify
+	// the last entry this loop applied so an unchanged tick can skip the decode.
+	// The pair (rev, created) — not rev alone — is required: a recreated bucket
+	// reuses revision numbers from 1, but the entry creation timestamp does not
+	// collide across a real recreate.
+	reconcileRev     uint64
+	reconcileCreated time.Time
+	reconcileKnown   bool
 
 	// onReconcileTick is called after each reconcile tick with the interval that
 	// was scheduled for that tick. It is nil in production and set by tests that
@@ -298,6 +323,7 @@ func NewNatsKV(kv jetstream.KeyValue, key string, logger types.Logger, opts ...N
 	s.watchFn = func(ctx context.Context) (jetstream.KeyWatcher, error) {
 		return s.kv.Watch(ctx, s.key)
 	}
+	s.decodeFn = partcodec.Decode
 	for _, o := range opts {
 		o(s)
 	}
@@ -756,8 +782,15 @@ func (s *NatsKV) RemovePartitions(ctx context.Context, partitions ...types.Parti
 // It sorts the incoming partitions, diffs against the current state, updates
 // s.partitions/s.revision/s.known atomically, and fans out to listeners if
 // notify is true and the state actually changed.
-func (s *NatsKV) applyLocal(partitions []types.Partition, revision uint64, notify bool) {
+//
+// It returns whether the entry was accepted (passed the stale gate and became
+// the current revision). The reconcile path uses this to update its skip cache
+// only with entries that were actually applied — recording a gate-dropped entry
+// would let the skip-guard wrongly skip a later re-read of that same identity.
+// Other callers ignore the result.
+func (s *NatsKV) applyLocal(partitions []types.Partition, revision uint64, notify bool) bool {
 	s.mu.Lock()
+	accepted := revision == 0 || revision >= s.revision
 	changed := s.applyLocalLocked(partitions, revision, true)
 	listeners := s.listeners
 	if notify && changed {
@@ -770,6 +803,126 @@ func (s *NatsKV) applyLocal(partitions []types.Partition, revision uint64, notif
 		}
 	}
 	s.mu.Unlock()
+
+	return accepted
+}
+
+// markReconcileApplied records the entry identity the reconcile loop last
+// accepted, for the next tick's skip-guard. Called ONLY after an apply that was
+// actually accepted (never after a dropped or unconfirmed entry). Reconcile-loop
+// goroutine only; no lock.
+func (s *NatsKV) markReconcileApplied(revision uint64, created time.Time) {
+	s.reconcileRev = revision
+	s.reconcileCreated = created
+	s.reconcileKnown = true
+}
+
+// applyReconcileReset accepts an entry that a confirmatory reconcile read has
+// proven belongs to a new bucket incarnation (its revision is below the baseline
+// we observed before the confirmatory read, yet it is the current latest). It
+// clears the stale-gate baseline under the lock so the lower revision is
+// accepted, then fans out exactly like applyLocal. The shared
+// watcher/Update/Start paths are unaffected.
+//
+// baseline/gen are s.revision and s.applyGen as observed before the confirmatory
+// read. The baseline clear is applied ONLY if s.applyGen is still gen — i.e. no
+// apply has been accepted in between. A revision check alone is insufficient: a
+// recreated bucket can advance back to a revision numerically equal to the old
+// baseline (the ABA case), so s.revision == baseline can hold even though local
+// state already moved to newer recreated content. If anything was accepted in
+// the window we must NOT bypass the stale gate; we fall through to a normal gated
+// apply that drops the lower revision instead of rolling state backward.
+//
+// It returns whether the entry was accepted (the reset cleared the baseline, or
+// the fall-through gated apply still accepted it), so the caller updates its skip
+// cache only on a real apply.
+func (s *NatsKV) applyReconcileReset(partitions []types.Partition, revision, baseline, gen uint64) bool {
+	s.mu.Lock()
+	if s.revision == baseline && s.applyGen == gen {
+		s.revision = 0 // confirmed incarnation reset: drop baseline so the lower revision applies
+	}
+	accepted := revision == 0 || revision >= s.revision
+	changed := s.applyLocalLocked(partitions, revision, true)
+	listeners := s.listeners
+	if changed {
+		for _, l := range listeners {
+			select {
+			case l.ch <- struct{}{}:
+			default:
+			}
+		}
+	}
+	s.mu.Unlock()
+
+	return accepted
+}
+
+// applyReconcileEntry applies a freshly fetched reconcile entry, handling bucket
+// incarnation reset. A reconcile kv.Get returns the current latest revision, so
+// an entry revision below our cached baseline is ambiguous: a stale read racing
+// a concurrent Update (same incarnation), or a deleted+recreated bucket. We
+// disambiguate with ONE confirmatory latest read before bypassing the stale
+// gate; we never roll state back on a single possibly-stale read.
+func (s *NatsKV) applyReconcileEntry(ctx context.Context, partitions []types.Partition, entry jetstream.KeyValueEntry) {
+	s.mu.RLock()
+	cachedRev := s.revision
+	cachedGen := s.applyGen
+	s.mu.RUnlock()
+
+	if entry.Revision() == 0 || entry.Revision() >= cachedRev {
+		// Not backwards: ordinary apply (stale gate no-ops on equal/higher).
+		// Update the skip cache only if the gate accepted the entry: a concurrent
+		// writer may have advanced s.revision past it, in which case it was dropped
+		// and must not be recorded as applied.
+		if s.applyLocal(partitions, entry.Revision(), true) {
+			s.markReconcileApplied(entry.Revision(), entry.Created())
+		}
+
+		return
+	}
+
+	// Backwards revision: confirm with one authoritative latest read.
+	confirm, err := s.kv.Get(ctx, s.key)
+	if err != nil {
+		// Cannot confirm: do not guess, do not update the skip cache. The next
+		// tick re-evaluates. Mirror reconcileOnce's bucket-missing posture.
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			return
+		}
+		if s.noteBucketUnavailable(err) {
+			s.logError("reconcile: confirmatory read found bucket missing", "error", err)
+		}
+
+		return
+	}
+	confirmParts, decErr := s.decodeFn(confirm.Value())
+	if decErr != nil {
+		s.logError("reconcile: failed to decode confirmatory entry", "error", decErr)
+
+		return
+	}
+
+	// Compare the confirmed latest against the pre-confirm baseline (cachedRev),
+	// NOT the live s.revision. In a single incarnation the latest revision only
+	// grows, so a confirmed latest below cachedRev can only mean the bucket was
+	// recreated. Using live s.revision here would misread a concurrent
+	// same-incarnation Update (which advances s.revision past the confirmed
+	// revision) as a reset and roll state backward.
+	var accepted bool
+	if confirm.Revision() != 0 && confirm.Revision() < cachedRev {
+		// Confirmed latest is below the prior baseline -> genuine incarnation reset.
+		accepted = s.applyReconcileReset(confirmParts, confirm.Revision(), cachedRev, cachedGen)
+	} else {
+		// First read was stale (a concurrent writer advanced the revision);
+		// apply the confirmed latest through the normal gate.
+		accepted = s.applyLocal(confirmParts, confirm.Revision(), true)
+	}
+	// Record the entry in the skip cache only if it was actually applied. A
+	// dropped confirm that is still the latest readable entry would otherwise
+	// make the next tick's skip-guard skip it forever (recovery never happens).
+	if accepted {
+		s.markReconcileApplied(confirm.Revision(), confirm.Created())
+	}
 }
 
 // applyLocalLocked applies partition state while the caller already holds s.mu.
@@ -807,6 +960,7 @@ func (s *NatsKV) applyLocalLocked(partitions []types.Partition, revision uint64,
 	}
 	s.revision = revision
 	s.known = known
+	s.applyGen++ // entry accepted: advance the apply generation (see field doc)
 
 	return changed
 }
@@ -1019,6 +1173,13 @@ func (s *NatsKV) nextReconcileInterval() time.Duration {
 // reconcileOnce performs a single reconcile pass: reads KV, decodes, and calls
 // applyLocal so that missed watcher events are recovered. If the local state
 // already matches KV, this is a no-op (no listener signal emitted).
+//
+// Bucket delete+recreate recovery is reconcile-driven. After an operator
+// deletes and recreates the source bucket, its revision namespace resets to 1;
+// the watcher may transiently drop that recreated rev-1 value through the stale
+// gate, but a later reconcile tick re-applies it via applyReconcileEntry's
+// confirmatory read. With WithReconcileInterval(0) and no leadership probe the
+// reconciler is disabled, so bucket-recreate recovery does not occur.
 func (s *NatsKV) reconcileOnce(ctx context.Context) {
 	entry, err := s.kv.Get(ctx, s.key)
 	if err != nil {
@@ -1030,6 +1191,7 @@ func (s *NatsKV) reconcileOnce(ctx context.Context) {
 			// the delete event with the correct revision. Only the
 			// initial-never-written case (known=false) leaves state unchanged.
 			s.applyEmptyPreservingKnown()
+			s.reconcileKnown = false // empty state: invalidate the skip cache
 
 			return
 		}
@@ -1044,16 +1206,26 @@ func (s *NatsKV) reconcileOnce(ctx context.Context) {
 		return
 	}
 
-	partitions, err := partcodec.Decode(entry.Value())
+	// Successful kv.Get confirms the bucket is reachable.
+	s.noteBucketAvailable()
+
+	// Skip the decode when this entry is the one we last applied. Match on
+	// (revision, created): revision alone is unsafe because a recreated bucket
+	// reuses revision numbers, while the creation timestamp does not collide
+	// across a real recreate. reconcileKnown==false (first tick) never skips.
+	if s.reconcileKnown &&
+		entry.Revision() == s.reconcileRev &&
+		entry.Created().Equal(s.reconcileCreated) {
+		return
+	}
+
+	partitions, err := s.decodeFn(entry.Value())
 	if err != nil {
 		s.logError("reconcile: failed to decode partitions", "error", err)
 
 		return
 	}
-
-	// Successful kv.Get confirms the bucket is reachable.
-	s.noteBucketAvailable()
-	s.applyLocal(partitions, entry.Revision(), true)
+	s.applyReconcileEntry(ctx, partitions, entry)
 }
 
 // refreshFromKV reads the current entry from KV and updates the local revision

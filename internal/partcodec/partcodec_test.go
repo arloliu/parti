@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"fmt"
 	"io"
 	"testing"
 
@@ -179,6 +180,28 @@ func TestDecode_EmptyInput(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, result)
 			require.Empty(t, result)
+		})
+	}
+}
+
+func BenchmarkDecode(b *testing.B) {
+	for _, n := range []int{100, 10000, 100000} {
+		parts := make([]types.Partition, n)
+		for i := range parts {
+			parts[i] = types.Partition{Keys: []string{fmt.Sprintf("part-%08d", i)}, Weight: 1}
+		}
+		data, err := Encode(parts)
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			b.SetBytes(int64(len(data)))
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := Decode(data); err != nil {
+					b.Fatal(err)
+				}
+			}
 		})
 	}
 }
