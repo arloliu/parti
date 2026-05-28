@@ -10,6 +10,7 @@ import (
 
 	"github.com/arloliu/parti/v2/internal/logging"
 	"github.com/arloliu/parti/v2/types"
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 )
@@ -225,6 +226,84 @@ func TestClassify_NoHeartbeat_BurstButConsumerStillExists(t *testing.T) {
 	action, newCons, _ := c.Classify(context.Background(), jetstream.ErrNoHeartbeat, alwaysSuccessInfo, baseCfg, nil)
 	require.Equal(t, ActionBackoff, action)
 	require.Nil(t, newCons)
+}
+
+func TestController_UnservableDetection(t *testing.T) {
+	ctx := context.Background()
+	unservableInfo := func(_ context.Context) (*jetstream.ConsumerInfo, error) {
+		return nil, nats.ErrNoResponders
+	}
+	healthyInfo := func(_ context.Context) (*jetstream.ConsumerInfo, error) {
+		return &jetstream.ConsumerInfo{Cluster: &jetstream.ClusterInfo{Leader: "n0"}}, nil
+	}
+	degradingInfo := func(_ context.Context) (*jetstream.ConsumerInfo, error) {
+		return nil, jetstream.ErrStreamNotFound
+	}
+
+	t.Run("fires after sustained window, re-arms on recovery", func(t *testing.T) {
+		var mu sync.Mutex
+		var fires int
+		c := NewController(ControllerConfig{
+			Strategy: FromNew, BurstThreshold: 1, BurstWindow: time.Second,
+			Subject: "sub.A", UnservableWindow: 40 * time.Millisecond,
+			OnUnservable: func(_ string, _ error) { mu.Lock(); fires++; mu.Unlock() },
+			Logger:       nopLog,
+		})
+		count := func() int { mu.Lock(); defer mu.Unlock(); return fires }
+
+		// First unservable confirm starts the episode but is not yet sustained.
+		_, _, _ = c.Classify(ctx, jetstream.ErrNoHeartbeat, unservableInfo, baseCfg, nil)
+		require.Equal(t, 0, count())
+
+		time.Sleep(60 * time.Millisecond)
+		_, _, _ = c.Classify(ctx, jetstream.ErrNoHeartbeat, unservableInfo, baseCfg, nil)
+		require.Equal(t, 1, count(), "fires once sustained past the window")
+
+		// Immediate re-confirm: no re-fire within the window.
+		_, _, _ = c.Classify(ctx, jetstream.ErrNoHeartbeat, unservableInfo, baseCfg, nil)
+		require.Equal(t, 1, count())
+
+		// Healthy confirm clears the episode (recovered + re-arm).
+		_, _, _ = c.Classify(ctx, jetstream.ErrNoHeartbeat, healthyInfo, baseCfg, nil)
+		// New unservable confirm restarts the episode; not yet sustained → no new fire.
+		_, _, _ = c.Classify(ctx, jetstream.ErrNoHeartbeat, unservableInfo, baseCfg, nil)
+		require.Equal(t, 1, count(), "episode re-armed after recovery; not sustained yet")
+	})
+
+	t.Run("degrading does not fire (manager owns it)", func(t *testing.T) {
+		var n atomic.Int64
+		c := NewController(ControllerConfig{
+			Strategy: FromNew, BurstThreshold: 1, BurstWindow: time.Second,
+			Subject: "sub.B", UnservableWindow: 20 * time.Millisecond,
+			OnUnservable: func(string, error) { n.Add(1) }, Logger: nopLog,
+		})
+		_, _, _ = c.Classify(ctx, jetstream.ErrNoHeartbeat, degradingInfo, baseCfg, nil)
+		time.Sleep(40 * time.Millisecond)
+		_, _, _ = c.Classify(ctx, jetstream.ErrNoHeartbeat, degradingInfo, baseCfg, nil)
+		require.Equal(t, int64(0), n.Load(), "stream-missing/degrading is owned by the manager, not unservable")
+	})
+
+	t.Run("opt-out when no hook is set", func(t *testing.T) {
+		c := NewController(ControllerConfig{
+			Strategy: FromNew, BurstThreshold: 1, BurstWindow: time.Second, Logger: nopLog,
+		})
+		action, _, _ := c.Classify(ctx, jetstream.ErrNoHeartbeat, unservableInfo, baseCfg, nil)
+		require.Equal(t, ActionBackoff, action) // no panic, no detection
+	})
+
+	t.Run("NoteProgress clears the episode", func(t *testing.T) {
+		var n atomic.Int64
+		c := NewController(ControllerConfig{
+			Strategy: FromNew, BurstThreshold: 1, BurstWindow: time.Second,
+			Subject: "sub.C", UnservableWindow: 40 * time.Millisecond,
+			OnUnservable: func(string, error) { n.Add(1) }, Logger: nopLog,
+		})
+		_, _, _ = c.Classify(ctx, jetstream.ErrNoHeartbeat, unservableInfo, baseCfg, nil)
+		c.NoteProgress() // a delivery proves serviceability before the window elapses
+		time.Sleep(60 * time.Millisecond)
+		_, _, _ = c.Classify(ctx, jetstream.ErrNoHeartbeat, unservableInfo, baseCfg, nil) // episode restarts
+		require.Equal(t, int64(0), n.Load(), "NoteProgress reset the episode so the window restarts")
+	})
 }
 
 func TestClassify_TransientError(t *testing.T) {

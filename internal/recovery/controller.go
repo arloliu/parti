@@ -50,6 +50,21 @@ type ControllerConfig struct {
 	// If zero, auto-computed from FetchTimeout: FetchTimeout*(BurstThreshold+1)+3s.
 	BurstWindow time.Duration
 
+	// Subject is the consumer's filter subject, passed to OnUnservable so the app
+	// can identify which partition consumer needs operator attention.
+	Subject string
+
+	// UnservableWindow is how long a ConfirmUnservable state must persist before
+	// OnUnservable fires. Zero defaults to defaultUnservableWindow (10s) when
+	// OnUnservable is set.
+	UnservableWindow time.Duration
+
+	// OnUnservable, when non-nil, opts the controller into unservable-consumer
+	// detection. It is a non-terminal notification (the consume loop keeps
+	// retrying); it fires when the consumer exists but its raft group is
+	// unavailable while the connection is up, sustained past UnservableWindow.
+	OnUnservable func(subject string, err error)
+
 	Logger  types.Logger
 	Metrics types.WorkerConsumerMetrics
 }
@@ -94,9 +109,27 @@ type Controller struct {
 	// from sequence 1 rather than skipping pre-bind messages.
 	recreatedSinceLastBuild atomic.Bool
 
+	// Unservable-consumer detection (opt-in via onUnservable != nil). A consumer
+	// that EXISTS but whose raft group is unavailable while the connection is up
+	// (confirm classifies ConfirmUnservable) is something parti cannot fix — the
+	// operator must recover NATS. When this persists for >= unservableWindow we
+	// notify the app (and keep retrying, so recovery is automatic once NATS is
+	// restored). All fields below are guarded by mu.
+	subject              string
+	unservableWindow     time.Duration
+	onUnservable         func(subject string, err error)
+	unservableSince      time.Time // zero = no current unservable episode
+	unservableFired      bool
+	lastUnservableRefire time.Time
+
 	logger  types.Logger
 	metrics types.WorkerConsumerMetrics
 }
+
+// defaultUnservableWindow is the duration an unservable confirm must persist
+// before the app is notified. Chosen to comfortably exceed NATS leader-election
+// + raft settle (low single-digit seconds) so normal election churn never fires.
+const defaultUnservableWindow = 10 * time.Second
 
 // NewController creates a Controller. Returns nil if strategy is RecoveryDisabled,
 // so callers can use a nil check to skip recovery entirely.
@@ -114,11 +147,19 @@ func NewController(cfg ControllerConfig) *Controller {
 		window = defaultBurstWindow(cfg.FetchTimeout, threshold)
 	}
 
+	unservableWindow := cfg.UnservableWindow
+	if unservableWindow <= 0 {
+		unservableWindow = defaultUnservableWindow
+	}
+
 	return &Controller{
 		strategy:            cfg.Strategy,
 		checkpoint:          newCheckpoint(cfg.Logger),
 		burst:               NewBurstDetector(window, threshold),
 		minRecoveryInterval: defaultRecoveryMinInterval,
+		subject:             cfg.Subject,
+		unservableWindow:    unservableWindow,
+		onUnservable:        cfg.OnUnservable,
 		logger:              cfg.Logger,
 		metrics:             cfg.Metrics,
 	}
@@ -185,16 +226,35 @@ func (c *Controller) Classify(
 		if !c.burst.Record() {
 			return ActionBackoff, nil, nil // not enough failures yet
 		}
-		// Burst threshold reached — confirm via consumer.Info().
-		if !c.confirmConsumerGone(ctx, infoFn) {
-			return ActionBackoff, nil, nil // consumer still exists, transient issue
-		}
-		newCons, recErr := c.recover(ctx, "consumer_not_found_after_burst", baseCfg, recreate)
-		if recErr != nil {
-			return ActionStreamMissing, nil, recErr
-		}
-		if newCons != nil {
-			return ActionContinue, newCons, nil
+		// Burst threshold reached — confirm via consumer.Info() and route by class.
+		result, infoErr := c.confirm(ctx, infoFn)
+		switch result {
+		case ConfirmGone:
+			c.noteServiceable() // not unservable; clear any episode
+			newCons, recErr := c.recover(ctx, "consumer_not_found_after_burst", baseCfg, recreate)
+			if recErr != nil {
+				return ActionStreamMissing, nil, recErr
+			}
+			if newCons != nil {
+				return ActionContinue, newCons, nil
+			}
+
+			return ActionBackoff, nil, nil
+		case ConfirmUnservable:
+			// Consumer exists but its raft group is unavailable (operator must
+			// recover NATS). Notify if sustained; keep retrying for auto-heal.
+			c.noteUnservable(infoErr)
+
+			return ActionBackoff, nil, nil
+		case ConfirmHealthy, ConfirmDegrading, ConfirmConnectivity:
+			// ConfirmHealthy: consumer is fine (transient blip).
+			// ConfirmDegrading: stream/bucket missing — owned by the manager's
+			//   stream-missing/degraded route, not this path; keep existing
+			//   backoff behavior (do not reroute or count as unservable).
+			// ConfirmConnectivity: connection layer / manager owns it.
+			c.noteServiceable()
+
+			return ActionBackoff, nil, nil
 		}
 
 		return ActionBackoff, nil, nil
@@ -540,17 +600,91 @@ func (c *Controller) recover(
 	return newCons, nil
 }
 
-// confirmConsumerGone calls consumer.Info() and returns true if the consumer is confirmed gone.
-func (c *Controller) confirmConsumerGone(ctx context.Context, infoFn InfoFunc) bool {
+// confirm calls consumer.Info() and classifies the outcome. The returned error
+// is the underlying Info() error (nil for healthy/leaderless), preserved so an
+// unservable notification can carry the cause.
+func (c *Controller) confirm(ctx context.Context, infoFn InfoFunc) (ConfirmResult, error) {
 	if infoFn == nil {
-		return false
+		// Cannot confirm; treat as a transient/no-signal condition (backoff,
+		// no recreate, no unservable count).
+		return ConfirmConnectivity, nil
 	}
 
 	c.consInfoMu.Lock()
-	_, err := infoFn(ctx)
+	ci, err := infoFn(ctx)
 	c.consInfoMu.Unlock()
 
-	return natsutil.IsConsumerNotFound(err)
+	return ClassifyConfirm(ci, err), err
+}
+
+// noteUnservable advances the unservable episode and fires OnUnservable (plus an
+// ERROR log) when the episode has persisted >= unservableWindow, then re-fires on
+// the same cadence while it persists. Opt-in: a no-op unless OnUnservable is set.
+// Non-terminal — the caller keeps retrying so recovery is automatic once the
+// operator restores NATS.
+func (c *Controller) noteUnservable(cause error) {
+	if c == nil || c.onUnservable == nil {
+		return
+	}
+
+	c.mu.Lock()
+	now := time.Now()
+	if c.unservableSince.IsZero() {
+		c.unservableSince = now
+	}
+	elapsed := now.Sub(c.unservableSince)
+	fire := false
+	switch {
+	case elapsed < c.unservableWindow:
+		// not sustained long enough yet
+	case !c.unservableFired:
+		c.unservableFired = true
+		c.lastUnservableRefire = now
+		fire = true
+	case now.Sub(c.lastUnservableRefire) >= c.unservableWindow:
+		c.lastUnservableRefire = now
+		fire = true
+	}
+	subject := c.subject
+	hook := c.onUnservable
+	c.mu.Unlock()
+
+	if fire {
+		if c.logger != nil {
+			c.logger.Error("partition consumer unservable; NATS operator action needed",
+				"subject", subject, "elapsed", elapsed.String(), "cause", cause)
+		}
+		hook(subject, cause) // outside the lock; must be non-blocking
+	}
+}
+
+// noteServiceable clears any in-progress unservable episode. If an unservable
+// notification had fired, an INFO "recovered" line is emitted and the episode is
+// re-armed for the future. Safe on a nil controller.
+func (c *Controller) noteServiceable() {
+	if c == nil || c.onUnservable == nil {
+		return
+	}
+
+	c.mu.Lock()
+	wasFired := c.unservableFired
+	c.unservableSince = time.Time{}
+	c.unservableFired = false
+	c.lastUnservableRefire = time.Time{}
+	subject := c.subject
+	c.mu.Unlock()
+
+	if wasFired && c.logger != nil {
+		c.logger.Info("partition consumer recovered from unservable state", "subject", subject)
+	}
+}
+
+// NoteProgress is called by the consume loop on each successful message delivery.
+// A delivery proves the consumer is serviceable, so it clears any unservable
+// episode (and emits the recovered log) without waiting for the next confirm.
+// Safe on a nil controller.
+func (c *Controller) NoteProgress() {
+	c.noteServiceable()
 }
 
 // callInfo calls consumer.Info() with serialization.

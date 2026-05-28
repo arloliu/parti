@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/arloliu/parti/v2/internal/natsutil"
+	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -47,6 +48,70 @@ func ClassifyError(err error) ErrorClass {
 	}
 
 	return ErrorTransient
+}
+
+// ConfirmResult classifies the outcome of a consumer.Info() call made during the
+// confirm path (after an ambiguous ErrNoHeartbeat burst). It is a lossless
+// replacement for the previous boolean "is the consumer gone?" so the controller
+// can route each distinct failure class to the correct owner without rerouting
+// stream-missing / degrading / connectivity failures into the per-consumer
+// unservable-notification path.
+type ConfirmResult int
+
+const (
+	// ConfirmHealthy means the consumer exists and is serviceable (Info returned
+	// no error and, for a replicated consumer, has a raft leader). Resets any
+	// in-progress unservable episode.
+	ConfirmHealthy ConfirmResult = iota
+
+	// ConfirmGone means the consumer is unambiguously absent (ConsumerNotFound).
+	// Routes to the existing recreate path.
+	ConfirmGone
+
+	// ConfirmDegrading means a bucket/stream/consumer is MISSING or the stream is
+	// gone — owned by the manager's degraded / stream-missing routing, NOT by the
+	// per-consumer unservable path. Must never be counted as unservable.
+	ConfirmDegrading
+
+	// ConfirmConnectivity means the NATS connection itself is impaired. Owned by
+	// the connection monitor / manager degraded path; not counted as unservable.
+	ConfirmConnectivity
+
+	// ConfirmUnservable means the consumer EXISTS but its own raft group is
+	// unavailable while the connection is up — a 503 / "JetStream system
+	// temporarily unavailable" / no-quorum API error, NoResponders from the
+	// consumer Info, or a leaderless ConsumerInfo. This is the only class that
+	// drives the unservable-notification.
+	ConfirmUnservable
+)
+
+// ClassifyConfirm maps a consumer.Info() result to a ConfirmResult. The order of
+// checks is significant: ConsumerNotFound is matched before the degrading check
+// (IsDegradingJetStreamError also matches consumer-not-found), and connectivity
+// is matched before the unservable catch-all.
+func ClassifyConfirm(ci *jetstream.ConsumerInfo, err error) ConfirmResult {
+	if err == nil {
+		// A replicated consumer with no elected leader is unservable. A
+		// non-replicated (R1, nil Cluster) consumer with no error is healthy.
+		if ci != nil && ci.Cluster != nil && ci.Cluster.Leader == "" {
+			return ConfirmUnservable
+		}
+
+		return ConfirmHealthy
+	}
+	if natsutil.IsConsumerNotFound(err) {
+		return ConfirmGone
+	}
+	if natsutil.IsDegradingJetStreamError(err) || errors.Is(err, types.ErrStreamMissing) {
+		return ConfirmDegrading
+	}
+	if natsutil.IsConnectivityError(err) {
+		return ConfirmConnectivity
+	}
+
+	// Non-NotFound, non-degrading, non-connectivity error while the connection is
+	// up: the consumer's raft group is unavailable (503/no-quorum/NoResponders).
+	return ConfirmUnservable
 }
 
 // Action is the recommended action after the controller classifies an error.
