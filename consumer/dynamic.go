@@ -246,6 +246,17 @@ type DynamicConfig struct {
 	// for the option form and the full trade-off discussion.
 	OnPermanentFailure func(subject string, err error)
 
+	// OnConsumerUnservable is the non-terminal app-facing seam fired while a
+	// partition consumer exists but its raft group is unavailable past
+	// UnservableWindow (a NATS-operator condition parti cannot self-heal). The
+	// loop keeps retrying. See [WithOnConsumerUnservable].
+	OnConsumerUnservable func(subject string, err error)
+
+	// UnservableWindow is how long the unservable condition must persist before
+	// OnConsumerUnservable fires. Zero uses the recovery default (10s).
+	// See [WithConsumerUnservableThreshold].
+	UnservableWindow time.Duration
+
 	// RecoveryRetry tunes the bounded-retry envelope wrapped around
 	// the iterator-creation path and the stream-missing Site B
 	// detour. Zero-valued fields fall back to the durable layer's
@@ -352,6 +363,8 @@ func NewDynamic(
 		RecoveryStrategy:            o.recoveryStrategy,
 		StreamMissingHook:           o.streamMissingHook,
 		OnPermanentFailure:          o.onPermanentFailure,
+		OnConsumerUnservable:        o.onConsumerUnservable,
+		UnservableWindow:            o.consumerUnservableWindow,
 		RecoveryRetry:               o.recoveryRetry,
 	}
 
@@ -408,7 +421,11 @@ func NewDynamic(
 		// SetOnStreamMissingError) at fire time, so a Manager.Start call
 		// occurring AFTER NewDynamic still reaches the durable layer.
 		OnPermanentFailure: d.onPermanentFailure,
-		OnStreamRecreated:  d.resetCompatCheck,
+		// OnConsumerUnservable is a direct user callback (no manager-observer
+		// fallback like OnPermanentFailure), so it is forwarded as-is.
+		OnUnservable:      cfg.OnConsumerUnservable,
+		UnservableWindow:  cfg.UnservableWindow,
+		OnStreamRecreated: d.resetCompatCheck,
 		Retry: durable.RetryConfig{
 			Backoff:    cfg.Retry.Backoff,
 			Max:        cfg.Retry.Max,

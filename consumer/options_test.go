@@ -185,6 +185,41 @@ func TestWithConsumerMemoryStorage(t *testing.T) {
 	}
 }
 
+func TestWithOnConsumerUnservable(t *testing.T) {
+	o := defaultOptions()
+	if o.onConsumerUnservable != nil {
+		t.Error("default onConsumerUnservable != nil")
+	}
+
+	var gotSubject string
+	WithOnConsumerUnservable(func(subject string, _ error) { gotSubject = subject }).apply(&o)
+	if o.onConsumerUnservable == nil {
+		t.Fatal("after WithOnConsumerUnservable, callback is nil")
+	}
+	o.onConsumerUnservable("sub.X", nil)
+	if gotSubject != "sub.X" {
+		t.Errorf("callback got subject %q, want sub.X", gotSubject)
+	}
+}
+
+func TestWithConsumerUnservableThreshold(t *testing.T) {
+	o := defaultOptions()
+	if o.consumerUnservableWindow != 0 {
+		t.Errorf("default consumerUnservableWindow = %v, want 0", o.consumerUnservableWindow)
+	}
+
+	WithConsumerUnservableThreshold(25 * time.Second).apply(&o)
+	if o.consumerUnservableWindow != 25*time.Second {
+		t.Errorf("after WithConsumerUnservableThreshold(25s), got %v", o.consumerUnservableWindow)
+	}
+
+	// Non-positive is ignored (keeps the prior/default value).
+	WithConsumerUnservableThreshold(0).apply(&o)
+	if o.consumerUnservableWindow != 25*time.Second {
+		t.Errorf("after WithConsumerUnservableThreshold(0), got %v, want 25s (unchanged)", o.consumerUnservableWindow)
+	}
+}
+
 func TestWithConsumerReplicas(t *testing.T) {
 	o := defaultOptions()
 	if o.consumerReplicas != 0 {

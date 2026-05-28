@@ -196,6 +196,8 @@ type options struct {
 	partitionRefreshMinInterval time.Duration
 	streamMissingHook           types.StreamMissingHook
 	onPermanentFailure          func(subject string, err error)
+	onConsumerUnservable        func(subject string, err error)
+	consumerUnservableWindow    time.Duration
 	recoveryRetry               RecoveryRetryConfig
 }
 
@@ -519,6 +521,48 @@ func WithStreamMissingHook(hook types.StreamMissingHook) DynamicOption {
 func WithOnPermanentFailure(fn func(subject string, err error)) DynamicOption {
 	return dynamicOpt(func(o *options) {
 		o.onPermanentFailure = fn
+	})
+}
+
+// WithOnConsumerUnservable installs a non-terminal callback fired while a
+// dynamic partition consumer EXISTS but its raft group is unavailable (a 503 /
+// "JetStream system temporarily unavailable" / no-quorum / leaderless condition)
+// while the NATS connection is up, sustained past the unservable window
+// (see [WithConsumerUnservableThreshold], default 10s).
+//
+// This is the signal that parti cannot self-heal the consumer — the NATS cluster
+// itself needs operator recovery (e.g. restore crashed nodes / restore quorum).
+// Parti keeps retrying regardless, so delivery resumes automatically once the
+// operator restores NATS; an INFO "recovered" line is logged when it does.
+//
+// Distinct from [WithOnPermanentFailure]:
+//   - OnPermanentFailure is TERMINAL — fired once just before the consume loop
+//     exits on iterator-creation retry exhaustion / stream-missing.
+//   - OnConsumerUnservable is NON-TERMINAL — fired (rate-limited, re-fired while
+//     the condition persists) without stopping the loop.
+//
+// Setting one does not enable or disable the other; OnConsumerUnservable does not
+// alter OnPermanentFailure's interaction with the manager auto-degraded route.
+//
+// The callback runs on the consumption loop's goroutine and MUST be non-blocking;
+// offload long work (e.g. raising an alert) to a goroutine. The err preserves the
+// underlying cause. Applies only to [Dynamic].
+func WithOnConsumerUnservable(fn func(subject string, err error)) DynamicOption {
+	return dynamicOpt(func(o *options) {
+		o.onConsumerUnservable = fn
+	})
+}
+
+// WithConsumerUnservableThreshold sets how long the unservable condition must
+// persist continuously before [WithOnConsumerUnservable] fires. The default
+// (10s) comfortably exceeds NATS leader-election + raft settle, so normal
+// election churn never trips the signal. Raise it for slower clusters; a value
+// <= 0 keeps the default. Applies only to [Dynamic].
+func WithConsumerUnservableThreshold(window time.Duration) DynamicOption {
+	return dynamicOpt(func(o *options) {
+		if window > 0 {
+			o.consumerUnservableWindow = window
+		}
 	})
 }
 

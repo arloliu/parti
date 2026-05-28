@@ -299,6 +299,19 @@ type WorkerConsumerConfig struct {
 	// work should be offloaded to a goroutine inside the callback.
 	OnPermanentFailure func(subject string, err error)
 
+	// OnUnservable, when non-nil, is invoked (rate-limited, non-terminal) while a
+	// partition consumer exists but its raft group is unavailable while the NATS
+	// connection is up, sustained past UnservableWindow — a condition parti cannot
+	// fix on its own (the NATS cluster needs operator recovery). Unlike
+	// OnPermanentFailure it does NOT exit the consume loop: parti keeps retrying so
+	// delivery resumes automatically once the operator restores NATS.
+	OnUnservable func(subject string, err error)
+
+	// UnservableWindow is how long the unservable condition must persist before
+	// OnUnservable fires. Zero uses the recovery default (10s). The default
+	// comfortably exceeds NATS leader-election + settle so normal churn is silent.
+	UnservableWindow time.Duration
+
 	// AllowWorkerIDChange controls whether workerID changes are allowed after initialization.
 	// Default: false (immutable once set). Intended for controlled migrations only.
 	AllowWorkerIDChange bool

@@ -38,6 +38,16 @@ type partitionConsumerConfig struct {
 	// envelope exhausts its attempt budget. See WorkerConsumerConfig.
 	OnPermanentFailure func(subject string, err error)
 
+	// OnUnservable, when non-nil, is fired (rate-limited, non-terminal) while
+	// this partition's consumer exists but its raft group is unavailable past
+	// UnservableWindow — a condition parti cannot fix (operator must recover
+	// NATS). The consume loop keeps retrying so recovery is automatic on restore.
+	OnUnservable func(subject string, err error)
+
+	// UnservableWindow is how long the unservable condition must persist before
+	// OnUnservable fires. Zero uses the recovery default (10s).
+	UnservableWindow time.Duration
+
 	// StreamMissingHook is the operator-supplied escalation invoked when
 	// the partition consumer's recovery flow detects the underlying
 	// JetStream stream is absent. Nil means "no hook configured" — the
@@ -158,10 +168,13 @@ func newPartitionConsumer(
 		checkPullSuppression: opts.checkPullSuppression,
 		done:                 make(chan struct{}),
 		recovery: recovery.NewController(recovery.ControllerConfig{
-			Strategy:     config.RecoveryStrategy,
-			FetchTimeout: config.FetchTimeout,
-			Logger:       logger,
-			Metrics:      config.Metrics,
+			Strategy:         config.RecoveryStrategy,
+			FetchTimeout:     config.FetchTimeout,
+			Subject:          opts.subject,
+			UnservableWindow: config.UnservableWindow,
+			OnUnservable:     config.OnUnservable,
+			Logger:           logger,
+			Metrics:          config.Metrics,
 		}),
 	}
 }
@@ -502,6 +515,10 @@ func (pc *partitionConsumer) processIterator(
 			}
 			return false, err
 		}
+
+		// A delivered message proves the consumer is serviceable again; clear any
+		// in-progress unservable episode (emits the recovered log if one fired).
+		pc.recovery.NoteProgress()
 
 		if handler == nil {
 			_ = msg.Nak()
