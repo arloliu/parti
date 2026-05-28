@@ -1356,3 +1356,324 @@ func (e *fakeKVEntry) Revision() uint64                { return e.revision }
 func (e *fakeKVEntry) Created() time.Time              { return e.created }
 func (e *fakeKVEntry) Delta() uint64                   { return e.delta }
 func (e *fakeKVEntry) Operation() jetstream.KeyValueOp { return e.op }
+
+func TestReconcileOnce_SkipsDecodeWhenEntryUnchanged(t *testing.T) {
+	_, nc := partitest.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx := t.Context()
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "partitions_reconcile_skip"})
+	require.NoError(t, err)
+	src := NewNatsKV(kv, "partitions", nil, WithReconcileInterval(0))
+
+	var decodeCalls atomic.Int64
+	src.decodeFn = func(data []byte) ([]types.Partition, error) {
+		decodeCalls.Add(1)
+		return partcodec.Decode(data)
+	}
+
+	require.NoError(t, src.Update(ctx, []types.Partition{{Keys: []string{"p1"}, Weight: 1}}))
+	src.reconcileOnce(ctx) // prime cache
+	baseline := decodeCalls.Load()
+	// The priming reconcile must have decoded through the seam exactly once;
+	// otherwise reconcileOnce bypassed s.decodeFn and this test proves nothing.
+	require.Equal(t, int64(1), baseline, "priming reconcile must decode through the seam")
+
+	for range 5 {
+		src.reconcileOnce(ctx)
+	}
+	if got := decodeCalls.Load(); got != baseline {
+		t.Fatalf("expected no additional decodes across 5 unchanged ticks; baseline=%d got=%d", baseline, got)
+	}
+	parts, _ := src.List(ctx)
+	if len(parts) != 1 || parts[0].Keys[0] != "p1" {
+		t.Fatalf("state corrupted: %+v", parts)
+	}
+}
+
+func TestReconcileOnce_AppliesEqualRevisionRecreate(t *testing.T) {
+	_, nc := partitest.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx := t.Context()
+	const bucket = "partitions_reconcile_recreate_eq"
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: bucket})
+	require.NoError(t, err)
+	src := NewNatsKV(kv, "partitions", nil, WithReconcileInterval(0))
+
+	var decodeCalls atomic.Int64
+	src.decodeFn = func(data []byte) ([]types.Partition, error) {
+		decodeCalls.Add(1)
+		return partcodec.Decode(data)
+	}
+
+	// A as the FIRST and only write -> revision 1, s.revision == 1.
+	require.NoError(t, src.Update(ctx, []types.Partition{{Keys: []string{"A"}, Weight: 1}}))
+	src.reconcileOnce(ctx) // prime cache (rev1, createdA)
+
+	// Recreate same bucket; write B as first value -> revision 1 again, later Created.
+	require.NoError(t, js.DeleteKeyValue(ctx, bucket))
+	kv2, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: bucket})
+	require.NoError(t, err)
+	data, err := partcodec.Encode([]types.Partition{{Keys: []string{"B"}, Weight: 1}})
+	require.NoError(t, err)
+	rev, err := kv2.Put(ctx, "partitions", data)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), rev, "precondition: want recreated first value at rev 1")
+
+	before := decodeCalls.Load()
+	// Bounded poll: the source's s.kv handle may observe the recreate with
+	// propagation delay (mirror the F6A recovery wait, not a fixed sleep).
+	require.Eventually(t, func() bool {
+		src.reconcileOnce(ctx)
+		parts, _ := src.List(ctx)
+		return len(parts) == 1 && parts[0].Keys[0] == "B"
+	}, 3*time.Second, 50*time.Millisecond, "equal-rev recreate not applied; want [B]")
+
+	if decodeCalls.Load() == before {
+		t.Fatal("reconcile skipped the recreated value (created-time guard missing)")
+	}
+}
+
+func TestReconcileOnce_RecoversRecreateWithHigherOldRevision(t *testing.T) {
+	_, nc := partitest.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx := t.Context()
+	const bucket = "partitions_reconcile_recreate_hi"
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: bucket})
+	require.NoError(t, err)
+	src := NewNatsKV(kv, "partitions", nil, WithReconcileInterval(0))
+
+	// Two writes -> s.revision == 2.
+	require.NoError(t, src.Update(ctx, []types.Partition{{Keys: []string{"A"}, Weight: 1}}))
+	require.NoError(t, src.Update(ctx, []types.Partition{{Keys: []string{"A2"}, Weight: 1}}))
+	src.reconcileOnce(ctx) // prime cache
+
+	// Recreate same bucket; B becomes revision 1 in the new incarnation.
+	require.NoError(t, js.DeleteKeyValue(ctx, bucket))
+	kv2, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: bucket})
+	require.NoError(t, err)
+	data, err := partcodec.Encode([]types.Partition{{Keys: []string{"B"}, Weight: 1}})
+	require.NoError(t, err)
+	rev, err := kv2.Put(ctx, "partitions", data)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), rev, "precondition: want rev 1")
+
+	// Recovery tick (watcher never started -> reconcile is the only path).
+	// Bounded poll mirroring the F6A wait pattern if propagation lags.
+	require.Eventually(t, func() bool {
+		src.reconcileOnce(ctx)
+		parts, _ := src.List(ctx)
+		return len(parts) == 1 && parts[0].Keys[0] == "B"
+	}, 3*time.Second, 50*time.Millisecond, "recreate-with-higher-old-revision not recovered; want [B]")
+}
+
+func TestReconcileOnce_DoesNotRegressOnConcurrentUpdate(t *testing.T) {
+	_, nc := partitest.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx := t.Context()
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "partitions_reconcile_race"})
+	require.NoError(t, err)
+	src := NewNatsKV(kv, "partitions", nil, WithReconcileInterval(0))
+
+	require.NoError(t, src.Update(ctx, []types.Partition{{Keys: []string{"v1"}, Weight: 1}}))
+	// IMPORTANT: do NOT prime the reconcile skip cache here. The seeding Update
+	// leaves reconcileKnown=false (only reconcileOnce sets it), so the single
+	// reconcileOnce below does NOT take the skip-guard early return — it reaches
+	// the decode, where the seam injects the concurrent write. (Priming first
+	// would make the tick skip at the guard and the injection would never fire —
+	// the test would prove nothing.)
+	var injected atomic.Bool
+	src.decodeFn = func(data []byte) ([]types.Partition, error) {
+		// Fires during reconcileOnce, AFTER its kv.Get captured the rev-1 entry
+		// but BEFORE applyReconcileEntry reads s.revision. Simulates a concurrent
+		// writer committing v2 (advancing s.revision to 2) mid-reconcile. Runs on
+		// the reconcile goroutine, OUTSIDE s.mu (reconcileOnce calls decodeFn
+		// before taking any lock), so the reentrant Update cannot deadlock.
+		if injected.CompareAndSwap(false, true) {
+			if err := src.Update(ctx, []types.Partition{{Keys: []string{"v2"}, Weight: 1}}); err != nil {
+				t.Errorf("injected update: %v", err)
+			}
+		}
+		return partcodec.Decode(data)
+	}
+
+	src.reconcileOnce(ctx) // fetched rev1, but s.revision becomes 2 mid-flight
+
+	parts, _ := src.List(ctx)
+	if len(parts) != 1 || parts[0].Keys[0] != "v2" {
+		t.Fatalf("reconcile regressed to a stale same-incarnation read; want [v2], got %+v", parts)
+	}
+}
+
+// TestReconcileOnce_DoesNotRegressOnSecondConcurrentUpdate drives the harder
+// TOCTOU: a SECOND same-incarnation Update lands AFTER the confirmatory kv.Get
+// returns but BEFORE the reset decision. The confirmed entry (rev2) is below the
+// now-live s.revision (rev3) yet it is NOT a bucket reset — it must not roll
+// state back to rev2. The reset decision must key off the pre-confirm baseline
+// (cachedRev), not the moving live revision.
+func TestReconcileOnce_DoesNotRegressOnSecondConcurrentUpdate(t *testing.T) {
+	_, nc := partitest.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx := t.Context()
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "partitions_reconcile_race2"})
+	require.NoError(t, err)
+	src := NewNatsKV(kv, "partitions", nil, WithReconcileInterval(0))
+
+	require.NoError(t, src.Update(ctx, []types.Partition{{Keys: []string{"v1"}, Weight: 1}}))
+
+	// decodeFn fires twice in the backwards path: decode #1 is reconcileOnce's
+	// decode of the fetched rev1 entry; decode #2 is applyReconcileEntry's decode
+	// of the confirmatory read. Inject one Update on each, advancing s.revision to
+	// 2 then 3, both OUTSIDE s.mu (reconcile holds no lock across either decode),
+	// so the reentrant Updates cannot deadlock.
+	var n atomic.Int64
+	src.decodeFn = func(data []byte) ([]types.Partition, error) {
+		switch n.Add(1) {
+		case 1:
+			if err := src.Update(ctx, []types.Partition{{Keys: []string{"v2"}, Weight: 1}}); err != nil {
+				t.Errorf("inject v2: %v", err)
+			}
+		case 2:
+			if err := src.Update(ctx, []types.Partition{{Keys: []string{"v3"}, Weight: 1}}); err != nil {
+				t.Errorf("inject v3: %v", err)
+			}
+		}
+
+		return partcodec.Decode(data)
+	}
+
+	src.reconcileOnce(ctx)
+
+	parts, rev, _, _ := src.Snapshot(ctx)
+	if len(parts) != 1 || parts[0].Keys[0] != "v3" {
+		t.Fatalf("reconcile rolled back a newer same-incarnation update; want [v3], got %+v", parts)
+	}
+	require.Equal(t, uint64(3), rev, "revision must not regress below the latest committed update")
+}
+
+// TestReconcileOnce_DoesNotRollBackOnRecreateBaselineABA drives the ABA race in
+// the reset path: the bucket is recreated (revisions restart at 1), reconcile's
+// confirmatory read captures the recreated rev-1 value, but before the reset
+// lock is taken a concurrent Modify advances the NEW incarnation back to a
+// revision numerically equal to the old baseline and applies it locally. A
+// numeric-only baseline recheck cannot tell the new incarnation's rev-2 apart
+// from the old baseline rev-2, so it would clear the gate and roll the newer
+// recreated content back to the stale confirmed rev-1. The reset must detect
+// that local state advanced (via an apply-generation token) and decline.
+func TestReconcileOnce_DoesNotRollBackOnRecreateBaselineABA(t *testing.T) {
+	_, nc := partitest.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx := t.Context()
+	const bucket = "partitions_reconcile_aba"
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: bucket})
+	require.NoError(t, err)
+	src := NewNatsKV(kv, "partitions", nil, WithReconcileInterval(0))
+
+	// Old incarnation reaches revision 2.
+	require.NoError(t, src.Update(ctx, []types.Partition{{Keys: []string{"A"}, Weight: 1}}))
+	require.NoError(t, src.Update(ctx, []types.Partition{{Keys: []string{"A2"}, Weight: 1}}))
+	src.reconcileOnce(ctx) // prime cache at rev2
+
+	// Recreate the bucket so the new first value B is revision 1.
+	require.NoError(t, js.DeleteKeyValue(ctx, bucket))
+	kv2, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: bucket})
+	require.NoError(t, err)
+	data, err := partcodec.Encode([]types.Partition{{Keys: []string{"B"}, Weight: 1}})
+	require.NoError(t, err)
+	rev, err := kv2.Put(ctx, "partitions", data)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), rev, "precondition: recreated first value at rev 1")
+
+	// decodeFn fires twice in the backwards path: decode #1 is reconcileOnce's
+	// decode of the fetched rev-1 entry; decode #2 is the confirmatory decode,
+	// which runs AFTER the confirmatory kv.Get captured rev 1 but BEFORE the reset
+	// lock. Injecting Modify on decode #2 advances the NEW incarnation to rev 2
+	// (== old baseline) and applies [C] locally, reproducing the ABA window.
+	var n atomic.Int64
+	src.decodeFn = func(d []byte) ([]types.Partition, error) {
+		if n.Add(1) == 2 {
+			if err := src.Modify(ctx, func(_ []types.Partition) []types.Partition {
+				return []types.Partition{{Keys: []string{"C"}, Weight: 1}}
+			}); err != nil {
+				t.Errorf("inject modify: %v", err)
+			}
+		}
+
+		return partcodec.Decode(d)
+	}
+
+	src.reconcileOnce(ctx)
+
+	parts, gotRev, _, _ := src.Snapshot(ctx)
+	if len(parts) != 1 || parts[0].Keys[0] != "C" {
+		t.Fatalf("reset rolled the recreated bucket back to a stale revision; want [C], got %+v", parts)
+	}
+	require.Equal(t, uint64(2), gotRev, "revision must reflect the newer recreated-bucket write, not the stale confirm")
+}
+
+// TestReconcileOnce_RecoversAfterNoOpApplyInResetWindow guards against skip-cache
+// poisoning. An accepted-but-no-op apply (e.g. a watcher re-delivering the old
+// baseline revision) lands in the reset window and advances the apply generation
+// without changing state, so the reset declines this tick and the confirmed
+// recreate value is gate-dropped. The reconcile skip cache must NOT record that
+// dropped value: if it did, the next tick — seeing the same (revision, created)
+// — would skip decode entirely and the source would stay permanently stuck on
+// the stale state. A subsequent reconcile tick must still recover the recreate.
+func TestReconcileOnce_RecoversAfterNoOpApplyInResetWindow(t *testing.T) {
+	_, nc := partitest.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx := t.Context()
+	const bucket = "partitions_reconcile_noop_window"
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: bucket})
+	require.NoError(t, err)
+	src := NewNatsKV(kv, "partitions", nil, WithReconcileInterval(0))
+
+	// Old incarnation reaches revision 2 with content [A2].
+	require.NoError(t, src.Update(ctx, []types.Partition{{Keys: []string{"A"}, Weight: 1}}))
+	require.NoError(t, src.Update(ctx, []types.Partition{{Keys: []string{"A2"}, Weight: 1}}))
+	src.reconcileOnce(ctx) // prime cache at rev2 / [A2]
+
+	// Recreate so the new first value B is revision 1.
+	require.NoError(t, js.DeleteKeyValue(ctx, bucket))
+	kv2, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: bucket})
+	require.NoError(t, err)
+	data, err := partcodec.Encode([]types.Partition{{Keys: []string{"B"}, Weight: 1}})
+	require.NoError(t, err)
+	rev, err := kv2.Put(ctx, "partitions", data)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), rev, "precondition: recreated first value at rev 1")
+
+	// On the confirmatory decode (call #2), inject an accepted no-op re-apply of
+	// the old baseline revision (rev 2, same [A2] content). It advances applyGen
+	// without changing state, so the reset for this tick is declined.
+	var n atomic.Int64
+	src.decodeFn = func(d []byte) ([]types.Partition, error) {
+		if n.Add(1) == 2 {
+			src.applyLocal([]types.Partition{{Keys: []string{"A2"}, Weight: 1}}, 2, true)
+		}
+
+		return partcodec.Decode(d)
+	}
+
+	src.reconcileOnce(ctx) // reset declined this tick; must not poison the skip cache
+
+	// Subsequent reconcile ticks must still recover the recreated value.
+	require.Eventually(t, func() bool {
+		src.reconcileOnce(ctx)
+		parts, _ := src.List(ctx)
+		return len(parts) == 1 && parts[0].Keys[0] == "B"
+	}, 3*time.Second, 50*time.Millisecond, "recreate recovery permanently blocked by skip-cache poisoning")
+}
