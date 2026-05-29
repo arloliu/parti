@@ -2,6 +2,7 @@ package assignment
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 
 	"github.com/arloliu/parti/v2/types"
@@ -31,8 +32,14 @@ func (m *mockStateProvider) SetGrace(v bool) {
 
 // mockSource implements types.PartitionSource for testing.
 //
-// Provides configurable partition lists and error simulation.
+// Provides configurable partition lists and error simulation. The partition
+// list is guarded by mu so a test can mutate it (via SetPartitions) while the
+// calculator's background rebalance goroutine reads it through List, without
+// tripping the race detector. Construct-time field initialization
+// (&mockSource{partitions: ...}) needs no lock because it happens-before the
+// calculator goroutines start.
 type mockSource struct {
+	mu         sync.RWMutex
 	partitions []types.Partition
 	err        error
 }
@@ -49,11 +56,25 @@ func (m *mockSource) Stop(_ context.Context) error {
 
 // List returns the configured partitions or error.
 func (m *mockSource) List(_ context.Context) ([]types.Partition, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	if m.err != nil {
 		return nil, m.err
 	}
 
 	return m.partitions, nil
+}
+
+// SetPartitions replaces the partition list under the lock. Tests that change
+// the source after the calculator has started (e.g. partition-refresh
+// scenarios) must use this instead of writing the field directly, so the write
+// is synchronized against concurrent List reads. It assigns a fresh slice
+// rather than mutating in place, so a slice already returned by List stays
+// valid to iterate without the lock.
+func (m *mockSource) SetPartitions(p []types.Partition) {
+	m.mu.Lock()
+	m.partitions = p
+	m.mu.Unlock()
 }
 
 // mockStrategy implements types.AssignmentStrategy for testing.

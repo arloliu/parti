@@ -47,7 +47,14 @@ func waitStableVersion(t *testing.T, calc *Calculator) int64 {
 	deadline := time.Now().Add(6 * time.Second)
 	for time.Now().Before(deadline) {
 		v := calc.CurrentVersion()
-		if v == 0 {
+		// Require a published version AND that the state machine has returned
+		// to Idle. Idle gates out the window where a cold-start final rebalance
+		// is still pending (CalcStateScaling) but the version has not yet been
+		// bumped: a version-only check could otherwise capture the
+		// immediate-assignment version as "stable" under load, before the
+		// delayed stabilization timer fires — the same premature-baseline race
+		// this helper exists to prevent.
+		if v == 0 || calc.GetState() != types.CalcStateIdle {
 			time.Sleep(25 * time.Millisecond)
 			continue
 		}
@@ -55,7 +62,7 @@ func waitStableVersion(t *testing.T, calc *Calculator) int64 {
 		end := time.Now().Add(confirm)
 		for time.Now().Before(end) {
 			time.Sleep(25 * time.Millisecond)
-			if calc.CurrentVersion() != v {
+			if calc.CurrentVersion() != v || calc.GetState() != types.CalcStateIdle {
 				stable = false
 				break
 			}
@@ -523,12 +530,14 @@ func TestCalculator_Cooldown_WithPartitionRefresh(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	initialVersion := calc.CurrentVersion()
 
-	// Change partition source (add new partition)
-	source.partitions = []types.Partition{
+	// Change partition source (add new partition). Use SetPartitions: the
+	// calculator's background rebalance goroutine may be reading the source
+	// concurrently via List, so a direct field write would be a data race.
+	source.SetPartitions([]types.Partition{
 		{Keys: []string{"p1"}},
 		{Keys: []string{"p2"}},
 		{Keys: []string{"p3"}}, // New partition
-	}
+	})
 
 	// Trigger partition refresh
 	err = calc.TriggerRebalance(ctx)
@@ -539,7 +548,12 @@ func TestCalculator_Cooldown_WithPartitionRefresh(t *testing.T) {
 	require.Greater(t, firstRefreshVersion, initialVersion, "first refresh should succeed")
 
 	// Try another refresh immediately (should be blocked by cooldown)
-	source.partitions = append(source.partitions, types.Partition{Keys: []string{"p4"}})
+	source.SetPartitions([]types.Partition{
+		{Keys: []string{"p1"}},
+		{Keys: []string{"p2"}},
+		{Keys: []string{"p3"}},
+		{Keys: []string{"p4"}},
+	})
 	err = calc.TriggerRebalance(ctx)
 	require.NoError(t, err)
 	time.Sleep(100 * time.Millisecond)
