@@ -529,25 +529,34 @@ func absInt(x int) int {
 }
 
 // VerifyTotalPartitionCount verifies the total number of unique partitions assigned.
+//
+// Assignment publication and follower consumption can lag the Stable transition
+// under parallel load, so this polls until the expected coverage is observed
+// (or a bounded timeout elapses) before asserting, rather than snapshotting once.
 func (wc *WorkerCluster) VerifyTotalPartitionCount(expected int) {
-	// Use a map to track unique partitions across all workers
-	uniquePartitions := make(map[string]bool)
-
-	for i, mgr := range wc.Workers {
-		assignment := mgr.CurrentAssignment()
-		wc.T.Logf("Worker %d (%s): %d partitions",
-			i, mgr.WorkerID(), len(assignment.Partitions))
-
-		// Add partitions to unique set
-		for _, p := range assignment.Partitions {
-			// Use the first key as partition identifier
-			if len(p.Keys) > 0 {
-				uniquePartitions[p.Keys[0]] = true
+	var totalUnique int
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		uniquePartitions := make(map[string]bool)
+		for _, mgr := range wc.Workers {
+			for _, p := range mgr.CurrentAssignment().Partitions {
+				if len(p.Keys) > 0 {
+					uniquePartitions[p.Keys[0]] = true
+				}
 			}
 		}
+		totalUnique = len(uniquePartitions)
+		if totalUnique == expected || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 
-	totalUnique := len(uniquePartitions)
+	for i, mgr := range wc.Workers {
+		wc.T.Logf("Worker %d (%s): %d partitions",
+			i, mgr.WorkerID(), len(mgr.CurrentAssignment().Partitions))
+	}
+
 	require.Equal(wc.T, expected, totalUnique,
 		"unique partition count mismatch (expected %d, got %d unique partitions)", expected, totalUnique)
 }
