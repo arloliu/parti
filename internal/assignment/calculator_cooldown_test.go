@@ -1,6 +1,7 @@
 package assignment
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -8,6 +9,65 @@ import (
 	"github.com/arloliu/parti/v2/types"
 	"github.com/stretchr/testify/require"
 )
+
+// fakeClock is a manually-advanced clock for deterministic cooldown tests.
+// The calculator's cooldown gate and the publisher's lastRebalance stamp both
+// read Config.Now, so advancing this clock past Cooldown deterministically
+// opens the gate regardless of real-time scheduling under load. Freezing it
+// (not advancing) keeps the gate closed no matter how much wall time passes.
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func newFakeClock() *fakeClock { return &fakeClock{t: time.Now()} }
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.t
+}
+
+func (c *fakeClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
+
+// waitStableVersion waits until the calculator's version is > 0 and has not
+// changed across a confirmation window, then returns it. Cold start may perform
+// more than one rebalance (initial assignment plus a stabilization-window
+// rebalance); with a frozen fake clock the cooldown gate blocks any further
+// rebalance once cold start settles, so a stable version is a deterministic
+// baseline for the cooldown assertions that follow.
+func waitStableVersion(t *testing.T, calc *Calculator) int64 {
+	t.Helper()
+	const confirm = 500 * time.Millisecond
+	deadline := time.Now().Add(6 * time.Second)
+	for time.Now().Before(deadline) {
+		v := calc.CurrentVersion()
+		if v == 0 {
+			time.Sleep(25 * time.Millisecond)
+			continue
+		}
+		stable := true
+		end := time.Now().Add(confirm)
+		for time.Now().Before(end) {
+			time.Sleep(25 * time.Millisecond)
+			if calc.CurrentVersion() != v {
+				stable = false
+				break
+			}
+		}
+		if stable {
+			return v
+		}
+	}
+	t.Fatal("calculator version did not stabilize")
+
+	return 0
+}
 
 // TestCalculator_RebalanceAttemptDuringCooldown_Blocked verifies cooldown prevents rebalancing.
 func TestCalculator_RebalanceAttemptDuringCooldown_Blocked(t *testing.T) {
@@ -30,6 +90,7 @@ func TestCalculator_RebalanceAttemptDuringCooldown_Blocked(t *testing.T) {
 	}
 	strategy := &mockStrategy{}
 
+	clock := newFakeClock()
 	calc, err := NewCalculator(&Config{
 		AssignmentKV:         assignmentKV,
 		HeartbeatKV:          heartbeatKV,
@@ -37,11 +98,12 @@ func TestCalculator_RebalanceAttemptDuringCooldown_Blocked(t *testing.T) {
 		Source:               source,
 		Strategy:             strategy,
 		HeartbeatPrefix:      "worker-hb",
-		HeartbeatTTL:         200 * time.Millisecond, // Fast heartbeat for test
+		HeartbeatTTL:         2 * time.Second, // long enough that workers persist through the short test
 		EmergencyGracePeriod: 1 * time.Second,
 		ColdStartWindow:      50 * time.Millisecond,
 		PlannedScaleWindow:   50 * time.Millisecond,
-		Cooldown:             500 * time.Millisecond, // Short but noticeable cooldown
+		Cooldown:             5 * time.Second, // fake-clock driven; never elapses in real time
+		Now:                  clock.Now,
 	})
 	require.NoError(t, err)
 
@@ -49,23 +111,22 @@ func TestCalculator_RebalanceAttemptDuringCooldown_Blocked(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = calc.Stop(ctx) }()
 
-	// Wait for initial rebalance
-	time.Sleep(100 * time.Millisecond)
-	initialVersion := calc.CurrentVersion()
-	require.NotZero(t, initialVersion, "should have initial version")
+	// Cold-start rebalance(s) establish the initial version and stamp
+	// lastRebalance at the (frozen) clock time. Wait until it fully settles.
+	initialVersion := waitStableVersion(t, calc)
 
-	// Add worker-2 (should trigger rebalance attempt but be blocked by cooldown)
+	// Add worker-2: the monitor's watcher fires a poll, but the cooldown gate
+	// (clock has not advanced past the 5s Cooldown) must block the rebalance.
+	// Because the gate reads the frozen fake clock, real-time scheduling under
+	// load cannot let the rebalance slip through.
 	_, err = heartbeatKV.Put(ctx, "worker-hb.worker-2", []byte(time.Now().Format(time.RFC3339Nano)))
 	require.NoError(t, err)
 
-	// Wait for monitoring cycle (TTL/2 = 100ms) + margin, but less than cooldown (500ms)
-	time.Sleep(200 * time.Millisecond)
+	require.Never(t, func() bool { return calc.CurrentVersion() != initialVersion },
+		750*time.Millisecond, 50*time.Millisecond,
+		"cooldown must block the rebalance while the clock has not advanced past Cooldown")
 
-	// Version should NOT change - cooldown is still active
-	blockedVersion := calc.CurrentVersion()
-	require.Equal(t, initialVersion, blockedVersion, "cooldown should block rebalance")
-
-	t.Logf("Cooldown correctly blocked rebalance: version remained %d", blockedVersion)
+	t.Logf("cooldown correctly blocked rebalance: version remained %d", initialVersion)
 }
 
 // TestCalculator_RebalanceAfterCooldown_Allowed verifies rebalance proceeds after cooldown expires.
@@ -145,7 +206,8 @@ func TestCalculator_CooldownBoundary_ExactTiming(t *testing.T) {
 	}
 	strategy := &mockStrategy{}
 
-	cooldownDuration := 300 * time.Millisecond
+	cooldownDuration := 5 * time.Second // fake-clock driven; real time never reaches it
+	clock := newFakeClock()
 	calc, err := NewCalculator(&Config{
 		AssignmentKV:         assignmentKV,
 		HeartbeatKV:          heartbeatKV,
@@ -153,11 +215,12 @@ func TestCalculator_CooldownBoundary_ExactTiming(t *testing.T) {
 		Source:               source,
 		Strategy:             strategy,
 		HeartbeatPrefix:      "worker-hb",
-		HeartbeatTTL:         200 * time.Millisecond,
+		HeartbeatTTL:         2 * time.Second,
 		EmergencyGracePeriod: 1 * time.Second,
 		ColdStartWindow:      50 * time.Millisecond,
 		PlannedScaleWindow:   50 * time.Millisecond,
 		Cooldown:             cooldownDuration,
+		Now:                  clock.Now,
 	})
 	require.NoError(t, err)
 
@@ -165,35 +228,25 @@ func TestCalculator_CooldownBoundary_ExactTiming(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = calc.Stop(ctx) }()
 
-	// Wait for initial rebalance
-	time.Sleep(100 * time.Millisecond)
-	initialVersion := calc.CurrentVersion()
-	rebalanceTime := time.Now()
+	initialVersion := waitStableVersion(t, calc)
 
-	// Add worker-2
+	// Add worker-2. Just below the boundary: advance the clock to one tick short
+	// of Cooldown — the gate must still block.
 	_, err = heartbeatKV.Put(ctx, "worker-hb.worker-2", []byte(time.Now().Format(time.RFC3339Nano)))
 	require.NoError(t, err)
+	clock.Advance(cooldownDuration - time.Millisecond)
+	require.Never(t, func() bool { return calc.CurrentVersion() != initialVersion },
+		500*time.Millisecond, 50*time.Millisecond, "must still be in cooldown just below the boundary")
+	t.Log("just below boundary: cooldown still active")
 
-	// Test at boundary: just before cooldown expires
-	justBeforeExpiry := cooldownDuration - 50*time.Millisecond
-	time.Sleep(justBeforeExpiry)
-
-	// Should still be blocked
-	beforeVersion := calc.CurrentVersion()
-	require.Equal(t, initialVersion, beforeVersion, "should still be in cooldown")
-
-	t.Logf("At boundary -%dms: cooldown still active", 50)
-
-	// Wait past cooldown + monitoring cycle
-	remainingTime := cooldownDuration - justBeforeExpiry + 300*time.Millisecond
-	time.Sleep(remainingTime)
-
-	// Should be allowed now
-	afterVersion := calc.CurrentVersion()
-	require.Greater(t, afterVersion, initialVersion, "should be past cooldown")
-
-	actualCooldown := time.Since(rebalanceTime)
-	t.Logf("Cooldown boundary test: configured=%v, actual delay=%v", cooldownDuration, actualCooldown)
+	// Cross the boundary: advance past Cooldown and re-touch the heartbeat to
+	// fire the watcher; the rebalance must now proceed.
+	clock.Advance(2 * time.Millisecond)
+	_, err = heartbeatKV.Put(ctx, "worker-hb.worker-2", []byte(time.Now().Format(time.RFC3339Nano)))
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return calc.CurrentVersion() > initialVersion },
+		3*time.Second, 50*time.Millisecond, "rebalance must proceed once the clock crosses Cooldown")
+	t.Logf("crossed boundary: version %d → %d", initialVersion, calc.CurrentVersion())
 }
 
 // TestCalculator_MultipleCooldowns_Sequential verifies multiple cooldown cycles work correctly.
@@ -218,6 +271,7 @@ func TestCalculator_MultipleCooldowns_Sequential(t *testing.T) {
 	}
 	strategy := &mockStrategy{}
 
+	clock := newFakeClock()
 	calc, err := NewCalculator(&Config{
 		AssignmentKV:         assignmentKV,
 		HeartbeatKV:          heartbeatKV,
@@ -225,11 +279,12 @@ func TestCalculator_MultipleCooldowns_Sequential(t *testing.T) {
 		Source:               source,
 		Strategy:             strategy,
 		HeartbeatPrefix:      "worker-hb",
-		HeartbeatTTL:         200 * time.Millisecond, // Fast heartbeat
+		HeartbeatTTL:         3 * time.Second, // workers persist across all cycles
 		EmergencyGracePeriod: 1 * time.Second,
 		ColdStartWindow:      50 * time.Millisecond,
 		PlannedScaleWindow:   50 * time.Millisecond,
-		Cooldown:             200 * time.Millisecond, // Short cooldown
+		Cooldown:             5 * time.Second, // fake-clock driven; never elapses in real time
+		Now:                  clock.Now,
 	})
 	require.NoError(t, err)
 
@@ -237,42 +292,36 @@ func TestCalculator_MultipleCooldowns_Sequential(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = calc.Stop(ctx) }()
 
-	// Wait for initial rebalance
-	time.Sleep(100 * time.Millisecond)
-	v1 := calc.CurrentVersion()
-	t.Logf("Initial version: %d", v1)
+	// renew re-puts the given worker heartbeats: keeps them alive (beating the
+	// KV TTL) and fires the monitor's watcher. A cooldown-blocked poll does not
+	// clear the pending worker-set change, so re-firing the watcher after the
+	// clock advances past Cooldown lets the blocked rebalance proceed.
+	renew := func(workers ...string) {
+		for _, w := range workers {
+			_, perr := heartbeatKV.Put(ctx, "worker-hb."+w, []byte(time.Now().Format(time.RFC3339Nano)))
+			require.NoError(t, perr)
+		}
+	}
 
-	// Add worker-2, wait for cooldown + rebalance
-	_, err = heartbeatKV.Put(ctx, "worker-hb.worker-2", []byte(time.Now().Format(time.RFC3339Nano)))
-	require.NoError(t, err)
-	time.Sleep(500 * time.Millisecond) // Cooldown + monitoring + margin
+	prev := waitStableVersion(t, calc)
+	t.Logf("initial version: %d", prev)
 
-	v2 := calc.CurrentVersion()
-	require.Greater(t, v2, v1, "first rebalance should complete")
-	t.Logf("After worker-2: %d → %d", v1, v2)
-
-	// Add worker-3, wait for cooldown + rebalance
-	_, err = heartbeatKV.Put(ctx, "worker-hb.worker-3", []byte(time.Now().Format(time.RFC3339Nano)))
-	require.NoError(t, err)
-	time.Sleep(500 * time.Millisecond)
-
-	v3 := calc.CurrentVersion()
-	require.Greater(t, v3, v2, "second rebalance should complete")
-	t.Logf("After worker-3: %d → %d", v2, v3)
-
-	// Add worker-4, wait for cooldown + rebalance
-	_, err = heartbeatKV.Put(ctx, "worker-hb.worker-4", []byte(time.Now().Format(time.RFC3339Nano)))
-	require.NoError(t, err)
-	time.Sleep(500 * time.Millisecond)
-
-	v4 := calc.CurrentVersion()
-	require.Greater(t, v4, v3, "third rebalance should complete")
-	t.Logf("After worker-4: %d → %d → %d → %d", v1, v2, v3, v4)
-
-	// Verify each cooldown was respected
-	require.Equal(t, v1+1, v2, "versions should increment by 1")
-	require.Equal(t, v2+1, v3, "versions should increment by 1")
-	require.Equal(t, v3+1, v4, "versions should increment by 1")
+	alive := make([]string, 0, 4)
+	alive = append(alive, "worker-1")
+	for _, added := range []string{"worker-2", "worker-3", "worker-4"} {
+		alive = append(alive, added)
+		renew(alive...) // introduce the new worker (set change) — blocked by cooldown
+		clock.Advance(5*time.Second + 100*time.Millisecond)
+		renew(alive...) // gate is open now; re-fire the watcher to retry the rebalance
+		want := prev + 1
+		require.Eventually(t, func() bool { return calc.CurrentVersion() == want },
+			3*time.Second, 50*time.Millisecond,
+			"adding %s should bump version to %d after cooldown", added, want)
+		require.Equal(t, want, calc.CurrentVersion(),
+			"each cooldown cycle must increment the version by exactly 1")
+		t.Logf("after %s: version %d", added, want)
+		prev = want
+	}
 }
 
 // TestCalculator_TriggerRebalance_BypassesCooldown verifies TriggerRebalance bypasses cooldown.

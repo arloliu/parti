@@ -101,8 +101,7 @@ func TestCalculator_PlannedScaleRespectsCooldown(t *testing.T) {
 	}
 	strategy := &mockStrategy{}
 
-	cooldown := 1 * time.Second
-
+	clock := newFakeClock()
 	calc, err := NewCalculator(&Config{
 		AssignmentKV:         assignmentKV,
 		HeartbeatKV:          heartbeatKV,
@@ -110,11 +109,12 @@ func TestCalculator_PlannedScaleRespectsCooldown(t *testing.T) {
 		Source:               source,
 		Strategy:             strategy,
 		HeartbeatPrefix:      "worker-hb",
-		HeartbeatTTL:         200 * time.Millisecond,
+		HeartbeatTTL:         2 * time.Second, // workers persist through the short test
 		EmergencyGracePeriod: 100 * time.Millisecond,
 		ColdStartWindow:      50 * time.Millisecond,
 		PlannedScaleWindow:   50 * time.Millisecond,
-		Cooldown:             cooldown,
+		Cooldown:             5 * time.Second, // fake-clock driven; never elapses in real time
+		Now:                  clock.Now,
 	})
 	require.NoError(t, err)
 
@@ -122,32 +122,26 @@ func TestCalculator_PlannedScaleRespectsCooldown(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = calc.Stop(ctx) }()
 
-	// Wait for initial assignment
-	require.Eventually(t, func() bool {
-		return calc.CurrentVersion() > 0
-	}, 2*time.Second, 50*time.Millisecond)
+	// Cold-start rebalance(s) stamp lastRebalance at the (frozen) clock time.
+	// Wait until cold start fully settles for a deterministic baseline.
+	initialVersion := waitStableVersion(t, calc)
+	t.Logf("initial version (after cold start): %d", initialVersion)
 
-	// Wait for ColdStartWindow (50ms) to complete and trigger its rebalance
-	// This ensures we are in a stable state before testing planned scale
-	time.Sleep(100 * time.Millisecond)
-
-	initialVersion := calc.CurrentVersion()
-	t.Logf("Initial version (after cold start): %d", initialVersion)
-
-	// Trigger Planned Scale: Add worker-2
-	// This should be BLOCKED by cooldown initially
-	// Last rebalance was ~50ms ago (ColdStart). Cooldown is 1s.
+	// Planned scale: add worker-2. The cooldown gate (clock not advanced past
+	// the 5s Cooldown) must block it. Because the gate reads the frozen fake
+	// clock, real-time scheduling under load cannot let it slip through.
 	_, err = heartbeatKV.Put(ctx, "worker-hb.worker-2", []byte(time.Now().Format(time.RFC3339Nano)))
 	require.NoError(t, err)
+	require.Never(t, func() bool { return calc.CurrentVersion() != initialVersion },
+		750*time.Millisecond, 50*time.Millisecond, "planned scale must be blocked while in cooldown")
 
-	// Check shortly after (within cooldown)
-	time.Sleep(200 * time.Millisecond)
-	require.Equal(t, initialVersion, calc.CurrentVersion(), "planned scale should be blocked by cooldown")
-
-	// Wait for cooldown to expire
+	// Advance past Cooldown and re-fire the watcher: the planned scale proceeds.
+	clock.Advance(5*time.Second + 100*time.Millisecond)
+	_, err = heartbeatKV.Put(ctx, "worker-hb.worker-2", []byte(time.Now().Format(time.RFC3339Nano)))
+	require.NoError(t, err)
 	require.Eventually(t, func() bool {
 		return calc.CurrentVersion() > initialVersion
-	}, 2*time.Second, 100*time.Millisecond, "planned scale should proceed after cooldown")
+	}, 3*time.Second, 50*time.Millisecond, "planned scale should proceed after cooldown")
 }
 
 // TestCalculator_EmergencyDuringScaling verifies that emergency rebalancing
