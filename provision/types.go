@@ -452,5 +452,5 @@ type PlannedConsumer struct {
 	StreamName string                   `json:"streamName"`
 	Subject    string                   `json:"subject"`
 	Durable    string                   `json:"durable"`
-	Config     jetstream.ConsumerConfig `json:"config,omitempty"`
+	Config     jetstream.ConsumerConfig `json:"config"`
 }

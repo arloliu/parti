@@ -205,10 +205,7 @@ func (c *Config) SetDefaults() {
 		c.PlannedScaleWindow = 10 * time.Second
 	}
 	if c.RebalanceGraceDrainInterval == 0 {
-		c.RebalanceGraceDrainInterval = min(c.Cooldown, 30*time.Second)
-		if c.RebalanceGraceDrainInterval < time.Second {
-			c.RebalanceGraceDrainInterval = time.Second
-		}
+		c.RebalanceGraceDrainInterval = max(min(c.Cooldown, 30*time.Second), time.Second)
 	}
 	if c.ApplyGracePeriod == 0 {
 		c.ApplyGracePeriod = 2 * c.HeartbeatTTL

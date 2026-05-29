@@ -123,10 +123,10 @@ func bucketFromSubjectPrefix(prefix string) string {
 		return ""
 	}
 	rest := prefix[len(kvPrefix):]
-	idx := strings.Index(rest, ".")
-	if idx < 0 {
+	before, _, ok := strings.Cut(rest, ".")
+	if !ok {
 		return rest
 	}
 
-	return rest[:idx]
+	return before
 }

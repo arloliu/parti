@@ -2,6 +2,7 @@ package parti
 
 import (
 	"context"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -158,13 +159,7 @@ func TestApplyStartJitter_StartupBudget_Negative(t *testing.T) {
 	// Wait for watchdog to fire Degraded("startup-timeout").
 	require.Eventually(t, func() bool {
 		reasons, _ := degradedReasonsAtomic.Load().([]string)
-		for _, r := range reasons {
-			if r == "startup-timeout" {
-				return true
-			}
-		}
-
-		return false
+		return slices.Contains(reasons, "startup-timeout")
 	}, 2*time.Second, 10*time.Millisecond,
 		"watchdog must fire Degraded('startup-timeout') when jitter exceeds StartupTimeout budget")
 }

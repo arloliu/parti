@@ -323,7 +323,7 @@ func TestHelp_ContainsAdopt(t *testing.T) {
 
 // extractDeferredLine returns the line containing "Deferred commands" from s.
 func extractDeferredLine(s string) string {
-	for _, line := range strings.Split(s, "\n") {
+	for line := range strings.SplitSeq(s, "\n") {
 		if strings.Contains(line, "Deferred") {
 			return line
 		}

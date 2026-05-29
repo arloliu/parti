@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -422,13 +423,7 @@ func (s *assignmentWatcherReasonSpy) record(_ context.Context, reason string) er
 func (s *assignmentWatcherReasonSpy) has(reason string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, r := range s.reasons {
-		if r == reason {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(s.reasons, reason)
 }
 
 func (s *assignmentWatcherReasonSpy) snapshot() []string {

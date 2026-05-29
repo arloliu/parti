@@ -181,7 +181,7 @@ func TestEnvelope_Run_JitterStaysWithinBounds(t *testing.T) {
 	const jitter = 0.3 // ± 30%
 	low := time.Duration(float64(base) * (1 - jitter))
 	high := time.Duration(float64(base) * (1 + jitter))
-	for i := 0; i < trials; i++ {
+	for range trials {
 		sl := &instantSleep{}
 		env := New(Config{
 			Work: func(context.Context) error {

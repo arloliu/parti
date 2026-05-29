@@ -237,7 +237,7 @@ func TestStart_EmptySliceFromNonEmptyCluster_HookFiresEmptyEmpty(t *testing.T) {
 	defer cancel()
 
 	mgrs := make([]*parti.Manager, 2)
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		m, err := parti.NewManager(&cfg, js, src, assignStrat, parti.WithHooks(makeHooks(i)))
 		require.NoError(t, err)
 		require.NoError(t, m.Start(ctx))

@@ -3,6 +3,7 @@ package durable
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -152,13 +153,7 @@ func TestPartitionConsumer_SiteB_StreamMissing_HookSuccess_ResetAwareRebuild(t *
 	require.Eventually(t, func() bool {
 		iterMu.Lock()
 		defer iterMu.Unlock()
-		for _, c := range iterCalls {
-			if c == jetstream.Consumer(rebuiltCons) {
-				return true
-			}
-		}
-
-		return false
+		return slices.Contains(iterCalls, jetstream.Consumer(rebuiltCons))
 	}, 5*time.Second, 10*time.Millisecond,
 		"Site B success path must cause the outer loop to construct a fresh envelope against the rebuilt consumer")
 

@@ -114,7 +114,7 @@ func TestStartupAsync_CalculatorStateNotClobbered(t *testing.T) {
 		}()
 	}
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		mgr, err := parti.NewManager(&cfg, js, src, assignStrat, parti.WithHooks(makeHooks(i)))
 		require.NoError(t, err)
 		require.NoError(t, mgr.Start(ctx))

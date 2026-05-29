@@ -201,10 +201,10 @@ func TestDynamic_CompatRearm_ConcurrentStress_NoRace(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(workers)
-	for i := 0; i < workers; i++ {
+	for i := range workers {
 		go func(id int) {
 			defer wg.Done()
-			for j := 0; j < itersPerWorker; j++ {
+			for j := range itersPerWorker {
 				_ = d.ensureCompatChecked(ctx)
 				if (id+j)%17 == 0 {
 					d.resetCompatCheck()

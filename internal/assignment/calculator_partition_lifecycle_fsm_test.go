@@ -2,6 +2,7 @@ package assignment
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -76,15 +77,13 @@ func buildFSMPartitionFixture(t *testing.T, busName string, drainInterval time.D
 func recordFSMTransitions(calc *Calculator) (*fsmRecorder, func()) {
 	ch, unsubscribe := calc.SubscribeToStateChanges()
 	r := &fsmRecorder{}
-	r.wg.Add(1)
-	go func() {
-		defer r.wg.Done()
+	r.wg.Go(func() {
 		for s := range ch {
 			r.mu.Lock()
 			r.states = append(r.states, s)
 			r.mu.Unlock()
 		}
-	}()
+	})
 
 	return r, func() {
 		unsubscribe()
@@ -107,12 +106,7 @@ func (r *fsmRecorder) snapshot() []types.CalculatorState {
 }
 
 func (r *fsmRecorder) contains(s types.CalculatorState) bool {
-	for _, x := range r.snapshot() {
-		if x == s {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(r.snapshot(), s)
 }
 
 // TestPartitionLifecycle_DrivesFSMRebalancing verifies PR-3 §5.2 — a

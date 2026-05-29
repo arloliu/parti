@@ -904,13 +904,7 @@ func commitContainsWorker(c *types.AssignmentCommit, workerID string) bool {
 	if c == nil {
 		return false
 	}
-	for _, w := range c.Workers {
-		if w == workerID {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(c.Workers, workerID)
 }
 
 // handleCommitValue implements §3.6 case 1 (commit-path state machine).
