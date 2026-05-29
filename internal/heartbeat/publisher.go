@@ -321,9 +321,7 @@ func (p *Publisher) publishLoop() {
 				p.recordSkippedPublish()
 				continue
 			}
-			p.inFlightWG.Add(1)
-			go func() {
-				defer p.inFlightWG.Done()
+			p.inFlightWG.Go(func() {
 				defer p.inFlight.Store(false)
 
 				timeout := min(maxPublishTimeout, p.interval/2)
@@ -340,7 +338,7 @@ func (p *Publisher) publishLoop() {
 				} else {
 					p.recordMetric(true)
 				}
-			}()
+			})
 		}
 	}
 }

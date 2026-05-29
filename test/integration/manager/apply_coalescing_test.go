@@ -745,11 +745,7 @@ func recommendedWindow(rs map[string]burstReport) time.Duration {
 	ns := int64(d)
 	stepNs := int64(step)
 	roundedNs := ((ns + stepNs - 1) / stepNs) * stepNs
-	w := time.Duration(roundedNs) + step
-
-	if w > time.Second {
-		w = time.Second
-	}
+	w := min(time.Duration(roundedNs)+step, time.Second)
 
 	return w
 }
@@ -856,13 +852,7 @@ func analyzeFleetBursts(
 			fv.Last = s.at
 		}
 		// Track distinct workers.
-		alreadySeen := false
-		for _, w := range fv.Workers {
-			if w == s.workerID {
-				alreadySeen = true
-				break
-			}
-		}
+		alreadySeen := slices.Contains(fv.Workers, s.workerID)
 		if !alreadySeen {
 			fv.WorkerCount++
 			fv.Workers = append(fv.Workers, s.workerID)
@@ -1021,16 +1011,9 @@ func recommendedApplyJitter(r fleetReport) time.Duration {
 	wsNs := int64(ws)
 	stepNs := int64(step)
 	roundedNs := int64(math.Ceil(float64(wsNs)/float64(stepNs))) * stepNs
-	rounded := time.Duration(roundedNs)
+	rounded := max(time.Duration(roundedNs), floor)
 
-	if rounded < floor {
-		rounded = floor
-	}
-
-	result := rounded + margin
-	if result > cap1s {
-		result = cap1s
-	}
+	result := min(rounded+margin, cap1s)
 
 	return result
 }

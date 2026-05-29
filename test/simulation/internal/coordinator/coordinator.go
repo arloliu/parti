@@ -2210,11 +2210,8 @@ func (c *Coordinator) RegisterLongDisconnectExpectation(workerID string, deadlin
 	owned := make(map[int]struct{})
 	if snap != nil {
 		for pid, owners := range snap.perPartition {
-			for _, o := range owners {
-				if o == workerID {
-					owned[pid] = struct{}{}
-					break
-				}
+			if slices.Contains(owners, workerID) {
+				owned[pid] = struct{}{}
 			}
 		}
 	}
@@ -2242,11 +2239,8 @@ func (c *Coordinator) PartitionsOwnedBy(workerID string) []int {
 	}
 	var out []int
 	for pid, owners := range snap.perPartition {
-		for _, o := range owners {
-			if o == workerID {
-				out = append(out, pid)
-				break
-			}
+		if slices.Contains(owners, workerID) {
+			out = append(out, pid)
 		}
 	}
 

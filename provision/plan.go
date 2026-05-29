@@ -414,9 +414,7 @@ func mergeMarkerMetadata(live map[string]string, component, instance string) map
 	if merged == nil {
 		merged = map[string]string{}
 	}
-	for k, v := range BuildMarker(component, instance) {
-		merged[k] = v
-	}
+	maps.Copy(merged, BuildMarker(component, instance))
 	if instance == "" {
 		delete(merged, MarkerInstanceKey)
 	}

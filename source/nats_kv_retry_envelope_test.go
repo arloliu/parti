@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -88,11 +89,8 @@ func TestRestartWatcher_BoundedByEnvelope(t *testing.T) {
 	warnMu.Lock()
 	defer warnMu.Unlock()
 	var sawExhausted bool
-	for _, w := range warnLines {
-		if w == "source watcher restart attempt budget exhausted; relying on reconciler for recovery" {
-			sawExhausted = true
-			break
-		}
+	if slices.Contains(warnLines, "source watcher restart attempt budget exhausted; relying on reconciler for recovery") {
+		sawExhausted = true
 	}
 	require.True(t, sawExhausted,
 		"onWatcherRetryExhausted must emit the named WARN line at exhaustion; got %v", warnLines)

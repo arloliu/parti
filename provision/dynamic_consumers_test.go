@@ -151,7 +151,7 @@ func TestPlanDynamicConsumers_DeterministicOrderAcrossShuffles(t *testing.T) {
 	require.NoError(t, err)
 
 	r := rand.New(rand.NewSource(42)) //nolint:gosec // deterministic shuffle for test
-	for trial := 0; trial < 10; trial++ {
+	for trial := range 10 {
 		shuffled := make([]types.Partition, len(base))
 		copy(shuffled, base)
 		r.Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })

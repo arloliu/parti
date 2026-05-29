@@ -275,7 +275,7 @@ func TestPlan_Deterministic_AcrossRepeats(t *testing.T) {
 
 	// Call Plan multiple more times (exploiting Go map-iteration randomness)
 	// and assert full PlanResult equality, not just name/kind tuples.
-	for i := 0; i < 9; i++ {
+	for i := range 9 {
 		again, err := provision.Plan(ctx, js, cfg)
 		require.NoError(t, err)
 		require.True(t, reflect.DeepEqual(first, again),

@@ -121,7 +121,7 @@ func runCASStorm(ctx context.Context, js jetstream.JetStream, duration time.Dura
 		return
 	}
 
-	staleValue := []byte(fmt.Sprintf("chaos-cas-storm-%d", time.Now().UnixNano()))
+	staleValue := fmt.Appendf(nil, "chaos-cas-storm-%d", time.Now().UnixNano())
 	iteration := 0
 
 	for {

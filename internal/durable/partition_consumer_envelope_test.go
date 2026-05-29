@@ -138,7 +138,7 @@ func TestPartitionConsumer_RecoveryEnvelope_RecoveredIterationsResetBudget(t *te
 	// Pattern: fail once, succeed once, fail once, succeed once, ... ensures
 	// no two consecutive failures.
 	var failPlan []bool
-	for i := 0; i < totalEpisodes; i++ {
+	for range totalEpisodes {
 		failPlan = append(failPlan, true)  // fail
 		failPlan = append(failPlan, false) // succeed
 	}
