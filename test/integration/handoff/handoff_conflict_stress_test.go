@@ -80,11 +80,7 @@ func TestHandoffConflictStress(t *testing.T) {
 	require.NoError(t, m2.Start(ctx))
 	t.Cleanup(func() { _ = m2.Stop(context.Background()) })
 
-	// Wait for initial assignments to stabilize (bounded wait loop instead of fixed sleep)
-	// Use KV watcher-based collector for deterministic stabilization
-	collector, err := testutil.NewHandoffClaimCollector(ctx, js, bucket)
-	require.NoError(t, err)
-	t.Cleanup(func() { collector.Stop() })
+	// Wait for initial assignments to stabilize (bounded wait loop instead of fixed sleep).
 	// Initial convergence: wait until at least one claim enters stable state.
 	// Since partition IDs are unknown until claims appear, poll for any stable.
 	deadline := time.Now().Add(1 * time.Second)
@@ -116,66 +112,50 @@ func TestHandoffConflictStress(t *testing.T) {
 		// Proceed to next churn iteration; final stabilization is asserted later
 	}
 
-	// Final stabilization after churn
+	// Final stabilization after churn: poll until every current partition has a
+	// claim and ALL claims (current partitions plus any extras left over from the
+	// expansion-to-10 rounds) are stable with no pending owner, owned by an active
+	// worker. Convergence is eventual — under parallel load it settles within a
+	// few hundred ms — so poll the full invariant rather than snapshotting once
+	// after a fixed wait, which races a still-settling claim.
 	curParts, err := src.List(ctx)
-	require.NoError(t, err)
-	ids := make([]string, 0, len(curParts))
-	for _, p := range curParts {
-		ids = append(ids, p.ID())
-	}
-	// Allow more time due to churn and potential lingering prepare/commit windows.
-	require.True(t, collector.WaitForAllStable(ctx, ids, 4*time.Second))
-
-	// Inspect claims: current partitions must be stable; extras (from earlier expansions) must also be stable
-	claims, err := parti.InspectHandoffClaims(ctx, js, bucket)
-	require.NoError(t, err)
-	// Build current partition set
-	curParts, err = src.List(ctx)
 	require.NoError(t, err)
 	curSet := make(map[string]struct{}, len(curParts))
 	for _, p := range curParts {
 		curSet[p.ID()] = struct{}{}
 	}
 	owners := map[string]struct{}{m1.WorkerID(): {}, m2.WorkerID(): {}}
-	for _, c := range claims {
-		require.Equal(t, parti.HandoffClaimStable, c.State, "claims should converge to stable")
-		require.Empty(t, c.PendingOwner, "no pending owner after stabilization")
-		if _, ok := owners[c.Owner]; !ok {
-			t.Fatalf("unexpected owner %q; expected one of %v", c.Owner, owners)
-		}
-	}
-	// Ensure every current partition has a claim present
-	present := make(map[string]bool, len(claims))
-	for _, c := range claims {
-		present[c.PartitionID] = true
-	}
-	for pid := range curSet {
-		require.True(t, present[pid], "current partition %s must have a claim", pid)
-	}
 
-	// Observe CAS conflicts during churn (informational). Depending on timing and a single active leader,
-	// it's possible to see zero conflicts; we record the value but do not fail the test on zero.
+	var claims []parti.HandoffClaim
+	require.Eventually(t, func() bool {
+		var ierr error
+		claims, ierr = parti.InspectHandoffClaims(ctx, js, bucket)
+		if ierr != nil {
+			return false
+		}
+		present := make(map[string]bool, len(claims))
+		for _, c := range claims {
+			if c.State != parti.HandoffClaimStable || c.PendingOwner != "" {
+				return false
+			}
+			if _, ok := owners[c.Owner]; !ok {
+				return false
+			}
+			present[c.PartitionID] = true
+		}
+		for pid := range curSet {
+			if !present[pid] {
+				return false
+			}
+		}
+
+		return true
+	}, 15*time.Second, 100*time.Millisecond,
+		"all handoff claims must converge to stable (no pending owner) with every current partition present")
+
+	// Observe CAS conflicts during churn (informational). Depending on timing and
+	// a single active leader, it's possible to see zero conflicts; we record the
+	// value but do not fail the test on zero.
 	snap := mr.Snapshot()
 	t.Logf("CAS conflicts observed: %d", snap.CASConflicts)
-
-	// Phase 4 makes the initial-bootstrap apply synchronous-before-StateStable,
-	// so the initial prepare → commit transitions complete before the
-	// collector (started after Start returns) can observe them, and any
-	// partition that doesn't migrate during churn remains invisible to
-	// the collector. The convergence assertion now uses InspectHandoffClaims
-	// (KV query, sees all current state) rather than the collector's
-	// updates-only feed. The intermediate-state observability invariant
-	// is covered by unit tests against handleCommitValue's case-(c) path.
-	finalClaims, err := parti.InspectHandoffClaims(ctx, js, bucket)
-	require.NoError(t, err)
-	claimsByPID := make(map[string]parti.HandoffClaim, len(finalClaims))
-	for _, c := range finalClaims {
-		claimsByPID[c.PartitionID] = c
-	}
-	for pid := range curSet {
-		cl, ok := claimsByPID[pid]
-		require.True(t, ok, "partition %s must have a claim", pid)
-		require.Equal(t, parti.HandoffClaimStable, cl.State, "partition %s must terminate in Stable", pid)
-		require.Empty(t, cl.PendingOwner, "partition %s must not have a pending owner", pid)
-	}
 }
