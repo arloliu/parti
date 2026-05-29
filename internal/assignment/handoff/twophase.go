@@ -356,8 +356,16 @@ func (t *twoPhaseCoordinator) commitPhase(ctx context.Context, workerID string, 
 					return nil, nil // already finalized
 				}
 
-				// If we're pending owner or current owner differs, move to commit.
-				if cur.PendingOwner == workerID || cur.Owner != workerID {
+				// Only commit a handoff that was actually prepared TO this worker
+				// (pendingOwner == workerID). A worker must NOT commit a claim it
+				// neither owns nor was promised: running NextCommit on a foreign
+				// stable claim (cur.Owner != workerID, pendingOwner == "") flips it
+				// to commit while keeping the foreign owner, and this worker's
+				// stabilizePhase then skips it (not its claim) — orphaning the
+				// owner's claim in commit until the TTL sweep. That happens when a
+				// transient rebalance disagreement puts a peer-owned partition in
+				// this worker's assignment without a preceding prepare.
+				if cur.PendingOwner == workerID {
 					committed := *cur
 					if cur.State != ClaimStateCommit {
 						committed = cur.NextCommit(now)
