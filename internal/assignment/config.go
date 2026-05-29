@@ -51,6 +51,13 @@ type Config struct {
 	ColdStartWindow      time.Duration // Stabilization window for cold start (default: 30s)
 	PlannedScaleWindow   time.Duration // Stabilization window for planned scale (default: 10s)
 
+	// Now returns the current time and backs the cooldown gate
+	// (time-since-last-rebalance vs Cooldown) and the publisher's
+	// lastRebalance stamp. When nil, time.Now is used. Tests inject a
+	// controllable clock so cooldown timing is deterministic under load;
+	// production leaves it nil.
+	Now func() time.Time
+
 	// Partition-input credibility (see
 	// errSuspiciousPartitionObservation Godoc in calculator.go):
 	//
@@ -179,6 +186,9 @@ func (c *Config) Validate() error {
 // This method is called automatically by NewCalculatorWithConfig.
 // Fields that are already set (non-zero) are not overwritten.
 func (c *Config) SetDefaults() {
+	if c.Now == nil {
+		c.Now = time.Now
+	}
 	if c.EmergencyGracePeriod == 0 {
 		c.EmergencyGracePeriod = 5 * time.Second
 	}

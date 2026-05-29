@@ -120,6 +120,12 @@ type AssignmentPublisher struct {
 
 	lastRebalance time.Time
 
+	// now returns the current time; injectable so cooldown timing can be
+	// driven deterministically in tests. Defaults to time.Now. It backs the
+	// lastRebalance stamp, which the calculator's cooldown gate compares
+	// against using the same clock.
+	now func() time.Time
+
 	// inflightRefs records the payload keys this publisher has selected for an
 	// in-progress publish (after step 4 verify-back, before step 9 commit
 	// CAS). The GC consults LiveRefs() so it cannot delete a payload that an
@@ -166,6 +172,11 @@ type PublisherConfig struct {
 	// this to detect that its stopCh has been closed. nil means no gate
 	// (test-only).
 	IsShuttingDown func() bool
+
+	// Now returns the current time and backs the lastRebalance stamp. When
+	// nil, time.Now is used. Tests inject a controllable clock so the
+	// calculator's cooldown gate is deterministic under load.
+	Now func() time.Time
 }
 
 // abortIfShuttingDown returns errShuttingDown when isShuttingDown signals
@@ -209,6 +220,10 @@ func NewAssignmentPublisher(cfg PublisherConfig) *AssignmentPublisher {
 	if metrics == nil {
 		metrics = nopPublisherMetrics{}
 	}
+	now := cfg.Now
+	if now == nil {
+		now = time.Now
+	}
 
 	return &AssignmentPublisher{
 		assignmentKV:   cfg.AssignmentKV,
@@ -220,6 +235,7 @@ func NewAssignmentPublisher(cfg PublisherConfig) *AssignmentPublisher {
 		leaderCheckFn:  cfg.LeaderCheckFn,
 		gcTriggerFn:    cfg.GCTriggerFn,
 		isShuttingDown: cfg.IsShuttingDown,
+		now:            now,
 		logger:         logger,
 		metrics:        metrics,
 	}
@@ -482,7 +498,7 @@ func (p *AssignmentPublisher) Publish(ctx context.Context, in PublishInput) erro
 	}
 
 	// Bookkeeping & metrics.
-	p.lastRebalance = time.Now()
+	p.lastRebalance = p.now()
 	for _, parts := range in.Assignments {
 		p.metrics.RecordAssignmentChange(len(parts), 0, commit.Version)
 	}

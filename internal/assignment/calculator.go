@@ -236,6 +236,7 @@ func NewCalculator(cfg *Config) (*Calculator, error) {
 		Logger:          cfg.Logger,
 		Metrics:         cfg.Metrics,
 		IsShuttingDown:  c.isStopping,
+		Now:             cfg.Now,
 	})
 
 	c.gc = NewCommitGC(CommitGCConfig{
@@ -1064,7 +1065,10 @@ func (c *Calculator) observeAndDecide(ctx context.Context, provided map[string]b
 		return nil
 	}
 
-	if time.Since(c.publisher.LastRebalanceTime()) < c.Cooldown {
+	// c.Now is the injectable clock (embedded Config field, defaulted to
+	// time.Now in SetDefaults); the publisher stamps lastRebalance with the
+	// same clock so this comparison is deterministic under test.
+	if c.Now().Sub(c.publisher.LastRebalanceTime()) < c.Cooldown {
 		c.Logger.Debug("worker change detected but rate limit active",
 			"reason", reason,
 			"min_rebalance_interval", c.Cooldown,
