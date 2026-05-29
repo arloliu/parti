@@ -464,14 +464,24 @@ func TestCalculator_InitialAssignment_Metrics(t *testing.T) {
 		return len(assignment.Partitions) == 1
 	}, 150*time.Millisecond, 10*time.Millisecond, "leader should get all partitions immediately")
 
-	// Wait for both phases
-	time.Sleep(200 * time.Millisecond)
+	// The final (post-stabilization) cold_start rebalance fires after the
+	// ColdStartWindow timer elapses. Under load that timer plus the rebalance
+	// itself can run well past a fixed 200ms budget, so poll for the metric
+	// instead of sleeping a fixed amount and asserting once.
+	require.Eventually(t, func() bool {
+		return metrics.GetRebalanceAttempt("cold_start") == 1
+	}, 3*time.Second, 20*time.Millisecond, "final cold_start rebalance should run exactly once")
 
-	// Verify two rebalance attempts recorded
+	// Immediate-assignment phase must have recorded exactly once.
 	require.Equal(t, 1, metrics.GetRebalanceAttempt("cold_start_immediate"),
 		"immediate assignment should be recorded exactly once")
-	require.Equal(t, 1, metrics.GetRebalanceAttempt("cold_start"),
-		"final assignment should run exactly once")
+
+	// Exactly-once guard: the final cold_start must not run again for the
+	// unchanged single-worker topology.
+	require.Never(t, func() bool {
+		return metrics.GetRebalanceAttempt("cold_start") > 1
+	}, 300*time.Millisecond, 50*time.Millisecond,
+		"cold_start must run exactly once, not repeatedly")
 
 	t.Logf("✅ Metrics correctly recorded: immediate=%d, final=%d",
 		metrics.GetRebalanceAttempt("cold_start_immediate"),

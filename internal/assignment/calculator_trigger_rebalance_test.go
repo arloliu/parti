@@ -39,9 +39,10 @@ func TestTriggerRebalance_NoDuplicateScaleOnNextPoll(t *testing.T) {
 	}
 	strategy := &mockStrategy{}
 
-	// Long HeartbeatTTL so the worker monitor's polling fallback (hbTTL/2) is
-	// slow enough that we can win the race against the watcher and call
-	// TriggerRebalance before the new heartbeat key is observed.
+	// Long HeartbeatTTL keeps all workers alive for the whole test. The worker
+	// monitor is stopped after the cluster settles (see below) so its watcher
+	// cannot independently observe worker-3 and race the manual
+	// TriggerRebalance.
 	calc, err := NewCalculator(&Config{
 		AssignmentKV:         assignmentKV,
 		HeartbeatKV:          heartbeatKV,
@@ -65,16 +66,18 @@ func TestTriggerRebalance_NoDuplicateScaleOnNextPoll(t *testing.T) {
 		return calc.GetState() == types.CalcStateIdle && calc.CurrentVersion() > 0
 	}, 5*time.Second, 25*time.Millisecond, "initial rebalance did not settle")
 
+	// Stop the worker monitor's background watcher so no background poll can
+	// rebalance behind our back and perturb the version during the behavioral
+	// check below. TriggerRebalance still picks up worker-3 via its own fresh
+	// KV scan (GetActiveWorkers is a direct scan, monitor-independent), and
+	// IsStarted reads a calculator-level flag, so stopping the monitor does not
+	// disable TriggerRebalance.
+	require.NoError(t, calc.monitor.Stop())
+
 	versionBeforeTrigger := calc.CurrentVersion()
 
-	// Subscribe AFTER the cluster has settled so the initial cold-start
-	// Scaling cycle does not leak into the assertion.
-	states, unsubscribe := calc.SubscribeToStateChanges()
-	defer unsubscribe()
-
-	// Add a third worker directly to KV. The watcher may or may not have
-	// observed it yet — that is irrelevant because TriggerRebalance fetches
-	// the worker set fresh inside rebalance.
+	// Add a third worker directly to KV. TriggerRebalance fetches the worker
+	// set fresh inside rebalance, so it picks up worker-3.
 	_, err = heartbeatKV.Put(ctx, "worker-hb.worker-3", []byte(time.Now().Format(time.RFC3339Nano)))
 	require.NoError(t, err)
 
@@ -83,31 +86,30 @@ func TestTriggerRebalance_NoDuplicateScaleOnNextPoll(t *testing.T) {
 	require.Greater(t, versionAfterTrigger, versionBeforeTrigger,
 		"TriggerRebalance must publish a new assignment version")
 
-	// Force a worker-set observation by calling checkForChanges (the same
-	// entry point the worker monitor uses). With the W3 fix, lastWorkers is
-	// already aligned with the post-trigger currentWorkers, so no Scaling
-	// transition should fire. Without the fix, lastWorkers is stale and
-	// checkForChanges will detect a planned_scale.
+	// Primary regression guard — deterministic, with no dependence on watcher
+	// quiescence or scaling-timer timing: TriggerRebalance must refresh
+	// lastWorkers to match the freshly-scanned worker set. This is the exact
+	// invariant the W3 fix restored. Without the refresh, lastWorkers stays
+	// {worker-1, worker-2} and the next observe cycle re-enters planned_scale
+	// for worker-3 (the duplicate scale this test guards against).
+	calc.mu.RLock()
+	lastWorkers := calc.cloneLastWorkersLocked()
+	calc.mu.RUnlock()
+	require.True(t, lastWorkers["worker-3"],
+		"TriggerRebalance must refresh lastWorkers to include the newly-scanned worker-3")
+	require.Len(t, lastWorkers, 3,
+		"lastWorkers must equal the post-trigger worker set {worker-1, worker-2, worker-3}")
+
+	// Behavioral confirmation: observing the now-unchanged topology must not
+	// start another rebalance. With lastWorkers refreshed, observeAndDecide
+	// short-circuits on "no change" before any scaling or rebalance, so the
+	// version stays put. The monitor is stopped, so this explicit
+	// checkForChanges is the only observation in flight — fully deterministic,
+	// with no draining for the absence of a state transition.
+	require.Eventually(t, func() bool {
+		return calc.GetState() == types.CalcStateIdle
+	}, 2*time.Second, 10*time.Millisecond, "calculator should return to Idle after TriggerRebalance")
 	require.NoError(t, calc.checkForChanges(ctx))
-
-	// Wait briefly for any Scaling transition to surface on the subscriber.
-	scalingObserved := false
-	drain := time.After(500 * time.Millisecond)
-drainLoop:
-	for {
-		select {
-		case s := <-states:
-			if s == types.CalcStateScaling {
-				scalingObserved = true
-				break drainLoop
-			}
-		case <-drain:
-			break drainLoop
-		}
-	}
-
-	require.False(t, scalingObserved,
-		"observed CalcStateScaling after TriggerRebalance — lastWorkers was not refreshed and the next checkForChanges re-entered planned_scale")
 	require.Equal(t, versionAfterTrigger, calc.CurrentVersion(),
 		"no further rebalance must run for an unchanged topology after TriggerRebalance")
 }

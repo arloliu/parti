@@ -54,9 +54,14 @@ func TestCalculator_RecoveryGrace_BlocksNormalRebalance(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = calc.Stop(ctx) }()
 
-	// Wait for any initial activity to settle
-	time.Sleep(150 * time.Millisecond)
-	initialVersion := calc.CurrentVersion()
+	// Capture the baseline only after the full cold-start sequence (immediate +
+	// post-window final rebalance) has settled. A fixed sleep is racy: cold
+	// start is not subject to recovery grace, so under load its final
+	// rebalance (gated by the 50ms ColdStartWindow) can land AFTER the sleep
+	// and bump the version during the measurement window below, masquerading as
+	// an unblocked planned_scale. waitStableVersion blocks until the version
+	// stops changing, so the baseline is the settled cold-start version.
+	initialVersion := waitStableVersion(t, calc)
 
 	// Add a second worker — this would normally trigger a scaling rebalance
 	_, err = heartbeatKV.Put(ctx, "worker-hb.worker-2", []byte(time.Now().Format(time.RFC3339Nano)))
@@ -115,9 +120,12 @@ func TestCalculator_RecoveryGrace_AllowsRebalanceAfterGraceExpires(t *testing.T)
 	require.NoError(t, err)
 	defer func() { _ = calc.Stop(ctx) }()
 
-	// Wait for the initial cold_start stabilization to complete before measuring
-	time.Sleep(500 * time.Millisecond)
-	initialVersion := calc.CurrentVersion()
+	// Wait for the full cold-start stabilization (immediate + post-window
+	// final rebalance) to settle before measuring. A fixed sleep is racy under
+	// load: cold start is not gated by recovery grace, so a late final
+	// rebalance would shift the baseline. waitStableVersion blocks until the
+	// version stops changing.
+	initialVersion := waitStableVersion(t, calc)
 
 	// Add worker-2 while grace is active — should be blocked
 	_, err = heartbeatKV.Put(ctx, "worker-hb.worker-2", []byte(time.Now().Format(time.RFC3339Nano)))
