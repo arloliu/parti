@@ -7,11 +7,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
 	"github.com/arloliu/parti/v2/partitest"
 )
+
+type keysAttemptResult struct {
+	keys []string
+	err  error
+}
 
 // TestHeartbeatBucket_TruncatedKeysObservable is the diagnostic reproducer
 // (T0) for F10-A. Its passing IS the empirical observation that justifies
@@ -62,7 +68,7 @@ func TestHeartbeatBucket_TruncatedKeysObservable(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	_, nc := partitest.StartEmbeddedNATS(t)
+	ns, nc := partitest.StartEmbeddedNATS(t)
 
 	js, err := jetstream.New(nc)
 	require.NoError(t, err)
@@ -91,12 +97,15 @@ func TestHeartbeatBucket_TruncatedKeysObservable(t *testing.T) {
 	// message / pre-marker window falls outside the optimistic
 	// developer-hardware band.
 	const attempts = 500
+	const attemptTimeout = 250 * time.Millisecond
+	const maxHungAttempts = 25
 	var (
 		observedTruncated  int
 		observedFull       int
 		observedNoKeys     int
 		observedCtxErr     int
 		observedOtherErr   int
+		observedHung       int
 		minObservedPartial = totalKeys
 		maxObservedPartial int
 	)
@@ -104,40 +113,69 @@ func TestHeartbeatBucket_TruncatedKeysObservable(t *testing.T) {
 	for i := range attempts {
 		delay := time.Duration(50+(i*20)) * time.Microsecond
 
+		probeNC, probeKV := openHeartbeatTruncationProbe(t, ns.ClientURL(), "heartbeat_trunc_probe")
 		ctx, cancel := context.WithCancel(t.Context())
-		time.AfterFunc(delay, cancel)
+		cancelTimer := time.AfterFunc(delay, cancel)
 
-		keys, kerr := kv.Keys(ctx)
+		resultCh := make(chan keysAttemptResult, 1)
+		go func() {
+			keys, kerr := probeKV.Keys(ctx)
+			resultCh <- keysAttemptResult{keys: keys, err: kerr}
+		}()
+
+		var result keysAttemptResult
+		select {
+		case result = <-resultCh:
+		case <-time.After(attemptTimeout):
+			observedHung++
+			cancel()
+			probeNC.Close()
+			if observedHung >= maxHungAttempts {
+				t.Fatalf("Keys() hung %d times without returning within %v; "+
+					"observed before abort: truncated=%d full=%d no-keys=%d ctx-err=%d other-err=%d",
+					observedHung, attemptTimeout, observedTruncated, observedFull, observedNoKeys,
+					observedCtxErr, observedOtherErr)
+			}
+
+			continue
+		}
+
+		cancelTimer.Stop()
 		cancel()
+		probeNC.Close()
 
 		switch {
-		case kerr != nil:
+		case result.err != nil:
 			switch {
-			case errors.Is(kerr, jetstream.ErrNoKeysFound):
+			case errors.Is(result.err, jetstream.ErrNoKeysFound):
 				observedNoKeys++
-			case errors.Is(kerr, context.Canceled), errors.Is(kerr, context.DeadlineExceeded):
+			case errors.Is(result.err, context.Canceled), errors.Is(result.err, context.DeadlineExceeded):
 				observedCtxErr++
 			default:
 				observedOtherErr++
-				t.Logf("attempt %d: unexpected err=%v (delay=%v)", i, kerr, delay)
+				t.Logf("attempt %d: unexpected err=%v (delay=%v)", i, result.err, delay)
 			}
-		case len(keys) == totalKeys:
+		case len(result.keys) == totalKeys:
 			observedFull++
-		case len(keys) > 0 && len(keys) < totalKeys:
+		case len(result.keys) > 0 && len(result.keys) < totalKeys:
 			observedTruncated++
-			if len(keys) < minObservedPartial {
-				minObservedPartial = len(keys)
+			if len(result.keys) < minObservedPartial {
+				minObservedPartial = len(result.keys)
 			}
-			if len(keys) > maxObservedPartial {
-				maxObservedPartial = len(keys)
+			if len(result.keys) > maxObservedPartial {
+				maxObservedPartial = len(result.keys)
 			}
 		default:
-			t.Logf("attempt %d: unclassified result len=%d err=%v", i, len(keys), kerr)
+			t.Logf("attempt %d: unclassified result len=%d err=%v", i, len(result.keys), result.err)
+		}
+
+		if observedTruncated > 0 {
+			break
 		}
 	}
 
-	t.Logf("results over %d attempts: truncated=%d full=%d no-keys=%d ctx-err=%d other-err=%d",
-		attempts, observedTruncated, observedFull, observedNoKeys, observedCtxErr, observedOtherErr)
+	t.Logf("results over up to %d attempts: truncated=%d full=%d no-keys=%d ctx-err=%d other-err=%d hung=%d",
+		attempts, observedTruncated, observedFull, observedNoKeys, observedCtxErr, observedOtherErr, observedHung)
 	if observedTruncated > 0 {
 		t.Logf("truncated read sizes: min=%d max=%d (totalKeys=%d)",
 			minObservedPartial, maxObservedPartial, totalKeys)
@@ -146,6 +184,24 @@ func TestHeartbeatBucket_TruncatedKeysObservable(t *testing.T) {
 	require.Positive(t, observedTruncated,
 		"expected to observe at least one (partial, nil) result from Keys() over %d attempts; "+
 			"if this assertion fails, the nats.go truncation behavior has changed or the "+
-			"environment cannot reproduce the race. Counts: full=%d no-keys=%d ctx-err=%d other-err=%d",
-		attempts, observedFull, observedNoKeys, observedCtxErr, observedOtherErr)
+			"environment cannot reproduce the race. Counts: full=%d no-keys=%d ctx-err=%d other-err=%d hung=%d",
+		attempts, observedFull, observedNoKeys, observedCtxErr, observedOtherErr, observedHung)
+}
+
+func openHeartbeatTruncationProbe(t *testing.T, serverURL, bucket string) (*nats.Conn, jetstream.KeyValue) {
+	t.Helper()
+
+	nc, err := nats.Connect(serverURL,
+		nats.Timeout(2*time.Second),
+		nats.MaxReconnects(0),
+	)
+	require.NoError(t, err)
+
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	kv, err := js.KeyValue(t.Context(), bucket)
+	require.NoError(t, err)
+
+	return nc, kv
 }
