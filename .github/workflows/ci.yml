@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  lint-test:
+  lint-unit:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -30,6 +30,18 @@ jobs:
 
       - name: Run unit tests (race)
         run: make test-unit
+
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
 
       - name: Run integration tests (non-short, race)
         env:
