@@ -1,6 +1,7 @@
 package parti
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -8,6 +9,51 @@ import (
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go"
 )
+
+// degradedReasonKVUnavailable is the distinct enterDegraded reason for the
+// connected-but-KV-unavailable condition (a bucket reachable on the connection
+// but unable to serve ops because its RAFT quorum is lost). It is kept separate
+// from "KV error threshold exceeded" so the operator-facing Degraded surface
+// distinguishes a quorum-loss op stall from a whole-bucket wipe, and so the
+// docstring contract that whole-bucket loss is the ONLY path to the threshold
+// reason is preserved.
+const degradedReasonKVUnavailable = "kv-unavailable"
+
+// ErrKVUnavailable marks a KV operation that failed because its backing
+// bucket is reachable on the live NATS connection but cannot serve the op
+// (deadline / no-responders) — the quorum-loss condition the connection-status
+// monitor and the connectivity/degrading-JetStream classifiers all miss.
+//
+// It is applied ONLY at the manager's own periodic KV-op call sites via
+// [markKVUnavailable], never added to any global predicate. That keeps an
+// unwrapped deadline / no-responders from anywhere else (notably the
+// peer-takeover claim path through onClaimerError) out of the degraded circuit,
+// preserving the cross-feature classification contracts.
+var ErrKVUnavailable = errors.New("kv unavailable")
+
+// markKVUnavailable wraps err with [ErrKVUnavailable] iff err is an
+// otherwise-unclassified deadline / no-responders timeout. Existing classifiers
+// win first: if err already classifies as connectivity (e.g.
+// jetstream.ErrNoStreamResponse, the whole-bucket-loss surface) or as degrading
+// JetStream (bucket / stream / consumer missing), it is returned unchanged so
+// the established routes keep ownership. nil and unrelated errors pass through
+// unchanged. Applied at the manager's heartbeat / election / assignment-watcher
+// / stableid-renew / commit KV-op sites.
+func markKVUnavailable(err error) error {
+	if err == nil {
+		return nil
+	}
+	// Existing classifiers win first — this is what makes it impossible to
+	// steal the whole-bucket (ErrNoStreamResponse) or bucket-missing route.
+	if natsutil.IsConnectivityError(err) || natsutil.IsDegradingJetStreamError(err) {
+		return err
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, nats.ErrNoResponders) {
+		return errors.Join(ErrKVUnavailable, err)
+	}
+
+	return err
+}
 
 // monitorNATSConnection starts a goroutine that monitors NATS connectivity.
 // Uses connMonitorOnce to ensure only one monitor runs per Manager instance.
@@ -95,7 +141,12 @@ func (m *Manager) recordKVError(err error) {
 	if errors.Is(err, types.ErrStreamMissing) {
 		return
 	}
-	if !natsutil.IsConnectivityError(err) && !natsutil.IsDegradingJetStreamError(err) {
+	// kvUnavailable is the F-D1 path: a marked connected-but-KV-unavailable
+	// timeout from one of the manager's periodic KV-op sites. It is admitted
+	// here (the connection-status monitor and the connectivity/degrading
+	// classifiers all miss it) and degrades with a distinct reason below.
+	kvUnavailable := errors.Is(err, ErrKVUnavailable)
+	if !natsutil.IsConnectivityError(err) && !natsutil.IsDegradingJetStreamError(err) && !kvUnavailable {
 		return
 	}
 	// Short-circuit once already Degraded. Every subsystem (heartbeat 500ms,
@@ -136,13 +187,35 @@ func (m *Manager) recordKVError(err error) {
 
 	// Check threshold
 	if int(count) >= m.cfg.DegradedBehavior.KVErrorThreshold {
-		m.logger.Warn("KV error threshold exceeded",
+		// Whole-bucket loss (connectivity / degrading JetStream) keeps the
+		// canonical threshold reason — the AGENTS.md contract that whole-bucket
+		// loss is the ONLY path to "KV error threshold exceeded". A marked
+		// connected-but-KV-unavailable timeout degrades with the distinct
+		// reason. Errors that classify both ways (a bucket-missing error never
+		// reaches markKVUnavailable's wrap branch) keep the threshold
+		// reason, so the contract holds.
+		reason := "KV error threshold exceeded"
+		if kvUnavailable {
+			reason = degradedReasonKVUnavailable
+		}
+		m.logger.Warn(reason,
 			"count", count,
 			"threshold", m.cfg.DegradedBehavior.KVErrorThreshold,
 			"window", m.cfg.DegradedBehavior.KVErrorWindow,
 		)
-		m.enterDegraded("KV error threshold exceeded")
+		m.enterDegraded(reason)
 	}
+}
+
+// recordKVOpError marks err as a possible connected-but-KV-unavailable
+// timeout (via [markKVUnavailable]) and feeds it to [Manager.recordKVError].
+// It is the single entry point for the manager's periodic KV-op call sites
+// (heartbeat / election / assignment-watcher / stableid-renew / commit) so a
+// future site only has to call this — not remember to wrap. The
+// peer-takeover claim path (onClaimerError's ErrClaimLost branch) intentionally
+// does NOT route through here, keeping its claim-lost shutdown semantics.
+func (m *Manager) recordKVOpError(err error) {
+	m.recordKVError(markKVUnavailable(err))
 }
 
 // recordKVSuccess records a successful KV operation and resets error count.

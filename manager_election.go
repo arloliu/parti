@@ -118,7 +118,12 @@ func (m *Manager) onClaimerError(err error) {
 		claimLostShutdown(m)
 		return
 	}
-	m.recordKVError(err)
+	// Non-ErrClaimLost renewal failures reach here, including a renewal read
+	// timeout (renew's default branch — neither ErrClaimLost nor a
+	// bucket-missing sentinel). recordKVOpError marks a connected-but-KV-
+	// unavailable timeout so it drives the degraded circuit; the ErrClaimLost
+	// peer-takeover branch above is intentionally NOT routed through here.
+	m.recordKVOpError(err)
 }
 
 // claimWorkerID claims a stable worker ID.
@@ -249,8 +254,12 @@ func (m *Manager) monitorLeadership() {
 					m.logError("failed to renew leadership", "error", err)
 					// Feed into degraded circuit: ErrBucketNotFound or
 					// ErrStreamNotFound from the election bucket is the
-					// canonical live-wipe signal on the leader side.
-					m.recordKVError(err)
+					// canonical live-wipe signal on the leader side. A
+					// bounded-ctx deadline / no-responders (quorum loss,
+					// connection still up) is marked so it also degrades —
+					// RenewLeadership surfaces the renewCtx deadline as
+					// ErrLeadershipLost: context.DeadlineExceeded.
+					m.recordKVOpError(err)
 					// Leadership lost
 					m.isLeader.Store(false)
 					m.logger.Info("lost leadership", "worker_id", m.WorkerID())
@@ -288,8 +297,10 @@ func (m *Manager) monitorLeadership() {
 					m.logError("failed to request leadership", "error", err)
 					// Feed into degraded circuit for the follower path:
 					// if the election bucket is gone, every follower will
-					// surface NotFound here each tick.
-					m.recordKVError(err)
+					// surface NotFound here each tick. A bounded-ctx deadline
+					// / no-responders (quorum loss, connection still up) is
+					// marked so it also degrades.
+					m.recordKVOpError(err)
 
 					continue
 				}
@@ -408,7 +419,9 @@ func (m *Manager) startHeartbeat(kv jetstream.KeyValue) error {
 	publisher := heartbeat.New(kv, "heartbeat", workerID, m.cfg.HeartbeatInterval, m.metrics, m.logger)
 	// Feed publish failures into the degraded-mode circuit so sustained KV
 	// errors (connection loss or bucket wipe) drive the manager into Degraded.
-	publisher.SetOnError(m.recordKVError)
+	// A connected-but-KV-unavailable timeout (quorum loss) is marked so the
+	// heartbeat-publish path degrades too — the connection monitor misses it.
+	publisher.SetOnError(m.recordKVOpError)
 	// Wire the capability function so the publisher reads the live bitmask on
 	// every heartbeat composition, reflecting runtime wire-up state.
 	publisher.SetCapabilitiesFn(m.Capabilities)

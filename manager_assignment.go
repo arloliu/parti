@@ -391,8 +391,10 @@ func (m *Manager) monitorAssignmentChanges(ctx context.Context, kv jetstream.Key
 					// envelope's exhaustion is the orthogonal
 					// escalation for non-recordable error classes
 					// and for sustained establish failure rates that
-					// outrun the threshold window.
-					m.recordKVError(err)
+					// outrun the threshold window. A connected-but-KV-
+					// unavailable timeout (quorum loss) is marked so it
+					// also degrades.
+					m.recordKVOpError(err)
 					m.logError("assignment watcher establish failed, will retry", "error", err)
 
 					return fmt.Errorf("failed to watch assignments: %w", err)
@@ -428,8 +430,10 @@ func (m *Manager) monitorAssignmentChanges(ctx context.Context, kv jetstream.Key
 		}
 		// Session ended on channel close. Feed the threshold circuit
 		// (preserves whole-bucket-loss → Degraded contract when the
-		// loss manifests mid-session) and loop with a fresh envelope.
-		m.recordKVError(sessionErr)
+		// loss manifests mid-session) and loop with a fresh envelope. A
+		// connected-but-KV-unavailable timeout (quorum loss) is marked so
+		// it also degrades.
+		m.recordKVOpError(sessionErr)
 		m.logError("assignment watcher session ended, will reconnect", "error", sessionErr)
 	}
 }
@@ -626,7 +630,9 @@ func (m *Manager) monitorCommitChanges(ctx context.Context, kv jetstream.KeyValu
 			return
 		}
 		m.logError("commit watcher failed, retrying", "error", err, "backoff", backoff)
-		m.recordKVError(err)
+		// A connected-but-KV-unavailable timeout (quorum loss, connection
+		// still up) is marked so the commit reconcile-fetch path degrades too.
+		m.recordKVOpError(err)
 
 		//nolint:gosec // jitter does not require crypto-secure random
 		f := rand.Float64()
@@ -1274,7 +1280,21 @@ func (m *Manager) applyAssignmentWithPrevCore(oldAssignment, newAssignment Assig
 	if applyErr != nil {
 		m.applyStoreMu.Unlock()
 		m.logError("handoff apply failed", "error", applyErr)
+		// Apply errors deliberately do NOT route through recordKVOpError /
+		// the degraded circuit. The apply path has its own recovery
+		// (scheduleApplyRetry), and a connected-but-KV-unavailable timeout
+		// here is already observable as Degraded by other means: in steady
+		// state no apply fires (the quorum-loss incident shape — only the
+		// renewal/heartbeat/election sites are active, and those ARE marked),
+		// and a startup-time apply that never reaches Stable is covered by the
+		// startup-timeout watchdog (enterDegraded("startup-timeout")). Routing
+		// here would also fire enterDegraded during WaitingAssignment and
+		// pre-empt that watchdog reason. Only a rebalance coinciding with a
+		// handoff-bucket-only quorum loss (every other bucket healthy) is
+		// uncovered, where the existing assignment keeps working and the retry
+		// is the correct response, not a worker-wide degrade.
 		m.scheduleApplyRetry(newAssignment)
+
 		return applyErr
 	}
 
