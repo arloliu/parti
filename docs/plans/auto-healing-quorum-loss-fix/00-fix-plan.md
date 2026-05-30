@@ -1,10 +1,30 @@
 # Auto-Healing Quorum-Loss — Fix Plan
 
 - **Date:** 2026-05-30
-- **Status:** REVIEW-CLEAN — ready to implement. Cleared the review loop (1 `plan-review`
-  xhigh + 4 `final-plan-review` high passes; reports `tmp/00-fix-plan_*_review*.md`); final
-  verdict **"ready to implement, 0 findings"** (`tmp/00-fix-plan_precision_pass_review_v4.md`).
-  **Implementation not started** — awaiting go-ahead.
+- **Status:** PARTIALLY IMPLEMENTED. The operational fix (**F-D2a + F-D2c + the S2 regression
+  guard**) is implemented, `make pre-pr`-green, and codex-reviewed to *merge* on branch
+  `fix/quorum-loss-fd2a-resolver-tombstone`. **F-D2b was implemented, reviewed, then DROPPED as
+  dead code** (see the decision log below). **F-D1 (PR3) and F-D3 (PR4) are not started.** The
+  plan originally cleared the review loop (1 `plan-review` xhigh + 4 `final-plan-review` high
+  passes; reports `tmp/00-fix-plan_*_review*.md`) — but that review missed the F-D2b
+  reachability gap, which only surfaced during implementation.
+
+### Implementation status & decision log (2026-05-30)
+
+| Item | Status | Notes |
+|---|---|---|
+| **F-D2a** (resolver root-cause) | ✅ **Shipped** (`0dc4319`) | The actual fix. Tier 0 oracle flipped + boundary table, all non-vacuous. Codex *merge* (PR1 v1/v2). |
+| **F-D2c** (observability) | ✅ **Shipped** (`bfacb44`) | Implemented as a **LOG, not a metric** — `durable.ResolverMetrics` is structurally coupled to the **public** `consumer.ResolverMetrics`, so a metric method would break external implementers (§0 invariant 1). One aggregated `Warn` per reconcile pass. (Non-breaking metric path if ever wanted: an optional interface the resolver type-asserts its metrics impl against.) |
+| **S2 regression guard** | ✅ **Shipped** (`70ed026`) | `test/integration/failure/resolver_readfault_test.go`; asserts the consumer keeps consuming through the Keys-ok/Get-fail window and after recovery — no restart. Verified a genuine flip oracle. |
+| **F-D2b** (tombstone self-heal) | ❌ **DROPPED — dead code** | Implemented + codex-reviewed to *merge*, then removed. **Its heal branch is unreachable once F-D2a is in place.** `forceReplaceResolve`'s revision-bypass only matters when a cached tombstone's revision ≥ a live KV claim's revision. The only two cache-tombstone writers (`claim_resolver.go` watcher real-delete at D; reconcile synthetic at `e.revision+1`, only for genuinely-gone pids) always sit **below** any live re-creation (KV revisions are monotonic ⇒ re-create at `C > D > tombstone`), so the existing `>=` guard + the reconciler already heal it. The **sole** state needing the bypass was the synthetic **R+1-over-live-R** poison — which **F-D2a eliminates**. **The §1 rollout note's rolling-upgrade rationale is WRONG:** that poison is per-process in-memory and dies with the restart the upgrade performs; the new binary `warm()`s clean — there is no cross-process poison to self-heal. Excised via `git rebase --onto`. |
+| **F-D1** (PR3, classifier) | ⏸ **Not started** | Still valid — it is observability whose open question is *desirability* (flapping) not reachability; the `Degraded(kv-read-unavailable)` state plainly arises (it is the incident). |
+| **F-D3** (PR4, startup empty-diff) | ⏸ **Not started** | Still valid — its trigger was *traced* on v2.5.0 in the repro phase (not an untraced assertion like F-D2b's). |
+
+**Lesson carried forward to F-D1/F-D3:** before building, re-verify the fix's branch *does something the existing code does not already handle* at HEAD — i.e. "can the state this fix targets actually arise post-fix / at HEAD?" That discriminating question is exactly what exposed F-D2b as dead. (It is a pre-flight check, not a presumption of deadness — F-D1/F-D3 are on firmer ground.)
+
+**The sections below are the original design and are RETAINED AS THE HISTORICAL RECORD.**
+Where they describe F-D2b as load-bearing (esp. §1 F-D2b, the §4 rollout note, §4 phasing/PR2,
+§5 F-D2b tests, §4 model/effort table), read them as **SUPERSEDED by the decision log above.**
 - **Builds on:** `docs/plans/auto-healing-quorum-loss-repro/` (00–05). The reproduction +
   attribution is complete; this plan designs the fix.
 - **Attribution recap (from `…-repro/05-final-synthesis.md`):** the non-recovery is
@@ -117,6 +137,9 @@ absent-from-`Keys` and delete-op pids still tombstone. Preserves the legitimate-
 and the monotonic guard; net change local to `reconcileOnce`.
 
 ### F-D2b (defense-in-depth — self-heal a poisoned entry without restart) — REPLACEMENT, not guarded refresh
+> **⚠️ SUPERSEDED — F-D2b was DROPPED as dead code.** Its heal branch is unreachable once F-D2a
+> is in place (see the decision log at the top). The design below is retained as the historical
+> record of what was considered; it does **not** reflect the shipped code.
 **[Review P1 fix]** Confirmed against source: `ForceRefreshPartition` returns without
 updating when `existing.revision >= entry.Revision()` (`claim_resolver.go:495`). A tombstone
 at `R+1` vs a live read at `R` → `R+1 >= R` → **no-op**; the current call would NOT self-heal.
@@ -247,13 +270,18 @@ assertion that a retry after a failed initial apply re-attempts the full claim s
 Order rationale: the data-plane fix (PR1) lands first; the risky classifier change (PR3)
 lands last, when it is no longer load-bearing.
 
-**[Review P2] Rollout note — PR1 alone does NOT fully resolve a live incident.** F-D2a
-*prevents new* tombstones in **upgraded** processes only. It does **not** clear an
-**already-poisoned** in-process cache (the guarded refresh loses to `R+1`; only PR2's
-replacement re-resolve, or a restart, clears it), and during a **rolling upgrade** an
-old-version consumer can still manufacture/retain tombstones until restarted. **For the
-operational release, ship PR2 with or before PR1** so the deployed fleet both stops
-poisoning and self-heals existing poison without a restart.
+**[Review P2] Rollout note — SUPERSEDED (the reasoning here was wrong; see the decision log at
+the top).** This note argued PR1 needs PR2 (F-D2b) to clear an already-poisoned cache during a
+rolling upgrade. That is **incorrect**: the poison is per-process in-memory and dies with the
+restart the rolling upgrade itself performs — the new (F-D2a) binary `warm()`s clean, so there
+is no surviving poison for F-D2b to heal. **F-D2a alone is the operational fix.** The original
+(wrong) text is preserved below for the record:
+> F-D2a *prevents new* tombstones in **upgraded** processes only. It does **not** clear an
+> **already-poisoned** in-process cache (the guarded refresh loses to `R+1`; only PR2's
+> replacement re-resolve, or a restart, clears it), and during a **rolling upgrade** an
+> old-version consumer can still manufacture/retain tombstones until restarted. **For the
+> operational release, ship PR2 with or before PR1** so the deployed fleet both stops
+> poisoning and self-heals existing poison without a restart.
 
 ### Per-task model & effort (implementation dispatch)
 For the **implementation** sub-agent of each PR. Use a **Claude Agent** for implementation
