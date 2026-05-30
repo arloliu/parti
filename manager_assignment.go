@@ -1365,7 +1365,7 @@ func (m *Manager) applyAssignmentWithPrevCore(oldAssignment, newAssignment Assig
 	// later succeeded would stay in WaitingAssignment forever even though
 	// the assignment was applied and acked. See manager_startup_async.go
 	// runStartupBackground Godoc.
-	m.casToStableFromWaitingAssignment()
+	m.markStartupAssignmentApplied()
 
 	return nil
 }

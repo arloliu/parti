@@ -153,6 +153,13 @@ type Manager struct {
 	// written — the startup empty-diff self-exit (F-D3). One-way latch.
 	initialClaimsCommitted atomic.Bool
 
+	// startupAssignmentApplied latches true once the startup assignment path
+	// has made this manager's local assignment visible and acked it. It is
+	// separate from initialClaimsCommitted: empty-source startup has no claims
+	// to commit but still must be allowed to reach StateStable after its
+	// applied-empty ack.
+	startupAssignmentApplied atomic.Bool
+
 	// Degraded mode tracking
 	degradedSince          atomic.Int64  // UnixNano when degraded mode entered; 0 = not degraded
 	lastAssignmentAt       atomic.Int64  // UnixNano of last successful assignment fetch; 0 = never
@@ -682,7 +689,7 @@ func (m *Manager) applyInitialAssignment(ctx context.Context, assignmentKV jetst
 		// stay in WaitingAssignment until a later non-empty assignment
 		// triggers applyAssignmentWithPrev's CAS — which may never
 		// happen if the source is genuinely empty.
-		m.casToStableFromWaitingAssignment()
+		m.markStartupAssignmentApplied()
 
 		return nil
 	}

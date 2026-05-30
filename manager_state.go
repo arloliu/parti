@@ -217,8 +217,15 @@ func (m *Manager) syncStateFromCalculator(calcState types.CalculatorState) error
 		// This prevents flapping back to Stable when we're already stable,
 		// which can happen when subscribing to calculator state changes
 		// (the calculator sends its current state immediately on subscription).
-		if currentState != StateScaling && currentState != StateRebalancing && currentState != StateEmergency {
+		if !isCalculatorOwnedActiveState(currentState) {
 			// Already stable or in a non-active state, no transition needed.
+			return nil
+		}
+		if !m.startupAssignmentApplied.Load() {
+			// Startup readiness is owned by the local apply/store/ack path.
+			// Calculator Idle can arrive before the leader has applied its own
+			// startup assignment; do not advertise StateStable until that path
+			// completes.
 			return nil
 		}
 
