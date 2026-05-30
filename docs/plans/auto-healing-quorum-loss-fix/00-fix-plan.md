@@ -4,10 +4,13 @@
 - **Status:** PARTIALLY IMPLEMENTED. The operational fix (**F-D2a + F-D2c + the S2 regression
   guard**) is implemented, `make pre-pr`-green, and codex-reviewed to *merge* on branch
   `fix/quorum-loss-fd2a-resolver-tombstone`. **F-D2b was implemented, reviewed, then DROPPED as
-  dead code** (see the decision log below). **F-D1 (PR3) and F-D3 (PR4) are not started.** The
-  plan originally cleared the review loop (1 `plan-review` xhigh + 4 `final-plan-review` high
-  passes; reports `tmp/00-fix-plan_*_review*.md`) — but that review missed the F-D2b
-  reachability gap, which only surfaced during implementation.
+  dead code** (see the decision log below). **F-D1 (PR3) is implemented** (branch
+  `fix/quorum-loss-fd1-classifier`, PR #28). **F-D3 (PR4) is implemented** (branch
+  `fix/quorum-loss-fd3-startup-empty-diff`) — with a verified correction to the spec's 3a
+  (the override moved to the shared apply pipeline; see §3). The plan originally cleared the
+  review loop (1 `plan-review` xhigh + 4 `final-plan-review` high passes; reports
+  `tmp/00-fix-plan_*_review*.md`) — but that review missed both the F-D2b reachability gap and
+  the F-D3 version-advance gap, which only surfaced during implementation.
 
 ### Implementation status & decision log (2026-05-30)
 
@@ -18,7 +21,7 @@
 | **S2 regression guard** | ✅ **Shipped** (`70ed026`) | `test/integration/failure/resolver_readfault_test.go`; asserts the consumer keeps consuming through the Keys-ok/Get-fail window and after recovery — no restart. Verified a genuine flip oracle. |
 | **F-D2b** (tombstone self-heal) | ❌ **DROPPED — dead code** | Implemented + codex-reviewed to *merge*, then removed. **Its heal branch is unreachable once F-D2a is in place.** `forceReplaceResolve`'s revision-bypass only matters when a cached tombstone's revision ≥ a live KV claim's revision. The only two cache-tombstone writers (`claim_resolver.go` watcher real-delete at D; reconcile synthetic at `e.revision+1`, only for genuinely-gone pids) always sit **below** any live re-creation (KV revisions are monotonic ⇒ re-create at `C > D > tombstone`), so the existing `>=` guard + the reconciler already heal it. The **sole** state needing the bypass was the synthetic **R+1-over-live-R** poison — which **F-D2a eliminates**. **The §1 rollout note's rolling-upgrade rationale is WRONG:** that poison is per-process in-memory and dies with the restart the upgrade performs; the new binary `warm()`s clean — there is no cross-process poison to self-heal. Excised via `git rebase --onto`. |
 | **F-D1** (PR3, classifier) | ⏸ **Not started** | Still valid — it is observability whose open question is *desirability* (flapping) not reachability; the `Degraded(kv-read-unavailable)` state plainly arises (it is the incident). |
-| **F-D3** (PR4, startup empty-diff) | ⏸ **Not started** | Still valid — its trigger was *traced* on v2.5.0 in the repro phase (not an untraced assertion like F-D2b's). |
+| **F-D3** (PR4, startup empty-diff) | ✅ **Implemented** (branch `fix/quorum-loss-fd3-startup-empty-diff`) | `initialClaimsCommitted` latch + an empty-prev bootstrap override in `applyAssignmentWithPrevCore`. **Correction (verified):** the spec's literal 3a (override only in `scheduleApplyRetry`) does NOT self-heal scenario_b — a `V1→V2` startup-window advance empty-diffs the new version AND stale-drops the old retry — so the override moved to the shared apply pipeline (covers retry + commit-/assignment-watcher). See §3 "Implementation correction". S3 promoted as `test/integration/failure/startup_writefault_test.go` (RED-on-parent). `make pre-pr` green; 3 cross-feature contracts pass. |
 
 **Lesson carried forward to F-D1/F-D3:** before building, re-verify the fix's branch *does something the existing code does not already handle* at HEAD — i.e. "can the state this fix targets actually arise post-fix / at HEAD?" That discriminating question is exactly what exposed F-D2b as dead. (It is a pre-flight check, not a presumption of deadness — F-D1/F-D3 are on firmer ground.)
 
@@ -251,8 +254,53 @@ Spec:
 - **(3b deferred, out of scope here):** coupling snapshot-advance to claim-commit is a
   larger startup-ordering change; 3a achieves the fix without it.
 
-**Tests:** the S3 harness `long_outage_restart_only` case must flip to self-heal; add a unit
-assertion that a retry after a failed initial apply re-attempts the full claim set.
+**Implementation correction (verified) — the override must live in the shared apply
+pipeline, not only in `scheduleApplyRetry`.** Localizing the empty-prev choice to
+`scheduleApplyRetry` (the literal 3a above) was empirically shown insufficient: running the
+S3 `long_outage_restart_only` repro against the retry-only fix still leaves claims absent
+(`KV-claim-reappears=false`). Cause: during the startup fault window the assignment advances
+`V1→V2` (a normal cold-start/rejoin rebalance). The `V2` apply (commit-/assignment-watcher)
+reads `prev = CurrentAssignment()` = the pre-advanced `V1` set → an **empty prepare diff** →
+it writes no claims **and** advances the snapshot to `V2`, which then **stale-gate-drops** the
+`V1` retry before it can write. So the one path 3a fixes is dropped, and the path that runs
+writes nothing. The shipped fix therefore puts the `if !initialClaimsCommitted { oldAssignment
+= Assignment{} }` override (and the latch) in **`applyAssignmentWithPrevCore`** — the single
+apply pipeline every path funnels through — under `applyStoreMu`. This makes *every* bootstrap
+apply (retry, commit-watcher, assignment-watcher) write the full claim set until the first
+successful full-set write latches `initialClaimsCommitted`; the per-claim CAS keeps any racing
+double-write safe, and `applyStoreMu` serializes the flag read/latch so exactly one apply takes
+the empty-prev path. Side benefit: a failed bootstrap write no longer falsely advances the
+snapshot to `V2` (the apply fails before the Store), so the version stays pinned during the
+outage. Decided with the user (PR-by-PR cadence); 3b (don't pre-advance) remains deferred.
+
+**Tests:** the S3 harness `long_outage_restart_only` case flips to self-heal — promoted as
+`test/integration/failure/startup_writefault_test.go` (write-axis fault seam; proven
+RED-on-parent / GREEN-with-fix, no restart). Unit coverage in
+`manager_initial_claims_bootstrap_test.go`: the retry path receives an empty prev before the
+first commit (verify-first, compiles+fails on parent), core overrides+latches on a bootstrap
+apply, keeps the real prev after the latch (both-directions boundary), the version-advance
+path (`applyAssignmentWithPrevCore(V1, V2)` with the latch false) gets an empty prev — the
+discriminator proven RED under retry-only placement by mutation, and a concurrent-apply
+`-race` test pins exactly-one empty-prev bootstrap path.
+
+**Deferred follow-up (not a regression; not in this PR) — sustained-write-fault Degraded
+recovery can report `Stable` while claims are still uncommitted.** If the claim-write fault
+persists past `StartupTimeout + DegradedBehavior.ExitThreshold` *with assignment reads still
+succeeding*, the worker can: startup-timeout watchdog → `Degraded` → `attemptRecoveryFromDegraded`
+(`manager_degraded.go`) refreshes the assignment snapshot via `monotonicStore` (a read, not an
+apply) → `exitDegraded` → `Stable`, all while no claims have been written. This is a pre-existing
+property of the connectivity-keyed Degraded-recovery path (untouched by this PR), and it is
+**strictly better than the pre-F-D3 behavior**: before F-D3 the worker reached `Stable`-with-no-
+claims *immediately* via the empty-diff "success" and never self-healed; with F-D3 the retry
+stays alive (latch false) and self-heals once writes recover. Two residual edges remain, both
+predating this PR: (a) a misleading `Stable`-while-uncommitted observability window, and (b) a
+narrow non-heal tail — if a version advance lands during the Degraded window and
+`refreshAssignmentFromNATS` monotonic-stores a version *strictly higher* than the retry's
+coalesced pending, the retry stale-drops and exits → restart-only. The clean fix (gate the
+Degraded-recovery exit on `initialClaimsCommitted` when `CurrentAssignment()` is non-empty)
+touches the generic recovery path shared by all degraded reasons (contracts 1/3) and warrants
+its own contract-regression pass — deferred rather than bundled here. (Surfaced by the PR4
+post-impl review v1, P1-1.)
 
 ---
 

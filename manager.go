@@ -145,6 +145,14 @@ type Manager struct {
 	stashedApplyRetry atomic.Pointer[Assignment]
 	applyRetryActive  atomic.Bool
 
+	// initialClaimsCommitted latches true the first time an apply genuinely
+	// commits the full claim set to the handoff bucket. Until then,
+	// applyAssignmentWithPrevCore forces an empty prev on every apply so the
+	// prepare diff is the full partition set, instead of computing an empty
+	// diff against the snapshot waitForAssignment pre-advanced with no claims
+	// written — the startup empty-diff self-exit (F-D3). One-way latch.
+	initialClaimsCommitted atomic.Bool
+
 	// Degraded mode tracking
 	degradedSince          atomic.Int64  // UnixNano when degraded mode entered; 0 = not degraded
 	lastAssignmentAt       atomic.Int64  // UnixNano of last successful assignment fetch; 0 = never

@@ -65,6 +65,7 @@ func (r *recordingMetrics) RecordAssignmentChange(_, _ int, _ int64) {
 type recordingHandoff struct {
 	mu         sync.Mutex
 	callOrder  []int64
+	applyPrevs []types.Assignment // the prev (previous) arg captured per Apply call
 	applyCount atomic.Int64
 
 	blockFirstApply atomic.Bool
@@ -85,7 +86,7 @@ func newRecordingHandoff() *recordingHandoff {
 
 func (h *recordingHandoff) Start(_ context.Context) {}
 
-func (h *recordingHandoff) Apply(_ context.Context, _ string, _ /* prev */, next types.Assignment) error {
+func (h *recordingHandoff) Apply(_ context.Context, _ string, prev, next types.Assignment) error {
 	// If blockFirstApply is set, the FIRST Apply call signals readiness then
 	// waits for the test to release it. Subsequent applies fall through.
 	if h.blockFirstApply.CompareAndSwap(true, false) {
@@ -95,6 +96,7 @@ func (h *recordingHandoff) Apply(_ context.Context, _ string, _ /* prev */, next
 	h.applyCount.Add(1)
 	h.mu.Lock()
 	h.callOrder = append(h.callOrder, next.Version)
+	h.applyPrevs = append(h.applyPrevs, prev)
 	h.mu.Unlock()
 	if box := h.errOnce.Swap(nil); box != nil {
 		return box.err

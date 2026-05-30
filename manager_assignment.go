@@ -1246,6 +1246,19 @@ func (m *Manager) applyAssignmentWithPrevCore(oldAssignment, newAssignment Assig
 		return nil
 	}
 
+	// Startup bootstrap override (F-D3): until the worker has committed its
+	// claims at least once, force an empty prev so the prepare diff is the FULL
+	// partition set. waitForAssignment pre-advances the snapshot to the full set
+	// with no claims written, so any apply that reads CurrentAssignment() for
+	// prev would otherwise compute an empty diff and write zero claims. This must
+	// live here (not only in scheduleApplyRetry): a startup-window version
+	// advance (cold-start/rejoin rebalance to V+1) applies V+1 against the
+	// pre-advanced snapshot AND stale-gate-drops the V retry, so fixing the retry
+	// alone does not self-heal. One-way: once committed, prev is CurrentAssignment().
+	if !m.initialClaimsCommitted.Load() {
+		oldAssignment = Assignment{}
+	}
+
 	// 1) Apply via handoff coordinator. Must succeed before we touch the
 	//    in-memory snapshot or publish the ack.
 	applyErr := m.handoffCoordinator.Apply(m.ctx, workerID, oldAssignment, newAssignment)
@@ -1263,6 +1276,14 @@ func (m *Manager) applyAssignmentWithPrevCore(oldAssignment, newAssignment Assig
 		m.logError("handoff apply failed", "error", applyErr)
 		m.scheduleApplyRetry(newAssignment)
 		return applyErr
+	}
+
+	// Latch initialClaimsCommitted on the first successful full-set write. During
+	// bootstrap the override forced oldAssignment empty, so an empty-prev →
+	// non-empty-next success genuinely wrote every claim — never a claim-less
+	// empty diff. One-way latch.
+	if len(oldAssignment.Partitions) == 0 && len(newAssignment.Partitions) > 0 {
+		m.initialClaimsCommitted.Store(true)
 	}
 
 	// 2) Advance lastSeenLeaderRevision (stale-leader fence) — single
