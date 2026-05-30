@@ -137,7 +137,7 @@ func TestPartitionConsumer_RecoveryEnvelope_RecoveredIterationsResetBudget(t *te
 	// failPlan[i] == true means: on the i-th iter-create call, return error.
 	// Pattern: fail once, succeed once, fail once, succeed once, ... ensures
 	// no two consecutive failures.
-	var failPlan []bool
+	failPlan := make([]bool, 0, 2*totalEpisodes)
 	for range totalEpisodes {
 		failPlan = append(failPlan, true)  // fail
 		failPlan = append(failPlan, false) // succeed
