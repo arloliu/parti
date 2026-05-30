@@ -987,6 +987,13 @@ func (r *ClaimBasedResolver) reconcileOnce(ctx context.Context) {
 
 	pendingByPID := make(map[string]pending)
 	seen := make(map[string]struct{}, len(keys))
+	// Keys we listed but could not Get this pass (transient read failure, e.g.
+	// a quorum-lost bucket returning DeadlineExceeded/ErrNoResponders while the
+	// connection stays CONNECTED). These must NOT be tombstoned: the key still
+	// exists, we just could not read it now; a later pass re-reads it. Without
+	// this set, an unreadable key would fall through to the tombstone pass below
+	// and be staged as a synthetic delete at R+1 — an irreversible poison.
+	unreadable := make(map[string]struct{})
 
 	for _, k := range keys {
 		if r.claimsPref != "" && !strings.HasPrefix(k, r.claimsPref) {
@@ -994,7 +1001,9 @@ func (r *ClaimBasedResolver) reconcileOnce(ctx context.Context) {
 		}
 		entry, err := r.kv.Get(ctx, k)
 		if err != nil {
-			// Skip missing keys; the next reconcile pass will retry.
+			// Listed-but-unreadable: record the pid so the tombstone pass
+			// skips it. The next reconcile pass retries the read.
+			unreadable[strings.TrimPrefix(k, r.claimsPref)] = struct{}{}
 			continue
 		}
 		// Defensive: skip delete-operation entries; we tombstone separately
@@ -1023,6 +1032,13 @@ func (r *ClaimBasedResolver) reconcileOnce(ctx context.Context) {
 			continue
 		}
 		if _, ok := seen[pid]; ok {
+			continue
+		}
+		// Listed but unreadable this pass — a transient read failure, not a
+		// deletion. Skip; the next reconcile re-reads it. (Genuine deletions —
+		// absent from Keys, or a delete/purge op — are not in `unreadable` and
+		// still tombstone below.)
+		if _, ok := unreadable[pid]; ok {
 			continue
 		}
 		// Synthetic tombstone revision: existing + 1. The shared apply

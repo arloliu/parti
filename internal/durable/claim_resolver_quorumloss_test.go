@@ -3,17 +3,23 @@
 // Incident: a KV bucket that lost quorum while the NATS connection stayed
 // CONNECTED produced a Keys()-ok / Get()-fail reconcile window. reconcileOnce
 // continued without adding the pid to `seen`, so the tombstone pass staged a
-// synthetic delete at R+1 (cache revision + 1). applyPendingBatch applied it
-// because R+1 > R. After recovery the real claim returned at R; both the
-// watcher and reconciler tried to re-apply it at R, but the guard
-// (existing.revision >= p.revision = R+1 >= R = true) rejected it. The
-// tombstone won permanently. Only a process restart (warm() re-reading KV
-// from scratch) cleared it.
+// synthetic delete at R+1 (cache revision + 1) — turning a transient read
+// failure into a permanent, monotonic-revision-irreversible tombstone that only
+// a process restart could clear.
 //
-// Plan: docs/plans/auto-healing-quorum-loss-repro/
+// Fix (F-D2a): reconcileOnce now distinguishes a listed-but-unreadable key (Get
+// errored) from a genuinely-gone key. A read error adds the pid to an
+// `unreadable` set, and the tombstone pass skips unreadable pids — it never
+// tombstones a key it simply could not read this pass. Genuine deletions (key
+// absent from Keys, or Get returning a delete/purge op) still tombstone.
 //
-//	02-consolidated-design.md  §2 Defect 2, §4 Tier 0
-//	03-execution-model-effort.md §3 control pairings
+// These tests pin BOTH directions: the read-fault case must NOT poison (the
+// flipped reproducer), and every genuine-deletion case must STILL tombstone (so
+// the fix is not over-broad).
+//
+// Plan: docs/plans/auto-healing-quorum-loss-fix/00-fix-plan.md §1 (F-D2a)
+//
+//	docs/plans/auto-healing-quorum-loss-repro/02-consolidated-design.md §2 Defect 2, §4 Tier 0
 //
 // All tests are deterministic and require no NATS server.
 package durable
@@ -30,13 +36,16 @@ import (
 // ─── Mock extension ───────────────────────────────────────────────────────────
 //
 // mockKVForReconcile (defined in claim_resolver_restart_test.go) is extended
-// with two nil-default fields:
+// with three nil-default fields:
 //
 //   getErrByKey map[string]error — if a key has an entry, Get returns that
 //     error while Keys() STILL lists the key (the asymmetric window).
+//   getOpByKey map[string]jetstream.KeyValueOp — if a key has an entry, the
+//     entry Get returns has its Operation() overridden (surfacing a listed key
+//     as a genuine delete/purge).
 //   keysErr error — if set, Keys() returns this error immediately.
 //
-// Both fields are set by direct field assignment (consistent with the existing
+// All fields are set by direct field assignment (consistent with the existing
 // afterKeys hook pattern). No existing call sites pass them, so they default
 // to nil and the behaviour of existing tests is unchanged.
 //
@@ -53,8 +62,9 @@ import (
 // window that reconcileOnce cannot handle.
 type mockKVWithKeyErr struct {
 	*mockKVForReconcile
-	getErrByKey map[string]error // optional per-key error override for Get
-	keysErr     error            // if set, Keys() returns this error
+	getErrByKey map[string]error                // optional per-key error override for Get
+	getOpByKey  map[string]jetstream.KeyValueOp // optional per-key Operation() override for Get
+	keysErr     error                           // if set, Keys() returns this error
 }
 
 func newMockKVWithKeyErr(store map[string][]byte, revision uint64) *mockKVWithKeyErr {
@@ -72,17 +82,34 @@ func (m *mockKVWithKeyErr) Keys(ctx context.Context, opts ...jetstream.WatchOpt)
 	return m.mockKVForReconcile.Keys(ctx, opts...)
 }
 
-// Get overrides mockKVForReconcile.Get to inject per-key errors. If a key has
-// an entry in getErrByKey the error is returned instead of the store value.
-// The key deliberately stays in store (i.e. Keys() still lists it), modelling
-// the asymmetric window: Keys returns the key, but Get times out.
+// Get overrides mockKVForReconcile.Get to inject per-key errors and per-key
+// operation overrides. If a key has an entry in getErrByKey the error is
+// returned instead of the store value (the key deliberately stays in store, so
+// Keys() still lists it — the asymmetric Keys-ok/Get-fail window). If a key has
+// an entry in getOpByKey the returned entry's Operation() is overridden (so a
+// listed key can surface as a genuine delete/purge tombstone via Get).
 func (m *mockKVWithKeyErr) Get(ctx context.Context, key string) (jetstream.KeyValueEntry, error) {
 	if m.getErrByKey != nil {
 		if err, hit := m.getErrByKey[key]; hit {
 			return nil, err
 		}
 	}
-	return m.mockKVForReconcile.Get(ctx, key)
+	entry, err := m.mockKVForReconcile.Get(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	if m.getOpByKey != nil {
+		if op, hit := m.getOpByKey[key]; hit {
+			return &mockKVEntryFull{
+				key:      entry.Key(),
+				val:      entry.Value(),
+				revision: entry.Revision(),
+				op:       op,
+			}, nil
+		}
+	}
+
+	return entry, nil
 }
 
 // ─── Shared construction helpers ─────────────────────────────────────────────
@@ -155,19 +182,23 @@ func TestQuorumLoss_HealthyReconcile_Control(t *testing.T) {
 	require.Equal(t, quorumTestOwner, owner, "owner must be unchanged after healthy reconcile")
 }
 
-// TestQuorumLoss_CaseA_GetFailCreatesUnbeatableTombstone is the primary
-// defect pin: Keys-ok / Get-fail for a single pid causes a permanent
-// tombstone that neither reconcile nor the watcher can overcome.
+// TestQuorumLoss_CaseA_GetFailDoesNotPoison is the primary F-D2a pin and the
+// flipped reproducer: a Keys-ok / Get-fail window for a single pid must NOT
+// tombstone the live claim. The transient read failure adds the pid to the
+// `unreadable` set; the tombstone pass skips it; the cached claim survives.
+//
+// This is the RED→GREEN flip: on the pre-fix code this same fault staged a
+// synthetic delete at R+1 and the final assertion would be ok=false. The fix
+// keeps it ok=true.
 //
 // Non-vacuous because:
 //   - The healthy-reconcile control above differs by exactly one variable
-//     (Get-ok vs Get-fail) and asserts ok=true. Removing getErrByKey from this
-//     test would flip the final assertion to ok=true — proven by the control.
-//   - After tombstone, both read-paths (reconcile AND watcher) are exercised
-//     and both fail to clear it: the revision guard R+1 >= R rejects both.
-//   - The restart control at the end proves warm() over a healthy KV returns
-//     ok=true — confirming process restart is the only fix.
-func TestQuorumLoss_CaseA_GetFailCreatesUnbeatableTombstone(t *testing.T) {
+//     (Get-ok vs Get-fail) and also asserts ok=true. The pairing isolates the
+//     Get-fail as the variable under test; the fix makes both outcomes equal.
+//   - Step 3 proves the claim was never lost: after Get recovers, a later
+//     reconcile still resolves ok=true with the correct owner — i.e. "we just
+//     couldn't read it this pass; a later pass re-reads it", no restart needed.
+func TestQuorumLoss_CaseA_GetFailDoesNotPoison(t *testing.T) {
 	// Step 1 — fault setup: Keys returns the key, Get returns DeadlineExceeded.
 	// This is the ONLY difference from TestQuorumLoss_HealthyReconcile_Control.
 	kv := newHealthyKV(t)
@@ -181,75 +212,41 @@ func TestQuorumLoss_CaseA_GetFailCreatesUnbeatableTombstone(t *testing.T) {
 	seedResolverCache(r)
 
 	// Step 2 — trigger the reconcile under fault conditions.
-	// reconcileOnce: Keys() ok → Get() fails → pid not in seen →
-	// tombstone staged at R+1=6 → applyPendingBatch writes {deleted:true, rev:6}.
+	// reconcileOnce: Keys() ok → Get() fails → pid added to `unreadable` →
+	// tombstone pass skips it → no synthetic delete staged → cache untouched.
 	r.reconcileOnce(context.Background())
 
-	// The tombstone must now be in place.
-	_, _, _, ok := r.GetOwner(quorumTestPID)
-	require.False(t, ok, "fault reconcile must have tombstoned the claim")
+	owner, _, _, ok := r.GetOwner(quorumTestPID)
+	require.True(t, ok,
+		// Non-vacuous: the healthy control differs only in Get-ok vs Get-fail.
+		// On pre-fix code this asserted ok=false (the R+1 tombstone). The fix
+		// keeps the unreadable claim live.
+		"a listed-but-unreadable claim must NOT be tombstoned by a transient Get failure",
+	)
+	require.Equal(t, quorumTestOwner, owner, "owner must be unchanged after an unreadable-key reconcile")
 
-	// Step 3 — simulate recovery: restore Get to return the live claim at R=5.
-	kv.getErrByKey = nil // Get is healthy again
-
-	// Step 3a — reconcile read-path: reconcileOnce now sees the live claim at
-	// R=5 via Get, but the reconcile PRE-FILTER (claim_resolver.go:1010-1014)
-	// drops it because the cached tombstone's revision (6) >= entry revision (5),
-	// so no upsert is ever staged and applyPendingBatch gets an empty batch. The
-	// tombstone persists. NOTE this is a DISTINCT guard from the applyPendingBatch
-	// guard exercised by step 3b below — Case A covers both sites.
+	// Step 3 — recovery: restore Get, run another reconcile. The claim was never
+	// lost, so it still resolves ok=true at the correct owner. No restart needed.
+	kv.getErrByKey = nil
 	r.reconcileOnce(context.Background())
-	_, _, _, ok = r.GetOwner(quorumTestPID)
-	require.False(t, ok,
-		// Non-vacuous: we just ran reconcileOnce with a healthy KV. If the
-		// reconcile pre-filter were wrong (staged R over the R+1 tombstone),
-		// this would be ok=true.
-		"reconcile read-path at R must NOT beat the tombstone at R+1",
-	)
-
-	// Step 3b — watcher read-path: deliver the live claim at R=5 via
-	// handleWatcherUpdate + applyPendingBatch. handleWatcherUpdate stages the
-	// upsert unconditionally, so here the applyPendingBatch guard (:865,
-	// existing.revision 6 >= p.revision 5) is what rejects it — the same >=
-	// semantics as 3a's pre-filter but a different code site.
-	pendingMap := make(map[string]pending)
-	watcherEntry := &mockKVEntryFull{
-		key:      quorumTestFullKey,
-		val:      quorumTestClaim(t),
-		revision: quorumTestRevision, // R=5 < tombstone R+1=6
-	}
-	r.handleWatcherUpdate(watcherEntry, pendingMap)
-	r.applyPendingBatch(pendingMap, "test-watcher-recovery")
-
-	_, _, _, ok = r.GetOwner(quorumTestPID)
-	require.False(t, ok,
-		// Non-vacuous: we just delivered the live claim via the watcher path.
-		// If the guard were wrong (accepted R over R+1), this would be ok=true.
-		"watcher read-path at R must NOT beat the tombstone at R+1",
-	)
-
-	// Step 4 — restart control: a fresh resolver calling warm() over the now-
-	// healthy KV reads KV directly (no in-memory tombstone) and returns ok=true.
-	// This proves a process restart IS the fix, as reported in the incident.
-	r2 := NewClaimBasedResolver(kv, "claims/", nil, WithReconcileInterval(0))
-	err := r2.warm(context.Background())
-	require.NoError(t, err)
-	owner, _, _, ok2 := r2.GetOwner(quorumTestPID)
-	require.True(t, ok2, "fresh warm() over healthy KV must return ok=true (restart fixes it)")
+	owner, _, _, ok = r.GetOwner(quorumTestPID)
+	require.True(t, ok, "claim must remain resolvable after the read fault recovers")
 	require.Equal(t, quorumTestOwner, owner)
 }
 
-// TestQuorumLoss_CaseAPrime_FleetWideTombstone verifies that if ALL pids' Get
-// calls fail in a single reconcile pass, ALL pids are tombstoned.
+// TestQuorumLoss_CaseAPrime_FleetWideReadFaultDoesNotPoison verifies that if
+// ALL pids' Get calls fail in a single reconcile pass, NONE are tombstoned —
+// every pid stays resolvable.
 //
 // This models the fleet-wide symptom from the incident report where all workers
-// stopped processing after a bucket quorum loss affecting all keys.
+// stopped processing after a bucket quorum loss affecting all keys. With F-D2a
+// the whole fleet survives the transient read fault.
 //
 // Non-vacuous: we assert ok=true for ALL pids immediately after seeding (before
-// the fault reconcile). After the fault reconcile we assert ALL pids are ok=false.
-// Without the pre-fault presence check, the post-fault absence could pass
-// vacuously (cache never populated).
-func TestQuorumLoss_CaseAPrime_FleetWideTombstone(t *testing.T) {
+// the fault reconcile) AND after it. The pre-fault check proves the cache was
+// genuinely populated; on pre-fix code the post-fault assertion was ok=false for
+// every pid, so the ok=true here is a real flip, not a vacuous pass.
+func TestQuorumLoss_CaseAPrime_FleetWideReadFaultDoesNotPoison(t *testing.T) {
 	const numPIDs = 3
 	pids := []string{"USER01", "USER02", "USER03"}
 
@@ -294,10 +291,11 @@ func TestQuorumLoss_CaseAPrime_FleetWideTombstone(t *testing.T) {
 	// Trigger the fault reconcile.
 	r.reconcileOnce(context.Background())
 
-	// Assert ALL pids are tombstoned (non-vacuous because we proved them present above).
+	// Assert ALL pids survive (non-vacuous because we proved them present above
+	// and pre-fix code tombstoned every one of them).
 	for _, pid := range pids {
 		_, _, _, ok := r.GetOwner(pid)
-		require.False(t, ok, "post-fault: pid %s must be tombstoned after all-Get-fail", pid)
+		require.True(t, ok, "post-fault: pid %s must survive an all-Get-fail reconcile", pid)
 	}
 }
 
@@ -305,18 +303,22 @@ func TestQuorumLoss_CaseAPrime_FleetWideTombstone(t *testing.T) {
 // a claim re-write at revision R+2 (strictly greater than the tombstone at R+1)
 // DOES beat the tombstone and restores the gate to open.
 //
-// This tells the fix authors that forcing a claim re-write at a new revision
-// (e.g., a triggered re-apply or a handoff coordinator that re-writes on
-// recovery) is a viable fix shape — without requiring a process restart.
+// This documents the monotonic-revision guard: a re-write at a strictly greater
+// revision is the only thing that clears a tombstone in-process. The tombstone
+// here is manufactured via a GENUINE delete-op (Get returns a KeyValueDelete) —
+// the F-D2a fix only spares transient READ failures, so a real deletion still
+// tombstones, which is exactly what this test relies on.
 //
 // Non-vacuous: we assert ok=false AFTER the tombstone (intermediate state)
 // before delivering R+2. The final ok=true can only pass because the R+2
 // write was accepted, NOT because the tombstone was absent.
 func TestQuorumLoss_CaseADoublePrime_KVRewriteBeatsTheTombstone(t *testing.T) {
-	// Step 1 — reproduce the tombstone at R+1 (same as Case A steps 1-2).
+	// Step 1 — manufacture a genuine tombstone at R+1: Keys() lists the key but
+	// Get() returns a delete operation, so the reconcile tombstone pass stages a
+	// synthetic delete at R+1.
 	kv := newHealthyKV(t)
-	kv.getErrByKey = map[string]error{
-		quorumTestFullKey: context.DeadlineExceeded,
+	kv.getOpByKey = map[string]jetstream.KeyValueOp{
+		quorumTestFullKey: jetstream.KeyValueDelete,
 	}
 
 	r := NewClaimBasedResolver(kv, "claims/", nil, WithReconcileInterval(0))
@@ -326,7 +328,7 @@ func TestQuorumLoss_CaseADoublePrime_KVRewriteBeatsTheTombstone(t *testing.T) {
 
 	// Non-vacuous intermediate check: tombstone is in place before the heal.
 	_, _, _, ok := r.GetOwner(quorumTestPID)
-	require.False(t, ok, "tombstone must be in place before the heal attempt")
+	require.False(t, ok, "a genuine delete-op must tombstone the claim before the heal attempt")
 
 	// Step 2 — deliver a claim re-write at R+2=7 via the watcher path.
 	// R+2=7 > tombstone=6 → guard: 6 >= 7 = false → write accepted.
@@ -354,15 +356,15 @@ func TestQuorumLoss_CaseADoublePrime_KVRewriteBeatsTheTombstone(t *testing.T) {
 // two fault branches: when Keys() ITSELF fails (not just per-key Get),
 // reconcileOnce takes the early-return path and leaves the cache untouched.
 //
-// This is the benign branch — the one the incident logs DID show
-// ("reconcile … list keys failed"). The dangerous branch is Case A (Keys-ok /
-// Get-fail). This test proves the two branches produce opposite outcomes.
+// This is the branch the incident logs DID show ("reconcile … list keys
+// failed"). Post-F-D2a it and Case A both leave the claim live (ok=true), but by
+// DIFFERENT mechanisms: Keys-fail returns early so the tombstone pass never
+// runs, whereas Keys-ok/Get-fail runs the tombstone pass but skips the pid via
+// the `unreadable` set. This test pins the early-return mechanism specifically.
 //
 // Non-vacuous: the presence assertion before reconcileOnce proves the cache was
 // genuinely populated. The post-reconcile ok=true cannot pass vacuously (it
-// would fail if reconcileOnce had poisoned the cache). Contrast with Case A:
-// identical setup, only the fault type differs (Keys-fail vs Get-fail), and the
-// outcome is the opposite (ok=true vs ok=false).
+// would fail if reconcileOnce had poisoned the cache via the tombstone pass).
 func TestQuorumLoss_CaseB_KeysFailDoesNotPoison(t *testing.T) {
 	kv := newHealthyKV(t)
 	// Keys() returns DeadlineExceeded — the EARLY-RETURN branch in reconcileOnce.
@@ -390,4 +392,150 @@ func TestQuorumLoss_CaseB_KeysFailDoesNotPoison(t *testing.T) {
 		"Keys() failure must take the early-return path and NOT poison the cache",
 	)
 	require.Equal(t, quorumTestOwner, owner)
+}
+
+// ─── F-D2a boundary table: genuine deletions must STILL tombstone ─────────────
+//
+// These guard that the fix is not over-broad: it spares ONLY a transient read
+// failure (Get errored). Every genuine-deletion signal still tombstones. They
+// pass on pre-fix code too — they are preservation guards, not RED flips — and
+// turn red if the fix were widened to skip tombstoning for ANY non-`seen` pid.
+
+// TestQuorumLoss_Boundary_GetDeleteOpStillTombstones: Keys lists the key, Get
+// returns a KeyValueDelete op → a genuine deletion → still tombstoned.
+func TestQuorumLoss_Boundary_GetDeleteOpStillTombstones(t *testing.T) {
+	kv := newHealthyKV(t)
+	kv.getOpByKey = map[string]jetstream.KeyValueOp{
+		quorumTestFullKey: jetstream.KeyValueDelete,
+	}
+	r := NewClaimBasedResolver(kv, "claims/", nil, WithReconcileInterval(0))
+	seedResolverCache(r)
+
+	_, _, _, ok := r.GetOwner(quorumTestPID)
+	require.True(t, ok, "pre-reconcile: claim must be present (non-vacuous)")
+
+	r.reconcileOnce(context.Background())
+
+	_, _, _, ok = r.GetOwner(quorumTestPID)
+	require.False(t, ok, "a Get delete-op is a genuine deletion and must still tombstone")
+}
+
+// TestQuorumLoss_Boundary_GetPurgeOpStillTombstones: same as above with a
+// KeyValuePurge op.
+func TestQuorumLoss_Boundary_GetPurgeOpStillTombstones(t *testing.T) {
+	kv := newHealthyKV(t)
+	kv.getOpByKey = map[string]jetstream.KeyValueOp{
+		quorumTestFullKey: jetstream.KeyValuePurge,
+	}
+	r := NewClaimBasedResolver(kv, "claims/", nil, WithReconcileInterval(0))
+	seedResolverCache(r)
+
+	_, _, _, ok := r.GetOwner(quorumTestPID)
+	require.True(t, ok, "pre-reconcile: claim must be present (non-vacuous)")
+
+	r.reconcileOnce(context.Background())
+
+	_, _, _, ok = r.GetOwner(quorumTestPID)
+	require.False(t, ok, "a Get purge-op is a genuine deletion and must still tombstone")
+}
+
+// TestQuorumLoss_Boundary_AbsentFromKeysStillTombstones: the cached pid is no
+// longer listed by Keys at all → genuinely gone → tombstoned. This is the
+// backstop deletion path; the fix must not disturb it.
+func TestQuorumLoss_Boundary_AbsentFromKeysStillTombstones(t *testing.T) {
+	// Store holds a DIFFERENT live claim so Keys() returns non-empty (avoiding
+	// the "no keys found" branch) but does NOT list the seeded pid.
+	kv := newMockKVWithKeyErr(map[string][]byte{
+		"claims/OTHER99": marshalClaim(t, handoff.Claim{
+			PartitionID: "OTHER99",
+			Owner:       "worker-other",
+			State:       handoff.ClaimStateStable,
+			Epoch:       1,
+		}),
+	}, quorumTestRevision)
+	r := NewClaimBasedResolver(kv, "claims/", nil, WithReconcileInterval(0))
+	seedResolverCache(r) // seeds quorumTestPID, which is NOT in the store
+
+	_, _, _, ok := r.GetOwner(quorumTestPID)
+	require.True(t, ok, "pre-reconcile: seeded claim must be present (non-vacuous)")
+
+	r.reconcileOnce(context.Background())
+
+	_, _, _, ok = r.GetOwner(quorumTestPID)
+	require.False(t, ok, "a pid absent from Keys is genuinely gone and must still tombstone")
+}
+
+// TestQuorumLoss_Boundary_PrefixFilteredKeyIsInert: a key that does not match
+// the claims prefix is skipped before Get, so it enters neither `seen` nor
+// `unreadable`. This test is load-bearing against a regressed prefix filter (one
+// that stopped skipping out-of-prefix keys) on BOTH sides:
+//
+//   - seen-side: an out-of-prefix key carrying a VALID claim. If it were
+//     fetched it would be staged as an upsert and become resolvable. (A junk
+//     payload would be masked by applyPendingBatch's unmarshal-skip, so the
+//     value must be a real claim for the assertion to bite.)
+//   - unreadable-side: an out-of-prefix key whose bare name equals a cached,
+//     genuinely-gone pid and whose Get errors. If it entered `unreadable` it
+//     would wrongly suppress that gone pid's tombstone.
+func TestQuorumLoss_Boundary_PrefixFilteredKeyIsInert(t *testing.T) {
+	// An out-of-prefix key is cached (if a regression staged it) under its
+	// TrimPrefix("claims/") result, which — having no prefix to strip — is the
+	// full key string. So the seen-side assertion must query that full key.
+	const outSeenKey = "other/SEEN9" // out-of-prefix valid claim; must stay inert
+	const gonePID = "GONE7"          // cached but genuinely gone → must tombstone
+
+	kv := newHealthyKV(t) // store: claims/USER21 (live)
+	// seen-side probe: a valid claim under an out-of-prefix key.
+	kv.store[outSeenKey] = marshalClaim(t, handoff.Claim{
+		PartitionID: "SEEN9",
+		Owner:       "worker-out",
+		State:       handoff.ClaimStateStable,
+		Epoch:       1,
+	})
+	// unreadable-side probe: a bare key whose name collides with gonePID and
+	// whose Get errors. The real prefixed key (claims/GONE7) is absent, so a
+	// correct prefix filter lets gonePID tombstone; a regressed filter would
+	// route this errored Get into `unreadable[gonePID]` and suppress it.
+	kv.store[gonePID] = []byte("ignored")
+	kv.getErrByKey = map[string]error{gonePID: context.DeadlineExceeded}
+
+	r := NewClaimBasedResolver(kv, "claims/", nil, WithReconcileInterval(0))
+	// Seed cache with the live claim AND the genuinely-gone pid.
+	seed := map[string]claimEntry{
+		quorumTestPID: {
+			owner:    quorumTestOwner,
+			state:    toState(handoff.ClaimStateStable),
+			epoch:    quorumTestEpoch,
+			revision: quorumTestRevision,
+		},
+		gonePID: {
+			owner:    "worker-gone",
+			state:    toState(handoff.ClaimStateStable),
+			epoch:    1,
+			revision: quorumTestRevision,
+		},
+	}
+	r.cache.Store(&seed)
+
+	// Non-vacuous pre-reconcile presence checks.
+	_, _, _, ok := r.GetOwner(quorumTestPID)
+	require.True(t, ok, "pre-reconcile: live claim must be present")
+	_, _, _, ok = r.GetOwner(gonePID)
+	require.True(t, ok, "pre-reconcile: gone pid must be present before it tombstones")
+
+	r.reconcileOnce(context.Background())
+
+	owner, _, _, ok := r.GetOwner(quorumTestPID)
+	require.True(t, ok, "the live claim must survive a reconcile that also saw out-of-prefix keys")
+	require.Equal(t, quorumTestOwner, owner)
+
+	// seen-side: the out-of-prefix valid claim must not have been staged. It
+	// would be cached under its full-key pid if the prefix filter regressed.
+	_, _, _, ok = r.GetOwner(outSeenKey)
+	require.False(t, ok, "an out-of-prefix key must never become a resolvable claim (seen-side)")
+
+	// unreadable-side: gonePID is genuinely gone (claims/GONE7 absent) and the
+	// bare GONE7 key was prefix-filtered, so it must still tombstone.
+	_, _, _, ok = r.GetOwner(gonePID)
+	require.False(t, ok, "an out-of-prefix errored key must not suppress a genuine tombstone (unreadable-side)")
 }
