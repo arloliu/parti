@@ -20,7 +20,7 @@
 | **F-D2c** (observability) | ✅ **Shipped** (`bfacb44`) | Implemented as a **LOG, not a metric** — `durable.ResolverMetrics` is structurally coupled to the **public** `consumer.ResolverMetrics`, so a metric method would break external implementers (§0 invariant 1). One aggregated `Warn` per reconcile pass. (Non-breaking metric path if ever wanted: an optional interface the resolver type-asserts its metrics impl against.) |
 | **S2 regression guard** | ✅ **Shipped** (`70ed026`) | `test/integration/failure/resolver_readfault_test.go`; asserts the consumer keeps consuming through the Keys-ok/Get-fail window and after recovery — no restart. Verified a genuine flip oracle. |
 | **F-D2b** (tombstone self-heal) | ❌ **DROPPED — dead code** | Implemented + codex-reviewed to *merge*, then removed. **Its heal branch is unreachable once F-D2a is in place.** `forceReplaceResolve`'s revision-bypass only matters when a cached tombstone's revision ≥ a live KV claim's revision. The only two cache-tombstone writers (`claim_resolver.go` watcher real-delete at D; reconcile synthetic at `e.revision+1`, only for genuinely-gone pids) always sit **below** any live re-creation (KV revisions are monotonic ⇒ re-create at `C > D > tombstone`), so the existing `>=` guard + the reconciler already heal it. The **sole** state needing the bypass was the synthetic **R+1-over-live-R** poison — which **F-D2a eliminates**. **The §1 rollout note's rolling-upgrade rationale is WRONG:** that poison is per-process in-memory and dies with the restart the upgrade performs; the new binary `warm()`s clean — there is no cross-process poison to self-heal. Excised via `git rebase --onto`. |
-| **F-D1** (PR3, classifier) | ⏸ **Not started** | Still valid — it is observability whose open question is *desirability* (flapping) not reachability; the `Degraded(kv-read-unavailable)` state plainly arises (it is the incident). |
+| **F-D1** (PR3, classifier) | ✅ **Implemented** (branch `fix/quorum-loss-fd1-classifier`) | `markKVUnavailable` + `ErrKVUnavailable` + `recordKVOpError` helper; admitted in `recordKVError` with the distinct reason `kv-unavailable`. Wrap sites: heartbeat / leader &amp; follower election / assignment-watcher establish &amp; session / commit-watcher / stableid-renew. **Reachability re-verified** (the F-D2b lesson): the election loop bounds each KV op with `OperationTimeout` → `context.DeadlineExceeded` reaches `recordKVError` and was dropped at the old gate. Reason renamed `kv-read-unavailable`→`kv-unavailable` (the renewal/election triggers are KV *writes*). **Handoff apply path is NOT a wrap site** — see the correction in §2. Capstone `TestManager_KVUnavailable_EntersDegraded` proven RED on parent. `make pre-pr` green; 3 cross-feature contracts pass. |
 | **F-D3** (PR4, startup empty-diff) | ✅ **Implemented** (branch `fix/quorum-loss-fd3-startup-empty-diff`) | `initialClaimsCommitted` latch + an empty-prev bootstrap override in `applyAssignmentWithPrevCore`. **Correction (verified):** the spec's literal 3a (override only in `scheduleApplyRetry`) does NOT self-heal scenario_b — a `V1→V2` startup-window advance empty-diffs the new version AND stale-drops the old retry — so the override moved to the shared apply pipeline (covers retry + commit-/assignment-watcher). See §3 "Implementation correction". S3 promoted as `test/integration/failure/startup_writefault_test.go` (RED-on-parent). `make pre-pr` green; 3 cross-feature contracts pass. |
 
 **Lesson carried forward to F-D1/F-D3:** before building, re-verify the fix's branch *does something the existing code does not already handle* at HEAD — i.e. "can the state this fix targets actually arise post-fix / at HEAD?" That discriminating question is exactly what exposed F-D2b as dead. (It is a pre-flight check, not a presumption of deadness — F-D1/F-D3 are on firmer ground.)
@@ -199,30 +199,47 @@ and (b) a hook to drive the consumer re-resolve.
   and break contract 1. Do **NOT** widen `IsConnectivityError`/`IsDegradingJetStreamError`
   (contract 2's `onClaimerError` keys off exactly those).
 - **Call-site scoped, not global — concrete API [Review P1].** Define a sentinel
-  `ErrKVReadUnavailable` and a call-site wrapper `markKVReadUnavailable(err)` that wraps
-  `context.DeadlineExceeded`/`nats.ErrNoResponders` (and ONLY those, after excluding
-  stream-missing/bucket-missing) **applied only at the manager's handoff/assignment claim
-  read+list sites** — i.e. the sites that already feed `recordKVError` (heartbeat / election /
-  assignment-watcher / stableid-renew + the handoff claim get/list in the apply path). In
-  `recordKVError`, admit the new path via `errors.Is(err, ErrKVReadUnavailable)` → degrade
-  with a **distinct reason** `kv-read-unavailable` (NOT `"KV error threshold exceeded"`,
-  preserving that docstring contract). Because the wrapper is applied ONLY at those sites,
-  an unwrapped `DeadlineExceeded`/`ErrNoResponders` from anywhere else (or a peer-takeover
-  claim-get timeout, which flows through `onClaimerError`, not these sites) never enters the
-  new path. Do not add the raw errors to any global predicate.
+  `ErrKVUnavailable` and a call-site wrapper `markKVUnavailable(err)` that wraps
+  `context.DeadlineExceeded`/`nats.ErrNoResponders` (and ONLY those — existing classifiers
+  win first, so a connectivity/degrading-JetStream error is returned unchanged and keeps its
+  route) **applied only at the manager's periodic KV-op sites via the helper
+  `recordKVOpError`** — i.e. the sites that already feed `recordKVError`: heartbeat / leader
+  &amp; follower election / assignment-watcher establish &amp; session / commit-watcher /
+  stableid-renew (`onClaimerError`'s non-`ErrClaimLost` branch). In `recordKVError`, admit the
+  new path via `errors.Is(err, ErrKVUnavailable)` → degrade with a **distinct reason**
+  `kv-unavailable` (NOT `"KV error threshold exceeded"`, preserving that docstring contract).
+  Because the wrapper is applied ONLY at those sites, an unwrapped
+  `DeadlineExceeded`/`ErrNoResponders` from anywhere else (or a peer-takeover claim-get
+  timeout, which flows through `onClaimerError`'s `ErrClaimLost` branch, not these sites)
+  never enters the new path. Do not add the raw errors to any global predicate.
+  - **The handoff apply path is intentionally NOT a wrap site (implementation correction).**
+    An earlier draft of this section listed "the handoff claim get/list in the apply path"
+    among "the sites that already feed `recordKVError`". That premise is wrong:
+    `applyAssignmentWithPrevCore`'s `handoffCoordinator.Apply` error routes to
+    `scheduleApplyRetry` (`manager_assignment.go`), never to `recordKVError`. Routing it would
+    be new degrade-on-apply behavior, and apply fires during `WaitingAssignment` so it would
+    pre-empt the startup-timeout watchdog's reason. It is also already covered: in steady
+    state no apply fires (RC2 — only renewal/heartbeat/election sites are active, and those are
+    marked); a startup apply that never reaches Stable is covered by
+    `enterDegraded("startup-timeout")`. Only a rebalance coinciding with a handoff-bucket-only
+    quorum loss (every other bucket healthy) is uncovered — there the existing assignment keeps
+    working and the retry is the correct response, not a worker-wide degrade. Documented at the
+    `applyErr` site.
 - **No manager→consumer bridge.** [Review P1] The earlier "bridge" is dropped — there is no
   wireable surface for it (`UpdateWorkerConsumer` only takes `(workerID, partitions)`; the
   resolver is private to `WorkerConsumer`). The data-plane self-heal lives entirely in
   **F-D2b (consumer-local)**. F-D1 is therefore **purely manager-side observability**:
-  the operator sees `Degraded(kv-read-unavailable)` instead of a silent stall. It does NOT
+  the operator sees `Degraded(kv-unavailable)` instead of a silent stall. It does NOT
   itself fix the data plane (F-D2 does).
 
 **RISK CALLOUT for the reviewer:** this is the change AGENTS.md warns about. Mandatory:
 the 3 contract regression tests (`TestManager_LiveNATSBucketLoss*`, `TestStableID_StaleKeyTakeover_Reclaim`,
 `OnDegradedHook`) + `make test-integration -race` + a classifier/routing table test (below)
 proving stableID bucket-deletion still reaches whole-bucket-degraded, peer-takeover still
-reaches claim-lost shutdown, and handoff `Get`/`Keys` deadline/`ErrNoResponders` reach the
-new reason ONLY from the intended call-sites.
+reaches claim-lost shutdown, and a deadline/`ErrNoResponders` reaches the new reason ONLY
+from the intended periodic KV-op call-sites (heartbeat / election / assignment-watcher /
+commit-watcher / stableid-renew) — NOT from the handoff apply path (see the apply-path
+boundary correction above).
 **Open decision:** is entering Degraded on transient read timeouts desirable, or does it
 cause Degraded flapping on brief blips? Tunable via `KVErrorThreshold`/`KVErrorWindow`.
 
@@ -378,7 +395,7 @@ not big-bang before or defer after).
   restart from an already-poisoned cache.
 - **F-D1 classifier/routing table**: `context.DeadlineExceeded`, `nats.ErrNoResponders`,
   `jetstream.ErrNoStreamResponse`, `ErrBucketNotFound`, `ErrStreamNotFound`, wrapped
-  `ErrClaimLost` — each asserted to route to the correct path (new `kv-read-unavailable` vs
+  `ErrClaimLost` — each asserted to route to the correct path (new `kv-unavailable` vs
   whole-bucket-degraded vs claim-lost-shutdown), from the intended call-sites only.
 - **F-D3 retry** (must match the chosen 3a flag semantics): initial apply fails after partial
   claim writes with `initialClaimsCommitted == false` → the retry uses explicit empty `prev`
