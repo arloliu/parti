@@ -62,6 +62,7 @@ func TestMonitorCalculatorState_ReconcileRecoversDroppedState(t *testing.T) {
 		heartbeat:       heartbeat.NewNop(),
 	}
 	m.state.Store(int32(StateStable))
+	m.startupAssignmentApplied.Store(true)
 	m.workerID.Store("worker-test")
 	m.assignment.Store(Assignment{})
 	m.ctx, m.cancel = context.WithCancel(context.Background())
@@ -164,6 +165,7 @@ func TestPartitionLifecycle_DrivesManagerStateRebalancing(t *testing.T) {
 		heartbeat:       heartbeat.NewNop(),
 	}
 	m.state.Store(int32(StateStable))
+	m.startupAssignmentApplied.Store(true)
 	m.workerID.Store("worker-test")
 	m.assignment.Store(Assignment{})
 	m.ctx, m.cancel = context.WithCancel(context.Background())

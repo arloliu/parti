@@ -8,8 +8,17 @@ import (
 
 	"github.com/arloliu/parti/v2/internal/logging"
 	"github.com/arloliu/parti/v2/internal/metrics"
+	"github.com/arloliu/parti/v2/types"
 	"github.com/stretchr/testify/require"
 )
+
+func newStateProjectionTestManager() *Manager {
+	return &Manager{
+		hooks:   &types.Hooks{},
+		logger:  logging.NewNop(),
+		metrics: metrics.NewNop(),
+	}
+}
 
 func TestManager_WaitState_AlreadyInState(t *testing.T) {
 	m := &Manager{}
@@ -41,6 +50,33 @@ func TestManager_WaitState_StateTransition(t *testing.T) {
 	// Should receive nil when state is reached
 	err := <-errCh
 	require.NoError(t, err)
+}
+
+func TestSyncStateFromCalculator_DefersStableUntilStartupAssignmentApplied(t *testing.T) {
+	m := newStateProjectionTestManager()
+	m.state.Store(int32(StateRebalancing))
+
+	require.NoError(t, m.syncStateFromCalculator(types.CalcStateIdle))
+	require.Equal(t, StateRebalancing, m.State(),
+		"calculator Idle must not report StateStable before startup assignment apply/store completes")
+
+	m.startupAssignmentApplied.Store(true)
+
+	require.NoError(t, m.syncStateFromCalculator(types.CalcStateIdle))
+	require.Equal(t, StateStable, m.State(),
+		"calculator Idle may report StateStable after startup assignment apply/store completes")
+}
+
+func TestMarkStartupAssignmentApplied_CompletesDeferredCalculatorIdle(t *testing.T) {
+	m := newStateProjectionTestManager()
+	m.calculator = &stubCalculator{}
+	m.state.Store(int32(StateRebalancing))
+
+	m.markStartupAssignmentApplied()
+
+	require.True(t, m.startupAssignmentApplied.Load())
+	require.Equal(t, StateStable, m.State(),
+		"apply success must complete a previously deferred calculator Idle -> Stable transition")
 }
 
 func TestManager_WaitState_Timeout(t *testing.T) {

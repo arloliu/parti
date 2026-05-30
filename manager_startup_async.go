@@ -3,6 +3,7 @@ package parti
 import (
 	"time"
 
+	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -24,13 +25,14 @@ import (
 // decoupled from the runner so the watchdog fires even if the runner is
 // blocked inside applyInitialAssignment).
 //
-// On a clean success the runner CAS-transitions WaitingAssignment → Stable
-// via casToStableFromWaitingAssignment. If the calculator-state monitor
-// (started in startCalculator at manager_assignment.go:157-168) has
-// already moved state to Scaling/Rebalancing/Emergency, the CAS fails and
-// the runner leaves state alone — calculator ownership wins. The
-// post-Stable monitor set always starts, regardless of apply success or
-// state path; the monitors handle whatever state they find.
+// On a clean success the runner marks startup assignment readiness. If state
+// is still WaitingAssignment, the readiness helper CAS-transitions
+// WaitingAssignment → Stable. If the calculator-state monitor (started in
+// startCalculator) has already moved state to Scaling/Rebalancing/Emergency,
+// the helper only completes the deferred calculator Idle → Stable transition
+// after the local assignment is applied and acked. The post-Stable monitor set
+// always starts, regardless of apply success or state path; the monitors handle
+// whatever state they find.
 //
 // Apply boundedness: applyInitialAssignment internally calls
 // handoffCoordinator.Apply(m.ctx, ...) which is unbounded per attempt.
@@ -103,6 +105,27 @@ func (m *Manager) casToStableFromWaitingAssignment() {
 		})
 	}
 	m.metrics.RecordStateTransition(StateWaitingAssignment, StateStable, 0)
+}
+
+func isCalculatorOwnedActiveState(state State) bool {
+	return state == StateScaling || state == StateRebalancing || state == StateEmergency
+}
+
+func (m *Manager) markStartupAssignmentApplied() {
+	if !m.startupAssignmentApplied.CompareAndSwap(false, true) {
+		return
+	}
+
+	m.casToStableFromWaitingAssignment()
+
+	if !isCalculatorOwnedActiveState(m.State()) {
+		return
+	}
+	if m.calculator == nil || m.calculator.GetState() != types.CalcStateIdle {
+		return
+	}
+
+	m.transitionState(StateStable)
 }
 
 // startPostStableMonitors launches the four monitor goroutines that drive
