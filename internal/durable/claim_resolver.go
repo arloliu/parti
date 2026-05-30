@@ -994,6 +994,10 @@ func (r *ClaimBasedResolver) reconcileOnce(ctx context.Context) {
 	// this set, an unreadable key would fall through to the tombstone pass below
 	// and be staged as a synthetic delete at R+1 — an irreversible poison.
 	unreadable := make(map[string]struct{})
+	// firstReadErr keeps one sample of the per-key Get errors for the aggregated
+	// observability log below (F-D2c). Per-key logging would be a storm during a
+	// whole-bucket read fault, so we log once per pass with the count.
+	var firstReadErr error
 
 	for _, k := range keys {
 		if r.claimsPref != "" && !strings.HasPrefix(k, r.claimsPref) {
@@ -1004,6 +1008,9 @@ func (r *ClaimBasedResolver) reconcileOnce(ctx context.Context) {
 			// Listed-but-unreadable: record the pid so the tombstone pass
 			// skips it. The next reconcile pass retries the read.
 			unreadable[strings.TrimPrefix(k, r.claimsPref)] = struct{}{}
+			if firstReadErr == nil {
+				firstReadErr = err
+			}
 			continue
 		}
 		// Defensive: skip delete-operation entries; we tombstone separately
@@ -1022,6 +1029,17 @@ func (r *ClaimBasedResolver) reconcileOnce(ctx context.Context) {
 			}
 		}
 		pendingByPID[pid] = pending{op: "upsert", data: entry.Value(), revision: entry.Revision()}
+	}
+
+	// Observability (F-D2c): surface the previously-swallowed per-key read
+	// failures. A non-zero count means the bucket is listing keys but failing to
+	// read some of them (the quorum-loss "Keys-ok/Get-fail" window) — the signal
+	// that, before the F-D2a fix, was silently converted into permanent
+	// tombstones. One aggregated line per pass avoids a log storm under a
+	// whole-bucket read fault.
+	if len(unreadable) > 0 && r.logger != nil {
+		r.logger.Warn("claim resolver reconcile: listed keys were unreadable this pass",
+			"unreadable_count", len(unreadable), "sample_error", firstReadErr)
 	}
 
 	// Iterate over the pre-Keys snapshot, NOT the live cache. Any
