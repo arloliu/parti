@@ -175,16 +175,34 @@ func rfBuildStream(t *testing.T, ctx context.Context, realJS jetstream.JetStream
 	require.NoError(t, err)
 }
 
-// rfBuildWorkerStack constructs one worker: a consumer.Dynamic (pull-gating +
-// processing gate + auto-created claim resolver reading the WRAPPED handoff KV)
-// wired into a Manager via WithWorkerConsumerUpdater. The manager runs two-phase
-// handoff. faultJS is handed to BOTH NewDynamic and NewManager.
+// rfBuildWorkerStack builds a worker with the default (60s startup) config and
+// no manager hooks. See rfBuildWorkerStackCfg for the construction details.
 func rfBuildWorkerStack(
 	t *testing.T,
 	ctx context.Context,
 	faultJS jetstream.JetStream,
 	src parti.PartitionSource,
 	index int,
+) *rfWorkerStack {
+	t.Helper()
+
+	return rfBuildWorkerStackCfg(t, ctx, faultJS, src, index, nil, nil)
+}
+
+// rfBuildWorkerStackCfg constructs one worker: a consumer.Dynamic (pull-gating +
+// processing gate + auto-created claim resolver reading the WRAPPED handoff KV)
+// wired into a Manager via WithWorkerConsumerUpdater. The manager runs two-phase
+// handoff. faultJS is handed to BOTH NewDynamic and NewManager. cfgFn customizes
+// the manager Config (applied after the defaults) and hooksFn customizes the
+// manager Hooks; either may be nil.
+func rfBuildWorkerStackCfg(
+	t *testing.T,
+	ctx context.Context,
+	faultJS jetstream.JetStream,
+	src parti.PartitionSource,
+	index int,
+	cfgFn func(*parti.Config),
+	hooksFn func(*parti.Hooks),
 ) *rfWorkerStack {
 	t.Helper()
 
@@ -231,10 +249,18 @@ func rfBuildWorkerStack(
 	cfg.KVBuckets.HandoffBucket = rfHandoffBucket
 	cfg.WorkerIDMax = 8
 	cfg.StartupTimeout = 60 * time.Second
+	if cfgFn != nil {
+		cfgFn(&cfg)
+	}
 
-	mgr, err := parti.NewManager(&cfg, faultJS, src, strategy.NewConsistentHash(),
-		parti.WithWorkerConsumerUpdater(dyn),
-	)
+	opts := []parti.Option{parti.WithWorkerConsumerUpdater(dyn)}
+	if hooksFn != nil {
+		var h parti.Hooks
+		hooksFn(&h)
+		opts = append(opts, parti.WithHooks(&h)) // WithHooks takes *Hooks
+	}
+
+	mgr, err := parti.NewManager(&cfg, faultJS, src, strategy.NewConsistentHash(), opts...)
 	require.NoError(t, err)
 	s.mgr = mgr
 	t.Cleanup(func() { _ = mgr.Stop(context.Background()) })
