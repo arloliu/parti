@@ -52,6 +52,16 @@ func (r *hookRecorder) snapshot() []error {
 	return out
 }
 
+func (r *hookRecorder) last() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.errs) == 0 {
+		return nil
+	}
+
+	return r.errs[len(r.errs)-1]
+}
+
 // gaugeMetrics is a SourceMetrics implementation that exposes the
 // most-recent SetSourceBucketMissing value so tests can assert on the
 // transitions without scraping logs.
@@ -73,6 +83,14 @@ type f6aFixture struct {
 	js     jetstream.JetStream
 	ctx    context.Context
 	bucket string
+}
+
+type deadlineKV struct {
+	jetstream.KeyValue
+}
+
+func (k deadlineKV) Get(context.Context, string) (jetstream.KeyValueEntry, error) {
+	return nil, context.DeadlineExceeded
 }
 
 // newKVForF6ATest spins an embedded NATS, creates a fresh source
@@ -309,4 +327,28 @@ func TestNatsKV_F6A_DefaultCooldown_PureUnit(t *testing.T) {
 	// Non-matching error must not advance the counters or fire.
 	require.False(t, src.noteBucketUnavailable(errors.New("unrelated")))
 	require.Equal(t, int64(1), rec.calls.Load())
+}
+
+func TestNatsKV_SourceUnavailable_DeadlineExceededThreshold(t *testing.T) {
+	t.Parallel()
+
+	rec := &hookRecorder{}
+	gauge := &gaugeMetrics{}
+	src := &NatsKV{
+		kv:                  deadlineKV{},
+		key:                 "config",
+		metrics:             gauge,
+		unavailableHook:     rec.fn(),
+		unavailableCooldown: 10 * time.Millisecond,
+	}
+
+	src.reconcileOnce(t.Context())
+
+	require.Equal(t, int64(1), rec.calls.Load(),
+		"deadline-exceeded source reads must fire the source-unavailable hook")
+	require.True(t, gauge.missing.Load(),
+		"deadline-exceeded source reads must set the unavailable gauge")
+	require.ErrorIs(t, rec.last(), context.DeadlineExceeded)
+	require.False(t, isBucketUnavailableErr(rec.last()),
+		"deadline-exceeded source reads are an unavailable-source signal, not bucket deletion")
 }
