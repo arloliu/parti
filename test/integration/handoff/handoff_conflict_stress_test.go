@@ -123,8 +123,11 @@ func TestHandoffConflictStress(t *testing.T) {
 	for _, p := range curParts {
 		ids = append(ids, p.ID())
 	}
-	// Allow more time due to churn and potential lingering prepare/commit windows.
-	require.True(t, collector.WaitForAllStable(ctx, ids, 4*time.Second))
+	// Allow generous time due to churn and potential lingering prepare/commit windows.
+	// The wait polls authoritative KV state, so this deadline only bounds genuine
+	// convergence-under-load, not watcher-delivery lag; it returns as soon as KV is
+	// all-stable, so a large bound is near-free in the happy path.
+	require.True(t, collector.WaitForAllStable(ctx, ids, 15*time.Second))
 
 	// Inspect claims: current partitions must be stable; extras (from earlier expansions) must also be stable
 	claims, err := parti.InspectHandoffClaims(ctx, js, bucket)

@@ -3,7 +3,6 @@ package testutil
 import (
 	"context"
 	"encoding/json"
-	"maps"
 	"sync"
 	"time"
 
@@ -89,57 +88,38 @@ func (c *HandoffClaimCollector) run(ctx context.Context) {
 	}
 }
 
-// WaitForAllStable waits until all provided partition IDs are observed in stable state.
+// WaitForAllStable waits until all provided partition IDs reach stable state with
+// no pending owner. It polls authoritative KV state via InspectHandoffClaims rather
+// than the watcher-fed latest map: under CPU load the watcher goroutine can lag or
+// coalesce updates, leaving latest showing prepare/commit for a claim that KV has
+// already moved to Stable. Reading KV truth removes that false-timeout failure mode,
+// which is what makes this gate robust under a starved CI runner.
 // Returns true on success before deadline, false on timeout.
 func (c *HandoffClaimCollector) WaitForAllStable(ctx context.Context, ids []string, deadline time.Duration) bool {
 	end := time.Now().Add(deadline)
-	set := make(map[string]struct{}, len(ids))
-	for _, id := range ids {
-		set[id] = struct{}{}
-	}
-	for time.Now().Before(end) {
-		all := true
-		c.mu.RLock()
-		// snapshot of latest to minimize lock hold time
-		latestCopy := make(map[string]parti.HandoffClaim, len(c.latest))
-		maps.Copy(latestCopy, c.latest)
-		for id := range set {
-			claim, ok := latestCopy[id]
-			if !ok {
-				// fall back to on-demand inspect for missing keys
-				c.mu.RUnlock()
-				claims, err := parti.InspectHandoffClaims(ctx, c.js, c.bucket)
-				if err != nil {
-					return false
-				}
-				stateMap := make(map[string]parti.HandoffClaim, len(claims))
-				for _, cl := range claims {
-					stateMap[cl.PartitionID] = cl
-				}
-				cl, ok2 := stateMap[id]
-				if !ok2 || cl.State != parti.HandoffClaimStable || cl.PendingOwner != "" {
+	for {
+		if claims, err := parti.InspectHandoffClaims(ctx, c.js, c.bucket); err == nil {
+			byPID := make(map[string]parti.HandoffClaim, len(claims))
+			for _, cl := range claims {
+				byPID[cl.PartitionID] = cl
+			}
+			all := true
+			for _, id := range ids {
+				cl, ok := byPID[id]
+				if !ok || cl.State != parti.HandoffClaimStable || cl.PendingOwner != "" {
 					all = false
-				}
-				c.mu.RLock()
-				if !all {
 					break
 				}
-
-				continue
 			}
-			if claim.State != parti.HandoffClaimStable || claim.PendingOwner != "" {
-				all = false
-				break
+			if all {
+				return true
 			}
 		}
-		c.mu.RUnlock()
-		if all {
-			return true
+		if !time.Now().Before(end) {
+			return false
 		}
-		time.Sleep(25 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
-
-	return false
 }
 
 // Sequence returns the unique state transition sequence for a partition.
