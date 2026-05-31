@@ -183,6 +183,36 @@ func TestTwoPhaseRetryCAS_ExhaustsRetries(t *testing.T) {
 	require.GreaterOrEqual(t, store.calls, 3) // initial + 2 retries
 }
 
+// TestTwoPhase_RemovalGuardBlocksConsumerRemoval verifies that a non-nil RemovalGuard
+// is invoked before the consumer-updater phase and that a guard error prevents the
+// consumer updater from being called.
+func TestTwoPhase_RemovalGuardBlocksConsumerRemoval(t *testing.T) {
+	t.Parallel()
+
+	up := &mockUpdater{}
+	guardCalls := atomic.Int64{}
+	coord := New(Config{
+		Store:           newMemStore(),
+		ConsumerUpdater: up,
+		RemovalGuard: func(ctx context.Context, workerID string, previous, next types.Assignment) error {
+			guardCalls.Add(1)
+			require.Equal(t, "w1", workerID)
+			require.Len(t, previous.Partitions, 1)
+			require.Empty(t, next.Partitions)
+			return ErrRemovalPending
+		},
+		TTL: time.Minute,
+	}, true)
+
+	prev := types.Assignment{Version: 1, Partitions: []types.Partition{{Keys: []string{"p0"}}}}
+	next := types.Assignment{Version: 2, Partitions: nil}
+
+	err := coord.Apply(context.Background(), "w1", prev, next)
+	require.ErrorIs(t, err, ErrRemovalPending)
+	require.Equal(t, int64(1), guardCalls.Load())
+	require.Equal(t, int64(0), up.calls.Load(), "consumer updater must not remove subjects while guard blocks")
+}
+
 // TestTwoPhase_MultiKeyPartition_ClaimKeyedBySubjectKey verifies the coordinator
 // keys ownership claims by Partition.SubjectKey() (dot-joined) — the identity
 // the consumer's pull gating and processing gate resolve ownership by — and not

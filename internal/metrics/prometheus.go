@@ -46,6 +46,7 @@ type PrometheusCollector struct {
 	mAlertLevel         prometheus.Gauge
 	mAlertEmitted       *prometheus.CounterVec
 	mApplyAttempts      *prometheus.CounterVec
+	mHandoffRemovalPend *prometheus.CounterVec
 
 	// Calculator metrics
 	cRebalanceDuration    *prometheus.HistogramVec
@@ -273,6 +274,12 @@ func (p *PrometheusCollector) ensureRegistered() {
 			Name:      "apply_attempts_total",
 			Help:      "Total invocations of applyAssignmentWithPrev counted before the (V, LR) stale gate. A higher rate after a NATS leader re-election indicates the watcher debounce did not collapse a burst.",
 		}, []string{"worker_id"})
+		p.mHandoffRemovalPend = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: p.namespace,
+			Subsystem: "manager",
+			Name:      "handoff_removal_pending_total",
+			Help:      "Total deferrals of a handoff transfer removal by the manager removal guard: a partition removal was blocked because the gaining worker had not yet committed its claim. A sustained rate indicates a transfer stuck before commit.",
+		}, []string{"worker_id"})
 
 		// Calculator metrics
 		p.cRebalanceDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
@@ -395,6 +402,7 @@ func (p *PrometheusCollector) ensureRegistered() {
 		p.reg.MustRegister(p.mAlertLevel)
 		p.reg.MustRegister(p.mAlertEmitted)
 		p.reg.MustRegister(p.mApplyAttempts)
+		p.reg.MustRegister(p.mHandoffRemovalPend)
 
 		p.reg.MustRegister(p.cRebalanceDuration)
 		p.reg.MustRegister(p.cRebalanceAttempts)
@@ -559,6 +567,14 @@ func (p *PrometheusCollector) IncrementAlertEmitted(level string) {
 func (p *PrometheusCollector) RecordApplyAttempt(workerID string, _ int64) {
 	p.ensureRegistered()
 	p.mApplyAttempts.WithLabelValues(workerID).Inc()
+}
+
+// RecordHandoffRemovalPending increments the handoff-removal-pending counter
+// for the given worker. Label cardinality is bounded to the fleet size (one
+// series per worker); no partition label.
+func (p *PrometheusCollector) RecordHandoffRemovalPending(workerID string) {
+	p.ensureRegistered()
+	p.mHandoffRemovalPend.WithLabelValues(workerID).Inc()
 }
 
 // CalculatorMetrics implementation

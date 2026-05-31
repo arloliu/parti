@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/arloliu/parti/v2/internal/assignment"
+	"github.com/arloliu/parti/v2/internal/assignment/handoff"
 	"github.com/arloliu/parti/v2/internal/heartbeat"
 	"github.com/arloliu/parti/v2/internal/natsutil"
 	"github.com/arloliu/parti/v2/internal/retry"
@@ -1326,7 +1327,15 @@ func (m *Manager) applyAssignmentWithPrevCore(oldAssignment, newAssignment Assig
 
 	if applyErr != nil {
 		m.applyStoreMu.Unlock()
-		m.logError("handoff apply failed", "error", applyErr)
+		if errors.Is(applyErr, handoff.ErrRemovalPending) {
+			// ErrRemovalPending is expected backpressure from the removal guard
+			// while the gaining worker has not yet committed. Log at DEBUG to
+			// avoid spamming OnError on every 1s→30s retry tick.
+			m.logger.Debug("handoff apply deferred: transfer removal pending",
+				"error", applyErr)
+		} else {
+			m.logError("handoff apply failed", "error", applyErr)
+		}
 		// Apply errors deliberately do NOT route through recordKVOpError /
 		// the degraded circuit. The apply path has its own recovery
 		// (scheduleApplyRetry), and a connected-but-KV-unavailable timeout
@@ -1649,4 +1658,189 @@ func diffPartitions(oldPartitions, newPartitions []Partition) (added, removed []
 	}
 
 	return added, removed
+}
+
+// commitBatchEntry is a cached snapshot of the current "_commit" entry's
+// partition set, keyed by (version, _commit KV revision).
+type commitBatchEntry struct {
+	version int64
+	rev     uint64
+	batch   map[string]struct{}
+}
+
+// guardHandoffRemoval is the manager-side RemovalGuard wired into the two-phase
+// coordinator. It blocks the consumer-updater phase from removing a partition
+// subject during a rebalance transfer until the gaining worker has durably
+// committed its ownership claim.
+//
+// Fail CLOSED: a transfer removal is permitted ONLY when the claim positively
+// proves a DIFFERENT owner now holds the partition in a post-switch ownership
+// state. Every ambiguous, missing, or error condition returns a retryable error
+// (ErrRemovalPending or a wrapped read error). Retryable errors ride the apply
+// path's existing scheduleApplyRetry branch — they do NOT enter the degraded
+// circuit and do NOT advance the snapshot — so the worker keeps its old
+// assignment (and its subjects) and retries on backoff.
+func (m *Manager) guardHandoffRemoval(ctx context.Context, workerID string, previous, next Assignment) error {
+	removed := removedPartitions(previous.Partitions, next.Partitions)
+	if len(removed) == 0 {
+		return nil
+	}
+
+	batch, err := m.currentCommitPartitionSet(ctx, next.Version)
+	if err != nil {
+		// Retryable, NOT fail-open: routes through scheduleApplyRetry, not Degraded.
+		return fmt.Errorf("handoff removal guard commit read: %w", err)
+	}
+	if len(batch) == 0 {
+		return nil
+	}
+
+	store, ok := m.handoffClaimStore()
+	if !ok {
+		return nil
+	}
+	for _, p := range removed {
+		pid := p.SubjectKey()
+		if _, transfer := batch[pid]; !transfer {
+			// Globally removed (partition-source deletion) — release locally.
+			continue
+		}
+		claim, rev, err := store.Get(ctx, pid)
+		if err != nil {
+			return fmt.Errorf("handoff removal guard claim read %s: %w", pid, err)
+		}
+		// FAIL CLOSED via a POSITIVE allow predicate: a transfer removal is safe
+		// ONLY when the claim proves a DIFFERENT owner now holds the partition —
+		// a non-empty owner != this worker, in a post-switch ownership state
+		// (commit or stable). Everything else (rev==0 missing, self-owned any
+		// state, different-owner prepare/abort/unknown, empty owner) is retryable.
+		committedElsewhere := rev != 0 &&
+			claim.Owner != "" &&
+			claim.Owner != workerID &&
+			(claim.State == handoff.ClaimStateCommit || claim.State == handoff.ClaimStateStable)
+		if !committedElsewhere {
+			m.metrics.RecordHandoffRemovalPending(workerID)
+			m.logger.Debug("handoff removal deferred: transfer not committed",
+				"worker_id", workerID, "partition_id", pid,
+				"claim_owner", claim.Owner, "claim_state", string(claim.State), "rev", rev)
+
+			return handoff.ErrRemovalPending
+		}
+	}
+
+	return nil
+}
+
+// removedPartitions returns the partitions present in previous but absent from
+// next, keyed by SubjectKey() (the identity under which handoff claims are
+// stored). It must key by SubjectKey() and NOT reuse diffPartitions, which keys
+// by ID() (a different separator); the claim store and the commit batch both
+// key by SubjectKey().
+func removedPartitions(previous, next []types.Partition) []types.Partition {
+	nextSet := make(map[string]struct{}, len(next))
+	for _, p := range next {
+		nextSet[p.SubjectKey()] = struct{}{}
+	}
+	var removed []types.Partition
+	for _, p := range previous {
+		if _, ok := nextSet[p.SubjectKey()]; !ok {
+			removed = append(removed, p)
+		}
+	}
+
+	return removed
+}
+
+// currentCommitPartitionSet reads the singleton "assignment._commit" entry and
+// returns the set of Partition.SubjectKey() across every payload in that
+// commit, but ONLY when the commit's Version matches version. On a version
+// mismatch (the live commit has moved past the candidate, or a stale alias is
+// driving this apply) it returns an empty map so the guard does not block.
+//
+// The expensive per-payload fan-out (KV get + gzip + sha256 + json + digest per
+// payload) is memoized in commitBatchCache keyed by (version, _commit KV
+// revision). The cheap "_commit" Get runs on every call so a same-version
+// revision change still invalidates the cache. The cache exists because
+// scheduleApplyRetry repeats the failed apply on a 1s..30s backoff; without it
+// the guard would re-fan-out N payload reads every retry tick while holding
+// applyStoreMu.
+func (m *Manager) currentCommitPartitionSet(ctx context.Context, version int64) (map[string]struct{}, error) {
+	commit, rev, err := m.readCommitEntry(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if commit == nil || commit.Version != version {
+		// No commit, or the live commit is for a different version: do not block.
+		return map[string]struct{}{}, nil
+	}
+
+	// Cache hit: same version AND same _commit revision.
+	m.commitBatchMu.Lock()
+	if c := m.commitBatchCache; c != nil && c.version == version && c.rev == rev {
+		batch := c.batch
+		m.commitBatchMu.Unlock()
+
+		return batch, nil
+	}
+	m.commitBatchMu.Unlock()
+
+	batch, err := m.commitPartitionBatch(ctx, commit)
+	if err != nil {
+		return nil, err
+	}
+
+	m.commitBatchMu.Lock()
+	m.commitBatchCache = &commitBatchEntry{version: version, rev: rev, batch: batch}
+	m.commitBatchMu.Unlock()
+
+	return batch, nil
+}
+
+// readCommitEntry reads and decodes the singleton "_commit" entry, returning
+// the decoded commit and its KV revision. A missing commit returns (nil, 0,
+// nil). Replaced by testHookCommitRead when set (test-only seam).
+func (m *Manager) readCommitEntry(ctx context.Context) (*types.AssignmentCommit, uint64, error) {
+	if hook := m.testHookCommitRead; hook != nil {
+		return hook(ctx)
+	}
+
+	key := "assignment." + commitKeyName
+	entry, err := m.assignmentKV.Get(ctx, key)
+	if err != nil {
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			return nil, 0, nil
+		}
+
+		return nil, 0, fmt.Errorf("get commit entry: %w", err)
+	}
+
+	var commit types.AssignmentCommit
+	if err := json.Unmarshal(entry.Value(), &commit); err != nil {
+		return nil, 0, fmt.Errorf("unmarshal commit entry: %w", err)
+	}
+
+	return &commit, entry.Revision(), nil
+}
+
+// commitPartitionBatch fans out over the commit's payload refs, fetches and
+// verifies each payload, and collects every partition's SubjectKey() into a
+// set. Replaced by testHookCommitBatch when set (test-only seam for asserting
+// fetch-once cache behavior).
+func (m *Manager) commitPartitionBatch(ctx context.Context, commit *types.AssignmentCommit) (map[string]struct{}, error) {
+	if hook := m.testHookCommitBatch; hook != nil {
+		return hook(ctx, commit)
+	}
+
+	batch := make(map[string]struct{})
+	for _, ref := range commit.Payloads {
+		payload, err := assignment.FetchAndVerifyCommitPayload(ctx, m.assignmentKV, ref)
+		if err != nil {
+			return nil, fmt.Errorf("fetch commit payload %s: %w", ref.Key, err)
+		}
+		for _, p := range payload.Partitions {
+			batch[p.SubjectKey()] = struct{}{}
+		}
+	}
+
+	return batch, nil
 }

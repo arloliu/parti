@@ -190,10 +190,12 @@ func (m *Manager) setupHandoff(startupCtx context.Context, js jetstream.JetStrea
 	}
 
 	store := handoff.NewNATSClaimStore(handoffKV, "claims/")
+	m.handoffStore = store
 	m.handoffCoordinator = handoff.New(handoff.Config{
 		ConsumerUpdater:   m.consumerUpdater,
 		Metrics:           m.handoffMetrics,
 		Store:             store,
+		RemovalGuard:      m.guardHandoffRemoval,
 		TTL:               m.cfg.KVBuckets.HandoffTTL,
 		SweepInterval:     m.cfg.Handoff.SweepInterval,
 		MaxRetries:        m.cfg.Handoff.MaxRetries,
