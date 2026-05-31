@@ -68,6 +68,11 @@ func (n *NopMetrics) RecordApplyAttempt(_ /* workerID */ string, _ /* version */
 	// No-op
 }
 
+// RecordHandoffRemovalPending discards the handoff-removal-pending counter.
+func (n *NopMetrics) RecordHandoffRemovalPending(_ /* workerID */ string) {
+	// No-op
+}
+
 // CalculatorMetrics implementation
 
 // RecordRebalanceDuration discards the rebalance duration metric.

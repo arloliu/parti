@@ -77,6 +77,14 @@ func (t *twoPhaseCoordinator) Apply(ctx context.Context, workerID string, previo
 		}
 	}
 
+	// Phase: removal guard — block consumer removal until any in-flight transfer commits.
+	if t.cfg.RemovalGuard != nil {
+		if err := t.cfg.RemovalGuard(ctx, workerID, previous, next); err != nil {
+			inst.finish(err)
+			return err
+		}
+	}
+
 	// Phase: apply (delegate to updater for now)
 	if t.cfg.ConsumerUpdater != nil {
 		err := inst.phase("apply", func() error {

@@ -65,6 +65,17 @@ type ManagerMetrics interface {
 	//   - workerID: Stable worker identifier (caller passes m.WorkerID()).
 	//   - version: The candidate assignment's Version field.
 	RecordApplyAttempt(workerID string, version int64)
+
+	// RecordHandoffRemovalPending records one deferral of a handoff transfer
+	// removal by the manager's removal guard: the worker was about to remove a
+	// partition subject during a rebalance, but the gaining worker had not yet
+	// committed its ownership claim, so the removal was blocked (the apply
+	// returns ErrRemovalPending and is retried). A sustained rate indicates a
+	// transfer that is stuck before commit.
+	//
+	// Parameters:
+	//   - workerID: Stable worker identifier (caller passes m.WorkerID()).
+	RecordHandoffRemovalPending(workerID string)
 }
 
 // AuditMetrics defines metrics for the leader-side apply audit (§4.2) and the

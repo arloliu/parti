@@ -70,6 +70,27 @@ type Manager struct {
 	// Handoff coordinator (feature-flagged); abstracts assignment application.
 	handoffCoordinator handoff.Coordinator
 	handoffMetrics     HandoffMetricsRecorder
+	// handoffStore is the claim store backing the two-phase coordinator. It is
+	// wired during Start (setupHandoff) when the handoff KV bucket is created;
+	// nil when two-phase handoff is disabled. The removal guard reads it to
+	// decide whether a transfer has committed elsewhere.
+	handoffStore handoff.ClaimStore
+
+	// commitBatchCache memoizes the partition set of the current "_commit"
+	// entry, keyed by (commit version, _commit KV revision), so the removal
+	// guard does not re-fan-out per-payload KV reads on every apply-retry tick.
+	// Guarded by commitBatchMu (independent of applyStoreMu; lock order is
+	// applyStoreMu -> commitBatchMu, never the reverse).
+	commitBatchMu    sync.Mutex
+	commitBatchCache *commitBatchEntry
+
+	// testHookCommitRead, when non-nil, replaces the live "_commit" KV read in
+	// currentCommitPartitionSet. Test-only seam; nil in production.
+	testHookCommitRead func(ctx context.Context) (*types.AssignmentCommit, uint64, error)
+	// testHookCommitBatch, when non-nil, replaces the per-payload fan-out in
+	// currentCommitPartitionSet (called only on a cache miss). Test-only seam
+	// for asserting fetch-once cache behavior; nil in production.
+	testHookCommitBatch func(ctx context.Context, commit *types.AssignmentCommit) (map[string]struct{}, error)
 
 	// Two-phase resume tracking
 	// Populated at startup if we detect in-flight claims that require resumption.
@@ -907,6 +928,17 @@ func (m *Manager) SetCapability(capBit uint32, active bool) {
 	} else {
 		m.capabilities.And(^capBit)
 	}
+}
+
+// handoffClaimStore returns the manager's handoff claim store and whether it is
+// wired. It is non-nil only when two-phase handoff is enabled and setupHandoff
+// has run. The removal guard treats a nil store as "no proof available" and
+// allows removals (no two-phase coordination in effect).
+func (m *Manager) handoffClaimStore() (handoff.ClaimStore, bool) {
+	if m.handoffStore == nil {
+		return nil, false
+	}
+	return m.handoffStore, true
 }
 
 // Capabilities returns the current capability bitmask as an atomic snapshot.

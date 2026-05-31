@@ -2,10 +2,16 @@ package handoff
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/arloliu/parti/v2/types"
 )
+
+// ErrRemovalPending is returned by a RemovalGuard to signal that the handoff
+// removal is not yet safe to execute (i.e. the in-flight transfer has not
+// committed). Callers may treat this as a retryable condition.
+var ErrRemovalPending = errors.New("handoff removal pending")
 
 // Coordinator abstracts partition handoff application for a single worker.
 //
@@ -68,12 +74,25 @@ type ConsumerUpdater interface {
 	UpdateWorkerConsumer(ctx context.Context, workerID string, partitions []types.Partition) error
 }
 
+// RemovalGuard is an optional hook invoked immediately before the consumer-updater
+// phase of Apply. It allows the caller to block partition-subject removal while an
+// in-flight transfer to another worker has not yet committed. When the guard returns
+// a non-nil error (typically ErrRemovalPending for retryable waits), Apply returns
+// that error without calling the ConsumerUpdater. A nil RemovalGuard is a complete
+// no-op.
+type RemovalGuard func(ctx context.Context, workerID string, previous, next types.Assignment) error
+
 // Config configures a Coordinator.
 // All fields are optional; a nil ConsumerUpdater produces a no-op behavior.
 type Config struct {
 	ConsumerUpdater ConsumerUpdater
-	Metrics         MetricsRecorder
-	Now             Now
+	// RemovalGuard optionally blocks consumer removal of partitions whose transfer
+	// has not committed yet. Called immediately before the consumer-updater phase.
+	// Must return ErrRemovalPending for retryable handoff-transfer waits.
+	// A nil RemovalGuard is a complete no-op.
+	RemovalGuard RemovalGuard
+	Metrics      MetricsRecorder
+	Now          Now
 	// Logger is optional structured logger for transition logs.
 	// When nil, logging is disabled in the coordinator.
 	Logger types.Logger
