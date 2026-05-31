@@ -1,0 +1,58 @@
+# Per-version handoff claim write-fault scenario.
+#
+# A scheduled handoff_claim_write_fault overlaps a scale-down event. Scale-down
+# forces a new assignment version and ownership movement while writes to
+# parti-handoff claims/* fail with context.DeadlineExceeded. The non-vacuity
+# gate requires at least one claim write to fault, and the existing
+# message/ownership/gap gates must still pass after recovery.
+
+simulation:
+  duration: 2m
+  mode: all-in-one
+  cooldown: 30s
+
+nats:
+  mode: embedded
+
+partitions:
+  count: 10
+  message_rate_per_partition: 1
+  distribution: uniform
+
+producers:
+  count: 1
+
+workers:
+  count: 3
+  assignment_strategy: WeightedConsistentHash
+  enforce_exclusive_consumption: true
+  processing_delay:
+    min: 1ms
+    max: 5ms
+
+chaos:
+  enabled: true
+  interval: "3600s-3601s"
+  events: []
+  min_workers: 2
+  scheduled_events:
+    - at: 35s
+      event: handoff_claim_write_fault
+      params:
+        duration: 20s
+    - at: 40s
+      event: scale_down
+      params:
+        count: 1
+
+coordinator:
+  gap_aging: 90s
+  slo:
+    enable_catch_up: true
+    catch_up_deadline: 60s
+    catch_up_percent: 99
+    absence_threshold: 5s
+
+metrics:
+  prometheus:
+    enabled: false

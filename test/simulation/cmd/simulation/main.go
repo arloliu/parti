@@ -43,6 +43,7 @@ var (
 	aioScaleUpOnce    int
 	aioMinWorkers     int
 	aioMaxWorkers     int
+	aioKVFaults       *simKVFaultController
 
 	// procCfg holds the active config in process-orchestrator mode so chaos
 	// handlers can resolve per-worker StableID overrides without threading
@@ -347,6 +348,9 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 	if err != nil {
 		return fmt.Errorf("failed to get JetStream: %w", err)
 	}
+	kvFaults := newSimKVFaultController()
+	js = newSimKVFaultJetStream(js, kvFaults)
+	installStartupKVFaults(ctx, kvFaults, cfg)
 
 	// Pre-create coordination KV buckets to avoid thundering herd on startup
 	// when many workers ensure the same buckets concurrently.
@@ -570,6 +574,7 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 	aioRegistry = goroutineRegistry
 	aioMinWorkers = cfg.Chaos.MinWorkers
 	aioMaxWorkers = cfg.Chaos.MaxWorkers
+	aioKVFaults = kvFaults
 
 	// Create chaos controller if enabled
 	var chaosCtrl *coordinator.ChaosController
@@ -679,9 +684,12 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 		}
 
 		workerCfg := worker.Config{
-			ID:                  workerID,
-			NC:                  workerNC,
-			JS:                  js,
+			ID: workerID,
+			NC: workerNC,
+			JS: js,
+			JetStreamWrapper: func(workerJS jetstream.JetStream) jetstream.JetStream {
+				return newSimKVFaultJetStream(workerJS, kvFaults)
+			},
 			PartitionCount:      cfg.Partitions.Count,
 			PartitionWeights:    weights,
 			AssignmentStrategy:  cfg.Workers.AssignmentStrategy,
@@ -1089,6 +1097,9 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 					invariantsErr = fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d long_disconnect_reassignment_inconclusive=%d long_disconnect_skipped=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d storage_type_violation=%d election_replicas_violation=%d kv_op_rate_ceiling_violation=%d revocation_report_dropped=%d",
 						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, ldReassignInconclusive, ldSkipped, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift, storageTypeViol, electionReplicasViol, kvOpRateCeilingViol, revocationDropped)
 				}
+				if invariantsErr == nil && scenarioHasHandoffClaimWriteFault(cfg) && handoffClaimWriteFaultInjected() == 0 {
+					invariantsErr = errors.New("handoff_claim_write_fault_injected=0: scenario expected at least one claim write to fault")
+				}
 				if invariantsErr == nil {
 					log.Printf("Stability invariants passed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d long_disconnect_reassignment_inconclusive=%d long_disconnect_skipped=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d storage_type_violation=%d election_replicas_violation=%d kv_op_rate_ceiling_violation=%d revocation_report_dropped=%d",
 						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, ldReassignInconclusive, ldSkipped, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift, storageTypeViol, electionReplicasViol, kvOpRateCeilingViol, revocationDropped)
@@ -1205,6 +1216,12 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 					// shutdown-invariant counters demand. TriggerFailure
 					// is idempotent via failureOnce, safe to call even if
 					// an earlier critical failure already wrote the report.
+					coord.TriggerFailure("Stability invariants failed at shutdown", invariantsErr)
+
+					return invariantsErr
+				}
+				if scenarioHasHandoffClaimWriteFault(cfg) && handoffClaimWriteFaultInjected() == 0 {
+					invariantsErr := errors.New("handoff_claim_write_fault_injected=0: scenario expected at least one claim write to fault")
 					coord.TriggerFailure("Stability invariants failed at shutdown", invariantsErr)
 
 					return invariantsErr
@@ -2010,7 +2027,7 @@ func handleChaosEvent(
 	case coordinator.BucketDeleteEvent, coordinator.BucketRecreateEvent, coordinator.BucketPeerTakeoverEvent,
 		coordinator.WatcherStallEvent, coordinator.StableIDClaimStealEvent,
 		coordinator.ProducerDisconnectEvent, coordinator.AssignmentCASStormEvent, coordinator.AssignmentBucketDeleteEvent,
-		coordinator.HandoffOrphanClaimWriteEvent:
+		coordinator.HandoffOrphanClaimWriteEvent, coordinator.KVUnavailableEvent, coordinator.HandoffClaimWriteFaultEvent:
 		// Process-mode dispatch is intentionally a log-and-skip per the
 		// plan's risk note (lines 386-388). Whole-bucket actions in
 		// process mode would need cross-process visibility into the
@@ -2043,7 +2060,7 @@ func handleGoroutineChaos( //nolint:cyclop,gocyclo,funlen,revive // dispatch gro
 			log.Printf("[Chaos] Skipping %s: no active workers", event)
 			return
 		}
-	case coordinator.ScaleUpEvent, coordinator.ProducerCrashEvent, coordinator.BucketDeleteEvent, coordinator.BucketRecreateEvent, coordinator.WatcherStallEvent, coordinator.StableIDTinyPoolRespawnEvent, coordinator.ProducerDisconnectEvent, coordinator.AssignmentCASStormEvent, coordinator.AssignmentBucketDeleteEvent, coordinator.HandoffOrphanClaimWriteEvent, coordinator.WorkerResumeEvent:
+	case coordinator.ScaleUpEvent, coordinator.ProducerCrashEvent, coordinator.BucketDeleteEvent, coordinator.BucketRecreateEvent, coordinator.WatcherStallEvent, coordinator.StableIDTinyPoolRespawnEvent, coordinator.ProducerDisconnectEvent, coordinator.AssignmentCASStormEvent, coordinator.AssignmentBucketDeleteEvent, coordinator.HandoffOrphanClaimWriteEvent, coordinator.WorkerResumeEvent, coordinator.KVUnavailableEvent, coordinator.HandoffClaimWriteFaultEvent:
 		_ = 0 // Dummy op to make branch different
 	default:
 		// Fallback for any other events
@@ -2279,6 +2296,12 @@ func handleGoroutineChaos( //nolint:cyclop,gocyclo,funlen,revive // dispatch gro
 		obsWindow := durationFromParams(params, "observation_window", 60*time.Second)
 		handleHandoffOrphanClaimWrite(ctx, obsWindow)
 
+	case coordinator.KVUnavailableEvent:
+		handleKVUnavailableFault(ctx, aioKVFaults, aioCoord, params)
+
+	case coordinator.HandoffClaimWriteFaultEvent:
+		handleHandoffClaimWriteFault(ctx, aioKVFaults, params)
+
 	case coordinator.WorkerResumeEvent:
 		// Phase 7b: process-mode only. All-in-one mode has no frozen-process
 		// equivalent (workers are goroutines), so this is a no-op here.
@@ -2467,9 +2490,12 @@ func spawnAllInOneWorker(parent context.Context, workerID string) bool {
 	}
 
 	wcfg := worker.Config{
-		ID:                          workerID,
-		NC:                          workerNC,
-		JS:                          aioJS,
+		ID: workerID,
+		NC: workerNC,
+		JS: aioJS,
+		JetStreamWrapper: func(workerJS jetstream.JetStream) jetstream.JetStream {
+			return newSimKVFaultJetStream(workerJS, aioKVFaults)
+		},
 		PartitionCount:              aioCfg.Partitions.Count,
 		PartitionWeights:            aioWeights,
 		AssignmentStrategy:          aioCfg.Workers.AssignmentStrategy,
@@ -3001,6 +3027,24 @@ func scenarioHasScheduledEvent(cfg *config.Config, want coordinator.ChaosEvent) 
 	return false
 }
 
+func scenarioHasChaosEvent(cfg *config.Config, want coordinator.ChaosEvent) bool {
+	if cfg == nil {
+		return false
+	}
+	if scenarioHasScheduledEvent(cfg, want) {
+		return true
+	}
+	if cfg.Chaos.Enabled {
+		for _, ev := range cfg.Chaos.Events {
+			if coordinator.ChaosEvent(ev) == want {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 // scenarioHasLongDisconnect reports whether the configured scenario
 // could fire a network_disconnect_long event — either via the random
 // chaos ticker (cfg.Chaos.Events listing "network_disconnect_long")
@@ -3011,21 +3055,18 @@ func scenarioHasScheduledEvent(cfg *config.Config, want coordinator.ChaosEvent) 
 // long_disconnect_skipped == 0. Scenarios that never schedule one
 // are exempt from this gate.
 func scenarioHasLongDisconnect(cfg *config.Config) bool {
+	return scenarioHasChaosEvent(cfg, coordinator.NetworkDisconnectLongEvent)
+}
+
+func scenarioHasHandoffClaimWriteFault(cfg *config.Config) bool {
 	if cfg == nil {
 		return false
 	}
-	if scenarioHasScheduledEvent(cfg, coordinator.NetworkDisconnectLongEvent) {
+	if cfg.Chaos.Faults.HandoffClaimWriteOnStart {
 		return true
 	}
-	if cfg.Chaos.Enabled {
-		for _, ev := range cfg.Chaos.Events {
-			if coordinator.ChaosEvent(ev) == coordinator.NetworkDisconnectLongEvent {
-				return true
-			}
-		}
-	}
 
-	return false
+	return scenarioHasChaosEvent(cfg, coordinator.HandoffClaimWriteFaultEvent)
 }
 
 // workerStateShutdownInt mirrors coordinator.workerStateShutdown (the int

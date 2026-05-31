@@ -151,6 +151,17 @@ const (
 	// state change) increments orphan_stable_claim_drift and fails the
 	// scenario. All-in-one only; process-mode logs and skips.
 	HandoffOrphanClaimWriteEvent ChaosEvent = "handoff_orphan_claim_write"
+
+	// KVUnavailableEvent faults selected manager-owned KV buckets with
+	// context.DeadlineExceeded while leaving the NATS connection connected.
+	// This exercises the connected-but-KV-unavailable / quorum-loss path
+	// that should enter Degraded with reason "kv-unavailable".
+	KVUnavailableEvent ChaosEvent = "kv_unavailable"
+
+	// HandoffClaimWriteFaultEvent faults writes to handoff claims/* keys
+	// while leaving reads and non-claim keys available. This exercises
+	// startup and version-advance apply retry/self-heal paths.
+	HandoffClaimWriteFaultEvent ChaosEvent = "handoff_claim_write_fault"
 )
 
 // ChaosController manages chaos event injection.
@@ -307,6 +318,8 @@ func (cc *ChaosController) injectEvent() {
 }
 
 // generateEventParams generates parameters for a specific chaos event.
+//
+//nolint:cyclop // exhaustive switch over chaos-event defaults; complexity grows linearly.
 func (cc *ChaosController) generateEventParams(event ChaosEvent) map[string]any {
 	params := make(map[string]any)
 
@@ -442,6 +455,17 @@ func (cc *ChaosController) generateEventParams(event ChaosEvent) map[string]any 
 		// 60s (= 2 × default Handoff.SweepInterval). Scenarios override
 		// via the YAML scheduled_events params.
 		params["observation_window"] = 60 * time.Second
+
+	case KVUnavailableEvent:
+		// Sustained connected-but-KV-unavailable fault. The dispatcher faults
+		// these buckets while the NATS connection itself stays up.
+		params["duration"] = 20 * time.Second
+		params["buckets"] = []string{"parti-election", "parti-heartbeat", "parti-stableid"}
+		params["expect_degraded"] = true
+
+	case HandoffClaimWriteFaultEvent:
+		// Claim-write fault window; scenarios choose the exact schedule.
+		params["duration"] = 20 * time.Second
 
 	default:
 		// Unknown event type, return empty params
@@ -582,6 +606,10 @@ func (e ChaosEvent) String() string {
 		return "Assignment Bucket Delete (parti-assignment, Gap 10b alias)"
 	case HandoffOrphanClaimWriteEvent:
 		return "Handoff Orphan Claim Write (Gap 5; stable-claim sweep skip)"
+	case KVUnavailableEvent:
+		return "KV Unavailable (connected KV timeout)"
+	case HandoffClaimWriteFaultEvent:
+		return "Handoff Claim Write Fault"
 	default:
 		return fmt.Sprintf("Unknown Event: %s", string(e))
 	}

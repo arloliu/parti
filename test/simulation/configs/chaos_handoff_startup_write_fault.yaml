@@ -1,0 +1,51 @@
+# Startup handoff claim write-fault scenario.
+#
+# The simulation arms the handoff claims/* write fault before workers are
+# constructed, so the initial two-phase handoff apply path sees
+# context.DeadlineExceeded while NATS remains connected. The scenario must
+# inject at least one claim write fault and then recover through the normal
+# message, ownership, degraded, and gap gates after the fault clears.
+
+simulation:
+  duration: 90s
+  mode: all-in-one
+  cooldown: 30s
+
+nats:
+  mode: embedded
+
+partitions:
+  count: 6
+  message_rate_per_partition: 1
+  distribution: uniform
+
+producers:
+  count: 1
+
+workers:
+  count: 3
+  assignment_strategy: WeightedConsistentHash
+  enforce_exclusive_consumption: true
+  processing_delay:
+    min: 1ms
+    max: 5ms
+
+chaos:
+  enabled: true
+  interval: "3600s-3601s"
+  events: []
+  faults:
+    handoff_claim_write_on_start: true
+    handoff_claim_write_duration: 10s
+
+coordinator:
+  gap_aging: 60s
+  slo:
+    enable_catch_up: true
+    catch_up_deadline: 30s
+    catch_up_percent: 99
+    absence_threshold: 5s
+
+metrics:
+  prometheus:
+    enabled: false
