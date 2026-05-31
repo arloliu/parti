@@ -19,6 +19,22 @@ import (
 // reason is preserved.
 const degradedReasonKVUnavailable = "kv-unavailable"
 
+// kvErrorEvent is one entry in the degraded-circuit error window.
+//
+// transient marks an F-D1 connected-but-KV-unavailable timeout (an
+// [ErrKVUnavailable]-wrapped deadline / no-responders from a periodic KV-op
+// site). A successful periodic KV op while not degraded clears ONLY the
+// transient entries (see [Manager.recordKVHealthyOp]), giving the F-D1 circuit
+// consecutive-error semantics. Whole-bucket-loss entries (connectivity /
+// degrading-JetStream, transient=false) are never cleared by a healthy op, so
+// they still accumulate to the threshold — preserving the AGENTS.md contract
+// that whole-bucket loss reliably drives every worker Degraded even when an
+// unaffected bucket (e.g. heartbeat) keeps succeeding.
+type kvErrorEvent struct {
+	at        time.Time
+	transient bool
+}
+
 // ErrKVUnavailable marks a KV operation that failed because its backing
 // bucket is reachable on the live NATS connection but cannot serve the op
 // (deadline / no-responders) — the quorum-loss condition the connection-status
@@ -164,14 +180,16 @@ func (m *Manager) recordKVError(err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Add error timestamp
-	m.kvErrorWindow = append(m.kvErrorWindow, now)
+	// Add error timestamp, tagged with its class so a healthy-op success can
+	// later clear the transient (F-D1) entries while leaving whole-bucket-loss
+	// entries to accumulate.
+	m.kvErrorWindow = append(m.kvErrorWindow, kvErrorEvent{at: now, transient: kvUnavailable})
 
 	// Remove errors outside the window
 	windowStart := now.Add(-m.cfg.DegradedBehavior.KVErrorWindow)
 	validIdx := 0
-	for i, t := range m.kvErrorWindow {
-		if t.After(windowStart) {
+	for i, e := range m.kvErrorWindow {
+		if e.at.After(windowStart) {
 			validIdx = i
 			break
 		}
@@ -218,13 +236,55 @@ func (m *Manager) recordKVOpError(err error) {
 	m.recordKVError(markKVUnavailable(err))
 }
 
-// recordKVSuccess records a successful KV operation and resets error count.
+// recordKVSuccess clears the ENTIRE degraded-circuit error window (both
+// transient and whole-bucket entries). It is the full reset used by the recovery
+// path (attemptRecoveryFromDegraded) after a healthy assignment read confirms KV
+// is serving again, so a freshly-recovered worker does not instantly re-trip on
+// stale window entries.
 func (m *Manager) recordKVSuccess() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	m.kvErrorWindow = m.kvErrorWindow[:0]
 	m.kvErrorCount.Store(0)
+}
+
+// recordKVHealthyOp clears the transient (F-D1 [ErrKVUnavailable]) entries from
+// the degraded-circuit window on a successful periodic KV op while the worker is
+// not degraded. This gives the F-D1 circuit consecutive-error semantics: a run
+// of connected-but-KV-unavailable timeouts only trips Degraded if no success
+// intervenes, instead of summing intermittent blips across KVErrorWindow.
+//
+// Whole-bucket-loss entries (connectivity / degrading-JetStream) are retained,
+// so a sustained whole-bucket loss still accumulates to the threshold even while
+// an unaffected high-frequency op (the heartbeat publisher) keeps succeeding —
+// preserving the AGENTS.md whole-bucket-loss contract.
+//
+// It is a no-op while degraded: recordKVError already short-circuits there so the
+// window is not growing, and the early return keeps the hot heartbeat-success
+// path (every HeartbeatInterval) off m.mu once a real outage is in progress.
+func (m *Manager) recordKVHealthyOp() {
+	if m.degradedSince.Load() != 0 {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if len(m.kvErrorWindow) == 0 {
+		return
+	}
+
+	kept := m.kvErrorWindow[:0]
+	for _, e := range m.kvErrorWindow {
+		if !e.transient {
+			kept = append(kept, e)
+		}
+	}
+	m.kvErrorWindow = kept
+
+	windowLen := min(len(kept), 0x7FFFFFFF)
+	m.kvErrorCount.Store(int32(windowLen)) // #nosec G115 - bounded above
 }
 
 // enterDegraded transitions the manager to degraded mode.

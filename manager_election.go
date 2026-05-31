@@ -422,6 +422,14 @@ func (m *Manager) startHeartbeat(kv jetstream.KeyValue) error {
 	// A connected-but-KV-unavailable timeout (quorum loss) is marked so the
 	// heartbeat-publish path degrades too — the connection monitor misses it.
 	publisher.SetOnError(m.recordKVOpError)
+	// Feed publish successes into the degraded-mode circuit's healthy-op reset so
+	// the F-D1 (connected-but-KV-unavailable) circuit has consecutive-error
+	// semantics: intermittent heartbeat-KV timeouts with a success between them
+	// do not accumulate across KVErrorWindow into a spurious Degraded. The
+	// heartbeat is the highest-frequency periodic KV op, so its success is the
+	// natural "heartbeat KV is serving" signal; whole-bucket-loss entries are
+	// untouched (see Manager.recordKVHealthyOp), preserving that contract.
+	publisher.SetOnSuccess(m.recordKVHealthyOp)
 	// Wire the capability function so the publisher reads the live bitmask on
 	// every heartbeat composition, reflecting runtime wire-up state.
 	publisher.SetCapabilitiesFn(m.Capabilities)

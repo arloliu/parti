@@ -240,8 +240,12 @@ reaches claim-lost shutdown, and a deadline/`ErrNoResponders` reaches the new re
 from the intended periodic KV-op call-sites (heartbeat / election / assignment-watcher /
 commit-watcher / stableid-renew) — NOT from the handoff apply path (see the apply-path
 boundary correction above).
-**Open decision:** is entering Degraded on transient read timeouts desirable, or does it
-cause Degraded flapping on brief blips? Tunable via `KVErrorThreshold`/`KVErrorWindow`.
+**Open decision — RESOLVED** (see [`04-fd1-flapping-decision.md`](04-fd1-flapping-decision.md)):
+entering Degraded on transient timeouts *did* flap, but via cross-blip accumulation
+(no success-reset on the Stable path), not the threshold alone. Fixed by a class-aware
+healthy-op success-reset (heartbeat success clears only the transient F-D1 entries;
+whole-bucket-loss entries still accumulate). The narrower sustained-single-bucket case
+(Finding A) is deferred.
 
 ---
 
@@ -412,8 +416,10 @@ not big-bang before or defer after).
 ## 7. Open decisions for review
 (F-D2b mechanism — event-driven, consumer-local — and F-D3 option 3a are now **decided** in
 the body above; they are no longer open.)
-1. F-D1: is auto-Degraded on transient read timeouts desirable (alerting value) vs flapping
-   risk? Default `KVErrorThreshold`/`KVErrorWindow` tuning.
+1. ~~F-D1: is auto-Degraded on transient read timeouts desirable (alerting value) vs flapping
+   risk? Default `KVErrorThreshold`/`KVErrorWindow` tuning.~~ **RESOLVED** — see
+   [`04-fd1-flapping-decision.md`](04-fd1-flapping-decision.md). Fixed via a class-aware
+   healthy-op success-reset; Finding A (sustained single-bucket flap) deferred.
 2. Should pull-gating additionally **fail-open after a bounded suppression timeout** as a
    last-resort safety net, independent of the resolver fix? (Overlaps the known-deferred
    "resolver fail-open" follow-up.)

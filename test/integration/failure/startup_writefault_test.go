@@ -88,6 +88,11 @@ type wfFaultController struct {
 	// the injected error. Lets the test assert the fault genuinely fired
 	// (non-vacuous) before disarming.
 	writeFaultsInjected atomic.Int64
+
+	// heartbeatFaultsInjected counts how many heartbeat-bucket writes actually
+	// returned the injected error. Lets a test assert the heartbeat fault
+	// genuinely fired (non-vacuous), mirroring writeFaultsInjected.
+	heartbeatFaultsInjected atomic.Int64
 }
 
 // ArmWrites enables the claim-write fault and resets the counter.
@@ -116,9 +121,15 @@ func (fc *wfFaultController) shouldFaultWrite() bool {
 	return true
 }
 
-// shouldFaultHeartbeat reports whether a heartbeat-bucket write should fault.
+// shouldFaultHeartbeat reports whether a heartbeat-bucket write should fault
+// and counts it when it does, so a test can assert the fault fired non-vacuously.
 func (fc *wfFaultController) shouldFaultHeartbeat() bool {
-	return fc.heartbeatArmed.Load()
+	if !fc.heartbeatArmed.Load() {
+		return false
+	}
+	fc.heartbeatFaultsInjected.Add(1)
+
+	return true
 }
 
 // wfFaultJetStream wraps a real jetstream.JetStream. Only the handoff-bucket KV
@@ -136,11 +147,12 @@ func newWFFaultJetStream(inner jetstream.JetStream, handoffBucket string, fc *wf
 }
 
 // newWFFaultJetStreamDual wraps BOTH the handoff bucket (claims-key writes only)
-// AND the heartbeat bucket (all writes). The dual fault drives the KV-error
+// AND the heartbeat bucket (all writes), using the fixed test bucket constants
+// rfHandoffBucket / rfHeartbeatBucket. The dual fault drives the KV-error
 // threshold circuit even when the worker's calculator has moved state out of
 // WaitingAssignment, enabling reliable Degraded entry without the startup watchdog.
-func newWFFaultJetStreamDual(inner jetstream.JetStream, handoffBucket, heartbeatBucket string, fc *wfFaultController) *wfFaultJetStream {
-	return &wfFaultJetStream{JetStream: inner, handoffBucket: handoffBucket, heartbeatBucket: heartbeatBucket, fc: fc}
+func newWFFaultJetStreamDual(inner jetstream.JetStream, fc *wfFaultController) *wfFaultJetStream {
+	return &wfFaultJetStream{JetStream: inner, handoffBucket: rfHandoffBucket, heartbeatBucket: rfHeartbeatBucket, fc: fc}
 }
 
 func (f *wfFaultJetStream) wrap(kv jetstream.KeyValue, bucket string) jetstream.KeyValue {
@@ -397,7 +409,7 @@ func TestStartupWriteFault_DegradedRecoveryDoesNotReportStableUncommitted(t *tes
 	// Dual-fault JS: handoff bucket faults claims/* writes; heartbeat bucket
 	// faults all writes. This drives the KV-error threshold circuit even when
 	// the calculator has moved state out of WaitingAssignment.
-	faultJS := newWFFaultJetStreamDual(realJS, rfHandoffBucket, rfHeartbeatBucket, fc)
+	faultJS := newWFFaultJetStreamDual(realJS, fc)
 
 	rfBuildStream(t, ctx, realJS)
 

@@ -234,3 +234,105 @@ func TestManager_LiveNATSBucketLoss_OnDegradedHook(t *testing.T) {
 	}
 	t.Logf("OnDegraded hook fired %d/%d times; reasons=%v", len(collected), clusterSize, collected)
 }
+
+// TestManager_PartialBucketLoss_HeartbeatHealthy is the masking guard for the
+// F-D1 healthy-op success-reset. It wipes every Parti-managed KV bucket EXCEPT
+// heartbeat, leaving the heartbeat bucket alive so the heartbeat publisher keeps
+// succeeding every interval and firing recordKVHealthyOp.
+//
+// The success-reset clears ONLY the transient (F-D1) error entries; whole-bucket-
+// loss errors (degrading-JetStream / connectivity, here ErrBucketNotFound from
+// the wiped stableid / election / assignment buckets) must still accumulate to
+// the threshold and drive every worker Degraded. If the reset were class-blind
+// (clearing the whole window on any heartbeat success), the surviving heartbeat
+// would mask the loss of the other buckets and the workers would never degrade.
+//
+// The all-buckets wipe in TestManager_LiveNATSBucketLoss CANNOT catch this: there
+// the heartbeat bucket is also gone, so the heartbeat publish fails and never
+// emits the success that would expose a class-mixing bug. This test keeps
+// heartbeat healthy on purpose.
+func TestManager_PartialBucketLoss_HeartbeatHealthy(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	t.Parallel()
+
+	nc, cleanup := testutil.StartEmbeddedNATS(t)
+	defer cleanup()
+
+	cfg := testutil.IntegrationTestConfig()
+	partitions := testutil.CreateTestPartitions(10)
+	src := source.NewStatic(partitions)
+	assignStrat := strategy.NewConsistentHash()
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+
+	cluster := &testutil.WorkerCluster{
+		Workers:  make([]*parti.Manager, 0),
+		Config:   cfg,
+		Source:   src,
+		Strategy: assignStrat,
+		NC:       nc,
+		JS:       js,
+		T:        t,
+	}
+	for range 3 {
+		cluster.AddWorker(ctx)
+	}
+	defer cluster.StopWorkers()
+
+	cluster.StartWorkers(ctx)
+	cluster.WaitForStableState(15 * time.Second)
+	cluster.VerifyExactlyOneLeader()
+	t.Log("phase 1: stable")
+
+	// Wipe every Parti bucket EXCEPT heartbeat. The heartbeat bucket stays alive
+	// so the heartbeat publisher keeps succeeding and firing the healthy-op reset.
+	wiped := []string{
+		cfg.KVBuckets.StableIDBucket,
+		cfg.KVBuckets.ElectionBucket,
+		cfg.KVBuckets.AssignmentBucket,
+	}
+	for _, b := range wiped {
+		if err := js.DeleteKeyValue(ctx, b); err != nil &&
+			!errors.Is(err, jetstream.ErrBucketNotFound) {
+			t.Fatalf("failed to wipe bucket %s: %v", b, err)
+		}
+	}
+	wipedAt := time.Now()
+	t.Logf("phase 2: wiped %d non-heartbeat buckets at %s", len(wiped), wipedAt.Format(time.RFC3339Nano))
+
+	// Confirm the wipe happened and the heartbeat bucket is still present (the
+	// surviving success signal whose masking we are guarding against).
+	_, err = js.KeyValue(ctx, cfg.KVBuckets.AssignmentBucket)
+	require.ErrorIs(t, err, jetstream.ErrBucketNotFound)
+	_, err = js.KeyValue(ctx, cfg.KVBuckets.HeartbeatBucket)
+	require.NoError(t, err, "heartbeat bucket must stay alive so its success-reset can run")
+
+	// Despite the healthy heartbeat clearing transient entries every interval, the
+	// whole-bucket-loss errors from the wiped buckets must still drive every worker
+	// Degraded within the bounded window.
+	const degradedWithin = 25 * time.Second
+	require.Eventually(t, func() bool {
+		active := cluster.GetActiveWorkers()
+		if len(active) != 3 {
+			return false
+		}
+		degraded := 0
+		for _, mgr := range active {
+			if mgr.State() == types.StateDegraded {
+				degraded++
+			}
+		}
+
+		return degraded == 3
+	}, degradedWithin, 500*time.Millisecond,
+		"all 3 workers must still enter Degraded within %s despite a healthy heartbeat bucket", degradedWithin)
+
+	t.Logf("phase 3: all workers Degraded within %s — class-aware reset did not mask the loss",
+		time.Since(wipedAt).Round(100*time.Millisecond))
+}
