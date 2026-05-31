@@ -308,6 +308,23 @@ type ChaosConfig struct {
 	// Storage carries Phase 8 / Gap 9 storage-assertion and
 	// burst-after-quiet (Gap 13) scenario knobs.
 	Storage StorageChaosConfig `yaml:"storage"`
+
+	// Faults carries startup-armed fault injection knobs. Scheduled chaos
+	// events are usually preferred; this is only for faults that must be
+	// active before the initial worker Start path.
+	Faults FaultsConfig `yaml:"faults"`
+}
+
+// FaultsConfig configures startup-armed fault injection.
+type FaultsConfig struct {
+	// HandoffClaimWriteOnStart arms the handoff claims/* write fault before
+	// workers are constructed. This lets startup-apply scenarios fault the
+	// first two-phase claim write.
+	HandoffClaimWriteOnStart bool `yaml:"handoff_claim_write_on_start"`
+
+	// HandoffClaimWriteDuration controls how long the startup claim-write
+	// fault remains armed. Defaults to 20s when omitted.
+	HandoffClaimWriteDuration time.Duration `yaml:"handoff_claim_write_duration"`
 }
 
 // HandoffChaosConfig configures Phase 6 / Gap 5 handoff-bucket chaos primitives.

@@ -229,8 +229,8 @@ jobs:
 
   sim-bucket-lifecycle:
     runs-on: ubuntu-latest
-    # 3 scenarios × ~3m + setup ≈ 11m worst case; 15m gives headroom.
-    timeout-minutes: 15
+    # 4 scenarios: 3 x ~3m + 90s + setup ~= 13m worst case; 18m gives headroom.
+    timeout-minutes: 18
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -246,7 +246,7 @@ jobs:
         # bucket-recreate epoch fence.
         run: |
           set -e
-          for scn in chaos_bucket_delete chaos_bucket_recreate chaos_bucket_peer_takeover; do
+          for scn in chaos_bucket_delete chaos_bucket_recreate chaos_bucket_peer_takeover chaos_kv_unavailable; do
             echo "::group::${scn}"
             ./tmp/simulation \
               --config "test/simulation/configs/${scn}.yaml" \
@@ -262,6 +262,7 @@ jobs:
           path: |
             failure_report.json
             tmp/chaos_bucket_*.log
+            tmp/chaos_kv_unavailable.log
 
   sim-natskv-source:
     runs-on: ubuntu-latest
@@ -338,8 +339,8 @@ jobs:
 
   sim-publisher-handoff:
     runs-on: ubuntu-latest
-    # 4 scenarios: 90s + 90s + 60s + 90s ≈ 6m + setup ≈ 7m; 11m gives headroom.
-    timeout-minutes: 11
+    # 6 scenarios: 90s + 90s + 60s + 90s + 90s + 2m ~= 10m + setup ~= 11m; 16m gives headroom.
+    timeout-minutes: 16
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -352,10 +353,10 @@ jobs:
       - name: Run Publisher & Handoff Scenarios
         # Phase 5 (Gaps 10a, 10b) + Phase 6 (Gap 5) — producer disconnect,
         # assignment-commit CAS storm, handoff bucket MaxAge contract,
-        # orphan stable-claim drift.
+        # orphan stable-claim drift, and handoff claim write-fault recovery.
         run: |
           set -e
-          for scn in chaos_producer_disconnect chaos_assignment_cas_storm handoff_precreate_maxage handoff_orphan_stable_claim; do
+          for scn in chaos_producer_disconnect chaos_assignment_cas_storm handoff_precreate_maxage handoff_orphan_stable_claim chaos_handoff_startup_write_fault chaos_handoff_version_write_fault; do
             echo "::group::${scn}"
             ./tmp/simulation \
               --config "test/simulation/configs/${scn}.yaml" \
@@ -372,6 +373,7 @@ jobs:
             failure_report.json
             tmp/chaos_producer_*.log
             tmp/chaos_assignment_*.log
+            tmp/chaos_handoff_*.log
             tmp/handoff_*.log
 
   sim-process-mode:

@@ -150,6 +150,7 @@ type Config struct {
 	ID                  string
 	NC                  *nats.Conn
 	JS                  jetstream.JetStream
+	JetStreamWrapper    func(jetstream.JetStream) jetstream.JetStream
 	PartitionCount      int
 	PartitionWeights    []int64
 	AssignmentStrategy  string
@@ -445,6 +446,9 @@ func NewWorker(cfg Config) (*Worker, error) { //nolint:cyclop,gocyclo // dispatc
 	js, err := jetstream.New(cfg.NC)
 	if err != nil {
 		return nil, fmt.Errorf("failed to init JetStream: %w", err)
+	}
+	if cfg.JetStreamWrapper != nil {
+		js = cfg.JetStreamWrapper(js)
 	}
 
 	dynamic, err := consumer.NewDynamic(

@@ -1,0 +1,56 @@
+# Connected-but-KV-unavailable simulation scenario.
+#
+# A scheduled kv_unavailable fault returns context.DeadlineExceeded from
+# election / heartbeat / stableid KV operations while the NATS connection stays
+# connected. The DegradedReasonOracle expects "kv-unavailable" and the normal
+# message/ownership gates must still pass after the fault clears.
+
+simulation:
+  duration: 90s
+  mode: all-in-one
+  cooldown: 30s
+
+nats:
+  mode: embedded
+
+partitions:
+  count: 6
+  message_rate_per_partition: 1
+  distribution: uniform
+
+producers:
+  count: 1
+
+workers:
+  count: 3
+  assignment_strategy: WeightedConsistentHash
+  processing_delay:
+    min: 1ms
+    max: 5ms
+
+chaos:
+  enabled: true
+  interval: "3600s-3601s"
+  events: []
+  scheduled_events:
+    - at: 20s
+      event: kv_unavailable
+      params:
+        duration: 20s
+        expect_degraded: true
+        buckets:
+          - parti-election
+          - parti-heartbeat
+          - parti-stableid
+
+coordinator:
+  gap_aging: 60s
+  slo:
+    enable_catch_up: true
+    catch_up_deadline: 30s
+    catch_up_percent: 99
+    absence_threshold: 5s
+
+metrics:
+  prometheus:
+    enabled: false
