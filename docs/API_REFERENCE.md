@@ -883,6 +883,19 @@ Called once when the manager transitions into degraded mode.
 - `ctx`: Lifecycle context (cancelled during shutdown)
 - `reason`: Description of the cause (e.g., "NATS connection down", "KV error threshold exceeded")
 
+Known reasons and operator intent:
+
+| Reason | Class | Operator action |
+|---|---|---|
+| `NATS connection down` | ride-through if reconnecting | Keep readiness degraded until NATS is stable; rotate only if the connection is closed or the outage exceeds policy. |
+| `kv-unavailable` | connected but KV quorum unavailable | Keep readiness degraded; rotation is acceptable if the outage exceeds SLO. |
+| `KV error threshold exceeded` | Parti-owned coordination data missing/lost | Restart or rotate workers after confirming bucket loss. |
+| `bucket-recreated:<bucket>` | ambiguous Parti-owned data loss | Restart or rotate workers; inspect JetStream storage before trusting the recreated bucket. |
+| `startup-timeout` | startup apply/wait did not reach Stable in budget | Readiness rotation unless the runner recovers before the pod is replaced. |
+| `assignment-watcher-exhausted` | assignment watcher retry envelope exhausted | Restart or rotate the worker; inspect the assignment bucket and NATS logs. |
+| `stream-missing-recovery-exhausted` | dynamic consumer stream missing and no app hook recovered it | Recover the stream or rotate workers according to application ownership. |
+| `source-unavailable:<bucket>` | caller-owned source bucket unavailable | Caller/operator recovers the source bucket; Parti does not recreate it. |
+
 **Returns**:
 - `error`: Error for logging (doesn't fail manager operation)
 
@@ -1177,7 +1190,7 @@ const (
     StateScaling
     StateRebalancing
     StateEmergency
-    StateDegraded         // NEW: Degraded mode (stale cache, NATS disconnected)
+    StateDegraded         // Degraded mode (fault-specific readiness signal)
     StateShutdown
 )
 ```
@@ -1191,7 +1204,7 @@ const (
 - `StateScaling`: New workers joining, preparing to rebalance
 - `StateRebalancing`: Actively redistributing partitions
 - `StateEmergency`: Critical worker failure, emergency rebalancing
-- `StateDegraded`: **Degraded mode** - Using stale cache due to NATS connectivity loss
+- `StateDegraded`: **Degraded mode** - Fresh coordination, source, or consumer state is unreliable; use `OnDegraded` reason to choose ride-through, recovery, rotation, or operator-owned response
 - `StateShutdown`: Graceful shutdown in progress
 
 **Start return point:** `Manager.Start(ctx)` returns once the

@@ -112,6 +112,23 @@ negative; the warning is informational only, not blocking.
 `nats.RootCAs(...)`, etc. are orthogonal to the recovery posture —
 configure as your environment requires.
 
+### Degraded Reason Taxonomy
+
+`StateDegraded` is a readiness signal. The `OnDegraded` reason tells
+operators whether the expected response is ride-through, in-process
+recovery, rotation, or caller-owned recovery.
+
+| Reason | Class | Operator action |
+|---|---|---|
+| `NATS connection down` | ride-through if reconnecting | Keep readiness degraded until NATS is stable; rotate only if the connection is closed or the outage exceeds policy. |
+| `kv-unavailable` | connected but KV quorum unavailable | Keep readiness degraded; rotation is acceptable if the outage exceeds SLO. |
+| `KV error threshold exceeded` | Parti-owned coordination data missing/lost | Restart or rotate workers after confirming bucket loss. |
+| `bucket-recreated:<bucket>` | ambiguous Parti-owned data loss | Restart or rotate workers; inspect JetStream storage before trusting the recreated bucket. |
+| `startup-timeout` | startup apply/wait did not reach Stable in budget | Readiness rotation unless the runner recovers before the pod is replaced. |
+| `assignment-watcher-exhausted` | assignment watcher retry envelope exhausted | Restart or rotate the worker; inspect the assignment bucket and NATS logs. |
+| `stream-missing-recovery-exhausted` | dynamic consumer stream missing and no app hook recovered it | Recover the stream or rotate workers according to application ownership. |
+| `source-unavailable:<bucket>` | caller-owned source bucket unavailable | Caller/operator recovers the source bucket; Parti does not recreate it. |
+
 ### KV Bucket Pre-Creation (Optional)
 
 Parti auto-creates KV buckets, but you can pre-create them for custom settings:
