@@ -40,7 +40,7 @@ func TestDegradedRecovery_Rearm_NoRace(t *testing.T) {
 	realJS, err := jetstream.New(nc)
 	require.NoError(t, err)
 	fc := &wfFaultController{}
-	faultJS := newWFFaultJetStreamDual(realJS, rfHandoffBucket, rfHeartbeatBucket, fc)
+	faultJS := newWFFaultJetStreamDual(realJS, fc)
 
 	rfBuildStream(t, ctx, realJS)
 

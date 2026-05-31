@@ -69,14 +69,15 @@ type Publisher struct {
 	capsFn func() uint32
 
 	// mu guards lifecycle fields: started, ticker, metrics, workerID.
-	mu      sync.Mutex
-	started bool
-	stopCh  chan struct{}
-	doneCh  chan struct{}
-	ticker  *time.Ticker
-	logger  types.Logger
-	metrics types.WorkerMetrics
-	onError atomic.Pointer[func(error)]
+	mu        sync.Mutex
+	started   bool
+	stopCh    chan struct{}
+	doneCh    chan struct{}
+	ticker    *time.Ticker
+	logger    types.Logger
+	metrics   types.WorkerMetrics
+	onError   atomic.Pointer[func(error)]
+	onSuccess atomic.Pointer[func()]
 
 	// inFlight guards concurrent publish attempts; set atomically before
 	// spawning the goroutine, cleared when the goroutine completes.
@@ -171,6 +172,27 @@ func (p *Publisher) SetOnError(fn func(error)) {
 		return
 	}
 	p.onError.Store(&fn)
+}
+
+// SetOnSuccess registers a callback invoked after each successful periodic
+// heartbeat publish (the background loop only — not the initial Start publish or
+// PublishNow, mirroring SetOnError). The manager wires this to its degraded-mode
+// circuit's healthy-op reset so a run of intermittent KV-unavailable timeouts
+// only trips Degraded when no success intervenes.
+//
+// Safe to call concurrently with the running publish goroutine; the update is
+// atomic and the hot path reads without locking. Passing nil clears the
+// callback. The callback must not block on the Publisher's own lifecycle
+// (do not call Stop from inside it).
+//
+// Parameters:
+//   - fn: Callback invoked after a successful publish; ignored if nil
+func (p *Publisher) SetOnSuccess(fn func()) {
+	if fn == nil {
+		p.onSuccess.Store(nil)
+		return
+	}
+	p.onSuccess.Store(&fn)
 }
 
 // SetAppliedAssignment records a successfully applied assignment.
@@ -337,6 +359,9 @@ func (p *Publisher) publishLoop() {
 					}
 				} else {
 					p.recordMetric(true)
+					if onSuccess := p.onSuccess.Load(); onSuccess != nil {
+						(*onSuccess)()
+					}
 				}
 			})
 		}

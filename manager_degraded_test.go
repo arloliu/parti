@@ -113,6 +113,73 @@ func TestManager_recordKVError(t *testing.T) {
 	})
 }
 
+// TestManager_recordKVHealthyOp pins the F-D1 healthy-op success-reset: a
+// successful periodic KV op while not degraded clears ONLY the transient
+// (connected-but-KV-unavailable) error entries, leaving whole-bucket-loss
+// entries to accumulate. This is what gives the F-D1 circuit consecutive-error
+// semantics without masking a whole-bucket loss when an unaffected bucket keeps
+// succeeding.
+func TestManager_recordKVHealthyOp(t *testing.T) {
+	logger := logging.NewNop()
+	nopMetrics := metrics.NewNop()
+	cfg := Config{
+		DegradedBehavior: DegradedBehaviorConfig{
+			// High threshold so recording errors never trips Degraded here —
+			// this test isolates the window bookkeeping, not the trip path.
+			KVErrorThreshold: 100,
+			KVErrorWindow:    10 * time.Second,
+		},
+		DegradedAlert: DegradedAlertConfig{AlertInterval: 1 * time.Minute},
+	}
+
+	t.Run("clears only transient entries", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		m := &Manager{logger: logger, cfg: cfg, hooks: &Hooks{}, metrics: nopMetrics, ctx: ctx, cancel: cancel}
+
+		m.recordKVError(nats.ErrTimeout)                  // whole-bucket (connectivity)
+		m.recordKVOpError(context.DeadlineExceeded)       // transient (F-D1)
+		m.recordKVOpError(context.DeadlineExceeded)       // transient (F-D1)
+		require.Equal(t, int32(3), m.kvErrorCount.Load()) // sanity
+
+		m.recordKVHealthyOp()
+
+		require.Equal(t, int32(1), m.kvErrorCount.Load(),
+			"only the whole-bucket entry must survive a healthy op")
+		require.Len(t, m.kvErrorWindow, 1)
+		require.False(t, m.kvErrorWindow[0].transient,
+			"the surviving entry must be the whole-bucket-loss one")
+	})
+
+	t.Run("no-op while degraded", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		m := &Manager{logger: logger, cfg: cfg, hooks: &Hooks{}, metrics: nopMetrics, ctx: ctx, cancel: cancel}
+
+		// Record BEFORE marking degraded (recordKVError short-circuits while degraded).
+		m.recordKVError(nats.ErrTimeout)            // whole-bucket
+		m.recordKVOpError(context.DeadlineExceeded) // transient
+		require.Equal(t, int32(2), m.kvErrorCount.Load())
+
+		m.degradedSince.Store(time.Now().UnixNano())
+		m.recordKVHealthyOp()
+
+		require.Equal(t, int32(2), m.kvErrorCount.Load(),
+			"a healthy op while degraded must not touch the window")
+		require.Len(t, m.kvErrorWindow, 2)
+	})
+
+	t.Run("empty window is a no-op", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		m := &Manager{logger: logger, cfg: cfg, hooks: &Hooks{}, metrics: nopMetrics, ctx: ctx, cancel: cancel}
+
+		m.recordKVHealthyOp()
+		require.Equal(t, int32(0), m.kvErrorCount.Load())
+		require.Empty(t, m.kvErrorWindow)
+	})
+}
+
 func TestManager_enterDegraded_rejectsShutdown(t *testing.T) {
 	logger := logging.NewNop()
 	nopMetrics := metrics.NewNop()

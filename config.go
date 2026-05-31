@@ -195,12 +195,16 @@ type DegradedBehaviorConfig struct {
 	// Default: 5 seconds.
 	ExitThreshold time.Duration `yaml:"exitThreshold" default:"5s" validate:"gte=0"`
 
-	// KVErrorThreshold is the number of consecutive KV operation errors that trigger degraded mode.
+	// KVErrorThreshold is the number of KV operation errors within KVErrorWindow
+	// that trigger degraded mode. Whole-bucket-loss errors accumulate across the
+	// window; connected-but-KV-unavailable timeouts are reset by any successful
+	// periodic KV op while not degraded, so for that class it is a consecutive
+	// run with no intervening success rather than blips summed across the window.
 	// Default: 5 errors.
 	KVErrorThreshold int `yaml:"kvErrorThreshold" default:"5" validate:"gte=0"`
 
-	// KVErrorWindow is the time window for counting consecutive KV errors.
-	// Errors outside this window are not counted.
+	// KVErrorWindow is the time window for counting KV errors toward
+	// KVErrorThreshold. Errors outside this window are not counted.
 	// Default: 30 seconds.
 	KVErrorWindow time.Duration `yaml:"kvErrorWindow" default:"30s" validate:"gte=0"`
 

@@ -169,20 +169,20 @@ type Manager struct {
 	startupAssignmentApplied atomic.Bool
 
 	// Degraded mode tracking
-	degradedSince          atomic.Int64  // UnixNano when degraded mode entered; 0 = not degraded
-	lastAssignmentAt       atomic.Int64  // UnixNano of last successful assignment fetch; 0 = never
-	lastAssignment         atomic.Value  // []Partition - cached assignment during degraded
-	connMonitorOnce        sync.Once     // ensures single connection monitor goroutine
-	postStableMonitorsOnce sync.Once     // ensures startPostStableMonitors fires exactly once
-	startedAt              time.Time     // absolute wall-clock anchor for StartupTimeout budget; set in prepareStart
-	startupWatchdogFired   atomic.Bool   // guards startStartupTimeoutWatchdog (one-shot)
-	connMonitorStop        chan struct{} // channel to stop connection monitor
-	connDownSince          atomic.Int64  // UnixNano when connectivity lost; 0 = up
-	connUpSince            atomic.Int64  // UnixNano when connectivity restored; 0 = none
-	kvErrorCount           atomic.Int32  // consecutive KV error count
-	kvErrorWindow          []time.Time   // timestamps of recent KV errors (protected by mu)
-	recoveryGraceStart     atomic.Int64  // UnixNano when recovery grace period started; 0 = not in grace
-	inRecoveryGrace        atomic.Bool   // true during recovery grace period
+	degradedSince          atomic.Int64   // UnixNano when degraded mode entered; 0 = not degraded
+	lastAssignmentAt       atomic.Int64   // UnixNano of last successful assignment fetch; 0 = never
+	lastAssignment         atomic.Value   // []Partition - cached assignment during degraded
+	connMonitorOnce        sync.Once      // ensures single connection monitor goroutine
+	postStableMonitorsOnce sync.Once      // ensures startPostStableMonitors fires exactly once
+	startedAt              time.Time      // absolute wall-clock anchor for StartupTimeout budget; set in prepareStart
+	startupWatchdogFired   atomic.Bool    // guards startStartupTimeoutWatchdog (one-shot)
+	connMonitorStop        chan struct{}  // channel to stop connection monitor
+	connDownSince          atomic.Int64   // UnixNano when connectivity lost; 0 = up
+	connUpSince            atomic.Int64   // UnixNano when connectivity restored; 0 = none
+	kvErrorCount           atomic.Int32   // count of KV errors in the current window (protected by mu)
+	kvErrorWindow          []kvErrorEvent // recent KV errors, class-tagged (protected by mu)
+	recoveryGraceStart     atomic.Int64   // UnixNano when recovery grace period started; 0 = not in grace
+	inRecoveryGrace        atomic.Bool    // true during recovery grace period
 
 	// Lifecycle management
 	ctx    context.Context
@@ -396,7 +396,7 @@ func NewManager(cfg *Config, js jetstream.JetStream, source PartitionSource, str
 		consumerUpdater: options.consumerUpdater,
 		capReporter:     asCapabilityReporter(options.consumerUpdater),
 		connMonitorStop: make(chan struct{}),
-		kvErrorWindow:   make([]time.Time, 0, cfg.DegradedBehavior.KVErrorThreshold),
+		kvErrorWindow:   make([]kvErrorEvent, 0, cfg.DegradedBehavior.KVErrorThreshold),
 		// Initialize internal components with Nop implementations
 		idClaimer:  stableid.NewNop(),
 		election:   election.NewNopElection(),

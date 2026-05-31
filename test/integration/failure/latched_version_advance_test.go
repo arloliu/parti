@@ -62,7 +62,7 @@ func TestLatchedWorkerVersionAdvance_DoesNotReportStableUncommitted(t *testing.T
 
 	// Dual-fault JS: handoff bucket faults claims/* writes; heartbeat bucket
 	// faults all writes (drives the KV-error circuit from any active state).
-	faultJS := newWFFaultJetStreamDual(realJS, rfHandoffBucket, rfHeartbeatBucket, fc)
+	faultJS := newWFFaultJetStreamDual(realJS, fc)
 
 	rfBuildStream(t, ctx, realJS)
 
