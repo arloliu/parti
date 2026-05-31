@@ -38,8 +38,11 @@ const (
 	// StateEmergency indicates an error condition requiring intervention.
 	StateEmergency
 
-	// StateDegraded indicates operating with cached data due to NATS connectivity issues.
-	// The system continues processing with last known good assignments while NATS is unavailable.
+	// StateDegraded indicates Parti has detected a fault that makes fresh
+	// coordination, source, or consumer state unreliable. Workers continue with
+	// last known safe local state where possible; the OnDegraded reason determines
+	// whether the intended response is ride-through, in-process recovery,
+	// readiness rotation, or operator-owned recovery.
 	StateDegraded
 
 	// StateShutdown indicates graceful shutdown is in progress.
