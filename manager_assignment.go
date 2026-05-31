@@ -1168,6 +1168,53 @@ func isApplyResultStale(candidate, cur Assignment) bool {
 	return candidate.LeaderRevision < cur.LeaderRevision
 }
 
+// committedAssignmentOrEmpty returns the last successfully applied+acked
+// assignment, or the zero Assignment if none has been committed yet (the
+// never-applied bootstrap state). It is the prev source for the apply prepare
+// diff and the comparand for currentAssignmentApplied.
+func (m *Manager) committedAssignmentOrEmpty() Assignment {
+	if c := m.committedAssignment.Load(); c != nil {
+		return *c
+	}
+
+	return Assignment{}
+}
+
+// currentAssignmentApplied reports whether the given (current snapshot)
+// assignment has been successfully applied+acked by this worker — i.e. whether
+// committedAssignment matches it on the full APPLIED-ACK identity. This is the
+// safe-to-exit-degraded predicate.
+//
+// Identity = (Version, LeaderRevision, PartitionSetDigest, source-rev-when-known),
+// NOT version alone and NOT gated on a non-empty partition set:
+//   - The publisher can expose two DIFFERENT partition sets at the SAME version
+//     for one worker (a legacy alias is written at the proposed version before
+//     the commit CAS, and an aborted/CAS-lost batch does not advance the version),
+//     so version alone can mistake an uncommitted set for committed.
+//   - Empty/revoke-all assignments (commit case (d)) are real versioned apply
+//     paths and all share digest 0, so Version/LR are what distinguish them —
+//     hence no len()>0 gate.
+//   - The applied-ack heartbeat carries LeaderRevision/source and the leader
+//     audit flags a mismatch as behind, so a same-version/same-digest/higher-LR
+//     assignment that only entered the snapshot via refresh is not "applied"
+//     until re-acked.
+//
+// The source comparison is AUDIT-SHAPED (asymmetric), mirroring the leader
+// audit: a source-unknown current target always matches (the degraded refresh
+// reads the legacy alias, which drops source revision, so re-arming to "fix" it
+// would only downgrade a stronger known-source ack); a source-known current
+// target requires the committed assignment known and equal.
+func (m *Manager) currentAssignmentApplied(cur Assignment) bool {
+	c := m.committedAssignmentOrEmpty()
+	srcOK := !cur.SourceRevisionKnown ||
+		(c.SourceRevisionKnown && c.SourceRevision == cur.SourceRevision)
+
+	return c.Version == cur.Version &&
+		c.LeaderRevision == cur.LeaderRevision &&
+		srcOK &&
+		types.PartitionSetDigest(c.Partitions) == types.PartitionSetDigest(cur.Partitions)
+}
+
 // applyAssignmentWithPrev is the fresh-version apply entry (watcher,
 // commit, alias, initial-bootstrap). It jitters once before calling core,
 // so a fleet of workers observing the same fresh version spreads its
@@ -1252,18 +1299,18 @@ func (m *Manager) applyAssignmentWithPrevCore(oldAssignment, newAssignment Assig
 		return nil
 	}
 
-	// Startup bootstrap override (F-D3): until the worker has committed its
-	// claims at least once, force an empty prev so the prepare diff is the FULL
-	// partition set. waitForAssignment pre-advances the snapshot to the full set
-	// with no claims written, so any apply that reads CurrentAssignment() for
-	// prev would otherwise compute an empty diff and write zero claims. This must
-	// live here (not only in scheduleApplyRetry): a startup-window version
-	// advance (cold-start/rejoin rebalance to V+1) applies V+1 against the
-	// pre-advanced snapshot AND stale-gate-drops the V retry, so fixing the retry
-	// alone does not self-heal. One-way: once committed, prev is CurrentAssignment().
-	if !m.initialClaimsCommitted.Load() {
-		oldAssignment = Assignment{}
-	}
+	// Prev source = the last assignment this worker successfully applied+acked
+	// (committedAssignment), NOT the passed-in oldAssignment / CurrentAssignment().
+	// The snapshot can be advanced past a failed apply by the recovery refresh's
+	// monotonicStore, so reading CurrentAssignment() for prev would compute an
+	// empty diff and write zero claims. Generalizes the old F-D3 bootstrap
+	// override (never-committed → committed empty → full set) to cover a latched
+	// worker whose version-advance apply failed before Store: committed stays the
+	// prior version, so the diff still acquires the new partitions. This must live
+	// here (not only in scheduleApplyRetry): a startup-window or post-commit
+	// version advance applies V+1 against a snapshot the refresh may have advanced
+	// AND stale-gate-drops the V retry, so fixing the retry alone does not heal.
+	oldAssignment = m.committedAssignmentOrEmpty()
 
 	// 1) Apply via handoff coordinator. Must succeed before we touch the
 	//    in-memory snapshot or publish the ack.
@@ -1298,14 +1345,6 @@ func (m *Manager) applyAssignmentWithPrevCore(oldAssignment, newAssignment Assig
 		return applyErr
 	}
 
-	// Latch initialClaimsCommitted on the first successful full-set write. During
-	// bootstrap the override forced oldAssignment empty, so an empty-prev →
-	// non-empty-next success genuinely wrote every claim — never a claim-less
-	// empty diff. One-way latch.
-	if len(oldAssignment.Partitions) == 0 && len(newAssignment.Partitions) > 0 {
-		m.initialClaimsCommitted.Store(true)
-	}
-
 	// 2) Advance lastSeenLeaderRevision (stale-leader fence) — single
 	//    source of truth for LSR. LSR MUST advance BEFORE the snapshot
 	//    Store, otherwise a concurrent handleCommitValueOnce reader could
@@ -1319,7 +1358,17 @@ func (m *Manager) applyAssignmentWithPrevCore(oldAssignment, newAssignment Assig
 		hook(newAssignment)
 	}
 
-	// 4) Update heartbeat in-memory snapshot INSIDE the lock (W15+W16
+	// 4) Record this assignment as the last one successfully applied+acked, on
+	//    EVERY successful apply (not one-way). Stored AFTER the snapshot Store so
+	//    a lock-free recovery-guard read can at worst see new-snapshot/old-
+	//    committed (a redundant re-arm), never a missed heal. This is the prev
+	//    source for the next apply AND the source of truth for "is the current
+	//    snapshot assignment applied?" (currentAssignmentApplied, used by the
+	//    degraded-recovery guard). newAssignment is a by-value parameter, so its
+	//    address is a distinct per-call pointer nothing mutates after this point.
+	m.committedAssignment.Store(&newAssignment)
+
+	// 5) Update heartbeat in-memory snapshot INSIDE the lock (W15+W16
 	//    plan-review v2 P0-B fix). The heartbeat publisher's monotonicity
 	//    is V-only (internal/heartbeat/publisher.go:170-195); equal-V Acks
 	//    overwrite LeaderRevision unconditionally. If we released the lock

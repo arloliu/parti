@@ -145,17 +145,25 @@ type Manager struct {
 	stashedApplyRetry atomic.Pointer[Assignment]
 	applyRetryActive  atomic.Bool
 
-	// initialClaimsCommitted latches true the first time an apply genuinely
-	// commits the full claim set to the handoff bucket. Until then,
-	// applyAssignmentWithPrevCore forces an empty prev on every apply so the
-	// prepare diff is the full partition set, instead of computing an empty
-	// diff against the snapshot waitForAssignment pre-advanced with no claims
-	// written — the startup empty-diff self-exit (F-D3). One-way latch.
-	initialClaimsCommitted atomic.Bool
+	// committedAssignment holds the last assignment this worker successfully
+	// applied+acked (a successful handoffCoordinator.Apply through
+	// applyAssignmentWithPrevCore). Two roles: (1) the prev source for every
+	// apply's prepare diff; (2) the source of truth for "is the current snapshot
+	// assignment applied?" — compared on the full applied-ack identity (Version,
+	// LeaderRevision, PartitionSetDigest, source-rev-when-known) by
+	// currentAssignmentApplied, used by the degraded-recovery guard. Starts as
+	// the zero Assignment (empty@0): a never-applied worker diffs against empty →
+	// writes the full set (subsuming the old F-D3 one-way bootstrap override),
+	// and its identity matches a cold empty snapshot so a never-assigned worker
+	// still exits recovery. Distinct from the snapshot (m.assignment): the
+	// snapshot can be advanced past a failed apply by the recovery refresh's
+	// monotonicStore; committedAssignment advances only on a successful apply.
+	// Distinct from startupAssignmentApplied (readiness CAS).
+	committedAssignment atomic.Pointer[Assignment]
 
 	// startupAssignmentApplied latches true once the startup assignment path
 	// has made this manager's local assignment visible and acked it. It is
-	// separate from initialClaimsCommitted: empty-source startup has no claims
+	// separate from committedAssignment: empty-source startup has no claims
 	// to commit but still must be allowed to reach StateStable after its
 	// applied-empty ack.
 	startupAssignmentApplied atomic.Bool
@@ -671,6 +679,12 @@ func (m *Manager) applyInitialAssignment(ctx context.Context, assignmentKV jetst
 		// PublishNow is faithful to the cold-empty intent.
 		empty := Assignment{}
 		m.assignment.Store(empty)
+		// Record the applied-empty assignment as committed too, so the
+		// "committedAssignment = last applied+acked" invariant holds by
+		// construction at this ack site (not by zero-value coincidence). The
+		// degraded-recovery guard then exits for a cold-empty worker because the
+		// snapshot and committed identities match.
+		m.committedAssignment.Store(&empty)
 		m.heartbeat.SetAppliedAssignment(heartbeat.AppliedAssignment{
 			LeaderRevision:        0,
 			AppliedVersion:        0,

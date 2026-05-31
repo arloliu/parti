@@ -1,12 +1,15 @@
 package parti
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+var errTestApplyFailed = errors.New("test: apply failed")
 
 // fullBootstrapAssignment is the pre-advanced full set a worker's
 // waitForAssignment stores into the snapshot before any claim is written.
@@ -62,25 +65,25 @@ func TestScheduleApplyRetry_BeforeBootstrap_UsesEmptyPrev(t *testing.T) {
 			"empty diff and a zero-claim self-exit (the startup empty-diff bug)")
 }
 
-// TestApplyCore_BootstrapOverridesPrevAndLatches pins both halves of the fix on
-// the shared apply pipeline: while no claims have been committed, core overrides
-// the caller's (pre-advanced) prev to empty so the coordinator writes the full
-// claim set, and a successful such write latches initialClaimsCommitted.
-func TestApplyCore_BootstrapOverridesPrevAndLatches(t *testing.T) {
+// TestApplyCore_BootstrapOverridesPrevAndRecordsCommitted pins both halves of the
+// fix on the shared apply pipeline: while nothing has been committed, core uses an
+// empty prev (committedAssignmentOrEmpty) so the coordinator writes the full claim
+// set, and a successful write records the applied assignment as committed.
+func TestApplyCore_BootstrapOverridesPrevAndRecordsCommitted(t *testing.T) {
 	t.Parallel()
 	m, rh, _, _ := newTestManager(t)
 
 	full := fullBootstrapAssignment()
 	m.assignment.Store(full) // waitForAssignment pre-advance
-	require.False(t, m.initialClaimsCommitted.Load(), "precondition: flag starts false")
+	require.Nil(t, m.committedAssignment.Load(), "precondition: nothing committed yet")
 
 	// A same-version apply with the pre-advanced full prev (what the
-	// commit/assignment watcher computes after the pre-advance). Core must
-	// override prev to empty so claims are actually written.
+	// commit/assignment watcher computes after the pre-advance). Core must use the
+	// empty committed prev so claims are actually written.
 	require.NoError(t, m.applyAssignmentWithPrevCore(full, full))
 
-	require.True(t, m.initialClaimsCommitted.Load(),
-		"a full-set bootstrap write must latch initialClaimsCommitted")
+	require.True(t, m.currentAssignmentApplied(full),
+		"a full-set bootstrap write must record full as the committed assignment")
 
 	rh.mu.Lock()
 	defer rh.mu.Unlock()
@@ -107,12 +110,12 @@ func TestApplyCore_BootstrapVersionAdvanceOverridesPrev(t *testing.T) {
 	v1 := fullBootstrapAssignment()
 	v2 := Assignment{Version: 2, LeaderRevision: 6, Partitions: v1.Partitions}
 	m.assignment.Store(v1) // waitForAssignment pre-advanced to V1, no claims written
-	require.False(t, m.initialClaimsCommitted.Load())
+	require.Nil(t, m.committedAssignment.Load())
 
 	// Apply the NEWER version against the pre-advanced V1 snapshot.
 	require.NoError(t, m.applyAssignmentWithPrevCore(v1, v2))
 
-	require.True(t, m.initialClaimsCommitted.Load(), "the V2 bootstrap write must latch the flag")
+	require.True(t, m.currentAssignmentApplied(v2), "the V2 bootstrap write must record V2 as committed")
 
 	rh.mu.Lock()
 	defer rh.mu.Unlock()
@@ -137,7 +140,8 @@ func TestApplyCore_AfterBootstrapKeepsPrev(t *testing.T) {
 		Partitions:     append(append([]Partition(nil), full.Partitions...), Partition{Keys: []string{"p3"}}),
 	}
 	m.assignment.Store(full)
-	m.initialClaimsCommitted.Store(true) // claims already committed at least once
+	committed := full
+	m.committedAssignment.Store(&committed) // full already applied+acked
 
 	require.NoError(t, m.applyAssignmentWithPrevCore(full, next))
 
@@ -145,17 +149,77 @@ func TestApplyCore_AfterBootstrapKeepsPrev(t *testing.T) {
 	defer rh.mu.Unlock()
 	require.Len(t, rh.applyPrevs, 1)
 	require.Equal(t, full.Partitions, rh.applyPrevs[0].Partitions,
-		"after the first claim commit core MUST use the real prev (incremental semantics), "+
-			"not a forced empty prev")
+		"once an assignment is committed core MUST diff against the committed prev "+
+			"(incremental semantics), not a forced empty prev")
+}
+
+// TestApplyCore_PrevIsCommittedNotSnapshot pins the heart of the fix: the apply
+// prev is the last COMMITTED assignment, not the current snapshot. After V1 is
+// committed, a refresh advances the snapshot to V2 (no apply); a subsequent V2
+// apply must still diff against committed V1 — otherwise prev==snapshot==V2
+// yields an empty diff and writes zero claims (the latched-worker defect).
+func TestApplyCore_PrevIsCommittedNotSnapshot(t *testing.T) {
+	t.Parallel()
+	m, rh, _, _ := newTestManager(t)
+
+	v1 := Assignment{Version: 1, LeaderRevision: 5, Partitions: []Partition{{Keys: []string{"p0"}}}}
+	v2 := Assignment{Version: 2, LeaderRevision: 8, Partitions: []Partition{{Keys: []string{"p0"}}, {Keys: []string{"p1"}}}}
+
+	// Commit V1 (bootstrap: empty prev → full set → committed = V1).
+	m.assignment.Store(v1)
+	require.NoError(t, m.applyAssignmentWithPrevCore(v1, v1))
+
+	// Refresh advances the snapshot to V2 WITHOUT an apply (the monotonicStore
+	// the recovery refresh performs). committed stays V1.
+	m.assignment.Store(v2)
+
+	// Apply V2: prev MUST be committed V1, NOT the V2 snapshot.
+	require.NoError(t, m.applyAssignmentWithPrevCore(v2, v2))
+
+	rh.mu.Lock()
+	defer rh.mu.Unlock()
+	require.Len(t, rh.applyPrevs, 2)
+	require.Empty(t, rh.applyPrevs[0].Partitions, "bootstrap V1 apply uses empty prev")
+	require.Equal(t, v1.Partitions, rh.applyPrevs[1].Partitions,
+		"the V2 apply MUST diff against committed V1, not the pre-advanced V2 snapshot "+
+			"(otherwise an empty diff writes zero claims)")
+}
+
+// TestApplyCore_CommittedUpdatesEveryApply pins that committedAssignment tracks
+// EVERY successful apply (not a one-way latch) and that a FAILED apply does not
+// advance it.
+func TestApplyCore_CommittedUpdatesEveryApply(t *testing.T) {
+	t.Parallel()
+	m, rh, _, _ := newTestManager(t)
+
+	v1 := Assignment{Version: 1, LeaderRevision: 5, Partitions: []Partition{{Keys: []string{"p0"}}}}
+	v2 := Assignment{Version: 2, LeaderRevision: 6, Partitions: []Partition{{Keys: []string{"p0"}}, {Keys: []string{"p1"}}}}
+	v3 := Assignment{Version: 3, LeaderRevision: 7, Partitions: []Partition{{Keys: []string{"p0"}}, {Keys: []string{"p1"}}, {Keys: []string{"p2"}}}}
+
+	m.assignment.Store(v1)
+	require.NoError(t, m.applyAssignmentWithPrevCore(v1, v1))
+	require.True(t, m.currentAssignmentApplied(v1), "committed tracks V1")
+
+	m.assignment.Store(v2)
+	require.NoError(t, m.applyAssignmentWithPrevCore(v2, v2))
+	require.True(t, m.currentAssignmentApplied(v2), "committed advances to V2 (not one-way)")
+	require.False(t, m.currentAssignmentApplied(v1), "committed no longer matches V1")
+
+	// A FAILED apply must not advance committed.
+	rh.errOnce.Store(&errBox{err: errTestApplyFailed})
+	m.assignment.Store(v3)
+	require.Error(t, m.applyAssignmentWithPrevCore(v3, v3))
+	require.True(t, m.currentAssignmentApplied(v2), "a failed apply must NOT advance committed past V2")
+	require.False(t, m.currentAssignmentApplied(v3), "committed must not record the failed V3")
 }
 
 // TestApplyCore_ConcurrentBootstrapApplies_LatchOnceNoRace pins the
 // concurrent-apply safety the override relies on (AGENTS.md concurrency
 // discipline). The retry goroutine and the commit/assignment watchers can all
 // issue an apply for the same bootstrap version at once. applyStoreMu serializes
-// them and the latch is read+written under that lock, so EXACTLY ONE apply takes
-// the empty-prev bootstrap path; the rest observe the latched flag and use the
-// real prev. Run under -race by the suite.
+// them and committedAssignment is read+written under that lock, so EXACTLY ONE
+// apply takes the empty-prev bootstrap path; the rest observe the recorded
+// committed assignment and use it as prev. Run under -race by the suite.
 func TestApplyCore_ConcurrentBootstrapApplies_LatchOnceNoRace(t *testing.T) {
 	t.Parallel()
 	m, rh, _, _ := newTestManager(t)
@@ -174,7 +238,7 @@ func TestApplyCore_ConcurrentBootstrapApplies_LatchOnceNoRace(t *testing.T) {
 	}
 	wg.Wait()
 
-	require.True(t, m.initialClaimsCommitted.Load(), "the bootstrap write must latch the flag")
+	require.True(t, m.currentAssignmentApplied(full), "the bootstrap write must record full as committed")
 
 	rh.mu.Lock()
 	defer rh.mu.Unlock()
@@ -186,6 +250,6 @@ func TestApplyCore_ConcurrentBootstrapApplies_LatchOnceNoRace(t *testing.T) {
 		}
 	}
 	require.Equal(t, 1, empties,
-		"exactly one apply may take the empty-prev bootstrap path; once it latches the flag "+
-			"the rest must use the real prev (no redundant full-set re-write)")
+		"exactly one apply may take the empty-prev bootstrap path; once it records committed "+
+			"the rest must use the committed prev (no redundant full-set re-write)")
 }

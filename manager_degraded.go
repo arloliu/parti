@@ -332,18 +332,21 @@ func (m *Manager) attemptRecoveryFromDegraded() {
 	// since recordKVError short-circuits while degraded).
 	m.recordKVSuccess()
 
-	// Startup self-heal guard (F-D3 follow-up): a worker that started during a
-	// sustained claim-write fault holds a non-empty assignment but never latched
-	// initialClaimsCommitted — no claims were ever written. exitDegraded here
-	// would report StateStable with zero claims. Instead stay degraded and re-arm
-	// a bootstrap apply so the worker actively self-heals once writes recover. cur
-	// is read AFTER the refresh so the re-arm targets the current version (the
-	// refresh may have advanced it during the degraded window). The guard keys on
-	// STATE, not the degraded reason — exiting with an uncommitted non-empty
-	// assignment is wrong regardless of why we degraded. See
-	// docs/plans/auto-healing-quorum-loss-fix/01-degraded-recovery-self-heal-plan.md.
+	// Self-heal guard: stay degraded + re-arm an apply whenever the current
+	// snapshot assignment has NOT been successfully applied+acked
+	// (currentAssignmentApplied compares the full applied-ack identity). This
+	// covers a worker that never committed (startup bootstrap, F-D3), one that
+	// committed an earlier version but whose version-advance apply failed (the
+	// latched case), an empty/revoke-all apply that failed, and a same-version
+	// higher-LR re-issue that only entered the snapshot via the refresh above.
+	// exitDegraded here would otherwise report StateStable with the current
+	// assignment's claims/ack uncommitted. cur is read AFTER the refresh so the
+	// re-arm targets the post-refresh assignment. The guard keys on commitment
+	// STATE, not the degraded reason — exiting with an unapplied assignment is
+	// wrong regardless of why we degraded. See
+	// docs/plans/auto-healing-quorum-loss-fix/03-latched-worker-version-commitment-plan.md.
 	cur := m.CurrentAssignment()
-	if !m.initialClaimsCommitted.Load() && len(cur.Partitions) > 0 {
+	if !m.currentAssignmentApplied(cur) {
 		m.scheduleApplyRetry(cur)
 		return
 	}
