@@ -123,15 +123,16 @@ func WithUpdateRetries(n int) NatsKVOption {
 	}
 }
 
-// SourceUnavailableHook fires when the partition-source bucket is observed to
-// be missing on the live connection. The reconciler and watcher-restart paths
-// each see a distinct error from the nats.go surface — [jetstream.ErrBucketNotFound]
-// from a fresh [jetstream.JetStream.KeyValue] lookup, [jetstream.ErrStreamNotFound]
-// from a cached watcher rebind, or [nats.ErrNoResponders] from a cached
-// [jetstream.KeyValue.Get] — and all three classify to bucket-loss internally.
-// The err argument hands the original sentinel to the hook so implementations
-// can log or surface the raw cause, but **do not gate readiness on a single
-// sentinel type**: when the hook fires, the bucket is missing.
+// SourceUnavailableHook fires when the partition-source bucket is unavailable
+// on the live connection. The reconciler and watcher-restart paths each see a
+// distinct error from the nats.go surface — [jetstream.ErrBucketNotFound] from
+// a fresh [jetstream.JetStream.KeyValue] lookup, [jetstream.ErrStreamNotFound]
+// from a cached watcher rebind, [nats.ErrNoResponders] from a cached
+// [jetstream.KeyValue.Get], or [context.DeadlineExceeded] when the source
+// bucket cannot answer in time. The err argument hands the original sentinel to
+// the hook so implementations can log or surface the raw cause, but **do not
+// gate readiness on a single sentinel type**: when the hook fires, the source is
+// unavailable.
 //
 // The library does not recreate the bucket — it is caller-owned, and rebuilding
 // it requires the operator's provisioning flow. Wire this hook into your
@@ -151,7 +152,7 @@ func WithUpdateRetries(n int) NatsKVOption {
 type SourceUnavailableHook func(err error)
 
 // WithUnavailableHook registers a [SourceUnavailableHook] that fires when
-// the partition-source bucket is observed to be missing. See
+// the partition-source bucket is observed to be unavailable. See
 // [SourceUnavailableHook] for the deadlock contract and rate-limiting
 // behavior. Without a hook, the loss is still logged and the metric is
 // set (when [WithMetrics] is configured), but no escalation runs — the
@@ -170,9 +171,9 @@ func WithUnavailableHook(h SourceUnavailableHook) NatsKVOption {
 
 // WithMetrics wires a [types.SourceMetrics] collector. The source uses the
 // collector to expose its `parti_source_bucket_missing` gauge (set to 1 on
-// the first bucket-loss observation — see [SourceUnavailableHook] for the
-// empirical error surface — cleared on the next successful operation). The
-// default is [types.NopSourceMetrics].
+// the first unavailable-source observation — see [SourceUnavailableHook] for
+// the empirical error surface — cleared on the next successful operation).
+// The default is [types.NopSourceMetrics].
 //
 // Parameters:
 //   - m: SourceMetrics collector
@@ -1195,9 +1196,13 @@ func (s *NatsKV) reconcileOnce(ctx context.Context) {
 
 			return
 		}
-		// Bucket-missing escalation: see noteBucketUnavailable Godoc.
+		// Source-unavailable escalation: see noteBucketUnavailable Godoc.
 		if s.noteBucketUnavailable(err) {
-			s.logError("reconcile: source bucket missing", "error", err)
+			msg := "reconcile: source unavailable"
+			if isBucketUnavailableErr(err) {
+				msg = "reconcile: source bucket missing"
+			}
+			s.logError(msg, "error", err)
 
 			return
 		}
@@ -1394,10 +1399,15 @@ func isBucketUnavailableErr(err error) bool {
 		errors.Is(err, nats.ErrNoResponders)
 }
 
-// noteBucketUnavailable handles the bucket-missing escalation path. Returns
-// true iff err is classified as a bucket-unavailable error (see
-// isBucketUnavailableErr), so the caller can substitute a more specific
-// log line for the existing generic one.
+func isSourceUnavailableErr(err error) bool {
+	return isBucketUnavailableErr(err) ||
+		errors.Is(err, context.DeadlineExceeded)
+}
+
+// noteBucketUnavailable handles the source-unavailable escalation path. Returns
+// true iff err is classified as source-unavailable (see
+// isSourceUnavailableErr), so the caller can substitute a more specific log
+// line for the existing generic one.
 //
 // On a match:
 //   - Sets the SourceBucketMissing gauge to true (idempotent — no-op if
@@ -1409,7 +1419,7 @@ func isBucketUnavailableErr(err error) bool {
 // The hook is invoked OUTSIDE unavailableMu so a long-running caller hook
 // does not block the reconcile / restart goroutine's next tick.
 func (s *NatsKV) noteBucketUnavailable(err error) bool {
-	if !isBucketUnavailableErr(err) {
+	if !isSourceUnavailableErr(err) {
 		return false
 	}
 	s.unavailableMu.Lock()
