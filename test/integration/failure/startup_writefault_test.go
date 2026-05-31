@@ -361,16 +361,14 @@ func TestStartupWriteFault_SelfHealsWithoutRestart(t *testing.T) {
 // the leader's calculator drives the manager out of WaitingAssignment long
 // before the watchdog triggers. The heartbeat fault is the correct seam for an
 // integration test that must produce Degraded while the leader's claim-write
-// fault keeps initialClaimsCommitted latched false.
+// fault keeps the assignment uncommitted.
 const rfHeartbeatBucket = "parti-heartbeat"
 
 // TestStartupWriteFault_DegradedRecoveryDoesNotReportStableUncommitted pins the
 // F-D3 follow-up: under a dual write fault (claims/* on the handoff bucket AND
 // all writes on the heartbeat bucket), the KV-error threshold circuit enters
-// Degraded while initialClaimsCommitted is still false and the assignment is
-// non-empty. On the parent, recovery refreshes (a read) and exits to Stable with
-// zero claims written (RED). With the fix the worker STAYS degraded (latch false,
-// non-empty assignment) and self-heals once writes recover — no restart. Also
+// Degraded while the assignment is non-empty and uncommitted. On the parent, recovery refreshes (a read) and exits to Stable with
+// zero claims written (RED). With the fix the worker STAYS degraded (uncommitted, non-empty assignment) and self-heals once writes recover — no restart. Also
 // asserts OnDegraded fires exactly once across the held window (cross-feature
 // contract 3).
 //
@@ -379,7 +377,7 @@ const rfHeartbeatBucket = "parti-heartbeat"
 // Rebalancing before the watchdog triggers. Faulting heartbeat bucket writes
 // (all-key mode) routes errors through the heartbeat publisher's
 // recordKVOpError → KV-error threshold → enterDegraded, which fires from any
-// active state. Claim-write faults keep initialClaimsCommitted false so the
+// active state. Claim-write faults keep the assignment uncommitted so the
 // guard in attemptRecoveryFromDegraded has something to act on.
 func TestStartupWriteFault_DegradedRecoveryDoesNotReportStableUncommitted(t *testing.T) {
 	if testing.Short() {

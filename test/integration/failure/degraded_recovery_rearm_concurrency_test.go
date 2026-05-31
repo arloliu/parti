@@ -16,8 +16,8 @@ import (
 // TestDegradedRecovery_Rearm_NoRace stresses the degraded-recovery re-arm side
 // effect (scheduleApplyRetry issued from the connection-monitor goroutine) added
 // by the F-D3 follow-up, concurrently with assignment-version churn. The worker
-// is held in the real unlatched-Degraded state by a DUAL write fault: claims/*
-// on the handoff bucket (keeps initialClaimsCommitted false) plus all writes on
+// is held in the real uncommitted-Degraded state by a DUAL write fault: claims/*
+// on the handoff bucket (keeps the assignment uncommitted) plus all writes on
 // the heartbeat bucket (drives Degraded via the KV-error threshold circuit, which
 // fires from any state — the startup-timeout watchdog does not, because a
 // single-worker leader's calculator leaves WaitingAssignment within ~1s). While
