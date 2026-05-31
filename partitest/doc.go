@@ -7,6 +7,7 @@
 // Key utilities:
 //   - StartEmbeddedNATS: Single NATS server with JetStream
 //   - StartEmbeddedNATSCluster: 3-node NATS cluster for HA testing
+//   - StartEmbeddedNATSClusterN: N-node NATS cluster for gated HA probes
 //   - CreateJetStreamKV: Convenience wrapper for KV bucket creation
 //
 // Example usage:
