@@ -122,7 +122,26 @@ func StartEmbeddedNATS(t testing.TB) (*server.Server, *nats.Conn) {
 func StartEmbeddedNATSCluster(t *testing.T) ([]*server.Server, *nats.Conn) {
 	t.Helper()
 
-	const clusterSize = 3
+	return startEmbeddedNATSClusterSized(t, 3)
+}
+
+// StartEmbeddedNATSClusterN starts an N-node NATS cluster with JetStream for HA testing.
+//
+// This is useful for tests that need more than the default 3 nodes, such as
+// RF3 selective peer-fault scenarios where one replicated stream loses quorum
+// while JetStream meta quorum remains available.
+func StartEmbeddedNATSClusterN(t *testing.T, clusterSize int) ([]*server.Server, *nats.Conn) {
+	t.Helper()
+	if clusterSize < 1 {
+		t.Fatalf("clusterSize must be >= 1, got %d", clusterSize)
+	}
+
+	return startEmbeddedNATSClusterSized(t, clusterSize)
+}
+
+func startEmbeddedNATSClusterSized(t *testing.T, clusterSize int) ([]*server.Server, *nats.Conn) {
+	t.Helper()
+
 	servers := make([]*server.Server, clusterSize)
 
 	// Pre-allocate ports to avoid chicken-and-egg problem with routes

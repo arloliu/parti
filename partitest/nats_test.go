@@ -73,6 +73,22 @@ func TestStartEmbeddedNATSCluster(t *testing.T) {
 	require.NotNil(t, js)
 }
 
+func TestStartEmbeddedNATSClusterN_FiveNodes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping cluster test in short mode")
+	}
+
+	servers, nc := StartEmbeddedNATSClusterN(t, 5)
+
+	require.Len(t, servers, 5)
+	require.NotNil(t, nc)
+	require.True(t, nc.IsConnected())
+	for i, s := range servers {
+		require.True(t, s.ReadyForConnections(5*time.Second), "server %d not ready", i)
+		require.GreaterOrEqual(t, s.NumRoutes(), 4, "server %d should have at least 4 routes", i)
+	}
+}
+
 func TestCreateJetStreamKV(t *testing.T) {
 	ctx := t.Context()
 	_, nc := StartEmbeddedNATS(t)
