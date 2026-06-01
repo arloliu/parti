@@ -60,7 +60,13 @@ func TestHandoffConflictStress(t *testing.T) {
 	baseCfg.Handoff.BaseBackoff = 10 * time.Millisecond
 	baseCfg.Handoff.MaxBackoff = 50 * time.Millisecond
 	baseCfg.Handoff.Jitter = 0.5
-	baseCfg.Handoff.SweepInterval = 0 // allow opportunistic sweeps per-apply
+	// Short sweep interval so the coordinator's reconcile promptly finalizes any
+	// claim left in `commit` by a stabilizePhase whose CAS exhausted MaxRetries
+	// under two-worker contention. Without a prompt sweep, such a claim would
+	// converge only when its advisory HandoffTTL elapses (minutes). NOTE: 0 here
+	// would coerce to the 30s default (coordinator.New), which is why this test
+	// must set an explicit small value.
+	baseCfg.Handoff.SweepInterval = 1 * time.Second
 
 	// Start two managers
 	mr := testutil.NewHandoffMetricsRecorder()
@@ -123,10 +129,11 @@ func TestHandoffConflictStress(t *testing.T) {
 	for _, p := range curParts {
 		ids = append(ids, p.ID())
 	}
-	// Allow generous time due to churn and potential lingering prepare/commit windows.
-	// The wait polls authoritative KV state, so this deadline only bounds genuine
-	// convergence-under-load, not watcher-delivery lag; it returns as soon as KV is
-	// all-stable, so a large bound is near-free in the happy path.
+	// Convergence is sweep-bounded: any claim left in `commit` by a contended
+	// stabilizePhase is finalized to stable by the coordinator's reconcile within
+	// ~SweepInterval (1s above), so this deadline has ample headroom under load. The
+	// wait polls authoritative KV state, so it bounds genuine convergence, not
+	// watcher-delivery lag, and returns as soon as KV is all-stable.
 	require.True(t, collector.WaitForAllStable(ctx, ids, 15*time.Second))
 
 	// Inspect claims: current partitions must be stable; extras (from earlier expansions) must also be stable

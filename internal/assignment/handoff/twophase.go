@@ -439,7 +439,19 @@ func (t *twoPhaseCoordinator) stabilizePhase(ctx context.Context, workerID strin
 	return g.Wait()
 }
 
-// maybeSweepClaims opportunistically resets expired non-stable claims back to stable.
+// maybeSweepClaims reconciles non-terminal claims toward stable. It handles two cases:
+//
+//  1. A committed-but-unstabilized claim (state == commit, no PendingOwner) is
+//     finalized to stable PROMPTLY, independent of TTL. This recovers a
+//     stabilizePhase that was missed because its CAS exhausted MaxRetries under
+//     two-worker contention; without it, convergence would have to wait for the
+//     advisory HandoffTTL to elapse (the expired-reset path below). NextCommit
+//     always clears PendingOwner and sets the committed Owner, so finalizing via
+//     NextStable preserves ownership and only completes the bookkeeping — exactly
+//     what stabilizePhase would have done.
+//  2. Any expired non-stable claim (e.g. a stuck prepare) is reset back to stable,
+//     clearing any pending owner (the original stale-claim safety net).
+//
 // Runs at most once per configured sweep interval. If SweepInterval <= 0, runs every time.
 func (t *twoPhaseCoordinator) maybeSweepClaims(ctx context.Context) {
 	if t.cfg.Store == nil {
@@ -469,37 +481,61 @@ func (t *twoPhaseCoordinator) maybeSweepClaims(ctx context.Context) {
 		if err != nil || rev == 0 {
 			continue
 		}
-		if !cur.IsExpired(now) {
+		// Cheap pre-filter: skip a CAS write attempt when this claim needs no
+		// reconcile (the common case for already-stable claims).
+		if sweepReconcile(&cur, now) == nil {
 			continue
 		}
-		if cur.State == ClaimStateStable {
-			// Leave stable claims as-is; no deletion API available.
-			continue
-		}
-		// Reset to stable and clear any pending owner.
 		if err := t.updateClaim(ctx, pid, func(cur *Claim) (*Claim, error) {
-			if cur == nil {
-				//nolint:nilnil // nil, nil indicates no update needed
-				return nil, nil
-			}
-			if !cur.IsExpired(now) {
-				//nolint:nilnil // nil, nil indicates no update needed
-				return nil, nil
-			}
-			if cur.State == ClaimStateStable {
-				//nolint:nilnil // nil, nil indicates no update needed
-				return nil, nil
-			}
-			next := cur.Copy()
-			next.State = ClaimStateStable
-			next.PendingOwner = ""
-			next.LastUpdated = now.UTC()
-
-			return &next, nil
+			// Re-decide on the fresh read inside the CAS loop.
+			return sweepReconcile(cur, now), nil
 		}); err == nil {
 			if t.cfg.Metrics != nil {
 				t.cfg.Metrics.IncClaimStoreStale()
 			}
 		}
 	}
+}
+
+// sweepReconcile computes the stable-finalizing transition the sweep should apply
+// to a non-terminal claim, or nil if none is needed. It mirrors the two reconcile
+// triggers documented on maybeSweepClaims:
+//
+//  1. a committed-but-unstabilized claim (state == commit, no PendingOwner) is
+//     finalized to stable via NextStable, preserving the committed Owner — this
+//     recovers a stabilizePhase missed under CAS contention, independent of TTL;
+//  2. any expired non-stable claim is reset to stable with its pending owner
+//     cleared (the original stale-claim safety net).
+//
+// Terminal states (stable, abort) and legitimately in-flight, non-expired prepares
+// are left untouched.
+//
+// SAFETY INVARIANT: the commit->stable finalize is owner-agnostic and
+// TTL-independent because the implemented lifecycle is strictly
+// stable->prepare->commit->stable. A `commit` claim already has its final Owner
+// baked in (NextCommit) and the prior owner was guarded out before commit
+// (RemovalGuard, which treats commit and stable identically as removal-safe), so
+// any coordinator may complete the bookkeeping with NextStable. This relies on
+// there being NO commit->abort transition: ClaimStateAbort currently has no
+// writer. If an abort-from-commit revert is introduced, revisit this — an eager
+// finalize could CAS-win against the revert and lock in the new owner.
+func sweepReconcile(cur *Claim, now time.Time) *Claim {
+	if cur == nil || cur.State == ClaimStateStable || cur.State == ClaimStateAbort {
+		return nil
+	}
+	if cur.State == ClaimStateCommit && cur.PendingOwner == "" {
+		next := cur.NextStable(now)
+
+		return &next
+	}
+	if cur.IsExpired(now) {
+		next := cur.Copy()
+		next.State = ClaimStateStable
+		next.PendingOwner = ""
+		next.LastUpdated = now.UTC()
+
+		return &next
+	}
+
+	return nil
 }
