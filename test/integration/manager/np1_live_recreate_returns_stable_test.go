@@ -3,7 +3,6 @@ package manager_test
 import (
 	"context"
 	"errors"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -130,10 +129,6 @@ func np1HasBucketRecreatedReason(p *np1Probe) bool {
 func TestNP1_LiveBucketRecreate_MustNotReturnToStable(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
-	}
-	if os.Getenv("PARTI_RUN_NP1_LIVE_RECREATE_PROOF") == "" {
-		t.Skip("opt-in KNOWN-FAILING proof (NP-1 live wipe+recreate fleet-wide flap, workers rest Stable on empty buckets); " +
-			"set PARTI_RUN_NP1_LIVE_RECREATE_PROOF=1 to run")
 	}
 
 	t.Parallel()

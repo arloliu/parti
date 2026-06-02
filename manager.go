@@ -204,6 +204,21 @@ type Manager struct {
 	kvErrorWindow          []kvErrorEvent // recent KV errors, class-tagged (protected by mu)
 	recoveryGraceStart     atomic.Int64   // UnixNano when recovery grace period started; 0 = not in grace
 	inRecoveryGrace        atomic.Bool    // true during recovery grace period
+	// lastDegradedReason holds the reason string of the active degrade. Written by
+	// the WINNING enterDegraded immediately AFTER the degradedSince CAS (losers
+	// never write it, so there is no loser-clobber) and cleared to "" by
+	// exitDegraded BEFORE it clears degradedSince. The reason-scoped recovery gate
+	// treats an empty reason as "this entry's reason is not yet observable" and
+	// stays degraded that tick — closing the tiny post-CAS-pre-store window via the
+	// degradedSince happens-before, without converting degradedSince to a record.
+	// atomic.Value of string ("" when never degraded / between an exit and the next
+	// entry's store).
+	lastDegradedReason atomic.Value
+	// lastHeartbeatSuccessAt is the UnixNano of the most recent successful
+	// heartbeat Put (stamped unconditionally in recordKVHealthyOp, even while
+	// degraded). The reason-scoped gate uses it to confirm the failing
+	// connected-but-KV-unavailable op recovered AFTER we degraded. 0 = never.
+	lastHeartbeatSuccessAt atomic.Int64
 
 	// Lifecycle management
 	ctx    context.Context

@@ -2,7 +2,6 @@ package failure_test
 
 import (
 	"context"
-	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -49,10 +48,6 @@ import (
 func TestNP2EpochFence_NonAssignmentRecreate_DegradedDoesNotFlap(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration: skipping in short mode")
-	}
-	if os.Getenv("PARTI_RUN_NP2_EPOCH_FLAP_PROOF") == "" {
-		t.Skip("opt-in KNOWN-FAILING proof (NP-2 epoch-fence Degraded<->Stable flap); " +
-			"set PARTI_RUN_NP2_EPOCH_FLAP_PROOF=1 to run")
 	}
 
 	t.Parallel()

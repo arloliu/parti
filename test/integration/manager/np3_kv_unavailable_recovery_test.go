@@ -2,7 +2,6 @@ package manager_test
 
 import (
 	"context"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -224,10 +223,6 @@ func TestNP3_KVUnavailable_HeldArmed_DoesNotFalselyExitToStable(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
-	if os.Getenv("PARTI_RUN_NP3_KVUNAVAIL_FLAP_PROOF") == "" {
-		t.Skip("opt-in KNOWN-FAILING proof (NP-3 / deferred Finding A recover-on-wrong-signal flap); " +
-			"set PARTI_RUN_NP3_KVUNAVAIL_FLAP_PROOF=1 to run")
-	}
 
 	t.Parallel()
 
@@ -259,13 +254,16 @@ func TestNP3_KVUnavailable_HeldArmed_DoesNotFalselyExitToStable(t *testing.T) {
 	require.Greater(t, injectedEnd, injectedMid,
 		"faulting ops must keep being exercised in the second half of the window")
 
-	// CORROBORATION (assert, non-halting): a 2nd+ "kv-unavailable" OnDegraded
-	// REQUIRES a prior false exit-to-Stable, so on main this corroborates the
-	// flap. It is correlated with the hard gate (same flap), so it is an assert
-	// — on an unlucky-but-still-buggy run (one false exit, no re-entry yet
-	// within the window) the gate below still fails with a legible message.
-	assert.GreaterOrEqual(t, h.recorder.kvUnavailable(), 2,
-		"a re-entry into kv-unavailable Degraded proves a prior false exit (the flap)")
+	// REGRESSION INVARIANT (assert, non-halting): with the reason-scoped gate in
+	// place there is no false exit, hence no re-entry — so EXACTLY ONE
+	// "kv-unavailable" OnDegraded fires across the whole armed window (the single
+	// setup entry). A count of 2+ would mean the flap returned (a false
+	// exit-to-Stable then re-entry, the reopened gap). Complements the hard gate
+	// below (zero exits); both encode "no flap". (Pre-fix this asserted >=2 as the
+	// proof-of-bug; closing the gap flips it to exactly-one.)
+	assert.Equal(t, 1, h.recorder.kvUnavailable(),
+		"exactly one kv-unavailable Degraded entry: the reason-scoped gate prevents "+
+			"the false exit, so there is no re-entry/flap")
 
 	// HARD GATE (sole load-bearing assertion, LAST): while the fault is armed
 	// the manager must NOT exit Degraded -> Stable. On current main it does
