@@ -37,7 +37,7 @@ func TestReasonOwnership_LosersDoNotClobberWinningReason(t *testing.T) {
 	m.cfg.DegradedAlert.AlertInterval = time.Minute // monitorDegradedAlerts NewTicker
 	m.state.Store(int32(StateStable))               // Stable -> Degraded is valid
 
-	const winner = degradedReasonKVUnavailable
+	const winner = DegradeReasonKVUnavailable
 	m.enterDegraded(winner)
 	require.Equal(t, StateDegraded, m.State(), "winner must transition to Degraded")
 	require.NotZero(t, m.degradedSince.Load(), "winner must set degradedSince")
@@ -79,7 +79,7 @@ func TestReasonOwnership_ConcurrentMultiReasonStorm_NoRace(t *testing.T) {
 	m.state.Store(int32(StateStable))
 
 	reasons := []string{
-		degradedReasonKVUnavailable,
+		DegradeReasonKVUnavailable,
 		"startup-timeout",
 		"NATS connection down",
 		"bucket-recreated:parti-heartbeat",

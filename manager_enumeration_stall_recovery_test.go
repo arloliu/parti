@@ -8,7 +8,7 @@ import (
 
 // TestAttemptRecovery_EnumerationStall_LeaderStaysUntilEnumerationRecovers proves
 // the NP-10 reason-scoped exit gate: a leader degraded with
-// degradedReasonEnumerationStall must NOT exit on the (unaffected) assignment
+// DegradeReasonEnumerationStall must NOT exit on the (unaffected) assignment
 // commitment read while its Keys scan is still timing out — it would resume
 // serving stale membership while blind. It exits only once an enumeration success
 // is stamped AFTER the degrade.
@@ -20,7 +20,7 @@ func TestAttemptRecovery_EnumerationStall_LeaderStaysUntilEnumerationRecovers(t 
 	m, _ := armDegraded(t, &committed, snap) // current assignment applied+acked
 	plantAssignment(t, m, snap)
 	m.isLeader.Store(true)
-	m.lastDegradedReason.Store(degradedReasonEnumerationStall)
+	m.lastDegradedReason.Store(DegradeReasonEnumerationStall)
 
 	// No enumeration success since the degrade: the commitment guard is satisfied,
 	// but the leader must STAY Degraded — exiting would resume serving stale
@@ -42,7 +42,7 @@ func TestAttemptRecovery_EnumerationStall_LeaderStaysUntilEnumerationRecovers(t 
 
 // TestAttemptRecovery_EnumerationStall_NonLeaderEscapesStuckDegrade is the
 // load-bearing leadership-loss-escape test. A leader that degraded with
-// degradedReasonEnumerationStall and then LOST leadership runs no enumeration
+// DegradeReasonEnumerationStall and then LOST leadership runs no enumeration
 // (startCalculator is leader-only via stopCalculator), so it can never stamp an
 // enumeration success. Without the "&& m.isLeader.Load()" escape in the exit
 // conjunct, such a worker would be trapped in Degraded forever — a gate on a
@@ -56,7 +56,7 @@ func TestAttemptRecovery_EnumerationStall_NonLeaderEscapesStuckDegrade(t *testin
 	m, _ := armDegraded(t, &committed, snap)
 	plantAssignment(t, m, snap)
 	m.isLeader.Store(false) // lost leadership while enumeration-stall-degraded
-	m.lastDegradedReason.Store(degradedReasonEnumerationStall)
+	m.lastDegradedReason.Store(DegradeReasonEnumerationStall)
 	// lastEnumerationSuccessAt stays 0 — a non-leader runs no enumeration and can
 	// never stamp a success. The escape must let it exit anyway.
 

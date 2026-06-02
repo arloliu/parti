@@ -8,7 +8,6 @@ import (
 
 	"github.com/arloliu/parti/v2/internal/election"
 	"github.com/arloliu/parti/v2/internal/heartbeat"
-	"github.com/arloliu/parti/v2/internal/natsutil"
 	"github.com/arloliu/parti/v2/internal/stableid"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
@@ -110,7 +109,7 @@ func (m *Manager) onClaimerError(err error) {
 		// what recordKVError already routes through the degraded
 		// circuit, so the union is the exact "this is bucket loss,
 		// not peer takeover" gate.
-		if natsutil.IsConnectivityError(err) || natsutil.IsDegradingJetStreamError(err) {
+		if isWholeBucketLoss(err) {
 			m.recordKVError(err)
 			return
 		}

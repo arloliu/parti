@@ -3,29 +3,11 @@ package parti
 import (
 	"context"
 	"errors"
+	"math"
 	"time"
 
-	"github.com/arloliu/parti/v2/internal/natsutil"
-	"github.com/arloliu/parti/v2/kvutil"
-	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go"
 )
-
-// degradedReasonKVUnavailable is the distinct enterDegraded reason for the
-// connected-but-KV-unavailable condition (a bucket reachable on the connection
-// but unable to serve ops because its RAFT quorum is lost). It is kept separate
-// from "KV error threshold exceeded" so the operator-facing Degraded surface
-// distinguishes a quorum-loss op stall from a whole-bucket wipe, and so the
-// docstring contract that whole-bucket loss is the ONLY path to the threshold
-// reason is preserved.
-const degradedReasonKVUnavailable = "kv-unavailable"
-
-// degradedReasonEnumerationStall is the distinct enterDegraded reason for a
-// sustained leader-side worker-enumeration (heartbeat Keys scan) stall that the
-// connectivity / degrading classifiers miss (NP-10). Kept separate so the
-// recovery exit can require an enumeration success before exiting, and so the
-// operator surface distinguishes it from a kv-unavailable op stall.
-const degradedReasonEnumerationStall = "heartbeat-enumeration-stall"
 
 // kvErrorEvent is one entry in the degraded-circuit error window.
 //
@@ -69,7 +51,7 @@ func markKVUnavailable(err error) error {
 	}
 	// Existing classifiers win first — this is what makes it impossible to
 	// steal the whole-bucket (ErrNoStreamResponse) or bucket-missing route.
-	if natsutil.IsConnectivityError(err) || natsutil.IsDegradingJetStreamError(err) {
+	if isWholeBucketLoss(err) {
 		return err
 	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, nats.ErrNoResponders) {
@@ -90,8 +72,6 @@ func (m *Manager) monitorNATSConnection() {
 			for {
 				select {
 				case <-m.ctx.Done():
-					return
-				case <-m.connMonitorStop:
 					return
 				case <-ticker.C:
 					m.checkConnectionHealth()
@@ -119,7 +99,7 @@ func (m *Manager) checkConnectionHealth() {
 			// Check if we should enter degraded mode
 			downSince := time.Unix(0, m.connDownSince.Load())
 			if time.Since(downSince) >= m.cfg.DegradedBehavior.EnterThreshold {
-				m.enterDegraded("NATS connection down")
+				m.enterDegraded(DegradeReasonNATSConnectionDown)
 			}
 		}
 
@@ -150,27 +130,15 @@ func (m *Manager) checkConnectionHealth() {
 // loss would otherwise produce a silent-drift failure mode where publishes
 // fail silently and no state transition occurs.
 func (m *Manager) recordKVError(err error) {
-	if err == nil {
-		return
-	}
-	// Stream-missing exhaustion is routed through the dynamic-consumer
-	// observer (Manager.onStreamMissingError → enterDegraded(
-	// "stream-missing-recovery-exhausted")), NOT through the generic
-	// KV-error threshold. Short-circuit here so an incidental wrap of
-	// jetstream.ErrStreamNotFound (which natsutil treats as a
-	// degrading-JetStream error) does not double-count or trip the
-	// threshold. Preserves the AGENTS.md cross-feature contract that
-	// whole-bucket loss is the ONLY path through recordKVError →
-	// enterDegraded("KV error threshold exceeded").
-	if errors.Is(err, types.ErrStreamMissing) {
-		return
-	}
-	// kvUnavailable is the F-D1 path: a marked connected-but-KV-unavailable
-	// timeout from one of the manager's periodic KV-op sites. It is admitted
-	// here (the connection-status monitor and the connectivity/degrading
-	// classifiers all miss it) and degrades with a distinct reason below.
-	kvUnavailable := errors.Is(err, ErrKVUnavailable)
-	if !natsutil.IsConnectivityError(err) && !natsutil.IsDegradingJetStreamError(err) && !kvUnavailable {
+	// Route via the pure classifier. Only kvRouteWindow is admitted here: a drop
+	// (nil / unclassified) is ignored, and a stream-missing error is owned by the
+	// dynamic-consumer observer (Manager.onStreamMissingError), NOT this threshold
+	// — preserving the AGENTS.md contract that whole-bucket loss is the ONLY path
+	// to DegradeReasonKVErrorThreshold. decision.transient marks the F-D1
+	// connected-but-KV-unavailable path that the connectivity/degrading classifiers
+	// miss; it degrades with the distinct DegradeReasonKVUnavailable below.
+	decision := classifyKVError(err)
+	if decision.route != kvRouteWindow {
 		return
 	}
 	// Short-circuit once already Degraded. Every subsystem (heartbeat 500ms,
@@ -191,7 +159,7 @@ func (m *Manager) recordKVError(err error) {
 	// Add error timestamp, tagged with its class so a healthy-op success can
 	// later clear the transient (F-D1) entries while leaving whole-bucket-loss
 	// entries to accumulate.
-	m.kvErrorWindow = append(m.kvErrorWindow, kvErrorEvent{at: now, transient: kvUnavailable})
+	m.kvErrorWindow = append(m.kvErrorWindow, kvErrorEvent{at: now, transient: decision.transient})
 
 	// Remove errors outside the window
 	windowStart := now.Add(-m.cfg.DegradedBehavior.KVErrorWindow)
@@ -204,11 +172,7 @@ func (m *Manager) recordKVError(err error) {
 	}
 	m.kvErrorWindow = m.kvErrorWindow[validIdx:]
 
-	// Update error count (safe conversion with bounds check)
-	// Extremely unlikely, but handle overflow case
-	windowLen := min(len(m.kvErrorWindow), 0x7FFFFFFF)
-
-	count := int32(windowLen) // #nosec G115 - bounded above
+	count := windowLenInt32(len(m.kvErrorWindow))
 	m.kvErrorCount.Store(count)
 
 	// Check threshold
@@ -217,12 +181,13 @@ func (m *Manager) recordKVError(err error) {
 		// canonical threshold reason — the AGENTS.md contract that whole-bucket
 		// loss is the ONLY path to "KV error threshold exceeded". A marked
 		// connected-but-KV-unavailable timeout degrades with the distinct
-		// reason. Errors that classify both ways (a bucket-missing error never
-		// reaches markKVUnavailable's wrap branch) keep the threshold
-		// reason, so the contract holds.
-		reason := "KV error threshold exceeded"
-		if kvUnavailable {
-			reason = degradedReasonKVUnavailable
+		// DegradeReasonKVUnavailable. The two cannot overlap on the production
+		// recordKVOpError path: markKVUnavailable returns whole-bucket errors
+		// unchanged (never tagging them ErrKVUnavailable), so transient and
+		// whole-bucket are mutually exclusive and the contract holds.
+		reason := DegradeReasonKVErrorThreshold
+		if decision.transient {
+			reason = DegradeReasonKVUnavailable
 		}
 		m.logger.Warn(reason,
 			"count", count,
@@ -297,8 +262,20 @@ func (m *Manager) recordKVHealthyOp() {
 	}
 	m.kvErrorWindow = kept
 
-	windowLen := min(len(kept), 0x7FFFFFFF)
-	m.kvErrorCount.Store(int32(windowLen)) // #nosec G115 - bounded above
+	m.kvErrorCount.Store(windowLenInt32(len(kept)))
+}
+
+// windowLenInt32 converts a kvErrorWindow length to int32, saturating at
+// math.MaxInt32. The degraded-circuit error window cannot realistically reach
+// 2^31 entries (the manager restarts long before that), but the saturating
+// conversion makes the bound explicit and centralizes the bounds check (and its
+// single #nosec) here instead of repeating it at each call site.
+func windowLenInt32(n int) int32 {
+	if n > math.MaxInt32 {
+		return math.MaxInt32
+	}
+
+	return int32(n) // #nosec G115 - clamped to math.MaxInt32 above
 }
 
 // enterDegraded transitions the manager to degraded mode.
@@ -408,7 +385,7 @@ func (m *Manager) exitDegraded() {
 // degraded are no-ops.
 func (m *Manager) onEnumerationStall(err error) {
 	m.logger.Warn("sustained heartbeat-enumeration stall; entering degraded", "error", err)
-	m.enterDegraded(degradedReasonEnumerationStall)
+	m.enterDegraded(DegradeReasonEnumerationStall)
 }
 
 // recordEnumerationSuccess is wired to the calculator's OnEnumerationSuccess. It
@@ -416,6 +393,33 @@ func (m *Manager) onEnumerationStall(err error) {
 // every successful enumeration (even while degraded), mirroring recordKVHealthyOp.
 func (m *Manager) recordEnumerationSuccess() {
 	m.lastEnumerationSuccessAt.Store(time.Now().UnixNano())
+}
+
+// recoverySignalStalled reports whether a reason-scoped recovery-exit gate must
+// keep the worker Degraded, and returns the (signal, since) timestamps it read so
+// the caller logs them without re-reading (a torn check-vs-log view). The gate
+// blocks when ALL hold: the active degrade reason matches scopedReason; the gate
+// applies (leaderOnly implies we are currently leader — a leaderOnly gate keyed on
+// a leader-only signal must be SKIPPED when not leader, else a worker that lost
+// leadership in this degrade is stuck on a signal it can never stamp); and the
+// recovery signal has NOT advanced past the degrade start.
+//
+// The "not advanced" test — signalAt == 0 (never stamped) OR signalAt <= since —
+// is the load-bearing comparison both reason-scoped gates share: the <= boundary
+// (a success stamped AT the degrade instant does not count) and the ==0 sentinel
+// must be identical across the gates so they cannot drift. (Given degradedSince is
+// non-zero here, ==0 is subsumed by <= since; it is kept for explicitness.)
+func (m *Manager) recoverySignalStalled(reason, scopedReason string, signalAt func() int64, leaderOnly bool) (stalled bool, sigAt, since int64) {
+	if reason != scopedReason {
+		return false, 0, 0
+	}
+	if leaderOnly && !m.isLeader.Load() {
+		return false, 0, 0
+	}
+	sigAt = signalAt()
+	since = m.degradedSince.Load()
+
+	return sigAt == 0 || sigAt <= since, sigAt, since
 }
 
 // attemptRecoveryFromDegraded checks if recovery conditions are met and exits degraded mode.
@@ -475,14 +479,10 @@ func (m *Manager) attemptRecoveryFromDegraded() {
 	// the commitment guard alone — an UNCONDITIONAL gate regresses NP-5, which
 	// has no heartbeat publisher so lastHeartbeatSuccessAt stays 0. Cheap atomic
 	// reads, evaluated before the Family A network re-probe added in a later task.
-	if reason == degradedReasonKVUnavailable {
-		hbAt := m.lastHeartbeatSuccessAt.Load()
-		since := m.degradedSince.Load()
-		if hbAt == 0 || hbAt <= since {
-			m.logger.Debug("recovery: heartbeat KV not recovered since kv-unavailable degrade; staying Degraded",
-				"last_heartbeat_success_unixnano", hbAt, "degraded_since_unixnano", since)
-			return
-		}
+	if stalled, hbAt, since := m.recoverySignalStalled(reason, DegradeReasonKVUnavailable, m.lastHeartbeatSuccessAt.Load, false); stalled {
+		m.logger.Debug("recovery: heartbeat KV not recovered since kv-unavailable degrade; staying Degraded",
+			"last_heartbeat_success_unixnano", hbAt, "degraded_since_unixnano", since)
+		return
 	}
 
 	// Family A — refuse a recovery exit while a Parti-owned bucket wipe-and-
@@ -514,14 +514,10 @@ func (m *Manager) attemptRecoveryFromDegraded() {
 	// enumeration-N/A and do NOT block, else a leader that lost leadership while in
 	// this degrade would be stuck forever (a gate on a capability that cannot
 	// fire). Reason-scoped, so other degrade reasons are unaffected.
-	if reason == degradedReasonEnumerationStall && m.isLeader.Load() {
-		ensAt := m.lastEnumerationSuccessAt.Load()
-		since := m.degradedSince.Load()
-		if ensAt == 0 || ensAt <= since {
-			m.logger.Debug("recovery: worker enumeration not recovered since stall degrade; staying Degraded",
-				"last_enumeration_success_unixnano", ensAt, "degraded_since_unixnano", since)
-			return
-		}
+	if stalled, ensAt, since := m.recoverySignalStalled(reason, DegradeReasonEnumerationStall, m.lastEnumerationSuccessAt.Load, true); stalled {
+		m.logger.Debug("recovery: worker enumeration not recovered since stall degrade; staying Degraded",
+			"last_enumeration_success_unixnano", ensAt, "degraded_since_unixnano", since)
+		return
 	}
 
 	// Success - exit degraded mode
@@ -555,30 +551,21 @@ func (m *Manager) attemptRecoveryFromDegraded() {
 // Concurrency: m.bucketEpochs is written only at Start (captureBucketEpoch) and
 // is read-only afterward, so ranging it from this (connection-monitor) goroutine
 // is race-free — the SAME lock-free-read contract checkBucketEpochs relies on. It
-// opens a FRESH probe handle per bucket rather than reusing ep.kv, which is owned
-// by the monitorBucketEpochs goroutine and is not safe to share across goroutines
-// (nats.go KeyValue handles cache *stream state).
+// passes a nil cached handle to probeBucketCreated so a FRESH handle is opened per
+// bucket rather than reusing ep.kv (owned by the monitorBucketEpochs goroutine);
+// probeBucketCreated also hard-bounds each probe by OperationTimeout, so an
+// unreachable bucket degrades to a bounded inline stall rather than wedging.
 func (m *Manager) epochMismatchOutstanding(ctx context.Context) bool {
 	if m.js == nil {
 		return false
 	}
 	for bucket, ep := range m.bucketEpochs {
-		// Bound BOTH the handle open AND the status read with a single per-bucket
-		// deadline: js.KeyValue does a stream-info round-trip, so passing the
-		// unbounded ctx here would let it block on nats.go's internal default
-		// (~5s) instead of OperationTimeout when a bucket is unreachable — turning
-		// this into an unbounded inline stall on the connection-monitor goroutine.
-		probeCtx, cancel := context.WithTimeout(ctx, m.cfg.OperationTimeout)
-		probeKV, err := m.js.KeyValue(probeCtx, bucket)
+		live, err := m.probeBucketCreated(ctx, bucket, nil)
 		if err != nil {
-			cancel()
-			m.logger.Debug("epoch re-probe: open handle failed; not actionable", "bucket", bucket, "error", err)
-			continue
-		}
-		live, err := kvutil.BucketStreamCreated(probeCtx, probeKV)
-		cancel()
-		if err != nil {
-			m.logger.Debug("epoch re-probe: probe failed; not actionable", "bucket", bucket, "error", err)
+			// Probe errors are NOT actionable (open or read failed): a
+			// missing/timing-out bucket is the connection monitor's / Family B's
+			// concern, not Family A's. Skip and let the next tick re-probe.
+			m.logger.Debug("epoch re-probe: not actionable", "bucket", bucket, "error", err)
 			continue
 		}
 		if !live.Equal(ep.created) {

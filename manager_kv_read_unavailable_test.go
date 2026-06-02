@@ -131,7 +131,7 @@ func TestRecordKVError_ReadUnavailable_Degrades(t *testing.T) {
 			m.wg.Wait()
 
 			require.Equal(t, StateDegraded, m.State())
-			require.Equal(t, degradedReasonKVUnavailable, *reason,
+			require.Equal(t, DegradeReasonKVUnavailable, *reason,
 				"a sustained KV-unavailable condition must use the distinct reason")
 		})
 	}
@@ -214,5 +214,5 @@ func TestOnClaimerError_ReadTimeout_Degrades(t *testing.T) {
 	m.wg.Wait()
 
 	require.Equal(t, StateDegraded, m.State())
-	require.Equal(t, degradedReasonKVUnavailable, *reason)
+	require.Equal(t, DegradeReasonKVUnavailable, *reason)
 }
