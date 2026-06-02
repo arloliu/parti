@@ -44,7 +44,7 @@ func (m *Manager) runStartupBackground(assignmentKV jetstream.KeyValue) {
 	defer func() {
 		if r := recover(); r != nil {
 			m.logError("startup background panicked", "panic", r)
-			m.enterDegraded("startup-background-panic")
+			m.enterDegraded(DegradeReasonStartupBackgroundPanic)
 			// Still attempt to start monitors so the manager can recover
 			// once degraded is exited via attemptRecoveryFromDegraded.
 			m.startPostStableMonitors(assignmentKV)
@@ -82,10 +82,9 @@ func (m *Manager) runStartupBackground(assignmentKV jetstream.KeyValue) {
 // as a valid next state from each. The direct CAS here only succeeds when
 // state is still WaitingAssignment; otherwise calculator owns state.
 //
-// On a successful CAS we manually invoke the same OnStateChanged hook and
-// RecordStateTransition metric that transitionState would have fired
-// (manager_state.go:121-138), so observers see no difference from a normal
-// transition.
+// On a successful CAS it calls emitTransitionEffects — the same shared emitter
+// transitionState uses for the OnStateChanged hook and RecordStateTransition
+// metric — so observers see no difference from a normal transition.
 //
 // Idempotent: callable from any apply-success path (runner, watcher
 // redelivery, scheduleApplyRetry). Second and later calls see state !=
@@ -94,17 +93,7 @@ func (m *Manager) casToStableFromWaitingAssignment() {
 	if !m.state.CompareAndSwap(int32(StateWaitingAssignment), int32(StateStable)) { //nolint:gosec // controlled enum
 		return
 	}
-	m.logger.Info("state transition",
-		"from", StateWaitingAssignment.String(),
-		"to", StateStable.String(),
-		"worker_id", m.WorkerID(),
-	)
-	if m.hooks.OnStateChanged != nil {
-		m.invokeHook("state change", func() error {
-			return m.hooks.OnStateChanged(m.ctx, StateWaitingAssignment, StateStable)
-		})
-	}
-	m.metrics.RecordStateTransition(StateWaitingAssignment, StateStable, 0)
+	m.emitTransitionEffects(StateWaitingAssignment, StateStable)
 }
 
 func isCalculatorOwnedActiveState(state State) bool {
@@ -184,6 +173,6 @@ func (m *Manager) startStartupTimeoutWatchdog() {
 			"startup_timeout", m.cfg.StartupTimeout,
 			"elapsed", time.Since(m.startedAt),
 		)
-		m.enterDegraded("startup-timeout")
+		m.enterDegraded(DegradeReasonStartupTimeout)
 	})
 }

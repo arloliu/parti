@@ -102,13 +102,12 @@ func TestManager_MonitorLeadership_FollowerTickDuringStop_NoErrorLog(t *testing.
 			ElectionTimeout:  30 * time.Millisecond,
 			OperationTimeout: 200 * time.Millisecond,
 		},
-		hooks:           &types.Hooks{},
-		metrics:         metrics.NewNop(),
-		logger:          logCap,
-		connMonitorStop: make(chan struct{}, 1),
-		idClaimer:       stableid.NewNop(),
-		election:        spy,
-		heartbeat:       heartbeat.NewNop(),
+		hooks:     &types.Hooks{},
+		metrics:   metrics.NewNop(),
+		logger:    logCap,
+		idClaimer: stableid.NewNop(),
+		election:  spy,
+		heartbeat: heartbeat.NewNop(),
 	}
 	m.state.Store(int32(StateStable))
 	m.workerID.Store("worker-0")
@@ -219,12 +218,11 @@ func TestManager_MonitorLeadership_LeaderTickDuringStop_NoErrorLogOrHook(t *test
 				return nil
 			},
 		},
-		metrics:         metrics.NewNop(),
-		logger:          logCap,
-		connMonitorStop: make(chan struct{}, 1),
-		idClaimer:       stableid.NewNop(),
-		election:        spy,
-		heartbeat:       heartbeat.NewNop(),
+		metrics:   metrics.NewNop(),
+		logger:    logCap,
+		idClaimer: stableid.NewNop(),
+		election:  spy,
+		heartbeat: heartbeat.NewNop(),
 	}
 	m.state.Store(int32(StateStable))
 	m.workerID.Store("worker-0")

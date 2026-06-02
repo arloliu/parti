@@ -51,15 +51,14 @@ func TestManager_Stop_ReleasesLeadershipBeforeSlowSourceStop(t *testing.T) {
 	src := &blockingSource{stopGate: gate}
 
 	m := &Manager{
-		cfg:             Config{ShutdownTimeout: 5 * time.Second},
-		hooks:           &types.Hooks{},
-		metrics:         metrics.NewNop(),
-		logger:          logging.NewNop(),
-		connMonitorStop: make(chan struct{}, 1),
-		idClaimer:       stableid.NewNop(),
-		election:        spy,
-		heartbeat:       heartbeat.NewNop(),
-		source:          src,
+		cfg:       Config{ShutdownTimeout: 5 * time.Second},
+		hooks:     &types.Hooks{},
+		metrics:   metrics.NewNop(),
+		logger:    logging.NewNop(),
+		idClaimer: stableid.NewNop(),
+		election:  spy,
+		heartbeat: heartbeat.NewNop(),
+		source:    src,
 	}
 	m.state.Store(int32(StateStable))
 	m.workerID.Store("worker-0")
@@ -83,15 +82,14 @@ func TestStop_AlwaysReleasesLeadership(t *testing.T) {
 		spy := &spyElection{}
 
 		m := &Manager{
-			cfg:             Config{ShutdownTimeout: 5 * time.Second},
-			hooks:           &types.Hooks{},
-			metrics:         metrics.NewNop(),
-			logger:          logging.NewNop(),
-			connMonitorStop: make(chan struct{}),
-			idClaimer:       stableid.NewNop(),
-			election:        spy,
-			heartbeat:       heartbeat.NewNop(),
-			source:          source.NewStatic(nil),
+			cfg:       Config{ShutdownTimeout: 5 * time.Second},
+			hooks:     &types.Hooks{},
+			metrics:   metrics.NewNop(),
+			logger:    logging.NewNop(),
+			idClaimer: stableid.NewNop(),
+			election:  spy,
+			heartbeat: heartbeat.NewNop(),
+			source:    source.NewStatic(nil),
 		}
 		m.state.Store(int32(StateStable))
 		m.workerID.Store("worker-0")

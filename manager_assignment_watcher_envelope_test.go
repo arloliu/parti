@@ -213,7 +213,7 @@ func TestMonitorAssignmentChanges_NonRecordableError_EnvelopeIsOnlyEscalation(t 
 	}()
 
 	require.Eventually(t, func() bool {
-		return reasonSpy.has(assignmentWatcherDegradedReason)
+		return reasonSpy.has(DegradeReasonAssignmentWatcherExhausted)
 	}, 5*time.Second, 25*time.Millisecond,
 		"under production-default KVErrorThreshold=5, only the envelope's "+
 			"named-reason path can escalate a sustained non-recordable error; "+

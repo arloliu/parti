@@ -26,13 +26,12 @@ func newHookTestManager(hooks *types.Hooks) *Manager {
 				AlertInterval: 1 * time.Minute,
 			},
 		},
-		hooks:           hooks,
-		metrics:         metrics.NewNop(),
-		logger:          logging.NewNop(),
-		connMonitorStop: make(chan struct{}),
-		idClaimer:       stableid.NewNop(),
-		election:        election.NewNopElection(),
-		heartbeat:       heartbeat.NewNop(),
+		hooks:     hooks,
+		metrics:   metrics.NewNop(),
+		logger:    logging.NewNop(),
+		idClaimer: stableid.NewNop(),
+		election:  election.NewNopElection(),
+		heartbeat: heartbeat.NewNop(),
 	}
 	m.state.Store(int32(StateInit))
 	m.workerID.Store("")

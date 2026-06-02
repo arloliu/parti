@@ -42,15 +42,6 @@ const (
 
 	// commitKeyName mirrors the publisher's "_commit" sub-component constant.
 	commitKeyName = "_commit"
-
-	// assignmentWatcherDegradedReason is the operator-visible
-	// degraded-mode reason emitted by the F2 envelope's permanent-
-	// failure callback when the assignment watcher exhausts its
-	// attempt budget. Distinct from the generic "KV error threshold
-	// exceeded" reason from recordKVError so operators can
-	// distinguish "assignment bucket is unrecoverable" from
-	// "accumulated transient errors".
-	assignmentWatcherDegradedReason = "assignment-watcher-exhausted"
 )
 
 // watcherReconcileInterval is the period between idempotent KV re-reads
@@ -139,7 +130,6 @@ func (m *Manager) startCalculator(assignmentKV, heartbeatKV jetstream.KeyValue) 
 		HeartbeatTTL:          m.cfg.HeartbeatTTL,
 		EmergencyGracePeriod:  m.cfg.EmergencyGracePeriod,
 		Cooldown:              m.cfg.RebalanceCooldown,
-		RestartRatio:          m.cfg.RestartDetectionRatio,
 		ColdStartWindow:       m.cfg.ColdStartWindow,
 		PlannedScaleWindow:    m.cfg.PlannedScaleWindow,
 		EnableTwoPhaseHandoff: m.cfg.EnableTwoPhaseHandoff,
@@ -410,8 +400,8 @@ func (m *Manager) monitorAssignmentChanges(ctx context.Context, kv jetstream.Key
 				m.logError("assignment watcher restart attempt budget exhausted; entering degraded mode",
 					"error", err,
 					"max_attempts", watcherMaxAttempts,
-					"reason", assignmentWatcherDegradedReason)
-				m.enterDegraded(assignmentWatcherDegradedReason)
+					"reason", DegradeReasonAssignmentWatcherExhausted)
+				m.enterDegraded(DegradeReasonAssignmentWatcherExhausted)
 			},
 			BaseBackoff: watcherBaseBackoff,
 			MaxBackoff:  watcherMaxBackoff,
@@ -441,6 +431,92 @@ func (m *Manager) monitorAssignmentChanges(ctx context.Context, kv jetstream.Key
 	}
 }
 
+// watchSessionHandlers carries the per-watcher behavior the generic
+// runWatchSession select loop delegates to. runWatchSession owns the
+// shutdown-race rules (below); the handlers own decode/debounce/reconcile, which
+// differ between the commit watcher (a version-guard + payload-hash debouncer)
+// and the assignment watcher (latest-wins over a raw pending entry). Keeping the
+// divergent logic in per-caller closures is deliberate: the commit side already
+// has commitDebouncer, and latest-wins does not need that machinery, so giving
+// the assignment side a mirror struct would be churn for no behavior change.
+type watchSessionHandlers struct {
+	// onUpdate handles one non-nil watcher entry (decode + stage, or apply directly).
+	onUpdate func(entry jetstream.KeyValueEntry)
+	// flush dispatches any pending debounced entry. runWatchSession calls it on the
+	// debounce-timer tick AND on channel close (so a final delivery that arrived
+	// just before the close is not lost) — but NEVER on ctx cancellation.
+	flush func()
+	// timerC returns the debounce timer channel, or nil when debounce is off
+	// (a nil channel blocks forever in the select, disabling that arm).
+	timerC func() <-chan time.Time
+	// onReconcile runs the periodic idempotent re-read.
+	onReconcile func()
+	// onStopping, if non-nil, runs once when ctx is cancelled (before the clean return).
+	onStopping func()
+}
+
+// runWatchSession drives one watch session against an already-established
+// watcher, owning the shutdown-race rules shared by the commit and assignment
+// watchers:
+//
+//   - the ctx.Done() arm is a CLEAN exit returning nil and does NOT flush —
+//     applying pending work there would invoke handler work with an already-dead
+//     context while Stop is draining the wait group. (As in the parent loops, a
+//     debounce timer that happens to be ready in the SAME select iteration can
+//     still win the race and flush; the guarantee is per-arm, not global.)
+//   - an Updates() channel close while ctx is STILL LIVE returns a non-nil error
+//     (the caller restarts with a fresh watcher); flush() runs first so a final
+//     delivery racing the close is preserved. A close arm that observes ctx
+//     already cancelled is instead a clean nil return with no flush.
+//   - a nil entry (end of initial-values replay) is skipped.
+//
+// watcherName tags the channel-closed error and the Stop-failure log; the
+// deferred watcher.Stop() ignores benign close races.
+func (m *Manager) runWatchSession(
+	ctx context.Context,
+	watcher jetstream.KeyWatcher,
+	reconcileTickC <-chan time.Time,
+	watcherName string,
+	h watchSessionHandlers,
+) error {
+	defer func() {
+		if serr := watcher.Stop(); serr != nil && !natsutil.IsBenignWatcherStopErr(serr) {
+			m.logError("failed to stop "+watcherName+" watcher", "error", serr)
+		}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			if h.onStopping != nil {
+				h.onStopping()
+			}
+
+			return nil
+
+		case entry, ok := <-watcher.Updates():
+			if !ok {
+				if ctx.Err() != nil {
+					return nil
+				}
+				h.flush()
+
+				return fmt.Errorf("%s watcher channel closed", watcherName)
+			}
+			if entry == nil {
+				continue
+			}
+			h.onUpdate(entry)
+
+		case <-h.timerC():
+			h.flush()
+
+		case <-reconcileTickC:
+			h.onReconcile()
+		}
+	}
+}
+
 // runAssignmentWatchSession drives one watch session against the
 // already-established watcher. Returns nil for ctx-cancel (clean exit)
 // and a non-nil error when the Updates() channel closes (the session
@@ -460,12 +536,6 @@ func (m *Manager) runAssignmentWatchSession(
 	reconcileTickC <-chan time.Time,
 	workerID, key string,
 ) error {
-	defer func() {
-		if serr := watcher.Stop(); serr != nil && !natsutil.IsBenignWatcherStopErr(serr) {
-			m.logError("failed to stop assignment watcher", "error", serr)
-		}
-	}()
-
 	window := m.cfg.AssignmentWatcherDebounce
 	debounce := window > 0
 
@@ -480,6 +550,8 @@ func (m *Manager) runAssignmentWatchSession(
 		timerC = timer.C
 	}
 	// flush dispatches the pending entry to the hook (tests) or production handler.
+	// runWatchSession calls it on the debounce-timer tick and on channel close, but
+	// never on ctx cancellation (Stop drops pending work — see runWatchSession).
 	flush := func() {
 		if pending == nil {
 			return
@@ -493,43 +565,12 @@ func (m *Manager) runAssignmentWatchSession(
 		}
 	}
 
-	for {
-		select {
-		case <-ctx.Done():
-			// Intentionally do NOT flush. Stop has cancelled m.ctx; running
-			// apply work now would invoke handoffCoordinator.Apply with an
-			// already-dead context, then scheduleApplyRetry would spawn a
-			// wait-group goroutine while Stop is draining the wait group.
-			// Dropping the pending entry is the correct shutdown behavior.
-			m.logger.Debug("assignment monitor stopping (context cancelled)", "worker_id", workerID)
-			return nil
-
-		case entry, ok := <-watcher.Updates():
-			if !ok {
-				// Session-restart path. Flush the pending entry so a
-				// re-election whose final delivery arrived just before
-				// the channel closed is not lost — the caller restarts
-				// the watcher and the version gate makes a repeat safe.
-				//
-				// EXCEPT if Stop has already cancelled m.ctx: a
-				// connection-side close racing Stop cancellation can
-				// surface here, and flushing would apply work during
-				// shutdown (the round-2 P1 hazard reapplied to the
-				// !ok branch).
-				if ctx.Err() != nil {
-					return nil
-				}
-				flush()
-				return errors.New("assignment watcher channel closed")
-			}
-			if entry == nil {
-				// Nil entry indicates end of initial values replay.
-				// This is normal — continue watching for future updates.
-				continue
-			}
+	return m.runWatchSession(ctx, watcher, reconcileTickC, "assignment", watchSessionHandlers{
+		onUpdate: func(entry jetstream.KeyValueEntry) {
 			if !debounce {
 				m.handleAssignmentEntry(workerID, entry)
-				continue
+
+				return
 			}
 			pending = entry
 			if !timer.Stop() {
@@ -539,33 +580,37 @@ func (m *Manager) runAssignmentWatchSession(
 				}
 			}
 			timer.Reset(window)
-
-		case <-timerC:
-			flush()
-
-		case <-reconcileTickC:
+		},
+		flush:  flush,
+		timerC: func() <-chan time.Time { return timerC },
+		onReconcile: func() {
 			// Idempotent re-read. Single-goroutine serialization with the
-			// watcher arm above guarantees no concurrent application of
-			// the same alias; the version fence at handleAssignmentEntry
-			// rejects re-reads of an already-applied alias.
+			// watcher arm guarantees no concurrent application of the same
+			// alias; the version fence at handleAssignmentEntry rejects
+			// re-reads of an already-applied alias.
 			current, gerr := kv.Get(ctx, key)
 			if gerr != nil {
 				if errors.Is(gerr, jetstream.ErrKeyNotFound) {
 					// Alias deleted (or never existed). No-op — matches
 					// handleAssignmentEntry's KeyValueDelete branch and
-					// W11's "delete is not a reassignment primitive".
-					continue
+					// the "delete is not a reassignment primitive" rule.
+					return
 				}
-				// Transient/connectivity error: silently continue,
-				// matching the commit watcher's symmetric reconcile arm.
-				// recordKVError is intentionally NOT called here: feeding
-				// a 30s-ticker into the degraded-mode circuit would
-				// amplify entry under transient KV stress.
-				continue
+				// Transient/connectivity error: silently continue, matching
+				// the commit watcher's symmetric reconcile arm. recordKVError
+				// is intentionally NOT called here: feeding a 30s-ticker into
+				// the degraded-mode circuit would amplify entry under transient
+				// KV stress.
+				return
 			}
 			m.handleAssignmentEntry(workerID, current)
-		}
-	}
+		},
+		onStopping: func() {
+			// Stop has cancelled m.ctx; runWatchSession drops the pending entry
+			// rather than applying it during shutdown (see its Godoc).
+			m.logger.Debug("assignment monitor stopping (context cancelled)", "worker_id", workerID)
+		},
+	})
 }
 
 func (m *Manager) handleAssignmentEntry(workerID string, entry jetstream.KeyValueEntry) {
@@ -792,12 +837,6 @@ func (m *Manager) runCommitWatchSession(
 	reconcileTickC <-chan time.Time,
 	key string,
 ) error {
-	defer func() {
-		if serr := watcher.Stop(); serr != nil && !natsutil.IsBenignWatcherStopErr(serr) {
-			m.logError("failed to stop commit watcher", "error", serr)
-		}
-	}()
-
 	// dispatch is the single seam through which staged commits exit the
 	// debounce window. It routes to handleCommitValue in production and to
 	// testHookHandleCommitValue when set, mirroring the alias-side
@@ -814,39 +853,25 @@ func (m *Manager) runCommitWatchSession(
 
 	db := newCommitDebouncer(m.cfg.AssignmentWatcherDebounce, m.WorkerID(), dispatch)
 
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case entry, ok := <-watcher.Updates():
-			if !ok {
-				if ctx.Err() != nil {
-					return nil
-				}
-				db.flush()
-
-				return errors.New("commit watcher channel closed")
-			}
-			if entry == nil {
-				continue
-			}
-			commit, ok := m.decodeCommitEntry(entry)
-			if ok {
+	return m.runWatchSession(ctx, watcher, reconcileTickC, "commit", watchSessionHandlers{
+		onUpdate: func(entry jetstream.KeyValueEntry) {
+			if commit, ok := m.decodeCommitEntry(entry); ok {
 				db.stage(commit)
 			}
-		case <-db.timerC():
-			db.flush()
-		case <-reconcileTickC:
+		},
+		flush:  db.flush,
+		timerC: db.timerC,
+		onReconcile: func() {
 			if kv == nil {
-				continue
+				return
 			}
 			current, _, gerr := kvutil.GetJSON[types.AssignmentCommit](ctx, kv, key)
 			if gerr != nil || current == nil {
-				continue
+				return
 			}
 			db.stage(current)
-		}
-	}
+		},
+	})
 }
 
 // handleCommitEntry decodes a watcher entry and routes through
@@ -1589,32 +1614,12 @@ func (m *Manager) refreshAssignmentFromNATS() error {
 		return nil
 	}
 
-	m.lastAssignmentAt.Store(time.Now().UnixNano())
-	m.lastAssignment.Store(m.clonePartitions(curAssignment.Partitions))
-
 	m.logger.Info("assignment refreshed from NATS",
 		"version", curAssignment.Version,
 		"partitions", len(curAssignment.Partitions),
 	)
 
 	return nil
-}
-
-// clonePartitions creates a deep copy of partition slice.
-func (m *Manager) clonePartitions(partitions []Partition) []Partition {
-	if partitions == nil {
-		return nil
-	}
-
-	cloned := make([]Partition, len(partitions))
-	for i, p := range partitions {
-		cloned[i] = Partition{
-			Keys:   append([]string(nil), p.Keys...),
-			Weight: p.Weight,
-		}
-	}
-
-	return cloned
 }
 
 // updateLastSeenLeaderRevision sets m.lastSeenLeaderRevision to
