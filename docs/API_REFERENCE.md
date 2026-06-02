@@ -889,9 +889,11 @@ Known reasons and operator intent:
 |---|---|---|
 | `NATS connection down` | ride-through if reconnecting | Keep readiness degraded until NATS is stable; rotate only if the connection is closed or the outage exceeds policy. |
 | `kv-unavailable` | connected but KV quorum unavailable | Keep readiness degraded; rotation is acceptable if the outage exceeds SLO. |
+| `heartbeat-enumeration-stall` | leader's heartbeat enumeration (Keys scan) is timing out while single-key ops still succeed | Keep readiness degraded; the leader cannot see worker membership, so rotate/restart the leader if the stall is sustained. |
 | `KV error threshold exceeded` | Parti-owned coordination data missing/lost | Restart or rotate workers after confirming bucket loss. |
 | `bucket-recreated:<bucket>` | ambiguous Parti-owned data loss | Restart or rotate workers; inspect JetStream storage before trusting the recreated bucket. |
 | `startup-timeout` | startup apply/wait did not reach Stable in budget | Readiness rotation unless the runner recovers before the pod is replaced. |
+| `startup-background-panic` | a background startup goroutine panicked | Rotate the worker; inspect logs for the panic. Monitors are still started so the worker may self-recover. |
 | `assignment-watcher-exhausted` | assignment watcher retry envelope exhausted | Restart or rotate the worker; inspect the assignment bucket and NATS logs. |
 | `stream-missing-recovery-exhausted` | dynamic consumer stream missing and no app hook recovered it | Recover the stream or rotate workers according to application ownership. |
 | `source-unavailable:<bucket>` | caller-owned source bucket unavailable | Caller/operator recovers the source bucket; Parti does not recreate it. |
@@ -939,7 +941,7 @@ type Config struct {
     ColdStartWindow       time.Duration // Window for cold start (default: 30s)
     PlannedScaleWindow    time.Duration // Window for planned scale (default: 10s)
     EmergencyGracePeriod  time.Duration // Grace period before emergency (default: 0 = auto = 1.5 * HeartbeatInterval)
-    RestartDetectionRatio float64       // Ratio for restart classification (default: 0.5)
+    RestartDetectionRatio float64       // NO-OP (orphaned, pending removal); historically classified restarts (default: 0.5)
 
     // Timeouts
     OperationTimeout time.Duration // Timeout for KV operations (default: 10s)
@@ -1307,7 +1309,7 @@ type Assignment struct {
 **Fields**:
 - `Version`: Monotonically increasing assignment version
 - `Lifecycle`: Reason the leader recomputed this assignment. One of:
-  - `"cold_start"` — initial startup, or a mass-failure event that exceeds `RestartDetectionRatio` (uses `ColdStartWindow` to stabilize)
+  - `"cold_start"` — initial startup or a mass-failure event (uses `ColdStartWindow` to stabilize). Note: `RestartDetectionRatio` no longer participates in this classification — it is an orphaned no-op pending removal.
   - `"planned_scale"` — rolling update or planned membership change within the planned-scale window
   - `"emergency"` — worker failure detected, immediate rebalance
   - `"restart"` — previously-known worker returned after a transient absence
