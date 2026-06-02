@@ -47,7 +47,6 @@ type Config struct {
 	// Optional configuration (with defaults)
 	EmergencyGracePeriod time.Duration // Minimum time before emergency rebalance (default: 5s)
 	Cooldown             time.Duration // Minimum time between rebalances (default: 10s)
-	RestartRatio         float64       // Cold start detection ratio (default: 0.5)
 	ColdStartWindow      time.Duration // Stabilization window for cold start (default: 30s)
 	PlannedScaleWindow   time.Duration // Stabilization window for planned scale (default: 10s)
 
@@ -69,8 +68,8 @@ type Config struct {
 	PartitionShrinkConfirmationCount int
 
 	// PartitionShrinkConfirmationThresholdPct defines "sharply shrunk".
-	// A new partition count below
-	//   lastKnownPartitionCount * Pct / 100
+	// A new partition count where
+	//   observed * 100 < lastKnownPartitionCount * Pct
 	// is suspicious. Default: 50 (a >=50% drop in one poll is
 	// suspicious). An empty observation is always suspicious
 	// regardless of this threshold.
@@ -218,9 +217,6 @@ func (c *Config) SetDefaults() {
 	}
 	if c.Cooldown == 0 {
 		c.Cooldown = 10 * time.Second
-	}
-	if c.RestartRatio == 0 {
-		c.RestartRatio = 0.5
 	}
 	if c.ColdStartWindow == 0 {
 		c.ColdStartWindow = 30 * time.Second

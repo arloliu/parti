@@ -61,12 +61,14 @@
 //
 // # Rebalancing Strategy
 //
-// The calculator uses adaptive stabilization windows to balance responsiveness
-// and stability:
+// The calculator uses stabilization windows to balance responsiveness and
+// stability. The window is chosen structurally by detectRebalanceType, not by a
+// ratio:
 //
-//   - Cold start detection: Many workers appear at once (>50% of expected)
+//   - Cold start: no previously-known workers (the first non-empty scan)
 //   - Cold start window: 30 seconds (wait for most workers to start)
-//   - Planned scale window: 10 seconds (quick response to single worker changes)
+//   - Planned scale: any change once workers are already known
+//   - Planned scale window: 10 seconds (quick response to membership changes)
 //   - Rebalance cooldown: 10 seconds (prevent excessive rebalancing)
 //
 // # Assignment Distribution
@@ -108,7 +110,6 @@
 // The calculator supports several configuration options:
 //
 //   - Cooldown: Minimum time between rebalances (default: 10s)
-//   - RestartRatio: Fraction of workers indicating cold start (default: 0.5)
 //   - ColdStartWindow: Stabilization time for cold starts (default: 30s)
 //   - PlannedScaleWindow: Stabilization time for planned scaling (default: 10s)
 //

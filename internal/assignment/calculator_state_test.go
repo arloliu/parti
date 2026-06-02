@@ -263,7 +263,6 @@ func TestCalculator_detectRebalanceType_Restart(t *testing.T) {
 		HeartbeatPrefix:      "test-hb",
 		HeartbeatTTL:         10 * time.Second,
 		EmergencyGracePeriod: 5 * time.Second,
-		RestartRatio:         0.5,
 	})
 	require.NoError(t, err)
 

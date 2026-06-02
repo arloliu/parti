@@ -399,10 +399,13 @@ type Config struct {
 	// Constraint: Must be <= HeartbeatTTL
 	EmergencyGracePeriod time.Duration `yaml:"emergencyGracePeriod" validate:"ltefield=HeartbeatTTL"`
 
-	// RestartDetectionRatio determines when a restart is classified as cold start vs planned.
-	// If (failed workers / total workers) > ratio, it's treated as a cold start.
-	// For example, 0.5 means if >50% of workers fail simultaneously, use ColdStartWindow.
-	// Recommended: 0.5.
+	// RestartDetectionRatio historically classified a restart as cold start vs
+	// planned (if failed/total > ratio, treat as cold start).
+	//
+	// NOTE: this knob is currently a NO-OP. The cold-start-vs-planned-scale window
+	// selector that consumed it was removed as dead code, so the value is still
+	// accepted and validated for config compatibility but no longer affects
+	// behavior. Its removal is deferred to a future major version (public-API change).
 	RestartDetectionRatio float64 `yaml:"restartDetectionRatio" default:"0.5" validate:"gte=0,lte=1"`
 
 	// OperationTimeout is the timeout for KV operations (get, put, delete).
