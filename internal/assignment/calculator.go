@@ -624,32 +624,6 @@ func (c *Calculator) enterEmergencyState(ctx context.Context) {
 	c.stateMach.EnterEmergency(ctx)
 }
 
-// selectStabilizationWindow chooses between cold start and planned scale window.
-func (c *Calculator) selectStabilizationWindow(ctx context.Context) time.Duration {
-	workers, _, _ := c.getActiveWorkers(ctx)
-	if len(workers) == 0 {
-		return c.ColdStartWindow
-	}
-
-	// If many workers appear at once, it's likely a cold start
-	// Use restart ratio to decide
-	partitions, _ := c.Source.List(ctx)
-	expectedWorkers := len(partitions) / 10 // Rough estimate
-	if expectedWorkers == 0 {
-		expectedWorkers = 1
-	}
-
-	ratio := float64(len(workers)) / float64(expectedWorkers)
-	if ratio >= c.RestartRatio {
-		c.Logger.Info("detected cold start", "workers", len(workers), "ratio", ratio)
-		return c.ColdStartWindow
-	}
-
-	c.Logger.Info("detected planned scale", "workers", len(workers), "ratio", ratio)
-
-	return c.PlannedScaleWindow
-}
-
 // pollForChanges is the WorkerMonitor callback. It runs the observe→decide→
 // claim critical section under pollMu and, on an emergency claim, releases
 // pollMu before invoking the long-running rebalance.
@@ -978,20 +952,32 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 	return c.observeAndDecide(ctx, provided)
 }
 
-// observeAndDecide is the single critical section that performs a fresh
-// observation of the worker set, runs CheckEmergency (if the observation is
-// fresh), and either claims the emergency lifecycle or enters the planned
-// scaling state. pollMu serializes the entire observe→decide→claim sequence
-// to prevent races between concurrent pollers / watchers / lifecycle callers.
+// pollAction is the action observeAndDecideLocked hands back to observeAndDecide
+// to perform AFTER pollMu is released. Both the emergency rebalance and the
+// degraded-cache skip log must run with the lock released — the prior code
+// unlocked before each — so the locked core signals them rather than running
+// them under the lock (a slow injected Logger or the long rebalance must not
+// extend the poll critical section).
+type pollAction int
+
+const (
+	pollActionNone            pollAction = iota // locked core fully handled it
+	pollActionRunEmergency                      // caller runs RunClaimedRebalance
+	pollActionLogDegradedSkip                   // caller logs the degraded-cache skip
+)
+
+// observeAndDecide performs a fresh observation of the worker set, runs
+// CheckEmergency (if the observation is fresh), and either claims the emergency
+// lifecycle or enters the planned scaling state. The observe→decide→claim
+// critical section runs in observeAndDecideLocked under pollMu; this wrapper then
+// performs the actions that must happen with pollMu RELEASED.
 //
-// The pollMu is released BEFORE the long-running emergency rebalance is
-// invoked: the state machine has already committed to Emergency, so a
-// concurrent poll cannot start a competing decision; the rebalance itself
-// is independently serialized by rebalanceMu.
-//
-// When the observation is not fresh (degraded mode), the detector is NOT
-// mutated and no rebalance decision is taken: stale data must not drive
-// topology changes.
+// The pollMu is released BEFORE the emergency rebalance is invoked: the state
+// machine has already committed to Emergency under the lock, so a concurrent poll
+// cannot start a competing decision, and the rebalance itself is independently
+// serialized by rebalanceMu. Holding pollMu across the rebalance would stall
+// every other poller for its duration. The degraded-cache skip is likewise logged
+// after release, matching the prior unlock-before-log on that path.
 //
 // Parameters:
 //   - ctx: Context for cancellation
@@ -1000,12 +986,41 @@ func (c *Calculator) checkForChanges(ctx context.Context, currentWorkers ...map[
 // Returns:
 //   - error: Processing error, nil on success
 func (c *Calculator) observeAndDecide(ctx context.Context, provided map[string]bool) error {
+	action, err := c.observeAndDecideLocked(ctx, provided)
+	if err != nil {
+		return err
+	}
+	switch action {
+	case pollActionRunEmergency:
+		c.stateMach.RunClaimedRebalance(ctx, "emergency")
+	case pollActionLogDegradedSkip:
+		c.Logger.Info("skipping rebalance decision: observation is from degraded cache")
+	case pollActionNone:
+		// Fully handled inside the locked core; nothing to do post-release.
+	}
+
+	return nil
+}
+
+// observeAndDecideLocked is the observe→decide→claim critical section. pollMu
+// serializes the whole sequence to prevent races between concurrent pollers /
+// watchers / lifecycle callers, and is released by a SINGLE defer on every exit
+// path (the structured replacement for the prior hand-placed unlocks). It returns
+// the pollAction observeAndDecide must perform AFTER the lock is released:
+// pollActionRunEmergency (an emergency was detected AND claimed) or
+// pollActionLogDegradedSkip (a changed-but-non-fresh observation). The planned
+// scaling-state entry and every other skip path complete inside the locked
+// section and return pollActionNone.
+//
+// When the observation is not fresh (degraded mode), the detector is NOT mutated
+// and no rebalance decision is taken: stale data must not drive topology changes.
+func (c *Calculator) observeAndDecideLocked(ctx context.Context, provided map[string]bool) (pollAction, error) {
 	c.pollMu.Lock()
+	defer c.pollMu.Unlock()
 
 	workers, fresh, err := c.collectWorkerObservation(ctx, provided)
 	if err != nil {
-		c.pollMu.Unlock()
-		return err
+		return pollActionNone, err
 	}
 
 	c.mu.RLock()
@@ -1034,42 +1049,37 @@ func (c *Calculator) observeAndDecide(ctx context.Context, provided map[string]b
 	}
 
 	if !changed {
-		c.pollMu.Unlock()
-		return nil
+		return pollActionNone, nil
 	}
 
 	c.Logger.Info("polling detected worker change", "workers", len(workers), "fresh", fresh)
 
 	// Degraded observation cannot drive a topology decision: the worker list
-	// was returned from cache and may not reflect current truth.
+	// was returned from cache and may not reflect current truth. The skip is
+	// logged by observeAndDecide AFTER pollMu is released, matching the prior
+	// unlock-before-log on this path.
 	if !fresh {
-		c.pollMu.Unlock()
-		c.Logger.Info("skipping rebalance decision: observation is from degraded cache")
-
-		return nil
+		return pollActionLogDegradedSkip, nil
 	}
 
 	if emergency {
-		claimed := c.claimEmergency(ctx, disappeared)
-		c.pollMu.Unlock()
-		if claimed {
-			c.stateMach.RunClaimedRebalance(ctx, "emergency")
+		// Claim under pollMu; observeAndDecide runs the rebalance after the
+		// deferred Unlock fires (release-before-rebalance).
+		if c.claimEmergency(ctx, disappeared) {
+			return pollActionRunEmergency, nil
 		}
 
-		return nil
+		return pollActionNone, nil
 	}
 
 	reason, window := c.detectRebalanceType(lastWorkersCopy, workers, pending)
 	if reason == "" {
-		c.pollMu.Unlock()
-		return nil
+		return pollActionNone, nil
 	}
-
-	defer c.pollMu.Unlock()
 
 	if c.inRecoveryGrace() {
 		c.Logger.Info("skipping rebalance: leader is in recovery grace period after degraded mode")
-		return nil
+		return pollActionNone, nil
 	}
 
 	// c.Now is the injectable clock (embedded Config field, defaulted to
@@ -1080,7 +1090,7 @@ func (c *Calculator) observeAndDecide(ctx context.Context, provided map[string]b
 			"reason", reason,
 			"min_rebalance_interval", c.Cooldown,
 		)
-		return nil
+		return pollActionNone, nil
 	}
 
 	if c.GetState() != types.CalcStateIdle {
@@ -1088,12 +1098,12 @@ func (c *Calculator) observeAndDecide(ctx context.Context, provided map[string]b
 			"state", c.GetState().String(),
 			"reason", reason,
 		)
-		return nil
+		return pollActionNone, nil
 	}
 
 	c.enterScalingState(ctx, reason, window)
 
-	return nil
+	return pollActionNone, nil
 }
 
 // collectWorkerObservation builds the current-worker set, either from a
@@ -1202,19 +1212,14 @@ func (c *Calculator) getActiveWorkers(ctx context.Context) ([]string, bool, erro
 	workers, err := c.monitor.GetActiveWorkers(ctx)
 	if err != nil {
 		if natsutil.IsConnectivityError(err) {
-			if cached, age, ok := c.getCachedWorkers(); ok {
-				c.Logger.Warn("using cached worker list due to connectivity error",
-					"workers", len(cached),
-					"cache_age", age,
-					"error", err)
-				c.Metrics.RecordCacheUsage("workers", age.Seconds())
-				c.Metrics.IncrementCacheFallback("connectivity_error")
-
-				return cached, false, nil
-			}
-			c.Metrics.IncrementCacheFallback("no_cache")
-
-			return nil, false, fmt.Errorf("%w: no cached workers available: %w", types.ErrDegraded, err)
+			return c.cacheFallbackOrDegraded("connectivity_error",
+				fmt.Errorf("%w: no cached workers available: %w", types.ErrDegraded, err),
+				func(cached []string, age time.Duration) {
+					c.Logger.Warn("using cached worker list due to connectivity error",
+						"workers", len(cached),
+						"cache_age", age,
+						"error", err)
+				})
 		}
 
 		// Sustained non-connectivity enumeration failure (NP-10): the poll loop
@@ -1251,15 +1256,11 @@ func (c *Calculator) getActiveWorkers(ctx context.Context) ([]string, bool, erro
 			"threshold_pct", c.WorkerShrinkConfirmationThresholdPct,
 			"consecutive_observations", consec,
 			"required", c.WorkerShrinkConfirmationCount)
-		if cached, age, ok := c.getCachedWorkers(); ok {
-			c.Metrics.RecordCacheUsage("workers", age.Seconds())
-			c.Metrics.IncrementCacheFallback("suspicious_worker_shrink")
 
-			return cached, false, nil
-		}
-		c.Metrics.IncrementCacheFallback("no_cache")
-
-		return nil, false, fmt.Errorf("%w: %w", types.ErrDegraded, errSuspiciousWorkerObservation)
+		// The Warn above already explained the fallback, so onHit is nil here
+		// (unlike the connectivity path, which logs on the cache hit).
+		return c.cacheFallbackOrDegraded("suspicious_worker_shrink",
+			fmt.Errorf("%w: %w", types.ErrDegraded, errSuspiciousWorkerObservation), nil)
 	}
 
 	// Healthy observation: refresh the cache so future connectivity
@@ -1271,6 +1272,31 @@ func (c *Calculator) getActiveWorkers(ctx context.Context) ([]string, bool, erro
 	}
 
 	return workers, true, nil
+}
+
+// cacheFallbackOrDegraded is the shared exit for getActiveWorkers' two degraded
+// fallbacks (a connectivity enumeration error and a suspicious worker-shrink). On
+// a cache hit it returns the last cached worker list as a NON-fresh observation
+// (fresh=false, so the rebalance path knows not to trust it as current truth) and
+// records cache usage + the reason-tagged fallback metric; on a miss it records
+// the no_cache metric and surfaces degradedErr (a types.ErrDegraded wrap). onHit,
+// when non-nil, runs on the hit path before the metrics — the connectivity path
+// logs its Warn there, while the suspicious-shrink path already logged earlier and
+// passes nil. Centralizing this keeps the fresh=false contract and the metric
+// pair identical across both fallbacks.
+func (c *Calculator) cacheFallbackOrDegraded(reason string, degradedErr error, onHit func(cached []string, age time.Duration)) ([]string, bool, error) {
+	if cached, age, ok := c.getCachedWorkers(); ok {
+		if onHit != nil {
+			onHit(cached, age)
+		}
+		c.Metrics.RecordCacheUsage("workers", age.Seconds())
+		c.Metrics.IncrementCacheFallback(reason)
+
+		return cached, false, nil
+	}
+	c.Metrics.IncrementCacheFallback("no_cache")
+
+	return nil, false, degradedErr
 }
 
 // recordEnumerationFailure increments the consecutive enumeration-failure counter
@@ -1332,22 +1358,31 @@ func (c *Calculator) recordWorkerObservation(observed int) (suspicious bool, con
 	return suspicious, consec, accepted, lastKnown
 }
 
+// shrinkSuspicious reports whether observed is sharply shrunk relative to a
+// positive lastKnown baseline, i.e.
+//
+//	observed*100 < lastKnown*thresholdPct
+//
+// The multiplied form (rather than the pre-divided lastKnown*thresholdPct/100)
+// avoids the intermediate-truncation surprise at small counts. Both shrink
+// guards — worker heartbeat scans (workerObservationSuspicious) and
+// partition-source observations (partitionInputCredibilityGuard) — share this
+// one definition so the two cannot drift. Callers own the lastKnown == 0
+// "baseline not yet established" case; each guard treats it differently.
+func shrinkSuspicious(observed, lastKnown, thresholdPct int) bool {
+	return observed*100 < lastKnown*thresholdPct
+}
+
 // workerObservationSuspicious returns true when a fresh worker-count
-// observation is sharply shrunk relative to the last known baseline.
-// The guard is silent until lastKnownWorkerCount > 0 — the first ever
-// scan must be trusted to establish the baseline. The threshold form
-// mirrors partitionInputCredibilityGuard's
-//
-//	observed*100 < lastKnown*Pct
-//
-// shape to avoid the intermediate-truncation surprise at small worker
-// counts that the pre-divided form (lastKnown*Pct/100) produces.
+// observation is sharply shrunk relative to the last known baseline
+// (see shrinkSuspicious). The guard is silent until lastKnownWorkerCount > 0 —
+// the first ever scan must be trusted to establish the baseline.
 func (c *Calculator) workerObservationSuspicious(observed int) bool {
 	if c.lastKnownWorkerCount == 0 {
 		return false
 	}
 
-	return observed*100 < c.lastKnownWorkerCount*c.WorkerShrinkConfirmationThresholdPct
+	return shrinkSuspicious(observed, c.lastKnownWorkerCount, c.WorkerShrinkConfirmationThresholdPct)
 }
 
 // getActiveWorkersFiltered retrieves workers, excluding those confirmed disappeared in emergency.
@@ -1432,7 +1467,7 @@ func (c *Calculator) partitionInputCredibilityGuard(lifecycle string, observed i
 
 			return true
 		}
-	case observed*100 < c.lastKnownPartitionCount*c.PartitionShrinkConfirmationThresholdPct:
+	case shrinkSuspicious(observed, c.lastKnownPartitionCount, c.PartitionShrinkConfirmationThresholdPct):
 		c.partitionShrunkObservations++
 		if c.partitionShrunkObservations < c.PartitionShrinkConfirmationCount {
 			c.Logger.Warn("ignoring sharply-shrunk partition observation pending confirmation",

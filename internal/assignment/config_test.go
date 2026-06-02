@@ -160,7 +160,6 @@ func TestConfig_SetDefaults(t *testing.T) {
 	// Check all defaults were set
 	require.Equal(t, 5*time.Second, cfg.EmergencyGracePeriod)
 	require.Equal(t, 10*time.Second, cfg.Cooldown)
-	require.Equal(t, 0.5, cfg.RestartRatio)
 	require.Equal(t, 30*time.Second, cfg.ColdStartWindow)
 	require.Equal(t, 10*time.Second, cfg.PlannedScaleWindow)
 	require.NotNil(t, cfg.Metrics)
@@ -181,7 +180,6 @@ func TestConfig_SetDefaults_PreservesExistingValues(t *testing.T) {
 		HeartbeatTTL:         3 * time.Second,
 		EmergencyGracePeriod: 7 * time.Second,
 		Cooldown:             15 * time.Second,
-		RestartRatio:         0.6,
 		ColdStartWindow:      45 * time.Second,
 		PlannedScaleWindow:   12 * time.Second,
 		Logger:               customLogger,
@@ -193,7 +191,6 @@ func TestConfig_SetDefaults_PreservesExistingValues(t *testing.T) {
 	// Check custom values were preserved
 	require.Equal(t, 7*time.Second, cfg.EmergencyGracePeriod)
 	require.Equal(t, 15*time.Second, cfg.Cooldown)
-	require.Equal(t, 0.6, cfg.RestartRatio)
 	require.Equal(t, 45*time.Second, cfg.ColdStartWindow)
 	require.Equal(t, 12*time.Second, cfg.PlannedScaleWindow)
 	require.Equal(t, customLogger, cfg.Logger)
@@ -226,7 +223,6 @@ func TestNewCalculator(t *testing.T) {
 
 	// Check defaults were applied
 	require.Equal(t, 10*time.Second, calc.Cooldown)
-	require.Equal(t, 0.5, calc.RestartRatio)
 	require.Equal(t, 30*time.Second, calc.ColdStartWindow)
 	require.Equal(t, 10*time.Second, calc.PlannedScaleWindow)
 	require.NotNil(t, calc.Metrics)
@@ -267,7 +263,6 @@ func TestNewCalculator_CustomValues(t *testing.T) {
 		HeartbeatTTL:         3 * time.Second,
 		EmergencyGracePeriod: 7 * time.Second,
 		Cooldown:             15 * time.Second,
-		RestartRatio:         0.6,
 		ColdStartWindow:      45 * time.Second,
 		PlannedScaleWindow:   12 * time.Second,
 		Logger:               customLogger,
@@ -280,7 +275,6 @@ func TestNewCalculator_CustomValues(t *testing.T) {
 
 	// Check custom values were used
 	require.Equal(t, 15*time.Second, calc.Cooldown)
-	require.Equal(t, 0.6, calc.RestartRatio)
 	require.Equal(t, 45*time.Second, calc.ColdStartWindow)
 	require.Equal(t, 12*time.Second, calc.PlannedScaleWindow)
 	require.Equal(t, customLogger, calc.Logger)

@@ -42,7 +42,6 @@ func TestCalculator_CacheFallback_ConnectivityError(t *testing.T) {
 		Cooldown:             100 * time.Millisecond,
 		ColdStartWindow:      200 * time.Millisecond,
 		PlannedScaleWindow:   100 * time.Millisecond,
-		RestartRatio:         0.5,
 	}
 
 	calc, err := NewCalculator(cfg)
@@ -109,7 +108,6 @@ func TestCalculator_CacheFallback_NoCacheAvailable(t *testing.T) {
 		Cooldown:             100 * time.Millisecond,
 		ColdStartWindow:      200 * time.Millisecond,
 		PlannedScaleWindow:   100 * time.Millisecond,
-		RestartRatio:         0.5,
 	}
 
 	calc, err := NewCalculator(cfg)
@@ -164,7 +162,6 @@ func TestCalculator_CacheUpdate_OnSuccess(t *testing.T) {
 		Cooldown:             100 * time.Millisecond,
 		ColdStartWindow:      200 * time.Millisecond,
 		PlannedScaleWindow:   100 * time.Millisecond,
-		RestartRatio:         0.5,
 	}
 
 	calc, err := NewCalculator(cfg)
