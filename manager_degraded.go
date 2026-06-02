@@ -20,6 +20,13 @@ import (
 // reason is preserved.
 const degradedReasonKVUnavailable = "kv-unavailable"
 
+// degradedReasonEnumerationStall is the distinct enterDegraded reason for a
+// sustained leader-side worker-enumeration (heartbeat Keys scan) stall that the
+// connectivity / degrading classifiers miss (NP-10). Kept separate so the
+// recovery exit can require an enumeration success before exiting, and so the
+// operator surface distinguishes it from a kv-unavailable op stall.
+const degradedReasonEnumerationStall = "heartbeat-enumeration-stall"
+
 // kvErrorEvent is one entry in the degraded-circuit error window.
 //
 // transient marks an F-D1 connected-but-KV-unavailable timeout (an
@@ -392,6 +399,25 @@ func (m *Manager) exitDegraded() {
 	}
 }
 
+// onEnumerationStall is wired to the calculator's OnEnumerationError. The
+// calculator fires it only after EnumerationFailureThreshold consecutive
+// non-connectivity enumeration failures, so the stall is already sustained:
+// degrade directly, bypassing the transient kvErrorWindow (a still-succeeding
+// heartbeat Put would clear a transient entry before it accumulated — the F-D1
+// constraint). enterDegraded is idempotent (CAS), so repeated calls while
+// degraded are no-ops.
+func (m *Manager) onEnumerationStall(err error) {
+	m.logger.Warn("sustained heartbeat-enumeration stall; entering degraded", "error", err)
+	m.enterDegraded(degradedReasonEnumerationStall)
+}
+
+// recordEnumerationSuccess is wired to the calculator's OnEnumerationSuccess. It
+// stamps the recovery signal the reason-scoped exit gate keys on. Stamped on
+// every successful enumeration (even while degraded), mirroring recordKVHealthyOp.
+func (m *Manager) recordEnumerationSuccess() {
+	m.lastEnumerationSuccessAt.Store(time.Now().UnixNano())
+}
+
 // attemptRecoveryFromDegraded checks if recovery conditions are met and exits degraded mode.
 func (m *Manager) attemptRecoveryFromDegraded() {
 	// Check if in degraded mode
@@ -477,6 +503,25 @@ func (m *Manager) attemptRecoveryFromDegraded() {
 	if m.heartbeatBucketUnavailable(m.ctx) {
 		m.logger.Warn("recovery: heartbeat bucket unavailable; staying Degraded for restart/rotation")
 		return
+	}
+
+	// NP-10 — reason-scoped enumeration-recovery gate. A heartbeat-enumeration
+	// stall degrade must not exit on the (unaffected) assignment read while the
+	// Keys scan is still timing out — the leader would resume serving stale
+	// membership. Require an enumeration success stamped AFTER we degraded.
+	// Leadership-loss escape: enumeration is leader-only (startCalculator), so a
+	// non-leader can never stamp a success — treat "not currently leader" as
+	// enumeration-N/A and do NOT block, else a leader that lost leadership while in
+	// this degrade would be stuck forever (a gate on a capability that cannot
+	// fire). Reason-scoped, so other degrade reasons are unaffected.
+	if reason == degradedReasonEnumerationStall && m.isLeader.Load() {
+		ensAt := m.lastEnumerationSuccessAt.Load()
+		since := m.degradedSince.Load()
+		if ensAt == 0 || ensAt <= since {
+			m.logger.Debug("recovery: worker enumeration not recovered since stall degrade; staying Degraded",
+				"last_enumeration_success_unixnano", ensAt, "degraded_since_unixnano", since)
+			return
+		}
 	}
 
 	// Success - exit degraded mode
