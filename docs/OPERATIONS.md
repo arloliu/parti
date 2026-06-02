@@ -129,6 +129,21 @@ recovery, rotation, or caller-owned recovery.
 | `stream-missing-recovery-exhausted` | dynamic consumer stream missing and no app hook recovered it | Recover the stream or rotate workers according to application ownership. |
 | `source-unavailable:<bucket>` | caller-owned source bucket unavailable | Caller/operator recovers the source bucket; Parti does not recreate it. |
 
+**Recovery bound — worker-ID lease (`WorkerIDTTL`).** M5 recover-to-Stable across
+a NATS outage is bounded by `WorkerIDTTL` (default 75s; the stableID bucket
+`MaxAge` is reconciled to it). An outage that exceeds `WorkerIDTTL` ages out the
+worker-ID lease; on reconnect the renewal sees a revision mismatch, surfaces a
+bare `ErrClaimLost`, and the worker **self-stops to `StateShutdown`** — the
+deliberate split-brain-safe behavior, since a peer may have taken the slot. The
+boundary is minute-scale at defaults (renewal cadence ~`WorkerIDTTL/3`; purge at
+last-renewal + `WorkerIDTTL`), so a ~1-minute blip can rotate the **whole fleet**
+(every disconnected worker crosses the boundary together). Recovery is
+orchestrator rotation (the readiness probe sees `StateShutdown` and the pod is
+replaced); Parti does not auto-reclaim a lease that aged out, because at the
+`ErrClaimLost` surface it cannot distinguish "my lease expired, slot empty" from
+"a peer took the slot". Raise `WorkerIDTTL` above the worst-case outage to move
+the boundary.
+
 ### KV Bucket Pre-Creation (Optional)
 
 Parti auto-creates KV buckets, but you can pre-create them for custom settings:
@@ -642,6 +657,57 @@ nats kv info parti-<cluster>-election | grep -i storage  # expect "File"
 
 After the migration a single-node restart in a 3-replica cluster
 no longer causes leadership churn.
+
+### Heartbeat Bucket Storage Migration
+
+The heartbeat bucket's default storage type changed from `MemoryStorage` to
+`FileStorage` so the heartbeat stream survives a single-node NATS restart.
+Previously, a single-node restart dropped the `MemoryStorage` heartbeat
+stream; the heartbeat publisher's `Put` then kept failing against the dead
+stream and the fleet flapped `Degraded`↔`Stable` without ever holding Stable.
+
+**Existing clusters need a one-time bucket replacement** because
+`EnsureKVBucketWithRetry` is get-first — it does not upgrade an existing
+`MemoryStorage` bucket to `FileStorage`.
+
+**Until migrated, an existing bucket keeps `MemoryStorage`,** so a single-node
+NATS restart still loses its heartbeat stream. The heartbeat-reachability
+recovery guard holds such a worker in **terminal `Degraded`** — it does not
+flap back to `Stable`. (A missing heartbeat stream degrades with the
+whole-bucket-loss reason `KV error threshold exceeded`, and the guard refuses
+the recovery exit while the bucket is unreachable.) This is loud and
+rotatable: `OnDegraded → readiness probe → pod rotation` rotates the worker,
+and because the lost bucket no longer exists, the rotating pod re-creates it
+as `FileStorage` — so a rotation completes the migration automatically. You
+can also migrate explicitly during a maintenance window (below) instead of
+waiting for a restart to trigger it.
+
+Migration steps, during a planned maintenance window:
+
+```bash
+# 1. Delete the bucket (also removes the backing KV_<bucket> stream).
+nats kv rm parti-<cluster>-heartbeat
+
+# 2. Paranoia check — confirm the backing stream is gone.
+nats stream ls | grep KV_parti-<cluster>-heartbeat  # expect no output
+
+# 3. Recreate as FileStorage (match your HeartbeatTTL and replica count).
+nats kv add parti-<cluster>-heartbeat --storage=file --ttl=15s --replicas=1
+
+# 4. Rolling restart of Parti workers (any order is fine).
+```
+
+Workers that observed the deletion enter degraded via the epoch fence (reason
+`bucket-recreated:parti-<cluster>-heartbeat`) and, with the Phase-1 live epoch
+re-probe, stay terminally `Degraded`. The existing
+`OnDegraded → readiness probe → pod rotation` path (plus the rolling restart
+in step 4) completes the migration.
+
+Post-migration verification:
+
+```bash
+nats kv info parti-<cluster>-heartbeat | grep -i storage  # expect "File"
+```
 
 ### Tuning OperationTimeout vs ElectionTimeout
 

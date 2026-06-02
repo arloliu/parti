@@ -40,6 +40,14 @@ func armDegraded(t *testing.T, committed *Assignment, snapshot Assignment) (*Man
 	}
 	m.state.Store(int32(StateDegraded))
 	m.degradedSince.Store(time.Now().UnixNano())
+	// Mirror enterDegraded's reason ownership: a real degrade always stores a
+	// reason right after the degradedSince CAS, and attemptRecoveryFromDegraded's
+	// empty-reason guard intentionally stays degraded a tick when the reason is
+	// unset. These are reason-agnostic commitment-guard recovery tests, so arm a
+	// non-kv-unavailable reason — the kv-unavailable conjunct is skipped and
+	// recovery keys on the commitment guard alone (the behavior this helper
+	// exercised before the guard existed).
+	m.lastDegradedReason.Store("NATS connection down")
 
 	return m, rh
 }

@@ -5,6 +5,69 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Auto-healing gap-closure follow-up to the v2.5.0 self-healing work: three
+verified recovery-exit gaps — where a worker returned to `Stable` while the
+fault that degraded it still persisted — are closed, and the heartbeat KV
+bucket joins election and assignment on `FileStorage` so a single-node NATS
+restart no longer flaps the fleet.
+
+### Changed
+
+- **Heartbeat KV bucket defaults to `FileStorage`** (was `MemoryStorage`).
+  With `MemoryStorage` the heartbeat stream was lost on a single-node
+  JetStream restart; the heartbeat publisher's `Put` then kept failing
+  against the dead stream and the fleet oscillated `Degraded`↔`Stable`.
+  Persisting the bucket lets the stream survive the restart. The added
+  write IOPS is a flat, partition-count-independent term measured within
+  the provisioned envelope already accepted for the v2.5.0 election-bucket
+  switch (see `docs/plans/iops-investigation/`). Election and assignment
+  buckets were already `FileStorage`.
+
+  **Existing clusters need a one-time manual migration** —
+  `EnsureKVBucketWithRetry` is get-first and does not upgrade an existing
+  `MemoryStorage` bucket. Until migrated, an existing bucket keeps
+  `MemoryStorage`, so a single-node NATS restart still loses its heartbeat
+  stream — but the heartbeat-reachability guard below now holds such a worker
+  in terminal `Degraded` (loud, rotatable) instead of flapping, and a rotation
+  re-creates the bucket as `FileStorage`, completing the migration. See
+  "Heartbeat Bucket Storage Migration" in `docs/OPERATIONS.md`.
+
+### Fixed — recovery exit no longer heals on the wrong signal
+
+The degraded→`Stable` recovery exit was trigger-blind: it returned to `Stable`
+on a healthy *assignment* read even while a *different* fault still persisted.
+Each fix below ANDs an additive guard onto the existing
+`currentAssignmentApplied` commitment guard (which is unchanged):
+
+- **Bucket wipe-and-recreate stays degraded.** A wiped-and-recreated
+  Parti-owned control-plane bucket left the epoch-fence mismatch permanent,
+  but the exit healed on a version-monotonic republish into the
+  recreated-empty bucket. A live per-tick epoch re-probe now refuses the exit
+  while any owned bucket's stream `Created` differs from the value captured at
+  `Start`; the worker stays terminally `Degraded` for restart/rotation.
+- **Connected-but-KV-unavailable stalls stay degraded.** A heartbeat /
+  election / stableID op stall degrades with reason `kv-unavailable`, but the
+  exit re-read only the unaffected assignment bucket. The exit now requires a
+  heartbeat `Put` success stamped *after* the degrade before leaving a
+  `kv-unavailable` degrade. Reason-scoped, so a `startup-timeout` degrade
+  still recovers on the commitment guard alone.
+- **Claim-loss self-stop documented.** An outage exceeding `WorkerIDTTL` ages
+  out the worker-ID lease; on reconnect the worker surfaces a bare
+  `ErrClaimLost` and self-stops to `StateShutdown` (split-brain-safe — a peer
+  may hold the slot). This was already the behavior; `docs/OPERATIONS.md` now
+  documents the bound and that recovery is orchestrator rotation.
+- **Heartbeat-bucket loss stays degraded (no flap).** A *missing* heartbeat
+  stream — e.g. a single-node restart of an un-migrated `MemoryStorage`
+  bucket — degrades with the whole-bucket-loss reason
+  `KV error threshold exceeded`, which the `kv-unavailable` gate does not
+  cover and which the recreate re-probe does not catch (a missing stream is
+  not a recreate), so the fleet flapped `Degraded`↔`Stable`. A
+  heartbeat-bucket reachability check now refuses the recovery exit while the
+  bucket's stream is missing/unreachable, holding the worker terminally
+  `Degraded` for rotation regardless of the degrade reason.
+
 ## [v2.5.0] - 2026-05-24
 
 Two themes: **self-healing under NATS infrastructure churn** — manager

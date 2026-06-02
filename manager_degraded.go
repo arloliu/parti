@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/arloliu/parti/v2/internal/natsutil"
+	"github.com/arloliu/parti/v2/kvutil"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go"
 )
@@ -264,6 +265,12 @@ func (m *Manager) recordKVSuccess() {
 // window is not growing, and the early return keeps the hot heartbeat-success
 // path (every HeartbeatInterval) off m.mu once a real outage is in progress.
 func (m *Manager) recordKVHealthyOp() {
+	// Stamp the heartbeat-success time unconditionally: the reason-scoped
+	// recovery gate needs to observe a heartbeat Put succeeding AFTER a
+	// kv-unavailable degrade. This must run even while degraded (the
+	// window-clear below intentionally does not).
+	m.lastHeartbeatSuccessAt.Store(time.Now().UnixNano())
+
 	if m.degradedSince.Load() != 0 {
 		return
 	}
@@ -310,9 +317,17 @@ func (m *Manager) enterDegraded(reason string) {
 		return
 	}
 
-	// Attempt validated state transition. Roll back degradedSince on failure
-	// (can only happen from Init/ClaimingID states that forbid degraded entry).
+	// Only the CAS winner reaches here, so this is the sole writer of the active
+	// reason — no loser-clobber. The recovery gate treats the brief
+	// CAS-won-but-reason-not-yet-stored window as "" and stays degraded that tick.
+	m.lastDegradedReason.Store(reason)
+
+	// Attempt validated state transition. Roll back BOTH reason and degradedSince
+	// on failure (clear reason BEFORE degradedSince so the happens-before holds).
+	// Failure can only happen from Init/ClaimingID states that forbid degraded
+	// entry.
 	if !m.transitionState(StateDegraded) {
+		m.lastDegradedReason.Store("")
 		m.degradedSince.Store(0)
 		return
 	}
@@ -351,8 +366,13 @@ func (m *Manager) exitDegraded() {
 		return
 	}
 
-	// Clear degradedSince after a successful state transition so that future
-	// enterDegraded calls can re-arm correctly (fixes the re-entry bug).
+	// Clear the reason BEFORE clearing degradedSince: a subsequent enterDegraded
+	// can only win its CAS after degradedSince becomes 0, so this clear
+	// happens-before that winner's reason store — no clobber, and the gap between
+	// an exit and the next store reads as "" (gate stays that tick). Clearing
+	// degradedSince after a successful state transition also lets future
+	// enterDegraded calls re-arm correctly (fixes the re-entry bug).
+	m.lastDegradedReason.Store("")
 	m.degradedSince.Store(0)
 
 	m.logger.Info("exiting degraded mode",
@@ -411,8 +431,160 @@ func (m *Manager) attemptRecoveryFromDegraded() {
 		return
 	}
 
+	// The degrade reason is written by the winning enterDegraded just after its
+	// CAS (Step 4). An empty read means this entry's reason is not yet observable
+	// (or we raced an exit) — stay degraded this tick rather than risk skipping a
+	// reason-scoped gate below. One-tick delay only.
+	reason, _ := m.lastDegradedReason.Load().(string)
+	if reason == "" {
+		return
+	}
+
+	// Family B — reason-scoped recover-on-wrong-signal gate. A kv-unavailable
+	// degrade is a connected-but-KV-unavailable op stall on the heartbeat /
+	// election / stableid buckets; the commitment guard above reads only the
+	// (unaffected) assignment bucket, so it cannot tell the failing op recovered.
+	// Require a heartbeat Put success stamped AFTER we degraded. Reason-scoped:
+	// a non-kv-unavailable degrade (e.g. "startup-timeout", NP-5) recovers via
+	// the commitment guard alone — an UNCONDITIONAL gate regresses NP-5, which
+	// has no heartbeat publisher so lastHeartbeatSuccessAt stays 0. Cheap atomic
+	// reads, evaluated before the Family A network re-probe added in a later task.
+	if reason == degradedReasonKVUnavailable {
+		hbAt := m.lastHeartbeatSuccessAt.Load()
+		since := m.degradedSince.Load()
+		if hbAt == 0 || hbAt <= since {
+			m.logger.Debug("recovery: heartbeat KV not recovered since kv-unavailable degrade; staying Degraded",
+				"last_heartbeat_success_unixnano", hbAt, "degraded_since_unixnano", since)
+			return
+		}
+	}
+
+	// Family A — refuse a recovery exit while a Parti-owned bucket wipe-and-
+	// recreate is still outstanding. A live re-probe; a missing/timing-out bucket
+	// is skipped (Family B's / the connection monitor's concern), so this conjunct
+	// fires only on a CONFIRMED Created mismatch.
+	if m.epochMismatchOutstanding(m.ctx) {
+		m.logger.Warn("recovery: bucket epoch mismatch outstanding; staying Degraded for restart/rotation")
+		return
+	}
+
+	// Heartbeat-bucket reachability backstop — refuse to exit while the heartbeat
+	// bucket's stream is missing/unreachable (e.g. a single-node restart of an
+	// un-migrated MemoryStorage heartbeat bucket). NOT reason-scoped: it backstops
+	// the "KV error threshold exceeded" reason that the Family B kv-unavailable gate
+	// does not cover and that Family A (recreate-only) does not catch for a missing
+	// stream. Holds the worker terminally Degraded for rotation.
+	if m.heartbeatBucketUnavailable(m.ctx) {
+		m.logger.Warn("recovery: heartbeat bucket unavailable; staying Degraded for restart/rotation")
+		return
+	}
+
 	// Success - exit degraded mode
 	m.exitDegraded()
+}
+
+// epochMismatchOutstanding reports whether any Parti-owned bucket's LIVE
+// stream-Created no longer matches the value captured at Start — i.e. a
+// wipe-and-recreate is still in effect. It is the Family A recovery-exit guard:
+// the commitment guard can be satisfied by a version-monotonic republish into a
+// recreated-empty bucket, so the exit must additionally refuse while a recreate
+// is outstanding (terminal Degraded => restart/rotation, docs/OPERATIONS.md).
+//
+// This is a LIVE re-probe (not a latch) so there is no pre-arm window: the
+// epoch-fence monitor ticks every OperationTimeout (10s) while recovery ticks
+// every 1s, so a latch could arm after a faster recovery had already exited.
+//
+// Probe errors are NOT actionable and are skipped (mirroring checkBucketEpochs'
+// continue-on-error): only a successful read with a DIFFERENT Created is a
+// recreate. A missing/timing-out bucket is the connection monitor's / Family B's
+// concern, not Family A's — this keeps the two exit conjuncts independent.
+//
+// Cost / timing: it runs inline on the 1s connection-monitor goroutine, but ONLY
+// in the connected branch (attemptRecoveryFromDegraded is reached only after the
+// connection is up for ExitThreshold), so the common case is a few sub-ms
+// round-trips against reachable buckets (measured ~3ms for 4 buckets). Each
+// bucket's probe is hard-bounded by OperationTimeout, so the worst case is
+// len(bucketEpochs)*OperationTimeout of inline blocking — it degrades gracefully
+// rather than wedging if a bucket goes unreachable mid-tick.
+//
+// Concurrency: m.bucketEpochs is written only at Start (captureBucketEpoch) and
+// is read-only afterward, so ranging it from this (connection-monitor) goroutine
+// is race-free — the SAME lock-free-read contract checkBucketEpochs relies on. It
+// opens a FRESH probe handle per bucket rather than reusing ep.kv, which is owned
+// by the monitorBucketEpochs goroutine and is not safe to share across goroutines
+// (nats.go KeyValue handles cache *stream state).
+func (m *Manager) epochMismatchOutstanding(ctx context.Context) bool {
+	if m.js == nil {
+		return false
+	}
+	for bucket, ep := range m.bucketEpochs {
+		// Bound BOTH the handle open AND the status read with a single per-bucket
+		// deadline: js.KeyValue does a stream-info round-trip, so passing the
+		// unbounded ctx here would let it block on nats.go's internal default
+		// (~5s) instead of OperationTimeout when a bucket is unreachable — turning
+		// this into an unbounded inline stall on the connection-monitor goroutine.
+		probeCtx, cancel := context.WithTimeout(ctx, m.cfg.OperationTimeout)
+		probeKV, err := m.js.KeyValue(probeCtx, bucket)
+		if err != nil {
+			cancel()
+			m.logger.Debug("epoch re-probe: open handle failed; not actionable", "bucket", bucket, "error", err)
+			continue
+		}
+		live, err := kvutil.BucketStreamCreated(probeCtx, probeKV)
+		cancel()
+		if err != nil {
+			m.logger.Debug("epoch re-probe: probe failed; not actionable", "bucket", bucket, "error", err)
+			continue
+		}
+		if !live.Equal(ep.created) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// heartbeatBucketUnavailable reports whether the heartbeat bucket's stream is
+// currently missing or unreachable. It is the recovery-exit backstop for the
+// heartbeat-bucket-loss flap that the reason-scoped Family B gate and the
+// recreate-only Family A re-probe do not cover: a single-node restart of an
+// un-migrated MemoryStorage heartbeat bucket loses the stream, the heartbeat
+// publisher Put keeps failing, and the worker degrades with the whole-bucket-loss
+// reason "KV error threshold exceeded" (manager_degraded.go:208-225) — NOT
+// kv-unavailable (so Family B is silent) and not a Created mismatch (the stream is
+// gone, not recreated, so epochMismatchOutstanding skips it). Without this guard
+// the recovery exit heals on the unaffected assignment read and the fleet flaps.
+//
+// Unlike Family B this guard is NOT reason-scoped: it fires for ANY degrade reason,
+// but only when the heartbeat bucket is genuinely unreachable, so it cannot regress
+// a degrade whose heartbeat bucket is healthy (NP-5 startup-timeout, NP-3a disarmed
+// — bucket reachable => returns false => recovery proceeds on the prior guards).
+//
+// Cost / timing: it runs inline on the 1s connection-monitor goroutine in the
+// connected branch only, so the common case is one sub-ms KeyValue+Status round
+// trip against a reachable bucket. The single per-call deadline (OperationTimeout)
+// hard-bounds BOTH the handle open and the status read, so an unreachable bucket
+// degrades to a bounded inline stall rather than wedging the goroutine.
+//
+// Concurrency: it opens a FRESH probe handle (not a cached one) for the same
+// goroutine-safety reason as epochMismatchOutstanding — nats.go KeyValue handles
+// cache *stream state and are not safe to share across goroutines. m.js == nil
+// (unit-test managers) short-circuits to false.
+func (m *Manager) heartbeatBucketUnavailable(ctx context.Context) bool {
+	if m.js == nil {
+		return false
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, m.cfg.OperationTimeout)
+	defer cancel()
+	kv, err := m.js.KeyValue(probeCtx, m.cfg.KVBuckets.HeartbeatBucket)
+	if err != nil {
+		return true // bucket missing / unreachable
+	}
+	if _, err := kv.Status(probeCtx); err != nil {
+		return true
+	}
+
+	return false
 }
 
 // enterRecoveryGracePeriod starts the recovery grace period for the leader.

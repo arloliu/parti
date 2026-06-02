@@ -113,8 +113,12 @@ func (m *Manager) ensureStableIDKV(ctx context.Context, js jetstream.JetStream) 
 //     leadership churn. The switch from MemoryStorage is effectively
 //     IOPS-free at production scales (see
 //     docs/plans/iops-investigation/findings.md §M1.9).
-//   - heartbeat:  MemoryStorage — workers re-publish every HeartbeatInterval,
-//     so a missed window is recovered by the next publish.
+//   - heartbeat:  FileStorage   — the heartbeat stream must survive a single-node
+//     NATS restart. With MemoryStorage the stream was lost on restart and the
+//     fleet flapped Degraded<->Stable (the publisher Put kept failing against the
+//     dead stream). The added write IOPS is a flat, partition-count-independent
+//     term measured within the provisioned envelope (see
+//     docs/plans/iops-investigation/findings.md and 06-deep-gap-fix-plan Task 0.1).
 //   - assignment: FileStorage  — must survive NATS restart so followers
 //     joining during the outage window can receive their assignment.
 //
@@ -153,7 +157,7 @@ func (m *Manager) ensureCoreKVBuckets( //nolint:revive
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	heartbeatKV, err = ensure("heartbeat", m.cfg.KVBuckets.HeartbeatBucket, m.cfg.HeartbeatTTL, jetstream.MemoryStorage)
+	heartbeatKV, err = ensure("heartbeat", m.cfg.KVBuckets.HeartbeatBucket, m.cfg.HeartbeatTTL, jetstream.FileStorage)
 	if err != nil {
 		return nil, nil, nil, err
 	}
