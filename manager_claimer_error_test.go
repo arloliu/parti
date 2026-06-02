@@ -2,6 +2,7 @@ package parti
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -100,6 +101,35 @@ func TestOnClaimerError_TransientErrorUsesKVCircuit(t *testing.T) {
 
 	require.Equal(t, int32(1), m.kvErrorCount.Load(),
 		"a transient error must be recorded by the KV error circuit")
+}
+
+// TestOnClaimerError_WrappedClaimLost_UsesKVCircuit pins the routing the existing
+// claimer tests did not cover: an ErrClaimLost that ALSO wraps a connectivity /
+// degrading-JetStream error is bucket loss observed via the claim path, NOT a
+// peer takeover. The stableid classifier wraps such failures as ErrClaimLost, so
+// onClaimerError must feed the degraded circuit (recordKVError) and must NOT stop
+// the worker — otherwise the single worker that renews first self-terminates
+// while peers stay up, losing the "all workers Degraded in lockstep" contract.
+func TestOnClaimerError_WrappedClaimLost_UsesKVCircuit(t *testing.T) {
+	m, cancel := claimerErrorTestManager(t)
+	defer cancel()
+
+	origShutdown := claimLostShutdown
+	claimLostShutdown = func(*Manager) {
+		t.Error("a bucket-loss-wrapped ErrClaimLost must NOT stop the worker")
+	}
+	defer func() { claimLostShutdown = origShutdown }()
+
+	// ErrClaimLost wrapping a connectivity error: errors.Is reports BOTH, which is
+	// exactly the "bucket loss, not peer takeover" shape onClaimerError routes to
+	// the circuit.
+	err := errors.Join(stableid.ErrClaimLost, nats.ErrTimeout)
+	require.ErrorIs(t, err, stableid.ErrClaimLost)
+
+	m.onClaimerError(err)
+
+	require.Equal(t, int32(1), m.kvErrorCount.Load(),
+		"a bucket-loss-wrapped ErrClaimLost must be recorded by the KV circuit, not shut down")
 }
 
 // recordingConsumerUpdater is a WorkerConsumerUpdater test double that records
