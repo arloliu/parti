@@ -80,7 +80,7 @@ func (m *Manager) onStreamMissingError(streamName string, cause error) {
 		"stream", streamName,
 		"error", cause,
 	)
-	m.enterDegraded("stream-missing-recovery-exhausted")
+	m.enterDegraded(DegradeReasonStreamMissingRecoveryExhausted)
 }
 
 // ensureStableIDKV ensures the StableID KV bucket exists and that its MaxAge
@@ -102,6 +102,15 @@ func (m *Manager) ensureStableIDKV(ctx context.Context, js jetstream.JetStream) 
 	}
 
 	return kv, nil
+}
+
+// coreKVBuckets bundles the three always-present Parti-owned coordination
+// buckets that Start opens together, so ensureCoreKVBuckets returns named
+// handles instead of a positional triple (which tripped revive's result limit).
+type coreKVBuckets struct {
+	election   jetstream.KeyValue
+	heartbeat  jetstream.KeyValue
+	assignment jetstream.KeyValue
 }
 
 // ensureCoreKVBuckets ensures election, heartbeat, and assignment KV buckets.
@@ -126,14 +135,7 @@ func (m *Manager) ensureStableIDKV(ctx context.Context, js jetstream.JetStream) 
 // pre-existing operational policy) can pre-create the bucket with their
 // own KeyValueConfig; kvutil.EnsureKVBucketWithRetry opens existing
 // buckets without inspecting their config.
-func (m *Manager) ensureCoreKVBuckets( //nolint:revive
-	startupCtx context.Context,
-	js jetstream.JetStream,
-) (
-	electionKV jetstream.KeyValue,
-	heartbeatKV jetstream.KeyValue,
-	assignmentKV jetstream.KeyValue, err error,
-) {
+func (m *Manager) ensureCoreKVBuckets(startupCtx context.Context, js jetstream.JetStream) (coreKVBuckets, error) {
 	ensure := func(label, bucket string, ttl time.Duration, storage jetstream.StorageType) (jetstream.KeyValue, error) {
 		bctx, bcancel := context.WithTimeout(startupCtx, m.cfg.OperationTimeout)
 		start := time.Now()
@@ -153,20 +155,20 @@ func (m *Manager) ensureCoreKVBuckets( //nolint:revive
 	// need cross-node HA pre-create the bucket with --replicas=3
 	// (EnsureKVBucketWithRetry is get-first and honors the existing
 	// config). See docs/OPERATIONS.md for the migration runbook.
-	electionKV, err = ensure("election", m.cfg.KVBuckets.ElectionBucket, m.cfg.ElectionTimeout, jetstream.FileStorage)
+	electionKV, err := ensure("election", m.cfg.KVBuckets.ElectionBucket, m.cfg.ElectionTimeout, jetstream.FileStorage)
 	if err != nil {
-		return nil, nil, nil, err
+		return coreKVBuckets{}, err
 	}
-	heartbeatKV, err = ensure("heartbeat", m.cfg.KVBuckets.HeartbeatBucket, m.cfg.HeartbeatTTL, jetstream.FileStorage)
+	heartbeatKV, err := ensure("heartbeat", m.cfg.KVBuckets.HeartbeatBucket, m.cfg.HeartbeatTTL, jetstream.FileStorage)
 	if err != nil {
-		return nil, nil, nil, err
+		return coreKVBuckets{}, err
 	}
-	assignmentKV, err = ensure("assignment", m.cfg.KVBuckets.AssignmentBucket, m.cfg.KVBuckets.AssignmentTTL, jetstream.FileStorage)
+	assignmentKV, err := ensure("assignment", m.cfg.KVBuckets.AssignmentBucket, m.cfg.KVBuckets.AssignmentTTL, jetstream.FileStorage)
 	if err != nil {
-		return nil, nil, nil, err
+		return coreKVBuckets{}, err
 	}
 
-	return electionKV, heartbeatKV, assignmentKV, nil
+	return coreKVBuckets{election: electionKV, heartbeat: heartbeatKV, assignment: assignmentKV}, nil
 }
 
 // setupHandoff wires the handoff coordinator and performs hygiene/resume detection.
@@ -295,6 +297,16 @@ func kvStreamConfig(ctx context.Context, kv jetstream.KeyValue) (jetstream.Strea
 	return bs.StreamInfo().Config, nil
 }
 
+// bucketMaxAgeReconciled reports whether kv's backing stream now carries
+// MaxAge == want. Both MaxAge reconcilers call it after a failed UpdateStream to
+// absorb the benign race where a concurrent worker reconciled the same bucket
+// first — a re-read that confirms the desired MaxAge means the goal was reached
+// regardless of which worker's update won.
+func bucketMaxAgeReconciled(ctx context.Context, kv jetstream.KeyValue, want time.Duration) bool {
+	cur, err := kvStreamConfig(ctx, kv)
+	return err == nil && cur.MaxAge == want
+}
+
 // reconcileHandoffBucketMaxAge clears a non-zero MaxAge on an already-existing
 // handoff KV bucket. A handoff bucket created by an older parti version carries
 // MaxAge == HandoffTTL, which expires stable ownership claims and permanently
@@ -334,7 +346,7 @@ func reconcileHandoffBucketMaxAge(
 	next.MaxAge = 0
 	if uerr := kvStreamUpdate(ctx, js, next); uerr != nil {
 		// A concurrent worker may have reconciled the bucket already.
-		if cur, rerr := kvStreamConfig(ctx, kv); rerr == nil && cur.MaxAge == 0 {
+		if bucketMaxAgeReconciled(ctx, kv, 0) {
 			return nil
 		}
 
@@ -413,7 +425,7 @@ func reconcileStableIDBucketMaxAge(
 	}
 	if uerr := kvStreamUpdate(ctx, js, next); uerr != nil {
 		// A concurrent worker may have reconciled the bucket already.
-		if cur, rerr := kvStreamConfig(ctx, kv); rerr == nil && cur.MaxAge == wantMaxAge {
+		if bucketMaxAgeReconciled(ctx, kv, wantMaxAge) {
 			return nil
 		}
 
@@ -667,6 +679,36 @@ func (m *Manager) monitorBucketEpochs(ctx context.Context) {
 	}
 }
 
+// probeBucketCreated reads bucket's live stream-Created timestamp, hard-bounded
+// by a single OperationTimeout deadline that covers BOTH the handle open AND the
+// status read — js.KeyValue/BucketStreamCreated each do a stream-info round-trip,
+// so an unbounded ctx would let an unreachable bucket block on nats.go's ~5s
+// internal default and turn the probe into an unbounded inline stall on the
+// caller's goroutine. A failed probe returns a non-nil error and is never
+// actionable — callers skip it; only a successful read whose Created differs from
+// the captured epoch is a wipe-and-recreate.
+//
+// Handle choice is the caller's: the epoch-fence MONITOR passes its dedicated
+// per-bucket cached handle (ep.kv, read only from the monitor goroutine), while
+// the recovery re-probe passes nil so a FRESH handle is opened — nats.go KeyValue
+// handles cache *stream state and are not safe to share across goroutines, and the
+// re-probe may run on the connection-monitor goroutine.
+func (m *Manager) probeBucketCreated(ctx context.Context, bucket string, cached jetstream.KeyValue) (time.Time, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, m.cfg.OperationTimeout)
+	defer cancel()
+
+	kv := cached
+	if kv == nil {
+		var err error
+		kv, err = m.js.KeyValue(probeCtx, bucket)
+		if err != nil {
+			return time.Time{}, err
+		}
+	}
+
+	return kvutil.BucketStreamCreated(probeCtx, kv)
+}
+
 // checkBucketEpochs is one tick of monitorBucketEpochs, split out so a
 // unit test can drive it deterministically without waiting on the
 // ticker.
@@ -677,9 +719,7 @@ func (m *Manager) checkBucketEpochs(ctx context.Context) {
 			return
 		default:
 		}
-		probeCtx, cancel := context.WithTimeout(ctx, m.cfg.OperationTimeout)
-		live, err := kvutil.BucketStreamCreated(probeCtx, ep.kv)
-		cancel()
+		live, err := m.probeBucketCreated(ctx, bucket, ep.kv)
 		if err != nil {
 			m.logger.Debug("epoch fence: probe failed; relying on next tick",
 				"bucket", bucket, "error", err)
@@ -690,7 +730,7 @@ func (m *Manager) checkBucketEpochs(ctx context.Context) {
 				"bucket", bucket,
 				"cached_created", ep.created,
 				"live_created", live)
-			m.enterDegraded("bucket-recreated:" + bucket)
+			m.enterDegraded(degradeReasonBucketRecreated(bucket))
 			return // once degraded; no need to probe the rest this tick
 		}
 	}

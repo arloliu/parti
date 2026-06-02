@@ -1,9 +1,12 @@
 package parti
 
 import (
+	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/arloliu/parti/v2/types"
 	"github.com/stretchr/testify/require"
 )
 
@@ -41,6 +44,40 @@ func TestCasToStableFromWaitingAssignment_SucceedsFromWaitingAssignment(t *testi
 
 	mgr.casToStableFromWaitingAssignment()
 	require.Equal(t, StateStable, mgr.State())
+}
+
+// TestCasToStableFromWaitingAssignment_EmitsStateChangeHook pins that the
+// lock-free CAS path fires the SAME OnStateChanged hook a normal transition
+// would — the reason casToStableFromWaitingAssignment exists rather than a bare
+// CAS. It is the net for emitTransitionEffects on the CAS caller's side
+// (transitionState's net lives in TestHookGoroutinesTrackedByWaitGroup). In this
+// test only casToStableFromWaitingAssignment produces a WaitingAssignment→Stable
+// transition, so the flag uniquely attributes the fired hook to the CAS path.
+func TestCasToStableFromWaitingAssignment_EmitsStateChangeHook(t *testing.T) {
+	t.Parallel()
+
+	var sawWaitingToStable atomic.Bool
+	hookSet := &types.Hooks{
+		OnStateChanged: func(_ context.Context, from, to types.State) error {
+			if from == StateWaitingAssignment && to == StateStable {
+				sawWaitingToStable.Store(true)
+			}
+			return nil
+		},
+	}
+	mgr := newHookTestManager(hookSet)
+	defer mgr.cancel()
+
+	require.True(t, mgr.transitionState(StateClaimingID))
+	require.True(t, mgr.transitionState(StateElection))
+	require.True(t, mgr.transitionState(StateWaitingAssignment))
+
+	mgr.casToStableFromWaitingAssignment()
+	mgr.wg.Wait()
+
+	require.Equal(t, StateStable, mgr.State())
+	require.True(t, sawWaitingToStable.Load(),
+		"the CAS path must fire OnStateChanged(WaitingAssignment, Stable) like a normal transition")
 }
 
 // TestCasToStableFromWaitingAssignment_NoOpFromDegraded asserts that

@@ -119,22 +119,7 @@ func (m *Manager) transitionState(to State) bool {
 		}
 
 		if m.state.CompareAndSwap(int32(from), int32(to)) { //nolint:gosec // State values are controlled enum
-			m.logger.Info("state transition",
-				"from", from.String(),
-				"to", to.String(),
-				"worker_id", m.WorkerID(),
-			)
-
-			// Trigger state change hook (tracked by WaitGroup so Stop waits for completion)
-			if m.hooks.OnStateChanged != nil {
-				capturedFrom := from // Capture for closure
-				m.invokeHook("state change", func() error {
-					return m.hooks.OnStateChanged(m.ctx, capturedFrom, to)
-				})
-			}
-
-			// Record metrics (always non-nil, defaults to nopMetrics)
-			m.metrics.RecordStateTransition(from, to, 0)
+			m.emitTransitionEffects(from, to)
 
 			return true
 		}
@@ -147,6 +132,32 @@ func (m *Manager) transitionState(to State) bool {
 	)
 
 	return false
+}
+
+// emitTransitionEffects fires the observable side effects of a state transition
+// that has just been committed: the structured log line, the OnStateChanged hook
+// (dispatched through invokeHook so Stop's WaitGroup waits for it), and the
+// RecordStateTransition metric. Both transition paths — the CAS-retry
+// transitionState and the lock-free casToStableFromWaitingAssignment — commit the
+// state themselves and then call this, so observers see an identical transition
+// regardless of which path ran. from is taken by value, so the hook closure
+// captures the committed transition without the caller needing a manual copy.
+func (m *Manager) emitTransitionEffects(from, to State) {
+	m.logger.Info("state transition",
+		"from", from.String(),
+		"to", to.String(),
+		"worker_id", m.WorkerID(),
+	)
+
+	// Trigger state change hook (tracked by WaitGroup so Stop waits for completion)
+	if m.hooks.OnStateChanged != nil {
+		m.invokeHook("state change", func() error {
+			return m.hooks.OnStateChanged(m.ctx, from, to)
+		})
+	}
+
+	// Record metrics (always non-nil, defaults to nopMetrics)
+	m.metrics.RecordStateTransition(from, to, 0)
 }
 
 // isValidTransition validates that a state transition is allowed.

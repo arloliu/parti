@@ -54,12 +54,11 @@ func TestMonitorCalculatorState_ReconcileRecoversDroppedState(t *testing.T) {
 	}
 
 	m := &Manager{
-		cfg:             Config{DegradedAlert: DegradedAlertConfig{AlertInterval: time.Minute}},
-		hooks:           &hooksCfg,
-		metrics:         metrics.NewNop(),
-		logger:          logging.NewNop(),
-		connMonitorStop: make(chan struct{}),
-		heartbeat:       heartbeat.NewNop(),
+		cfg:       Config{DegradedAlert: DegradedAlertConfig{AlertInterval: time.Minute}},
+		hooks:     &hooksCfg,
+		metrics:   metrics.NewNop(),
+		logger:    logging.NewNop(),
+		heartbeat: heartbeat.NewNop(),
 	}
 	m.state.Store(int32(StateStable))
 	m.startupAssignmentApplied.Store(true)
@@ -157,12 +156,11 @@ func TestPartitionLifecycle_DrivesManagerStateRebalancing(t *testing.T) {
 	}
 
 	m := &Manager{
-		cfg:             Config{DegradedAlert: DegradedAlertConfig{AlertInterval: time.Minute}},
-		hooks:           &hooksCfg,
-		metrics:         metrics.NewNop(),
-		logger:          logging.NewNop(),
-		connMonitorStop: make(chan struct{}),
-		heartbeat:       heartbeat.NewNop(),
+		cfg:       Config{DegradedAlert: DegradedAlertConfig{AlertInterval: time.Minute}},
+		hooks:     &hooksCfg,
+		metrics:   metrics.NewNop(),
+		logger:    logging.NewNop(),
+		heartbeat: heartbeat.NewNop(),
 	}
 	m.state.Store(int32(StateStable))
 	m.startupAssignmentApplied.Store(true)

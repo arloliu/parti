@@ -191,13 +191,10 @@ type Manager struct {
 
 	// Degraded mode tracking
 	degradedSince          atomic.Int64   // UnixNano when degraded mode entered; 0 = not degraded
-	lastAssignmentAt       atomic.Int64   // UnixNano of last successful assignment fetch; 0 = never
-	lastAssignment         atomic.Value   // []Partition - cached assignment during degraded
 	connMonitorOnce        sync.Once      // ensures single connection monitor goroutine
 	postStableMonitorsOnce sync.Once      // ensures startPostStableMonitors fires exactly once
 	startedAt              time.Time      // absolute wall-clock anchor for StartupTimeout budget; set in prepareStart
 	startupWatchdogFired   atomic.Bool    // guards startStartupTimeoutWatchdog (one-shot)
-	connMonitorStop        chan struct{}  // channel to stop connection monitor
 	connDownSince          atomic.Int64   // UnixNano when connectivity lost; 0 = up
 	connUpSince            atomic.Int64   // UnixNano when connectivity restored; 0 = none
 	kvErrorCount           atomic.Int32   // count of KV errors in the current window (protected by mu)
@@ -436,7 +433,6 @@ func NewManager(cfg *Config, js jetstream.JetStream, source PartitionSource, str
 		logger:          logger,
 		consumerUpdater: options.consumerUpdater,
 		capReporter:     asCapabilityReporter(options.consumerUpdater),
-		connMonitorStop: make(chan struct{}),
 		kvErrorWindow:   make([]kvErrorEvent, 0, cfg.DegradedBehavior.KVErrorThreshold),
 		// Initialize internal components with Nop implementations
 		idClaimer:  stableid.NewNop(),
@@ -585,7 +581,7 @@ func (m *Manager) Start(ctx context.Context) (startErr error) {
 	}
 
 	// Step 1.5: Ensure coordination buckets (election/heartbeat/assignment)
-	electionKV, heartbeatKV, assignmentKV, err := m.ensureCoreKVBuckets(startupCtx, js)
+	coreKV, err := m.ensureCoreKVBuckets(startupCtx, js)
 	if err != nil {
 		return err
 	}
@@ -606,26 +602,26 @@ func (m *Manager) Start(ctx context.Context) (startErr error) {
 	}
 
 	// Store KV buckets for later use
-	m.assignmentKV = assignmentKV
-	m.heartbeatKV = heartbeatKV
+	m.assignmentKV = coreKV.assignment
+	m.heartbeatKV = coreKV.heartbeat
 	m.logger.Info("startup: KV buckets ready")
 
 	// Step 2: Participate in leader election
 	m.transitionState(StateElection)
 	m.logger.Info("startup: participating in election")
-	if err := m.participateElection(startupCtx, electionKV); err != nil {
+	if err := m.participateElection(startupCtx, coreKV.election); err != nil {
 		return fmt.Errorf("failed to participate in election: %w", err)
 	}
 	m.logger.Info("startup: election stage complete", "is_leader", m.IsLeader())
 
 	// Step 3: Start heartbeat publisher
-	if err := m.startHeartbeat(heartbeatKV); err != nil {
+	if err := m.startHeartbeat(coreKV.heartbeat); err != nil {
 		return fmt.Errorf("failed to start heartbeat: %w", err)
 	}
 
 	// Step 4: If leader, start calculator
 	if m.IsLeader() {
-		if err := m.startCalculator(assignmentKV, heartbeatKV); err != nil {
+		if err := m.startCalculator(coreKV.assignment, coreKV.heartbeat); err != nil {
 			return fmt.Errorf("failed to start calculator: %w", err)
 		}
 	}
@@ -653,7 +649,7 @@ func (m *Manager) Start(ctx context.Context) (startErr error) {
 	m.transitionState(StateWaitingAssignment)
 	m.logger.Info("startup: sanity checks done; background runner taking over for initial apply")
 	m.startStartupTimeoutWatchdog()
-	m.wg.Go(func() { m.runStartupBackground(assignmentKV) })
+	m.wg.Go(func() { m.runStartupBackground(coreKV.assignment) })
 
 	return nil
 }
@@ -827,12 +823,8 @@ func (m *Manager) Stop(ctx context.Context) error {
 		m.logger.Debug("calculator stop skipped: not running", "worker_id", m.WorkerID())
 	}
 
-	// Step 1.5: Stop degraded mode connection monitor
-	select {
-	case m.connMonitorStop <- struct{}{}:
-	default:
-		// Channel already closed or monitor not running
-	}
+	// Step 1.5: the degraded-mode connection monitor stops via m.cancel() above
+	// (it selects on m.ctx.Done()); no separate stop signal is needed.
 
 	// Step 1.6: Stop partition source
 	if err := m.source.Stop(ctx); err != nil {
