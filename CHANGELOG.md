@@ -7,66 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Auto-healing gap-closure follow-up to the v2.5.0 self-healing work: three
-verified recovery-exit gaps — where a worker returned to `Stable` while the
-fault that degraded it still persisted — are closed, and the heartbeat KV
-bucket joins election and assignment on `FileStorage` so a single-node NATS
-restart no longer flaps the fleet.
+## [v2.6.0] - 2026-06-02
+
+Hardening release that deepens v2.5.0's self-healing and readies parti for
+large fleets. Three themes: **recovery-exit correctness** — a worker no longer
+returns to `Stable` (or flaps) while the fault that degraded it still persists;
+**thundering-herd hardening** — jitter, bounded handoff concurrency, and watcher
+debounce smooth fleet-wide reassignment storms; and a **heartbeat-bucket storage
+switch** so a single-node NATS restart no longer flaps the fleet. No API breaks.
 
 ### Changed
 
-- **Heartbeat KV bucket defaults to `FileStorage`** (was `MemoryStorage`).
-  With `MemoryStorage` the heartbeat stream was lost on a single-node
-  JetStream restart; the heartbeat publisher's `Put` then kept failing
-  against the dead stream and the fleet oscillated `Degraded`↔`Stable`.
-  Persisting the bucket lets the stream survive the restart. The added
-  write IOPS is a flat, partition-count-independent term measured within
-  the provisioned envelope already accepted for the v2.5.0 election-bucket
-  switch (see `docs/plans/iops-investigation/`). Election and assignment
-  buckets were already `FileStorage`.
+- **Heartbeat KV bucket defaults to `FileStorage`** (was `MemoryStorage`). With
+  `MemoryStorage` a single-node JetStream restart lost the heartbeat stream and
+  the fleet oscillated `Degraded`↔`Stable`; persisting it survives the restart.
+  The added write IOPS is a flat, partition-count-independent term within the
+  envelope accepted for v2.5.0's election-bucket switch. **Existing clusters need
+  a one-time manual migration** — until migrated, the new heartbeat-reachability
+  guard holds the worker in terminal `Degraded` (rotatable) instead of flapping,
+  and a rotation re-creates the bucket as `FileStorage`. See "Heartbeat Bucket
+  Storage Migration" in `docs/OPERATIONS.md`.
 
-  **Existing clusters need a one-time manual migration** —
-  `EnsureKVBucketWithRetry` is get-first and does not upgrade an existing
-  `MemoryStorage` bucket. Until migrated, an existing bucket keeps
-  `MemoryStorage`, so a single-node NATS restart still loses its heartbeat
-  stream — but the heartbeat-reachability guard below now holds such a worker
-  in terminal `Degraded` (loud, rotatable) instead of flapping, and a rotation
-  re-creates the bucket as `FileStorage`, completing the migration. See
-  "Heartbeat Bucket Storage Migration" in `docs/OPERATIONS.md`.
+### Added
 
-### Fixed — recovery exit no longer heals on the wrong signal
+- **Thundering-herd hardening for large fleets** (opt-in, default off):
+  `ApplyStartJitter` spreads fresh-version applies, `PhaseConcurrency` caps
+  in-flight per-partition handoff KV operations, and `AssignmentWatcherDebounce`
+  coalesces burst re-elections on both the assignment and commit watchers.
 
-The degraded→`Stable` recovery exit was trigger-blind: it returned to `Stable`
-on a healthy *assignment* read even while a *different* fault still persisted.
-Each fix below ANDs an additive guard onto the existing
-`currentAssignmentApplied` commitment guard (which is unchanged):
+### Fixed — self-healing no longer heals on the wrong signal
 
-- **Bucket wipe-and-recreate stays degraded.** A wiped-and-recreated
-  Parti-owned control-plane bucket left the epoch-fence mismatch permanent,
-  but the exit healed on a version-monotonic republish into the
-  recreated-empty bucket. A live per-tick epoch re-probe now refuses the exit
-  while any owned bucket's stream `Created` differs from the value captured at
-  `Start`; the worker stays terminally `Degraded` for restart/rotation.
-- **Connected-but-KV-unavailable stalls stay degraded.** A heartbeat /
-  election / stableID op stall degrades with reason `kv-unavailable`, but the
-  exit re-read only the unaffected assignment bucket. The exit now requires a
-  heartbeat `Put` success stamped *after* the degrade before leaving a
-  `kv-unavailable` degrade. Reason-scoped, so a `startup-timeout` degrade
-  still recovers on the commitment guard alone.
-- **Claim-loss self-stop documented.** An outage exceeding `WorkerIDTTL` ages
-  out the worker-ID lease; on reconnect the worker surfaces a bare
-  `ErrClaimLost` and self-stops to `StateShutdown` (split-brain-safe — a peer
-  may hold the slot). This was already the behavior; `docs/OPERATIONS.md` now
-  documents the bound and that recovery is orchestrator rotation.
-- **Heartbeat-bucket loss stays degraded (no flap).** A *missing* heartbeat
-  stream — e.g. a single-node restart of an un-migrated `MemoryStorage`
-  bucket — degrades with the whole-bucket-loss reason
-  `KV error threshold exceeded`, which the `kv-unavailable` gate does not
-  cover and which the recreate re-probe does not catch (a missing stream is
-  not a recreate), so the fleet flapped `Degraded`↔`Stable`. A
-  heartbeat-bucket reachability check now refuses the recovery exit while the
-  bucket's stream is missing/unreachable, holding the worker terminally
-  `Degraded` for rotation regardless of the degrade reason.
+- **Recovery exit is now trigger-aware.** It previously returned to `Stable` on a
+  healthy *assignment* read while a *different* fault persisted. Three additive
+  guards now AND onto the unchanged commitment guard — a live epoch re-probe (a
+  wiped-and-recreated bucket stays degraded), a reason-scoped
+  heartbeat-`Put`-after-degrade requirement (`kv-unavailable` stalls stay
+  degraded), and heartbeat-bucket reachability (a missing heartbeat stream stays
+  degraded, no flap) — and claim-loss self-stop is now documented.
+- **Degrade on connected-but-KV-unavailable timeouts** — a heartbeat / election /
+  stableID stall now escalates (reason `kv-unavailable`) instead of being swallowed.
+- **Self-heal a stuck version-advance** — a leader that bumped the commit version
+  but failed to persist every claim no longer reports `Stable` with uncommitted
+  claims; per-version commitment drives recovery.
+- **KV-error circuit resets on a healthy heartbeat**, so one transient KV error no
+  longer latches the fleet into degraded flapping.
+- **Quorum-loss resolver no longer self-poisons** — a claim listed-but-unreadable
+  during a transient read fault is no longer permanently tombstoned.
+- **Handoff transfer removals wait for the gaining worker to commit**, and
+  committed claims are finalized via sweep so handoffs converge under contention.
+- **Startup robustness** — apply writes the full claim set on retry, the
+  stable-readiness gate is corrected, and the `NatsKV` source recovers recreated
+  buckets while signaling sustained source-bucket timeouts distinctly from deletion.
+
+### Internal
+
+- **nats.go → v1.52.0, nats-server/v2 → v2.14.1** (test/embedded-server dependency).
+- **Simulation-coverage expansion** — ~18 chaos scenarios across KV, handoff,
+  process-mode, and source faults, with per-pillar CI jobs; CI split into parallel
+  `lint-unit` and `integration` runs. Plus a repo-wide `go fix` modernization pass.
 
 ## [v2.5.0] - 2026-05-24
 
