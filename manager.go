@@ -219,6 +219,11 @@ type Manager struct {
 	// degraded). The reason-scoped gate uses it to confirm the failing
 	// connected-but-KV-unavailable op recovered AFTER we degraded. 0 = never.
 	lastHeartbeatSuccessAt atomic.Int64
+	// lastEnumerationSuccessAt is the UnixNano of the most recent healthy worker
+	// enumeration (stamped via the calculator's OnEnumerationSuccess). The
+	// reason-scoped recovery gate keys on it to confirm a heartbeat-enumeration
+	// stall (NP-10) recovered before exiting Degraded. 0 = never.
+	lastEnumerationSuccessAt atomic.Int64
 
 	// Lifecycle management
 	ctx    context.Context

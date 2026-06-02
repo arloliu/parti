@@ -46,6 +46,14 @@ switch** so a single-node NATS restart no longer flaps the fleet. No API breaks.
   degraded, no flap) — and claim-loss self-stop is now documented.
 - **Degrade on connected-but-KV-unavailable timeouts** — a heartbeat / election /
   stableID stall now escalates (reason `kv-unavailable`) instead of being swallowed.
+- **A leader stalled on worker enumeration now degrades instead of silently
+  freezing** — a heartbeat-`Keys` scan that sustains a non-connectivity deadline
+  (while single-key heartbeat `Put` and election renewal keep succeeding) is
+  classified as neither connectivity nor degrading, so it used to be swallowed and
+  the leader froze its assignment, never reassigning a departed worker's
+  partitions. It now degrades (reason `heartbeat-enumeration-stall`) once sustained
+  and exits only after enumeration recovers; losing leadership while in this state
+  is not a trap.
 - **Self-heal a stuck version-advance** — a leader that bumped the commit version
   but failed to persist every claim no longer reports `Stable` with uncommitted
   claims; per-version commitment drives recovery.

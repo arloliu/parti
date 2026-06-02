@@ -159,6 +159,13 @@ type Calculator struct {
 	// widening either of the path-specific locks.
 	lastKnownWorkerCount     int
 	workerShrunkObservations int
+
+	// enumFailures is the running count of consecutive non-connectivity
+	// enumeration (heartbeat Keys scan) failures. Crossed against
+	// EnumerationFailureThreshold to fire OnEnumerationError; reset to zero on any
+	// successful enumeration (nil-error GetActiveWorkers, before F10-A handling).
+	// Guarded by c.mu (same as workerShrunkObservations).
+	enumFailures int
 }
 
 // cachedWorkerList bundles worker data with its timestamp for atomic operations.
@@ -1210,8 +1217,20 @@ func (c *Calculator) getActiveWorkers(ctx context.Context) ([]string, bool, erro
 			return nil, false, fmt.Errorf("%w: no cached workers available: %w", types.ErrDegraded, err)
 		}
 
+		// Sustained non-connectivity enumeration failure (NP-10): the poll loop
+		// only logs this and no caller routes it to the degraded circuit. Threshold
+		// locally and, once sustained, surface it via OnEnumerationError so the
+		// manager can degrade directly (the transient KV-error window would be
+		// cleared by the still-succeeding heartbeat Put — the F-D1 constraint).
+		c.recordEnumerationFailure(err)
+
 		return nil, false, err
 	}
+
+	// Enumeration succeeded: the Keys-scan stall (if any) has recovered. Reset the
+	// NP-10 counter and signal recovery HERE — before the F10-A suspicious-shrink
+	// handling below — so a recovered-but-suspicious scan still clears the stall.
+	c.resetEnumerationFailures()
 
 	// F10-A defense: a sharply-shrunk fresh observation is treated as
 	// suspicious until the confirmation window is satisfied. The first
@@ -1252,6 +1271,38 @@ func (c *Calculator) getActiveWorkers(ctx context.Context) ([]string, bool, erro
 	}
 
 	return workers, true, nil
+}
+
+// recordEnumerationFailure increments the consecutive enumeration-failure counter
+// and invokes OnEnumerationError once the threshold is reached/exceeded. Firing
+// while already over the threshold is intentional and harmless: the manager's
+// enterDegraded is idempotent (CAS short-circuits while degraded). Only the
+// swallowed non-connectivity branch of getActiveWorkers calls this; connectivity
+// errors stay owned by the existing circuit (heartbeat Put SetOnError).
+func (c *Calculator) recordEnumerationFailure(err error) {
+	if c.OnEnumerationError == nil {
+		return
+	}
+	c.mu.Lock()
+	c.enumFailures++
+	fire := c.enumFailures >= c.EnumerationFailureThreshold
+	c.mu.Unlock()
+	if fire {
+		c.OnEnumerationError(err)
+	}
+}
+
+// resetEnumerationFailures clears the consecutive-failure counter and signals
+// enumeration recovery. Called on every SUCCESSFUL enumeration — right after a
+// nil-error GetActiveWorkers, before F10-A suspicious-shrink handling — NOT only
+// on the fresh==true path (a recovered-but-suspicious scan must still clear).
+func (c *Calculator) resetEnumerationFailures() {
+	c.mu.Lock()
+	c.enumFailures = 0
+	c.mu.Unlock()
+	if c.OnEnumerationSuccess != nil {
+		c.OnEnumerationSuccess()
+	}
 }
 
 // recordWorkerObservation runs the F10-A counter under c.mu. It

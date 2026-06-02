@@ -130,3 +130,57 @@ func TestNP10_GetActiveWorkers_EnumerationDeadline_IsSwallowed(t *testing.T) {
 	require.False(t, fresh)
 	require.Nil(t, workers)
 }
+
+// TestNP10_GetActiveWorkers_SustainedEnumerationDeadline_FiresCallback drives the
+// fix: a SINGLE enumeration deadline must NOT fire OnEnumerationError (debounce —
+// a transient blip is not a sustained stall), EnumerationFailureThreshold
+// consecutive deadlines MUST fire it, and a subsequent healthy scan must fire
+// OnEnumerationSuccess and reset the counter.
+func TestNP10_GetActiveWorkers_SustainedEnumerationDeadline_FiresCallback(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	_, nc := partitest.StartEmbeddedNATS(t)
+	assignmentKV := partitest.CreateJetStreamKV(t, nc, "np10-fire-assign")
+	heartbeatKV := partitest.CreateJetStreamKV(t, nc, "np10-fire-hb")
+
+	_, err := heartbeatKV.Put(ctx, "worker-hb.worker-1", []byte(time.Now().Format(time.RFC3339Nano)))
+	require.NoError(t, err)
+
+	fault := &keysTimeoutKV{KeyValue: heartbeatKV}
+	var enumErr, enumOK atomic.Int64
+	calc, err := NewCalculator(&Config{
+		AssignmentKV:                assignmentKV,
+		HeartbeatKV:                 fault,
+		AssignmentPrefix:            "assignment",
+		Source:                      &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}},
+		Strategy:                    &mockStrategy{},
+		HeartbeatPrefix:             "worker-hb",
+		HeartbeatTTL:                6 * time.Second,
+		EnumerationFailureThreshold: 3,
+		OnEnumerationError:          func(error) { enumErr.Add(1) },
+		OnEnumerationSuccess:        func() { enumOK.Add(1) },
+	})
+	require.NoError(t, err)
+
+	// NEGATIVE SPACE: a single failure must NOT fire (below the threshold). This
+	// distinguishes a correct consecutive-counter from a broken one that fires on
+	// the first failure.
+	fault.armed.Store(true)
+	_, _, err = calc.getActiveWorkers(ctx)
+	require.Error(t, err)
+	require.Zero(t, enumErr.Load(), "one enumeration failure must not fire OnEnumerationError (below threshold)")
+
+	// Sustained: two more consecutive failures cross the threshold of 3.
+	for range 2 {
+		_, _, _ = calc.getActiveWorkers(ctx)
+	}
+	require.GreaterOrEqual(t, enumErr.Load(), int64(1),
+		"a sustained enumeration deadline must fire OnEnumerationError once the threshold is crossed")
+
+	// Recovery: a healthy scan resets the counter and signals success.
+	fault.armed.Store(false)
+	_, _, err = calc.getActiveWorkers(ctx)
+	require.NoError(t, err)
+	require.Positive(t, enumOK.Load(), "a healthy enumeration must signal recovery via OnEnumerationSuccess")
+}

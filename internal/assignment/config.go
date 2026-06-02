@@ -150,6 +150,30 @@ type Config struct {
 	// method so a former leader cannot pass the fence after another worker has
 	// taken over.
 	LeaderCheck func(ctx context.Context, claimed uint64) error
+
+	// OnEnumerationError, if set, is invoked when worker enumeration (the
+	// heartbeat Keys scan in WorkerMonitor.GetActiveWorkers) has failed
+	// EnumerationFailureThreshold times in a row with a non-connectivity error —
+	// notably a context.DeadlineExceeded on the stream-wide scan while single-key
+	// heartbeat Puts still succeed (NP-10). The manager wires this to a DIRECT
+	// degrade (NOT the transient KV-error window, which a succeeding heartbeat Put
+	// would clear). When nil, sustained enumeration failure remains logged-only
+	// (back-compat / test default). Must be safe for concurrent use.
+	OnEnumerationError func(err error)
+
+	// OnEnumerationSuccess, if set, is invoked on every SUCCESSFUL worker
+	// enumeration — i.e. whenever the heartbeat Keys scan (GetActiveWorkers)
+	// returns a nil error — REGARDLESS of the F10-A worker-credibility decision
+	// (it fires even when a sharply-shrunk result is treated as suspicious). The
+	// manager stamps it as the "enumeration recovered" signal its recovery exit
+	// gate keys on. Must be safe for concurrent use.
+	OnEnumerationSuccess func()
+
+	// EnumerationFailureThreshold is the number of consecutive non-connectivity
+	// enumeration failures before OnEnumerationError fires. Default: 3 (also
+	// applied to any value < 1, so a zero/negative config cannot fire on the
+	// first failure). Set explicitly to 1 to fire on the first failure.
+	EnumerationFailureThreshold int
 }
 
 // Validate checks configuration validity.
@@ -233,5 +257,8 @@ func (c *Config) SetDefaults() {
 	}
 	if c.WorkerShrinkConfirmationThresholdPct == 0 {
 		c.WorkerShrinkConfirmationThresholdPct = 50
+	}
+	if c.EnumerationFailureThreshold < 1 {
+		c.EnumerationFailureThreshold = 3
 	}
 }

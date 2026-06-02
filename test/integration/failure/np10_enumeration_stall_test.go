@@ -2,7 +2,6 @@ package failure_test
 
 import (
 	"context"
-	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -111,34 +110,28 @@ func (k *np10FaultKeyValue) Keys(ctx context.Context, opts ...jetstream.WatchOpt
 	return k.KeyValue.Keys(ctx, opts...)
 }
 
-// TestNP10_LeaderEnumerationStall_FrozenMembership is the end-to-end NP-10 proof
-// (the verify-first load-bearing gate). It stands up a leader + 2 followers with
-// full partition coverage, arms a Keys-only stall on the heartbeat bucket (the
-// connection stays UP and every single-key op keeps succeeding), removes a
-// follower, and observes whether the leader reacts.
+// TestNP10_LeaderEnumerationStall_FrozenMembership is the end-to-end NP-10
+// regression guard. It stands up a leader + 2 followers with full partition
+// coverage, arms a Keys-only stall on the heartbeat bucket (the connection stays
+// UP and every single-key op keeps succeeding), removes a follower, and asserts
+// the leader surfaces the stall instead of silently freezing.
 //
-// Oracle (verify-first against the parent — 06 landed, 07 absent):
-//   - GAP (this assertion FAILS on the parent): while the leader's enumeration
-//     scan stalls, the removed follower's partitions stay orphaned and the leader
-//     sits silently in StateStable with no degrade. A correct leader must surface
-//     the stall (enter Degraded) or re-cover.
-//   - CONTROL (PASSES on the parent, no fix): disarming the stall lets the leader
-//     re-enumerate, see the departed follower, and re-cover — proving the freeze
-//     is specifically the enumeration blind spot, not a broken leader.
+// This is a verify-first test: it FAILED on the parent (the leader sat in
+// StateStable with the removed follower's partitions orphaned and 0 degrades) and
+// PASSES with the fix (the leader degrades with reason "heartbeat-enumeration-
+// stall", then recovers on disarm). The three checks:
+//   - GAP (the gate): within the armed window the leader must surface the stall —
+//     degrade with the enumeration-stall reason, or re-cover. Pre-fix it did
+//     neither; the fix degrades it.
+//   - CONTROL: disarming the stall lets the leader re-enumerate, see the departed
+//     follower, and re-cover — this held even on the parent with no fix, proving
+//     the freeze is specifically the enumeration blind spot, not a broken leader.
 //   - NON-VACUITY (guards both directions): the Keys fault actually fired
-//     (injected > 0) and the connection stayed CONNECTED throughout.
-//
-// If on the parent the leader reacts on its own WHILE injected > 0 and the
-// connection held, NP-10 is NOT real — STOP, do not implement the fix.
+//     (injected > 0), the removal orphaned a partition, and the connection stayed
+//     CONNECTED throughout.
 func TestNP10_LeaderEnumerationStall_FrozenMembership(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
-	}
-	// Env-gated: this is a verify-first reproducer that FAILS on the parent until
-	// the NP-10 fix lands, so it stays out of the default `make test`/`make pre-pr`
-	// baseline. Remove this gate when the fix flips it green.
-	if os.Getenv("PARTI_RUN_NP10_ENUM_STALL_PROOF") == "" {
-		t.Skip("set PARTI_RUN_NP10_ENUM_STALL_PROOF=1 to run the NP-10 verify-first proof")
 	}
 
 	t.Parallel()
@@ -146,7 +139,7 @@ func TestNP10_LeaderEnumerationStall_FrozenMembership(t *testing.T) {
 	const (
 		numPartitions    = 6
 		numWorkers       = 3
-		armedObservation = 12 * time.Second
+		armedObservation = 15 * time.Second
 	)
 
 	nc, cleanup := testutil.StartEmbeddedNATS(t)
@@ -180,14 +173,16 @@ func TestNP10_LeaderEnumerationStall_FrozenMembership(t *testing.T) {
 
 	// Per-worker observers. WithHooks here replaces the cluster's tracker hooks,
 	// which is fine: every wait/coverage helper reads live manager state, not the
-	// trackers. Shared, thread-safe sinks captured by all workers.
-	degradedReasons := make(chan string, 16)
+	// trackers. Shared, thread-safe sinks captured by all workers. The gate keys on
+	// the SPECIFIC enumeration-stall reason (not "any degrade") so a wrong-reason
+	// degrade — e.g. from the leadership path — cannot pass the proof spuriously.
+	const enumStallReason = "heartbeat-enumeration-stall"
+	var sawEnumStallDegrade atomic.Bool
 	var degradedEntries atomic.Int64
 	observerHooks := &parti.Hooks{
 		OnDegraded: func(_ context.Context, reason string) error {
-			select {
-			case degradedReasons <- reason:
-			default:
+			if reason == enumStallReason {
+				sawEnumStallDegrade.Store(true)
 			}
 
 			return nil
@@ -266,7 +261,7 @@ func TestNP10_LeaderEnumerationStall_FrozenMembership(t *testing.T) {
 	reactedWhileArmed := false
 	deadline := time.Now().Add(armedObservation)
 	for time.Now().Before(deadline) {
-		if liveCoverage() == numPartitions || leader.State() == parti.StateDegraded {
+		if liveCoverage() == numPartitions || sawEnumStallDegrade.Load() {
 			reactedWhileArmed = true
 			break
 		}
@@ -288,12 +283,14 @@ func TestNP10_LeaderEnumerationStall_FrozenMembership(t *testing.T) {
 	require.True(t, nc.IsConnected(),
 		"the NATS connection stayed CONNECTED throughout — this is an enumeration stall, not a disconnect")
 
-	// THE GAP — post-fix invariant. FAILS on the parent, proving NP-10 is real.
+	// THE GAP — post-fix invariant. FAILS on the parent, proving NP-10 is real;
+	// flips green once the fix degrades the leader with the enumeration-stall reason.
 	require.True(t, reactedWhileArmed,
 		"NP-10 silent false-healthy leader: with the heartbeat Keys scan stalling, the removed follower's "+
-			"partitions stayed orphaned (live coverage %d/%d) and the leader sat in %s without degrading "+
-			"(cluster degraded-entries=%d) for %s while the connection stayed up and the fault fired %d times. "+
-			"A correct leader must surface the stall (enter Degraded) or re-cover. This assertion FAILS on the "+
-			"parent commit, proving the gap is real.",
-		observedCoverage, numPartitions, observedLeaderState, degradedEntries.Load(), armedObservation, fc.injected.Load())
+			"partitions stayed orphaned (live coverage %d/%d) and the leader sat in %s without surfacing a %q "+
+			"degrade (cluster degraded-entries=%d) for %s while the connection stayed up and the fault fired %d "+
+			"times. A correct leader must surface the stall (Degraded reason %q) or re-cover. This assertion "+
+			"FAILS on the parent commit, proving the gap is real.",
+		observedCoverage, numPartitions, observedLeaderState, enumStallReason, degradedEntries.Load(),
+		armedObservation, fc.injected.Load(), enumStallReason)
 }
