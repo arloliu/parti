@@ -137,9 +137,10 @@ func (m *Manager) transitionState(to State) bool {
 // emitTransitionEffects fires the observable side effects of a state transition
 // that has just been committed: the structured log line, the OnStateChanged hook
 // (dispatched through invokeHook so Stop's WaitGroup waits for it), and the
-// RecordStateTransition metric. Both transition paths — the CAS-retry
-// transitionState and the lock-free casToStableFromWaitingAssignment — commit the
-// state themselves and then call this, so observers see an identical transition
+// RecordStateTransition metric. The transition paths — the CAS-retry
+// transitionState and the lock-free casToStableFrom* helpers
+// (casToStableFromWaitingAssignment, casToStableFromDegraded) — commit the state
+// themselves and then call this, so observers see an identical transition
 // regardless of which path ran. from is taken by value, so the hook closure
 // captures the committed transition without the caller needing a manual copy.
 func (m *Manager) emitTransitionEffects(from, to State) {

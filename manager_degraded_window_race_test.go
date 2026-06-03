@@ -17,15 +17,17 @@ import (
 // commitment guard is satisfied and the reason is non-reason-scoped) concurrently
 // with re-entry (enterDegraded) and a heartbeat-success stamp that advances the
 // recovery signal inside the window, under -race, and asserts:
-//   - a loaded record is always nil or fully populated (never a torn since/reason), and
-//   - the storm completes without panic or deadlock.
+//   - a loaded record is always nil or fully populated (never a torn since/reason),
+//   - the storm completes without panic or deadlock, and
+//   - the storm never strands in Degraded with a nil record.
 //
-// Out of scope (documented; pre-existing on BOTH the two-atomic parent and this
-// pointer design): a recovery tick can vacuously transition Stable->Stable in the
-// window and clear a record an enterer is mid-publishing, ending Degraded with a
-// nil record. Closing that needs an exit-on-confirmed-Degraded guard — a separate
-// behaviour change. So this asserts record atomicity + liveness, NOT absolute
-// state-vs-record consistency.
+// That last assertion is the end-to-end guard for the exit-on-confirmed-Degraded
+// fix: a recovery tick that hits the window (record published, transition not yet
+// run) used to vacuously transition Stable->Stable and clear the in-flight record,
+// stranding the worker in Degraded+nil-record. exitDegraded now clears only on a
+// genuine Degraded->Stable CAS, so that strand can no longer occur regardless of
+// interleaving (the storm may legitimately end Degraded+record or Stable+nil, but
+// never Degraded+nil). On the pre-fix parent this assertion is reachable-RED.
 func TestDegradedRecord_EnterRecoverRace_NoTornRecord(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping embedded-NATS concurrency stress in short mode")
@@ -85,4 +87,11 @@ func TestDegradedRecord_EnterRecoverRace_NoTornRecord(t *testing.T) {
 	})
 	require.False(t, t.Failed(),
 		"the widened enter/transition window must not produce a torn record or a hang")
+
+	// End-to-end exit-on-confirmed-Degraded guard: after the storm drains, the
+	// worker must never sit in Degraded with a nil record — the strand the
+	// from-Degraded exit CAS closes. Degraded+record (last op was an enter) and
+	// Stable+nil (last op was a genuine exit) are both fine.
+	require.False(t, m.State() == StateDegraded && m.degraded.Load() == nil,
+		"enter/recover storm stranded the worker in Degraded with a nil record")
 }

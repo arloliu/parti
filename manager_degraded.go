@@ -340,6 +340,36 @@ func (m *Manager) enterDegraded(reason string) {
 	m.wg.Go(m.monitorDegradedAlerts)
 }
 
+// casToStableFromDegraded performs a guarded Degraded → Stable transition and
+// reports whether it fired; exitDegraded gates its record cleanup on the result.
+//
+// Generic transitionState(StateStable) is unsafe here. It returns true vacuously
+// when state is already Stable (manager_state.go:106), and CAS-walks a real but
+// wrong transition from any other active state (Scaling/Rebalancing/Emergency/
+// WaitingAssignment → Stable are all valid). A recovery tick that hit the
+// enterDegraded window — record published by a concurrent enter but its
+// transitionState(StateDegraded) not yet run — would then succeed and let
+// exitDegraded clear that in-flight record, stranding the worker in Degraded with
+// a nil record (recovery and alerting both early-return on a nil record). The
+// direct from-Degraded CAS only succeeds when state really is Degraded, so it
+// refuses that window and leaves the in-flight enter to complete and recover on
+// the next tick.
+//
+// On a successful CAS it calls emitTransitionEffects — the same shared emitter
+// transitionState uses for the OnStateChanged hook and RecordStateTransition
+// metric — so observers see no difference from a normal transition. A Shutdown
+// (or the racy non-Degraded state) fails the CAS and the caller skips cleanup,
+// matching the prior transitionState-returns-false behaviour (minus its
+// now-suppressed invalid-transition warn, benign noise on this path).
+func (m *Manager) casToStableFromDegraded() bool {
+	if !m.state.CompareAndSwap(int32(StateDegraded), int32(StateStable)) {
+		return false
+	}
+	m.emitTransitionEffects(StateDegraded, StateStable)
+
+	return true
+}
+
 // exitDegraded transitions the manager out of degraded mode.
 func (m *Manager) exitDegraded() {
 	rec := m.degraded.Load()
@@ -349,9 +379,10 @@ func (m *Manager) exitDegraded() {
 
 	duration := time.Since(time.Unix(0, rec.since))
 
-	// Transition out of degraded mode via validated CAS.
-	// If already Shutdown, transitionState returns false and we skip cleanup.
-	if !m.transitionState(StateStable) {
+	// Exit ONLY on a genuine Degraded->Stable transition (see casToStableFromDegraded):
+	// a vacuous transitionState(StateStable) success would clear a record a concurrent
+	// enterDegraded is mid-publishing, stranding the worker in Degraded+nil-record.
+	if !m.casToStableFromDegraded() {
 		return
 	}
 
@@ -365,7 +396,7 @@ func (m *Manager) exitDegraded() {
 		"next_state", StateStable,
 	)
 
-	// Record metrics (state transition already recorded by transitionState)
+	// Record metrics (state transition already recorded by emitTransitionEffects)
 	m.metrics.RecordDegradedDuration(duration.Seconds())
 	m.metrics.SetDegradedMode(0.0)
 	m.metrics.SetCacheAge(0.0)
