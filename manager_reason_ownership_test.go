@@ -9,27 +9,26 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Reason-ownership protocol (Family B). The active degrade reason is owned
-// atomically with the winning degradedSince CAS:
-//   - enterDegraded stores lastDegradedReason ONLY after the winning CAS (losers
-//     return at the CAS and never write it).
-//   - exitDegraded clears the reason BEFORE clearing degradedSince.
-//   - the recovery gate treats an empty reason as "not yet observable" and stays
-//     degraded that tick.
+// Degraded-record atomicity (Family B). The active degrade {since, reason} pair is
+// published as ONE atomic.Pointer[degradedRecord] swap:
+//   - enterDegraded builds the full record and CompareAndSwap(nil, rec)s it; a
+//     loser's CAS fails on the non-nil record, so it never clobbers the winner.
+//   - exitDegraded Store(nil)s after a successful state transition.
+//   - a reader therefore observes either nil or a fully-populated record — never a
+//     partial pair (since set but reason empty). The empty-reason recovery gate the
+//     two-atomic design needed to paper over a post-CAS-pre-store window is gone.
 //
-// These tests pin that protocol. The first is a deterministic clobber-resistance
-// proof (it FAILS on the rejected store-before-CAS design); the second is a
-// concurrent multi-reason storm whose load-bearing oracle is the race detector
-// (none of NP-3b / NP-5 / NP-9 drives multiple distinct degrade reasons racing
-// into the CAS).
+// These tests pin that invariant. The first is a deterministic clobber-resistance
+// proof; the second is a concurrent multi-reason storm whose oracles are the race
+// detector AND the nil-or-fully-populated reader check; the third is a
+// non-vacuity guard showing that check would flag a partial record.
 
-// TestReasonOwnership_LosersDoNotClobberWinningReason proves the P0 correction:
-// when many goroutines call enterDegraded concurrently with DIFFERENT reasons,
-// exactly one wins the degradedSince CAS and stores its reason; every loser must
-// return at the failed CAS WITHOUT writing lastDegradedReason. Storing the reason
-// before the CAS (the rejected design) would let a loser overwrite the winner's
-// reason — which would make the reason-scoped recovery gate key off the wrong
-// reason and falsely exit. Deterministic (no sleeps); also runs under -race.
+// TestReasonOwnership_LosersDoNotClobberWinningReason proves that when many
+// goroutines call enterDegraded concurrently with DIFFERENT reasons, exactly one
+// wins the CAS and publishes its record; every loser's CAS fails on the non-nil
+// record and discards its own. A non-winner reason surviving here would mean the
+// reason-scoped recovery gate could key off the wrong reason and falsely exit.
+// Deterministic (no sleeps); also runs under -race.
 func TestReasonOwnership_LosersDoNotClobberWinningReason(t *testing.T) {
 	t.Parallel()
 
@@ -40,12 +39,13 @@ func TestReasonOwnership_LosersDoNotClobberWinningReason(t *testing.T) {
 	const winner = DegradeReasonKVUnavailable
 	m.enterDegraded(winner)
 	require.Equal(t, StateDegraded, m.State(), "winner must transition to Degraded")
-	require.NotZero(t, m.degradedSince.Load(), "winner must set degradedSince")
-	require.Equal(t, winner, m.lastDegradedReason.Load(),
-		"the CAS winner is the sole reason writer")
+	rec := m.degraded.Load()
+	require.NotNil(t, rec, "winner must publish a degraded record")
+	require.NotZero(t, rec.since, "winner's record carries the degrade-entry time")
+	require.Equal(t, winner, rec.reason, "the CAS winner is the sole record publisher")
 
-	// N concurrent losers, each with a DISTINCT reason. All lose the CAS
-	// (degradedSince is already set), so none may write lastDegradedReason.
+	// N concurrent losers, each with a DISTINCT reason. All lose the CAS (the record
+	// is already non-nil), so none may replace the winner's record.
 	const losers = 64
 	var wg sync.WaitGroup
 	for i := range losers {
@@ -54,20 +54,22 @@ func TestReasonOwnership_LosersDoNotClobberWinningReason(t *testing.T) {
 	}
 	wg.Wait()
 
-	require.Equal(t, winner, m.lastDegradedReason.Load(),
-		"a losing concurrent enterDegraded must NOT clobber the winner's active reason "+
-			"(store-after-CAS); a non-winner reason here means store-before-CAS regressed")
+	got := m.degraded.Load()
+	require.NotNil(t, got)
+	require.Equal(t, winner, got.reason,
+		"a losing concurrent enterDegraded must NOT replace the winner's record "+
+			"(CAS(nil,&rec) fails on the live record)")
 	require.Equal(t, StateDegraded, m.State(), "losers must not change state")
 }
 
 // TestReasonOwnership_ConcurrentMultiReasonStorm_NoRace hammers the full protocol
 // — concurrent enterDegraded (5 distinct reasons), exitDegraded, recordKVHealthyOp
-// (the lastHeartbeatSuccessAt stamp), plus readers of the gate state — and is
-// designed to surface any data race on lastDegradedReason / degradedSince /
-// lastHeartbeatSuccessAt or any torn protocol interleaving. Load-bearing oracle:
-// the race detector. Light functional invariant: whenever degraded, the observed
-// reason is always either "" (the brief CAS-won-but-not-yet-stored / just-exited
-// window) or one of the reasons we actually entered with — never stale garbage.
+// (the lastHeartbeatSuccessAt stamp), plus readers of the gate state. Oracles: the
+// race detector AND the record-atomicity invariant — whenever the loaded record is
+// non-nil it is FULLY populated (since != 0 AND reason is one of the reasons we
+// entered with), never a partial pair and never "". A split set-since-then-set-
+// reason publish (the rejected two-atomic design) would let a reader observe an
+// empty reason here; the single swap makes that unrepresentable.
 func TestReasonOwnership_ConcurrentMultiReasonStorm_NoRace(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping concurrency stress in short mode")
@@ -85,14 +87,14 @@ func TestReasonOwnership_ConcurrentMultiReasonStorm_NoRace(t *testing.T) {
 		"bucket-recreated:parti-heartbeat",
 		"assignment-watcher-exhausted",
 	}
-	valid := map[string]bool{"": true}
+	valid := make(map[string]bool, len(reasons))
 	for _, r := range reasons {
 		valid[r] = true
 	}
 
 	const iters = 300
 	var wg sync.WaitGroup
-	var invalidReason sync.Map // observed bad reason -> struct{}
+	var bad sync.Map // observed bad record description -> struct{}
 
 	// Enterers: one goroutine per reason, each repeatedly attempting entry.
 	for _, r := range reasons {
@@ -102,8 +104,8 @@ func TestReasonOwnership_ConcurrentMultiReasonStorm_NoRace(t *testing.T) {
 			}
 		})
 	}
-	// Exiters: drive Degraded -> Stable so the enterers can re-arm, exercising
-	// the clear-reason-before-degradedSince ordering under concurrency.
+	// Exiters: drive Degraded -> Stable so the enterers can re-arm, exercising the
+	// transition-then-clear ordering under concurrency.
 	for range 3 {
 		wg.Go(func() {
 			for range iters {
@@ -119,14 +121,13 @@ func TestReasonOwnership_ConcurrentMultiReasonStorm_NoRace(t *testing.T) {
 			}
 		})
 	}
-	// Readers: read the gate state the recovery tick reads, validating the reason.
+	// Readers: load the record once and assert it is nil or fully populated.
 	for range 3 {
 		wg.Go(func() {
 			for range iters {
-				if m.degradedSince.Load() != 0 {
-					reason, _ := m.lastDegradedReason.Load().(string)
-					if !valid[reason] {
-						invalidReason.Store(reason, struct{}{})
+				if rec := m.degraded.Load(); rec != nil {
+					if rec.since == 0 || rec.reason == "" || !valid[rec.reason] {
+						bad.Store(fmt.Sprintf("since=%d reason=%q", rec.since, rec.reason), struct{}{})
 					}
 				}
 				_ = m.lastHeartbeatSuccessAt.Load()
@@ -135,9 +136,30 @@ func TestReasonOwnership_ConcurrentMultiReasonStorm_NoRace(t *testing.T) {
 	}
 	wg.Wait()
 
-	invalidReason.Range(func(k, _ any) bool {
-		t.Errorf("recovery gate observed an invalid degrade reason while degraded: %q", k)
+	bad.Range(func(k, _ any) bool {
+		t.Errorf("reader observed a non-atomic / invalid degraded record: %s", k)
 		return true
 	})
-	require.False(t, t.Failed(), "race detector / invalid-reason invariant tripped during the multi-reason storm")
+	require.False(t, t.Failed(), "race detector / record-atomicity invariant tripped during the multi-reason storm")
+}
+
+// TestDegradedRecord_PartialIsCaught is the non-vacuity guard for the storm's
+// record-atomicity oracle: it constructs the partial record a split two-step
+// publish would transiently expose (since set, reason empty) and confirms the same
+// nil-or-fully-populated check flags it. Production never publishes such a record
+// (enterDegraded builds it whole before the CAS); this only proves the oracle is
+// discriminating rather than vacuously green.
+func TestDegradedRecord_PartialIsCaught(t *testing.T) {
+	t.Parallel()
+
+	m, _, _, _ := newTestManager(t)
+	m.degraded.Store(&degradedRecord{since: time.Now().UnixNano(), reason: ""})
+
+	rec := m.degraded.Load()
+	require.NotNil(t, rec)
+	partial := rec.since == 0 || rec.reason == ""
+	require.True(t, partial,
+		"a since-without-reason record IS representable as a value, so the storm "+
+			"reader's check would flag it; the single-swap publish is what prevents "+
+			"production from ever creating one")
 }

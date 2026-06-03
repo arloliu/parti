@@ -20,22 +20,22 @@ func TestAttemptRecovery_EnumerationStall_LeaderStaysUntilEnumerationRecovers(t 
 	m, _ := armDegraded(t, &committed, snap) // current assignment applied+acked
 	plantAssignment(t, m, snap)
 	m.isLeader.Store(true)
-	m.lastDegradedReason.Store(DegradeReasonEnumerationStall)
+	m.markDegraded(m.degradedSinceNano(), DegradeReasonEnumerationStall)
 
 	// No enumeration success since the degrade: the commitment guard is satisfied,
 	// but the leader must STAY Degraded — exiting would resume serving stale
 	// membership while the enumeration scan is still stalling.
 	m.attemptRecoveryFromDegraded()
-	require.NotZero(t, m.degradedSince.Load(),
+	require.NotZero(t, m.degradedSinceNano(),
 		"a leader whose worker enumeration has not recovered must stay Degraded")
 	require.Equal(t, StateDegraded, m.State())
 
-	// Stamp an enumeration success AFTER degradedSince: the gate opens and the
+	// Stamp an enumeration success AFTER the degrade instant: the gate opens and the
 	// applied leader exits. (Assert synchronously; exitDegraded transitions before
 	// the recovery-grace goroutine it spawns matters.)
-	m.lastEnumerationSuccessAt.Store(m.degradedSince.Load() + 1)
+	m.lastEnumerationSuccessAt.Store(m.degradedSinceNano() + 1)
 	m.attemptRecoveryFromDegraded()
-	require.Zero(t, m.degradedSince.Load(),
+	require.Zero(t, m.degradedSinceNano(),
 		"a stamped enumeration success must let the leader exit Degraded")
 	require.Equal(t, StateStable, m.State())
 }
@@ -56,14 +56,14 @@ func TestAttemptRecovery_EnumerationStall_NonLeaderEscapesStuckDegrade(t *testin
 	m, _ := armDegraded(t, &committed, snap)
 	plantAssignment(t, m, snap)
 	m.isLeader.Store(false) // lost leadership while enumeration-stall-degraded
-	m.lastDegradedReason.Store(DegradeReasonEnumerationStall)
+	m.markDegraded(m.degradedSinceNano(), DegradeReasonEnumerationStall)
 	// lastEnumerationSuccessAt stays 0 — a non-leader runs no enumeration and can
 	// never stamp a success. The escape must let it exit anyway.
 
 	m.attemptRecoveryFromDegraded()
 	m.wg.Wait() // safe: a non-leader exit skips the recovery-grace goroutine
 
-	require.Zero(t, m.degradedSince.Load(),
+	require.Zero(t, m.degradedSinceNano(),
 		"a non-leader must not be trapped in an enumeration-stall degrade it can never clear")
 	require.Equal(t, StateStable, m.State())
 }

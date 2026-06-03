@@ -189,8 +189,13 @@ type Manager struct {
 	// applied-empty ack.
 	startupAssignmentApplied atomic.Bool
 
-	// Degraded mode tracking
-	degradedSince          atomic.Int64   // UnixNano when degraded mode entered; 0 = not degraded
+	// Degraded mode tracking. degraded holds {since, reason} as ONE atomic pointer
+	// (nil = not degraded), so both publish in a single swap: there is no
+	// post-CAS-pre-store window where since is set but reason is not, and no
+	// hand-maintained store ordering between two atomics. enterDegraded's
+	// CompareAndSwap(nil, rec) is the sole-winner entry gate; exitDegraded clears
+	// it with Store(nil) after a successful state transition. See degradedRecord.
+	degraded               atomic.Pointer[degradedRecord]
 	connMonitorOnce        sync.Once      // ensures single connection monitor goroutine
 	postStableMonitorsOnce sync.Once      // ensures startPostStableMonitors fires exactly once
 	startedAt              time.Time      // absolute wall-clock anchor for StartupTimeout budget; set in prepareStart
@@ -201,16 +206,6 @@ type Manager struct {
 	kvErrorWindow          []kvErrorEvent // recent KV errors, class-tagged (protected by mu)
 	recoveryGraceStart     atomic.Int64   // UnixNano when recovery grace period started; 0 = not in grace
 	inRecoveryGrace        atomic.Bool    // true during recovery grace period
-	// lastDegradedReason holds the reason string of the active degrade. Written by
-	// the WINNING enterDegraded immediately AFTER the degradedSince CAS (losers
-	// never write it, so there is no loser-clobber) and cleared to "" by
-	// exitDegraded BEFORE it clears degradedSince. The reason-scoped recovery gate
-	// treats an empty reason as "this entry's reason is not yet observable" and
-	// stays degraded that tick — closing the tiny post-CAS-pre-store window via the
-	// degradedSince happens-before, without converting degradedSince to a record.
-	// atomic.Value of string ("" when never degraded / between an exit and the next
-	// entry's store).
-	lastDegradedReason atomic.Value
 	// lastHeartbeatSuccessAt is the UnixNano of the most recent successful
 	// heartbeat Put (stamped unconditionally in recordKVHealthyOp, even while
 	// degraded). The reason-scoped gate uses it to confirm the failing

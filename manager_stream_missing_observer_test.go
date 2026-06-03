@@ -70,7 +70,7 @@ func TestManager_onStreamMissingError_NoopsAfterShutdown(t *testing.T) {
 	require.Zero(t, onErrorCalls.Load(),
 		"onStreamMissingError must short-circuit when the manager is in StateShutdown; "+
 			"firing Hooks.OnError post-Stop enqueues work into m.wg after Stop has already begun waiting on it")
-	require.Zero(t, m.degradedSince.Load(),
+	require.Zero(t, m.degradedSinceNano(),
 		"onStreamMissingError must not enter degraded mode when the manager is in StateShutdown")
 }
 

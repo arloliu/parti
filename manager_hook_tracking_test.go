@@ -173,7 +173,7 @@ func TestHookGoroutinesTrackedByWaitGroup(t *testing.T) {
 		m := newHookTestManager(hooks)
 		defer m.cancel()
 		// Put into degraded state first
-		m.degradedSince.Store(time.Now().UnixNano())
+		m.markDegraded(time.Now().UnixNano(), DegradeReasonNATSConnectionDown)
 		m.state.Store(int32(StateDegraded))
 
 		m.exitDegraded()

@@ -142,8 +142,8 @@ func (m *Manager) startPostStableMonitors(assignmentKV jetstream.KeyValue) {
 //
 // Decoupled from runStartupBackground: the watchdog fires even if the
 // runner is blocked inside applyInitialAssignment (which is unbounded —
-// see runStartupBackground Godoc). enterDegraded is CAS-gated on
-// degradedSince so concurrent degraded entries from other paths are
+// see runStartupBackground Godoc). enterDegraded is CAS-gated on the
+// degraded record so concurrent degraded entries from other paths are
 // harmless; OnDegraded fires exactly once per entry per the existing
 // contract.
 //

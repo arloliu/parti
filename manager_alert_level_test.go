@@ -15,7 +15,7 @@ import (
 // reorder the checks or remap a band undetected.
 //
 // Note on what is (not) locked: time.Since always returns threshold+epsilon for a
-// degradedSince computed as now-threshold, so the exact >=/> boundary at a single
+// a degrade-start time computed as now-threshold, so the exact >=/> boundary at a single
 // nanosecond is below the observable resolution and is intentionally NOT asserted
 // (no operator degrades for exactly 30.000000000s). The load-bearing behavior is
 // the band mapping and the cascade ORDER, both of which this table locks.
