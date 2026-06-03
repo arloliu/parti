@@ -24,7 +24,7 @@
 
 services:
   nats-1:
-    image: ${IOPS_RIG_NATS_IMAGE:-nats:2.12.6}
+    image: ${IOPS_RIG_NATS_IMAGE:-nats:2.14.2}
     container_name: iops-nats-1
     profiles: [r3, r5]
     command: ["-c", "/etc/nats/nats-server.conf"]
@@ -41,7 +41,7 @@ services:
     restart: unless-stopped
 
   nats-2:
-    image: ${IOPS_RIG_NATS_IMAGE:-nats:2.12.6}
+    image: ${IOPS_RIG_NATS_IMAGE:-nats:2.14.2}
     container_name: iops-nats-2
     profiles: [r3, r5]
     command: ["-c", "/etc/nats/nats-server.conf"]
@@ -55,7 +55,7 @@ services:
     restart: unless-stopped
 
   nats-3:
-    image: ${IOPS_RIG_NATS_IMAGE:-nats:2.12.6}
+    image: ${IOPS_RIG_NATS_IMAGE:-nats:2.14.2}
     container_name: iops-nats-3
     profiles: [r3, r5]
     command: ["-c", "/etc/nats/nats-server.conf"]
@@ -69,7 +69,7 @@ services:
     restart: unless-stopped
 
   nats-4:
-    image: ${IOPS_RIG_NATS_IMAGE:-nats:2.12.6}
+    image: ${IOPS_RIG_NATS_IMAGE:-nats:2.14.2}
     container_name: iops-nats-4
     profiles: [r5]
     command: ["-c", "/etc/nats/nats-server.conf"]
@@ -83,7 +83,7 @@ services:
     restart: unless-stopped
 
   nats-5:
-    image: ${IOPS_RIG_NATS_IMAGE:-nats:2.12.6}
+    image: ${IOPS_RIG_NATS_IMAGE:-nats:2.14.2}
     container_name: iops-nats-5
     profiles: [r5]
     command: ["-c", "/etc/nats/nats-server.conf"]
