@@ -28,7 +28,7 @@ import (
 //     assignment from KV (the planted V=1 snapshot, identical (V, LR, digest)
 //     to what the apply committed), sees currentAssignmentApplied == true, and
 //     calls exitDegraded — transitioning Degraded -> Stable and clearing
-//     degradedSince.
+//     the degraded record.
 //
 // The asserted invariants hinge on real state transitions and the committed
 // assignment, never on a bare timeout. Predicted verdict: PASS.
@@ -159,8 +159,8 @@ func TestNP5_BlockedApplyStartupTimeout_RecoversToStableAfterUnblock(t *testing.
 
 	require.Equal(t, StateStable, m.State(),
 		"recovery must heal the blocked-apply worker from Degraded to Stable")
-	require.Zero(t, m.degradedSince.Load(),
-		"exitDegraded must clear degradedSince on recovery")
+	require.Zero(t, m.degradedSinceNano(),
+		"exitDegraded must clear the degraded record on recovery")
 
 	// ASSERTION 5 — NO FLAP / SINGLE ENTRY: exactly one "startup-timeout" reason
 	// was recorded (the watchdog fired once), and no apply retry was stashed

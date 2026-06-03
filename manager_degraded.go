@@ -145,9 +145,9 @@ func (m *Manager) recordKVError(err error) {
 	// election ticks, stableID renew, assignment watcher, attemptRecoveryFromDegraded
 	// at 1s) retries against the same failure indefinitely; without this we would
 	// re-enter the locked window-append + threshold-warn on every call and grow
-	// kvErrorWindow unboundedly until the pod restarts. degradedSince is cleared
-	// atomically by exitDegraded, so recovery is unaffected.
-	if m.degradedSince.Load() != 0 {
+	// kvErrorWindow unboundedly until the pod restarts. The degraded record is
+	// cleared atomically by exitDegraded, so recovery is unaffected.
+	if m.degraded.Load() != nil {
 		return
 	}
 
@@ -243,7 +243,7 @@ func (m *Manager) recordKVHealthyOp() {
 	// window-clear below intentionally does not).
 	m.lastHeartbeatSuccessAt.Store(time.Now().UnixNano())
 
-	if m.degradedSince.Load() != 0 {
+	if m.degraded.Load() != nil {
 		return
 	}
 
@@ -278,13 +278,23 @@ func windowLenInt32(n int) int32 {
 	return int32(n) // #nosec G115 - clamped to math.MaxInt32 above
 }
 
+// degradedRecord is the single atomic unit of degraded-mode state: the entry
+// time and the active reason, published together. m.degraded holds a
+// *degradedRecord (nil = not degraded), so a reader never observes since without
+// reason or vice versa — the pair is atomic by construction. Fields are
+// immutable once published (a new degrade builds a fresh record), so reads need
+// no further synchronization.
+type degradedRecord struct {
+	since  int64  // UnixNano when degraded mode entered (always non-zero in a live record)
+	reason string // active degrade reason (always non-empty in a live record)
+}
+
 // enterDegraded transitions the manager to degraded mode.
 //
-// Uses a CAS on degradedSince (int64 UnixNano; 0 = unset) as the entry gate,
-// ensuring exactly one goroutine performs the transition even under concurrent calls.
-// After a successful exitDegraded, degradedSince is reset to 0, so future
-// enterDegraded calls succeed without the re-entry bug that typed-nil atomic.Value
-// storage caused previously.
+// Uses a CAS on m.degraded (nil = unset) as the entry gate, publishing {since,
+// reason} in one swap so exactly one goroutine performs the transition even under
+// concurrent calls. After a successful exitDegraded, m.degraded is reset to nil,
+// so future enterDegraded calls re-arm cleanly.
 //
 // Lock contract: must not acquire m.mu. Callers (notably recordKVError) may
 // already hold m.mu; taking it here would self-deadlock.
@@ -294,25 +304,20 @@ func (m *Manager) enterDegraded(reason string) {
 		return
 	}
 
-	// Atomically claim the degraded-entry slot.
-	// If degradedSince is already non-zero, we (or another goroutine) already entered.
+	// Atomically claim the degraded-entry slot, publishing since AND reason in one
+	// swap. A failed CAS (already degraded) is a true no-op — it touches nothing.
 	now := time.Now()
-	if !m.degradedSince.CompareAndSwap(0, now.UnixNano()) {
+	rec := &degradedRecord{since: now.UnixNano(), reason: reason}
+	if !m.degraded.CompareAndSwap(nil, rec) {
 		return
 	}
 
-	// Only the CAS winner reaches here, so this is the sole writer of the active
-	// reason — no loser-clobber. The recovery gate treats the brief
-	// CAS-won-but-reason-not-yet-stored window as "" and stays degraded that tick.
-	m.lastDegradedReason.Store(reason)
-
-	// Attempt validated state transition. Roll back BOTH reason and degradedSince
-	// on failure (clear reason BEFORE degradedSince so the happens-before holds).
-	// Failure can only happen from Init/ClaimingID states that forbid degraded
-	// entry.
+	// Attempt validated state transition. Roll back the record on failure (clear
+	// AFTER the failed transition, mirroring exitDegraded's transition-then-clear
+	// ordering). Failure can only happen from Init/ClaimingID states that forbid
+	// degraded entry.
 	if !m.transitionState(StateDegraded) {
-		m.lastDegradedReason.Store("")
-		m.degradedSince.Store(0)
+		m.degraded.Store(nil)
 		return
 	}
 
@@ -337,12 +342,12 @@ func (m *Manager) enterDegraded(reason string) {
 
 // exitDegraded transitions the manager out of degraded mode.
 func (m *Manager) exitDegraded() {
-	since := m.degradedSince.Load()
-	if since == 0 {
+	rec := m.degraded.Load()
+	if rec == nil {
 		return
 	}
 
-	duration := time.Since(time.Unix(0, since))
+	duration := time.Since(time.Unix(0, rec.since))
 
 	// Transition out of degraded mode via validated CAS.
 	// If already Shutdown, transitionState returns false and we skip cleanup.
@@ -350,14 +355,10 @@ func (m *Manager) exitDegraded() {
 		return
 	}
 
-	// Clear the reason BEFORE clearing degradedSince: a subsequent enterDegraded
-	// can only win its CAS after degradedSince becomes 0, so this clear
-	// happens-before that winner's reason store — no clobber, and the gap between
-	// an exit and the next store reads as "" (gate stays that tick). Clearing
-	// degradedSince after a successful state transition also lets future
-	// enterDegraded calls re-arm correctly (fixes the re-entry bug).
-	m.lastDegradedReason.Store("")
-	m.degradedSince.Store(0)
+	// Clear the record AFTER a successful state transition (transition-then-clear):
+	// a subsequent enterDegraded can only win its CAS after this Store(nil), so it
+	// re-arms cleanly with a fresh {since, reason} record.
+	m.degraded.Store(nil)
 
 	m.logger.Info("exiting degraded mode",
 		"duration", duration,
@@ -396,36 +397,40 @@ func (m *Manager) recordEnumerationSuccess() {
 }
 
 // recoverySignalStalled reports whether a reason-scoped recovery-exit gate must
-// keep the worker Degraded, and returns the (signal, since) timestamps it read so
-// the caller logs them without re-reading (a torn check-vs-log view). The gate
-// blocks when ALL hold: the active degrade reason matches scopedReason; the gate
-// applies (leaderOnly implies we are currently leader — a leaderOnly gate keyed on
-// a leader-only signal must be SKIPPED when not leader, else a worker that lost
-// leadership in this degrade is stuck on a signal it can never stamp); and the
-// recovery signal has NOT advanced past the degrade start.
+// keep the worker Degraded, and returns the signal timestamp it read so the caller
+// logs it without re-reading. The degrade start (since) is passed in by the caller
+// from the SAME degradedRecord it used for reason, so the gate's reason and since
+// are guaranteed consistent. The gate blocks when ALL hold: the active degrade
+// reason matches scopedReason; the gate applies (leaderOnly implies we are
+// currently leader — a leaderOnly gate keyed on a leader-only signal must be
+// SKIPPED when not leader, else a worker that lost leadership in this degrade is
+// stuck on a signal it can never stamp); and the recovery signal has NOT advanced
+// past the degrade start.
 //
 // The "not advanced" test — signalAt == 0 (never stamped) OR signalAt <= since —
 // is the load-bearing comparison both reason-scoped gates share: the <= boundary
 // (a success stamped AT the degrade instant does not count) and the ==0 sentinel
-// must be identical across the gates so they cannot drift. (Given degradedSince is
-// non-zero here, ==0 is subsumed by <= since; it is kept for explicitness.)
-func (m *Manager) recoverySignalStalled(reason, scopedReason string, signalAt func() int64, leaderOnly bool) (stalled bool, sigAt, since int64) {
+// must be identical across the gates so they cannot drift. (Given since is non-zero
+// in a live record, ==0 is subsumed by <= since; it is kept for explicitness.)
+func (m *Manager) recoverySignalStalled(reason, scopedReason string, signalAt func() int64, since int64, leaderOnly bool) (stalled bool, sigAt int64) {
 	if reason != scopedReason {
-		return false, 0, 0
+		return false, 0
 	}
 	if leaderOnly && !m.isLeader.Load() {
-		return false, 0, 0
+		return false, 0
 	}
 	sigAt = signalAt()
-	since = m.degradedSince.Load()
 
-	return sigAt == 0 || sigAt <= since, sigAt, since
+	return sigAt == 0 || sigAt <= since, sigAt
 }
 
 // attemptRecoveryFromDegraded checks if recovery conditions are met and exits degraded mode.
 func (m *Manager) attemptRecoveryFromDegraded() {
-	// Check if in degraded mode
-	if m.degradedSince.Load() == 0 {
+	// Load the degraded record once (nil = not degraded). reason and since used by
+	// the gates below both come from this record, so a reason-scoped gate can never
+	// read a since from a different degrade episode than its reason.
+	rec := m.degraded.Load()
+	if rec == nil {
 		return
 	}
 
@@ -461,14 +466,11 @@ func (m *Manager) attemptRecoveryFromDegraded() {
 		return
 	}
 
-	// The degrade reason is written by the winning enterDegraded just after its
-	// CAS (Step 4). An empty read means this entry's reason is not yet observable
-	// (or we raced an exit) — stay degraded this tick rather than risk skipping a
-	// reason-scoped gate below. One-tick delay only.
-	reason, _ := m.lastDegradedReason.Load().(string)
-	if reason == "" {
-		return
-	}
+	// reason comes from the record loaded above. A live record always carries a
+	// non-empty reason (since and reason publish together in one swap), so there is
+	// no "reason not yet observable" window — the empty-reason gate the two-atomic
+	// design needed to close that window is no longer reachable and is gone.
+	reason := rec.reason
 
 	// Family B — reason-scoped recover-on-wrong-signal gate. A kv-unavailable
 	// degrade is a connected-but-KV-unavailable op stall on the heartbeat /
@@ -479,9 +481,9 @@ func (m *Manager) attemptRecoveryFromDegraded() {
 	// the commitment guard alone — an UNCONDITIONAL gate regresses NP-5, which
 	// has no heartbeat publisher so lastHeartbeatSuccessAt stays 0. Cheap atomic
 	// reads, evaluated before the Family A network re-probe added in a later task.
-	if stalled, hbAt, since := m.recoverySignalStalled(reason, DegradeReasonKVUnavailable, m.lastHeartbeatSuccessAt.Load, false); stalled {
+	if stalled, hbAt := m.recoverySignalStalled(reason, DegradeReasonKVUnavailable, m.lastHeartbeatSuccessAt.Load, rec.since, false); stalled {
 		m.logger.Debug("recovery: heartbeat KV not recovered since kv-unavailable degrade; staying Degraded",
-			"last_heartbeat_success_unixnano", hbAt, "degraded_since_unixnano", since)
+			"last_heartbeat_success_unixnano", hbAt, "degraded_since_unixnano", rec.since)
 		return
 	}
 
@@ -514,9 +516,9 @@ func (m *Manager) attemptRecoveryFromDegraded() {
 	// enumeration-N/A and do NOT block, else a leader that lost leadership while in
 	// this degrade would be stuck forever (a gate on a capability that cannot
 	// fire). Reason-scoped, so other degrade reasons are unaffected.
-	if stalled, ensAt, since := m.recoverySignalStalled(reason, DegradeReasonEnumerationStall, m.lastEnumerationSuccessAt.Load, true); stalled {
+	if stalled, ensAt := m.recoverySignalStalled(reason, DegradeReasonEnumerationStall, m.lastEnumerationSuccessAt.Load, rec.since, true); stalled {
 		m.logger.Debug("recovery: worker enumeration not recovered since stall degrade; staying Degraded",
-			"last_enumeration_success_unixnano", ensAt, "degraded_since_unixnano", since)
+			"last_enumeration_success_unixnano", ensAt, "degraded_since_unixnano", rec.since)
 		return
 	}
 
@@ -682,12 +684,12 @@ func (m *Manager) monitorDegradedAlerts() {
 			return
 		case <-ticker.C:
 			// Check if still in degraded mode
-			since := m.degradedSince.Load()
-			if since == 0 {
+			rec := m.degraded.Load()
+			if rec == nil {
 				return // Exited degraded mode
 			}
 
-			degradedAt := time.Unix(0, since)
+			degradedAt := time.Unix(0, rec.since)
 			duration := time.Since(degradedAt)
 			level := m.calculateAlertLevel(degradedAt)
 

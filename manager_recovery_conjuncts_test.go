@@ -33,8 +33,7 @@ func armDegradedWithJS(t *testing.T, reason, heartbeatBucket string, createHeart
 	m.committedAssignment.Store(&committed)
 	m.assignment.Store(snap)
 	m.state.Store(int32(StateDegraded))
-	m.degradedSince.Store(time.Now().UnixNano())
-	m.lastDegradedReason.Store(reason)
+	m.markDegraded(time.Now().UnixNano(), reason)
 	plantAssignment(t, m, snap)
 
 	return m
@@ -60,8 +59,7 @@ func TestAttemptRecovery_KVUnavailable_StaleHeartbeat_StaysDegraded(t *testing.T
 		t.Parallel()
 		m, _ := armDegraded(t, &snap, snap)
 		plantAssignment(t, m, snap)
-		m.lastDegradedReason.Store(DegradeReasonKVUnavailable)
-		m.degradedSince.Store(sinceNano)
+		m.markDegraded(sinceNano, DegradeReasonKVUnavailable)
 		m.lastHeartbeatSuccessAt.Store(0)
 
 		m.attemptRecoveryFromDegraded()
@@ -74,8 +72,7 @@ func TestAttemptRecovery_KVUnavailable_StaleHeartbeat_StaysDegraded(t *testing.T
 		t.Parallel()
 		m, _ := armDegraded(t, &snap, snap)
 		plantAssignment(t, m, snap)
-		m.lastDegradedReason.Store(DegradeReasonKVUnavailable)
-		m.degradedSince.Store(sinceNano)
+		m.markDegraded(sinceNano, DegradeReasonKVUnavailable)
 		// Heartbeat succeeded BEFORE the degrade — does not prove the op recovered.
 		m.lastHeartbeatSuccessAt.Store(sinceNano - 1000)
 
@@ -89,10 +86,9 @@ func TestAttemptRecovery_KVUnavailable_StaleHeartbeat_StaysDegraded(t *testing.T
 		t.Parallel()
 		m, _ := armDegraded(t, &snap, snap)
 		plantAssignment(t, m, snap)
-		m.lastDegradedReason.Store(DegradeReasonKVUnavailable)
-		m.degradedSince.Store(sinceNano)
+		m.markDegraded(sinceNano, DegradeReasonKVUnavailable)
 		// Heartbeat stamped at EXACTLY the degrade instant. The gate's boundary is
-		// `<=`: a success AT degradedSince does not prove the op recovered AFTER we
+		// `<=`: a success AT the degrade instant (rec.since) does not prove the op recovered AFTER we
 		// degraded, so the worker stays Degraded. This pins the <= (vs <) boundary
 		// that the stale/fresh cases straddle but never land on.
 		m.lastHeartbeatSuccessAt.Store(sinceNano)
@@ -100,7 +96,7 @@ func TestAttemptRecovery_KVUnavailable_StaleHeartbeat_StaysDegraded(t *testing.T
 		m.attemptRecoveryFromDegraded()
 
 		require.Equal(t, StateDegraded, m.State(),
-			"a heartbeat stamped AT the degrade instant (hbAt == degradedSince) must stay Degraded")
+			"a heartbeat stamped AT the degrade instant (hbAt == rec.since) must stay Degraded")
 	})
 }
 
@@ -114,8 +110,7 @@ func TestAttemptRecovery_KVUnavailable_FreshHeartbeat_Exits(t *testing.T) {
 	m, _ := armDegraded(t, &snap, snap)
 	plantAssignment(t, m, snap)
 	sinceNano := time.Now().UnixNano()
-	m.lastDegradedReason.Store(DegradeReasonKVUnavailable)
-	m.degradedSince.Store(sinceNano)
+	m.markDegraded(sinceNano, DegradeReasonKVUnavailable)
 	// Heartbeat succeeded AFTER the degrade — the failing op recovered.
 	m.lastHeartbeatSuccessAt.Store(sinceNano + 1000)
 

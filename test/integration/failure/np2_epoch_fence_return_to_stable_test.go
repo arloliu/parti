@@ -209,7 +209,7 @@ func TestNP2EpochFence_NonAssignmentRecreate_DegradedDoesNotFlap(t *testing.T) {
 			"oscillate back to %s", finalState)
 
 	// Evidence note: >= 2 bucket-recreated entries proves oscillation, because
-	// enterDegraded's degradedSince CAS rejects re-entry until an intervening
+	// enterDegraded's degraded-record CAS rejects re-entry until an intervening
 	// exit clears it. A second bucket-recreated entry therefore can only happen
 	// after the worker exited Degraded in between. (Not asserted as a hard
 	// invariant — the primary degradedToStable check is the load-bearing one;

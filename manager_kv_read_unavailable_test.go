@@ -192,7 +192,7 @@ func TestRecordKVError_ReadUnavailable_IsolatedBelowThreshold_NoDegrade(t *testi
 
 	require.NotEqual(t, StateDegraded, m.State(),
 		"isolated KV-unavailable blips that each recover must not degrade")
-	require.Zero(t, m.degradedSince.Load())
+	require.Zero(t, m.degradedSinceNano())
 }
 
 // TestOnClaimerError_ReadTimeout_Degrades pins the stableid-renew wrap site

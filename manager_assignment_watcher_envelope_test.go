@@ -70,7 +70,7 @@ func TestMonitorAssignmentChanges_ExhaustionEntersDegraded(t *testing.T) {
 	// Set KVErrorThreshold above watcherMaxAttempts so the test can
 	// observe the envelope's exhaustion path specifically — without
 	// this, recordKVError's threshold trips at the zero-value (any
-	// degrading error trips on the first call) and degradedSince is
+	// degrading error trips on the first call) and the degraded record is
 	// claimed by "KV error threshold exceeded" before the envelope
 	// has a chance to escalate with the named reason this PR adds.
 	// In production both paths can race; whichever wins, the worker

@@ -93,7 +93,7 @@ func TestManager_F1_BucketRecreate_TripsDegraded(t *testing.T) {
 				js:     js,
 			}
 			m.state.Store(int32(StateStable))
-			m.degradedSince.Store(0)
+			m.degraded.Store(nil)
 			m.metrics = nopManagerMetrics{}
 			testCtx, cancel := context.WithCancel(ctx)
 			m.ctx = testCtx

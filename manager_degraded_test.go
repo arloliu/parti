@@ -74,7 +74,7 @@ func TestManager_recordKVError(t *testing.T) {
 		m.wg.Wait()
 
 		require.Equal(t, int32(3), m.kvErrorCount.Load())
-		require.NotZero(t, m.degradedSince.Load())
+		require.NotZero(t, m.degradedSinceNano())
 		require.Equal(t, StateDegraded, m.State())
 	})
 
@@ -161,7 +161,7 @@ func TestManager_recordKVHealthyOp(t *testing.T) {
 		m.recordKVOpError(context.DeadlineExceeded) // transient
 		require.Equal(t, int32(2), m.kvErrorCount.Load())
 
-		m.degradedSince.Store(time.Now().UnixNano())
+		m.markDegraded(time.Now().UnixNano(), DegradeReasonNATSConnectionDown)
 		m.recordKVHealthyOp()
 
 		require.Equal(t, int32(2), m.kvErrorCount.Load(),
@@ -199,8 +199,8 @@ func TestManager_enterDegraded_rejectsShutdown(t *testing.T) {
 
 		require.Equal(t, StateShutdown, m.State(),
 			"enterDegraded must not override StateShutdown")
-		require.Zero(t, m.degradedSince.Load(),
-			"degradedSince must remain zero when enterDegraded is rejected")
+		require.Zero(t, m.degradedSinceNano(),
+			"the degraded record must remain unset when enterDegraded is rejected")
 	})
 
 	t.Run("allows degraded entry from Stable state", func(t *testing.T) {
@@ -216,7 +216,7 @@ func TestManager_enterDegraded_rejectsShutdown(t *testing.T) {
 		m.wg.Wait()
 
 		require.Equal(t, StateDegraded, m.State())
-		require.NotZero(t, m.degradedSince.Load())
+		require.NotZero(t, m.degradedSinceNano())
 	})
 }
 
@@ -235,7 +235,7 @@ func TestManager_exitDegraded_safeWithCAS(t *testing.T) {
 		m := &Manager{logger: logger, cfg: cfg, hooks: &Hooks{}, metrics: nopMetrics, ctx: ctx, cancel: cancel}
 
 		// Simulate: entered degraded mode, then Stop set StateShutdown
-		m.degradedSince.Store(time.Now().UnixNano())
+		m.markDegraded(time.Now().UnixNano(), DegradeReasonNATSConnectionDown)
 		m.state.Store(int32(StateShutdown))
 
 		m.exitDegraded()
@@ -249,21 +249,23 @@ func TestManager_exitDegraded_safeWithCAS(t *testing.T) {
 		defer cancel()
 		m := &Manager{logger: logger, cfg: cfg, hooks: &Hooks{}, metrics: nopMetrics, ctx: ctx, cancel: cancel}
 
-		m.degradedSince.Store(time.Now().UnixNano())
+		m.markDegraded(time.Now().UnixNano(), DegradeReasonNATSConnectionDown)
 		m.state.Store(int32(StateDegraded))
 
 		m.exitDegraded()
 		m.wg.Wait()
 
 		require.Equal(t, StateStable, m.State())
-		require.Zero(t, m.degradedSince.Load())
+		require.Zero(t, m.degradedSinceNano())
 	})
 }
 
-// TestEnterDegraded_ReentryAfterExit verifies that enterDegraded works correctly
-// after exitDegraded resets degradedSince to 0. This tests the fix for the
-// atomic.Value typed-nil re-entry bug where Store((*time.Time)(nil)) produced a
-// non-nil interface, permanently blocking future enterDegraded calls.
+// TestEnterDegraded_ReentryAfterExit verifies enter -> exit -> re-enter works:
+// exitDegraded clears the degraded record (Store(nil)), so a later enterDegraded
+// wins CompareAndSwap(nil, rec) and re-arms. This locks the re-entry contract that
+// an earlier typed-nil atomic.Value storage bug once broke (Store((*time.Time)(nil))
+// produced a non-nil interface that permanently blocked re-entry); the pointer
+// record makes "cleared" an honest nil, so re-entry cannot be silently blocked.
 func TestEnterDegraded_ReentryAfterExit(t *testing.T) {
 	logger := logging.NewNop()
 	nopMetrics := metrics.NewNop()
@@ -284,12 +286,12 @@ func TestEnterDegraded_ReentryAfterExit(t *testing.T) {
 	m.wg.Wait() // wait for goroutines to exit
 
 	require.Equal(t, StateDegraded, m.State(), "must enter Degraded")
-	require.NotZero(t, m.degradedSince.Load())
+	require.NotZero(t, m.degradedSinceNano())
 
 	// Recovery: exit degraded
 	m.exitDegraded()
 	require.Equal(t, StateStable, m.State(), "must return to Stable")
-	require.Zero(t, m.degradedSince.Load(), "degradedSince must be 0 after exit")
+	require.Zero(t, m.degradedSinceNano(), "the degraded record must be cleared after exit")
 
 	// Re-entry: must succeed after reset (the core bug fix)
 	ctx2, cancel2 := context.WithCancel(context.Background())
@@ -302,5 +304,5 @@ func TestEnterDegraded_ReentryAfterExit(t *testing.T) {
 	m.wg.Wait()
 
 	require.Equal(t, StateDegraded, m.State(), "re-entry into Degraded must work after recovery")
-	require.NotZero(t, m.degradedSince.Load(), "degradedSince must be set on re-entry")
+	require.NotZero(t, m.degradedSinceNano(), "the degraded record must be set on re-entry")
 }

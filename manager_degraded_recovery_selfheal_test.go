@@ -39,15 +39,11 @@ func armDegraded(t *testing.T, committed *Assignment, snapshot Assignment) (*Man
 		m.committedAssignment.Store(committed)
 	}
 	m.state.Store(int32(StateDegraded))
-	m.degradedSince.Store(time.Now().UnixNano())
-	// Mirror enterDegraded's reason ownership: a real degrade always stores a
-	// reason right after the degradedSince CAS, and attemptRecoveryFromDegraded's
-	// empty-reason guard intentionally stays degraded a tick when the reason is
-	// unset. These are reason-agnostic commitment-guard recovery tests, so arm a
+	// These are reason-agnostic commitment-guard recovery tests, so arm a
 	// non-kv-unavailable reason — the kv-unavailable conjunct is skipped and
-	// recovery keys on the commitment guard alone (the behavior this helper
-	// exercised before the guard existed).
-	m.lastDegradedReason.Store("NATS connection down")
+	// recovery keys on the commitment guard alone. markDegraded publishes since and
+	// reason together, mirroring production enterDegraded's single-swap record.
+	m.markDegraded(time.Now().UnixNano(), "NATS connection down")
 
 	return m, rh
 }
@@ -61,7 +57,7 @@ func TestAttemptRecovery_NeverApplied_NonEmpty_StaysDegradedAndRearms(t *testing
 
 	m.attemptRecoveryFromDegraded()
 
-	require.NotZero(t, m.degradedSince.Load(),
+	require.NotZero(t, m.degradedSinceNano(),
 		"a worker holding an unapplied assignment must STAY degraded, not exit")
 	require.Equal(t, StateDegraded, m.State())
 	stash := m.stashedApplyRetry.Load()
@@ -79,7 +75,7 @@ func TestAttemptRecovery_Applied_ExitsToStable(t *testing.T) {
 	m.attemptRecoveryFromDegraded()
 	m.wg.Wait()
 
-	require.Zero(t, m.degradedSince.Load(), "an applied worker recovers normally")
+	require.Zero(t, m.degradedSinceNano(), "an applied worker recovers normally")
 	require.Equal(t, StateStable, m.State())
 	require.Nil(t, m.stashedApplyRetry.Load(), "no bootstrap re-arm for an applied worker")
 }
@@ -99,7 +95,7 @@ func TestAttemptRecovery_LatchedVersionAdvance_RearmsAtNewVersion(t *testing.T) 
 
 	m.attemptRecoveryFromDegraded()
 
-	require.NotZero(t, m.degradedSince.Load(),
+	require.NotZero(t, m.degradedSinceNano(),
 		"a worker committed at V1 but holding an unapplied V2 must STAY degraded")
 	require.Equal(t, int64(2), m.CurrentAssignment().Version, "refresh advances the snapshot to V2")
 	stash := m.stashedApplyRetry.Load()
@@ -122,7 +118,7 @@ func TestAttemptRecovery_SameVersionDifferentDigest_Rearms(t *testing.T) {
 
 	m.attemptRecoveryFromDegraded()
 
-	require.NotZero(t, m.degradedSince.Load(),
+	require.NotZero(t, m.degradedSinceNano(),
 		"same version but a different partition-set digest is NOT applied — must re-arm")
 	require.NotNil(t, m.stashedApplyRetry.Load())
 }
@@ -142,7 +138,7 @@ func TestAttemptRecovery_SameVersionHigherLR_Rearms(t *testing.T) {
 
 	m.attemptRecoveryFromDegraded()
 
-	require.NotZero(t, m.degradedSince.Load(),
+	require.NotZero(t, m.degradedSinceNano(),
 		"same version/digest but a higher leader revision is NOT applied — must re-arm")
 	require.NotNil(t, m.stashedApplyRetry.Load())
 }
@@ -165,7 +161,7 @@ func TestAttemptRecovery_SourceKnownVsUnknownAlias_ExitsNoDowngrade(t *testing.T
 	m.attemptRecoveryFromDegraded()
 	m.wg.Wait()
 
-	require.Zero(t, m.degradedSince.Load(),
+	require.Zero(t, m.degradedSinceNano(),
 		"a source-unknown alias must NOT trigger a re-arm that downgrades a known-source ack")
 	require.Equal(t, StateStable, m.State())
 	require.Nil(t, m.stashedApplyRetry.Load())
@@ -184,7 +180,7 @@ func TestAttemptRecovery_ColdZero_ExitsToStable(t *testing.T) {
 	m.attemptRecoveryFromDegraded()
 	m.wg.Wait()
 
-	require.Zero(t, m.degradedSince.Load(),
+	require.Zero(t, m.degradedSinceNano(),
 		"a never-assigned worker (empty@0 == committed empty@0) exits normally")
 	require.Equal(t, StateStable, m.State())
 	require.Nil(t, m.stashedApplyRetry.Load())
@@ -203,7 +199,7 @@ func TestAttemptRecovery_VersionedEmptyRevoke_Rearms(t *testing.T) {
 
 	m.attemptRecoveryFromDegraded()
 
-	require.NotZero(t, m.degradedSince.Load(),
+	require.NotZero(t, m.degradedSinceNano(),
 		"a versioned empty revoke that was never applied must re-arm, not exit")
 	require.Equal(t, int64(2), m.CurrentAssignment().Version)
 	stash := m.stashedApplyRetry.Load()
@@ -256,7 +252,7 @@ func TestRecoveryGuard_TornRead_NoMissedHeal(t *testing.T) {
 
 		m.attemptRecoveryFromDegraded()
 
-		require.NotZero(t, m.degradedSince.Load(), "must stay degraded, not falsely exit")
+		require.NotZero(t, m.degradedSinceNano(), "must stay degraded, not falsely exit")
 		stash := m.stashedApplyRetry.Load()
 		require.NotNil(t, stash)
 		require.Equal(t, int64(2), stash.Version, "re-arms the real current version V2")
@@ -272,7 +268,7 @@ func TestRecoveryGuard_TornRead_NoMissedHeal(t *testing.T) {
 
 		m.attemptRecoveryFromDegraded()
 
-		require.NotZero(t, m.degradedSince.Load(),
+		require.NotZero(t, m.degradedSinceNano(),
 			"committed-ahead-of-snapshot must NOT be treated as applied — no missed heal")
 		// Whatever was re-armed at the stale V1 is dropped once the real V2 is the
 		// current snapshot, so it cannot corrupt the heal.
@@ -290,7 +286,7 @@ func TestAttemptRecovery_RefreshFails_ReturnsBeforeGuard(t *testing.T) {
 
 	m.attemptRecoveryFromDegraded()
 
-	require.NotZero(t, m.degradedSince.Load(), "stays degraded when the refresh read fails")
+	require.NotZero(t, m.degradedSinceNano(), "stays degraded when the refresh read fails")
 	require.Nil(t, m.stashedApplyRetry.Load(),
 		"a failed refresh must not re-arm a bootstrap apply (guard not reached)")
 }
