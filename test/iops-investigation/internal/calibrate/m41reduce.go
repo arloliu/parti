@@ -26,7 +26,7 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -98,6 +98,7 @@ func ParseDriverRow(r io.Reader) (DriverRow, error) {
 		return DriverRow{}, fmt.Errorf("fetch_timeout_s: %w", err)
 	}
 	leaderPre := rec[11]
+
 	return DriverRow{
 		CStream:       cStream,
 		FetchTimeoutS: ftS,
@@ -184,7 +185,7 @@ func ReduceM41(samples []aggregate.CgroupSample, driver DriverRow) (leader, foll
 		}
 		followerKeys = append(followerKeys, k)
 	}
-	sort.Strings(followerKeys)
+	slices.Sort(followerKeys)
 	avg := perSecondAverage(byContainer, followerKeys)
 	follower = m41RowFromSamples(driver, "follower", avg)
 
@@ -220,6 +221,7 @@ func m41RowFromSamples(driver DriverRow, role string, b *bucket) M41Row {
 	if half < 0 {
 		half = 0
 	}
+
 	return M41Row{
 		CStream:        driver.CStream,
 		FetchTimeoutS:  driver.FetchTimeoutS,
@@ -254,6 +256,7 @@ func aggregateContainers(in map[string]*bucket, keys []string) *bucket {
 		out.reads = append(out.reads, b.reads...)
 		out.writes = append(out.writes, b.writes...)
 	}
+
 	return out
 }
 
@@ -299,6 +302,7 @@ func perSecondAverage(in map[string]*bucket, keys []string) *bucket {
 		out.reads[i] /= n
 		out.writes[i] /= n
 	}
+
 	return out
 }
 
@@ -307,7 +311,7 @@ func sortedKeys[V any](m map[string]V) []string {
 	for k := range m {
 		keys = append(keys, k)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 	return keys
 }
 
@@ -319,6 +323,7 @@ func mean(xs []float64) float64 {
 	for _, x := range xs {
 		s += x
 	}
+
 	return s / float64(len(xs))
 }
 
@@ -331,6 +336,7 @@ func stddev(xs []float64, mu float64) float64 {
 		d := x - mu
 		ss += d * d
 	}
+
 	return math.Sqrt(ss / float64(len(xs)-1))
 }
 

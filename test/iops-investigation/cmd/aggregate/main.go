@@ -39,6 +39,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -54,11 +55,12 @@ func main() {
 	}
 }
 
+//nolint:cyclop // aggregate CLI: flag parsing + sequential per-source reconcile; flat by design.
 func run(args []string, stdout, stderr *os.File) error {
 	fs := flag.NewFlagSet("aggregate", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var (
-		runDir    = fs.String("run-dir", "", "path to the per-run directory containing capture artifacts (required)")
+		runDir = fs.String("run-dir", "", "path to the per-run directory containing capture artifacts (required)")
 		// --strict default is false because cgroup-vs-iostat divergence
 		// is noisy on real hosts (write merging at the kernel level
 		// makes cgroup pre-merge counts diverge 2-4× from iostat
@@ -67,8 +69,8 @@ func run(args []string, stdout, stderr *os.File) error {
 		// and reports the divergence as a diagnostic line, but it no
 		// longer fails the run by default. Pass --strict to enforce
 		// paper-spec §R3 semantics on a dedicated rig host.
-		strict = fs.Bool("strict", false, "exit non-zero on cgroup/iostat divergence above --max-disagreement-pct (default false; the cross-check is diagnostic only)")
-		maxPct = fs.Float64("max-disagreement-pct", 5.0, "max permitted cgroup-excess over iostat as fraction of cgroup (0..100%, asymmetric guard) before strict mode fails. Only meaningful when --strict.")
+		strict    = fs.Bool("strict", false, "exit non-zero on cgroup/iostat divergence above --max-disagreement-pct (default false; the cross-check is diagnostic only)")
+		maxPct    = fs.Float64("max-disagreement-pct", 5.0, "max permitted cgroup-excess over iostat as fraction of cgroup (0..100%, asymmetric guard) before strict mode fails. Only meaningful when --strict.")
 		outName   = fs.String("output-name", "aggregated.csv", "output CSV filename written under --run-dir")
 		warmupSec = fs.Int("warmup-seconds", 2, "seconds at the start of the run to skip during the divergence check")
 	)
@@ -76,7 +78,7 @@ func run(args []string, stdout, stderr *os.File) error {
 		return err
 	}
 	if *runDir == "" {
-		return fmt.Errorf("--run-dir is required")
+		return errors.New("--run-dir is required")
 	}
 
 	// 1. Required inputs.
@@ -92,7 +94,7 @@ func run(args []string, stdout, stderr *os.File) error {
 	for _, name := range required {
 		p := filepath.Join(*runDir, name)
 		if _, err := os.Stat(p); err != nil {
-			return fmt.Errorf("required input missing: %s (%v)", p, err)
+			return fmt.Errorf("required input missing: %s (%w)", p, err)
 		}
 	}
 
@@ -119,6 +121,10 @@ func run(args []string, stdout, stderr *os.File) error {
 		return err
 	}
 	jszSamples, err := aggregate.ParseJSZ(filepath.Join(*runDir, jszFile))
+	if err != nil {
+		return err
+	}
+	metaSamples, err := aggregate.ParseMetaSnapshot(filepath.Join(*runDir, jszFile))
 	if err != nil {
 		return err
 	}
@@ -171,5 +177,28 @@ func run(args []string, stdout, stderr *os.File) error {
 		return fmt.Errorf("sync output: %w", err)
 	}
 	fmt.Fprintf(stdout, "wrote %s\n", outPath)
+
+	// 7. Meta-snapshot summary (§8.1 gate: count >= 5).
+	//    Reads from the same jsz file already parsed above.
+	//    Emits meta_snapshot.json next to aggregated.csv when gated,
+	//    and always logs the gate decision to stderr.
+	metaSum, metaLog := aggregate.SummarizeMetaSnapshot(metaSamples)
+	fmt.Fprintf(stderr, "aggregate: %s\n", metaLog)
+	if metaSum.Gated {
+		metaPath := filepath.Join(*runDir, "meta_snapshot.json")
+		mf, merr := os.Create(metaPath)
+		if merr != nil {
+			return fmt.Errorf("create meta_snapshot.json: %w", merr)
+		}
+		defer mf.Close()
+		if merr = aggregate.WriteMetaSnapshot(mf, metaSum); merr != nil {
+			return fmt.Errorf("write meta_snapshot.json: %w", merr)
+		}
+		if merr = mf.Sync(); merr != nil {
+			return fmt.Errorf("sync meta_snapshot.json: %w", merr)
+		}
+		fmt.Fprintf(stdout, "wrote %s\n", metaPath)
+	}
+
 	return nil
 }

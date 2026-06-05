@@ -8,16 +8,19 @@
 package main
 
 import (
+	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	hdr "github.com/HdrHistogram/hdrhistogram-go"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"gopkg.in/yaml.v3"
@@ -29,6 +32,8 @@ import (
 	"github.com/arloliu/parti/v2/types"
 
 	"github.com/arloliu/parti/test/iops-investigation/internal/instrumentedjs"
+	"github.com/arloliu/parti/test/iops-investigation/internal/latency"
+	"github.com/arloliu/parti/test/iops-investigation/internal/load"
 	"github.com/arloliu/parti/test/iops-investigation/internal/storageverify"
 )
 
@@ -51,33 +56,42 @@ const (
 // command-line flag in main.go; defining the struct separately means
 // tests can drive the run directly with a literal.
 type Options struct {
-	NATSURLs           string
-	Workers            int
-	N                  int
-	Replicas           int
-	TwoPhase           bool
-	SweepInterval      time.Duration
-	FetchTimeout       time.Duration
-	ConsumerMode       ConsumerMode
-	HeartbeatInterval  time.Duration
-	HeartbeatTTL       time.Duration
-	WorkerIDTTL        time.Duration
-	ElectionTimeout    time.Duration
+	NATSURLs              string
+	Workers               int
+	N                     int
+	Replicas              int
+	TwoPhase              bool
+	SweepInterval         time.Duration
+	FetchTimeout          time.Duration
+	ConsumerMode          ConsumerMode
+	HeartbeatInterval     time.Duration
+	HeartbeatTTL          time.Duration
+	WorkerIDTTL           time.Duration
+	ElectionTimeout       time.Duration
 	KVStorage             jetstream.StorageType
 	DataStorage           jetstream.StorageType
 	DataStreamName        string
-	ConsumerMemoryStorage bool // when true, harness-side override forces parti's per-partition consumers to MemoryStorage=true (Plan 02 M2.A/M2.B)
-	ConsumerReplicas      int  // when > 0, harness-side override forces parti's per-partition consumers to Replicas=N (Plan 02 M2.B). 0 = inherit stream.
+	ConsumerMemoryStorage bool   // when true, harness-side override forces parti's per-partition consumers to MemoryStorage=true (Plan 02 M2.A/M2.B)
+	ConsumerReplicas      int    // when > 0, harness-side override forces parti's per-partition consumers to Replicas=N (Plan 02 M2.B). 0 = inherit stream.
 	PartitionSourceKey    string // KV key inside the partition-source bucket
-	Warmup             time.Duration
-	CaptureWindow      time.Duration
-	RPCDumpInterval    time.Duration
-	OutputDir          string
-	PartiVersion       string
+	Warmup                time.Duration
+	CaptureWindow         time.Duration
+	RPCDumpInterval       time.Duration
+	OutputDir             string
+	PartiVersion          string
 	// FastConfig swaps in parti.TestConfig() timings so the smoke test
 	// can converge in under a few seconds; production runs leave this
 	// false and rely on the explicit duration flags above.
 	FastConfig bool
+
+	// --- perf-measurement (design §5–§9) ---
+	Load          bool          // enable the open-loop producer + latency handler
+	PerWorkerRate float64       // k: msg/s per worker; aggregate X = k·Workers
+	BatchSize     int           // consumer fetch batch size (pinned, §7)
+	MaxWaiting    int           // consumer MaxWaiting (§7)
+	MaxAckPending int           // consumer MaxAckPending (§7)
+	AckWait       time.Duration // consumer AckWait (§7)
+	StartupBudget time.Duration // WaitState/WaitStableAll budget (§9; 0 ⇒ max(60s, N·60ms))
 }
 
 // PartitionSourceBucket is the JetStream-KV bucket the harness creates
@@ -154,10 +168,25 @@ func BuildPartiConfig(o Options) parti.Config {
 	if o.TwoPhase && o.SweepInterval > 0 {
 		cfg.Handoff.SweepInterval = o.SweepInterval
 	}
+	// Cold-start watchdog: parti's StartupTimeout (default 60s) flips a manager
+	// to Degraded(startup-timeout) if it isn't Stable in time. A large-N /
+	// high-RF cold start (e.g. 2000 RF=5 consumers across M workers on a
+	// CPU-pinned cluster) legitimately takes longer than 60s to converge, so we
+	// raise StartupTimeout to the harness startup budget. Keep it < the
+	// WaitStableAll gate's effective budget isn't required (both are the same
+	// budget); what matters is the watchdog doesn't fire during a healthy slow
+	// start. ApplyStartJitter stays << StartupTimeout (parti default jitter is
+	// small), satisfying the config validation guidance.
+	startupBudget := o.StartupBudget
+	if startupBudget <= 0 {
+		startupBudget = defaultStartupBudget(o.N)
+	}
+	cfg.StartupTimeout = startupBudget
 	// EmergencyGracePeriod is computed from HeartbeatInterval by parti
 	// defaults; reset it to zero so SetDefaults (called inside
 	// NewManager) recomputes against our possibly-shorter interval.
 	cfg.EmergencyGracePeriod = 0
+
 	return cfg
 }
 
@@ -220,9 +249,9 @@ func ConnectNATS(urls string) (*nats.Conn, error) {
 	return nats.Connect(
 		urls,
 		nats.RetryOnFailedConnect(true),
-		nats.MaxReconnects(60),                 // 60 × 1 s = up to 60 s
+		nats.MaxReconnects(60), // 60 × 1 s = up to 60 s
 		nats.ReconnectWait(1*time.Second),
-		nats.Timeout(5*time.Second),            // per-connect attempt timeout
+		nats.Timeout(5*time.Second), // per-connect attempt timeout
 	)
 }
 
@@ -231,10 +260,10 @@ func ConnectNATS(urls string) (*nats.Conn, error) {
 // factor. A freshly-started NATS cluster passes through three
 // readiness stages on bring-up:
 //
-//   1. Client port accepts connections (~1s).
-//   2. JetStream meta-leader elected — AccountInfo returns (~5-10s).
-//   3. All `replicas` peers visible to the meta-cluster — R=replicas
-//      stream placement succeeds (~10-15s).
+//  1. Client port accepts connections (~1s).
+//  2. JetStream meta-leader elected — AccountInfo returns (~5-10s).
+//  3. All `replicas` peers visible to the meta-cluster — R=replicas
+//     stream placement succeeds (~10-15s).
 //
 // Probing AccountInfo (stage 2) alone is not enough on a fresh rig:
 // PreCreate then fails with "no suitable peers for placement, peer
@@ -291,9 +320,9 @@ func WaitForJetStream(ctx context.Context, setup *instrumentedjs.InstrumentedJS,
 			return err
 		}
 	}
+
 	return fmt.Errorf("JetStream not ready for R=%d placement after %s: %w", replicas, timeout, lastErr)
 }
-
 
 func PreCreate(
 	ctx context.Context,
@@ -348,8 +377,9 @@ func PreCreate(
 // storageverify.Verify so a silent mismatch surfaces before the capture
 // window opens.
 func ExpectedStreams(o Options, cfg parti.Config) []storageverify.Expected {
-	out := []storageverify.Expected{}
-	for _, spec := range PartiBuckets(cfg, o.KVStorage, o.TwoPhase) {
+	buckets := PartiBuckets(cfg, o.KVStorage, o.TwoPhase)
+	out := make([]storageverify.Expected, 0, len(buckets)+2) // +partition-source +data
+	for _, spec := range buckets {
 		out = append(out, storageverify.Expected{
 			Stream: spec.stream, Storage: spec.storage, Replicas: o.Replicas,
 		})
@@ -360,6 +390,7 @@ func ExpectedStreams(o Options, cfg parti.Config) []storageverify.Expected {
 	out = append(out, storageverify.Expected{
 		Stream: o.DataStreamName, Storage: o.DataStorage, Replicas: o.Replicas,
 	})
+
 	return out
 }
 
@@ -380,6 +411,7 @@ func SeedPartitions(ctx context.Context, srcKV jetstream.KeyValue, key string, n
 	if err := src.Update(ctx, parts); err != nil {
 		return fmt.Errorf("seed %d partitions: %w", n, err)
 	}
+
 	return nil
 }
 
@@ -401,7 +433,8 @@ type WorkerHandle struct {
 	manager     *parti.Manager
 	consumerDyn *consumer.Dynamic
 	consumerQ   *consumer.Queue
-	degraded    *atomic.Int64 // count of degraded transitions observed
+	degraded    *atomic.Int64     // count of degraded transitions observed
+	recorder    *latency.Recorder // non-nil in --load mode
 }
 
 // StartWorker connects to NATS, wraps the resulting JetStream in a
@@ -441,6 +474,13 @@ func StartWorker(
 
 	wh := &WorkerHandle{idx: idx, nc: nc, ijs: ijs, degraded: new(atomic.Int64)}
 
+	var handler consumer.MessageHandler = noopHandler{}
+	if o.Load {
+		rec := latency.NewRecorder() // records nothing until SetWindow at captureStart
+		wh.recorder = rec
+		handler = rec
+	}
+
 	hooks := &types.Hooks{
 		OnStateChanged: func(_ context.Context, _, to parti.State) error {
 			if to == parti.StateDegraded {
@@ -458,8 +498,12 @@ func StartWorker(
 	switch o.ConsumerMode {
 	case ConsumerModeDynamic:
 		dyn, derr := consumer.NewDynamic(
-			ijs, o.DataStreamName, dynamicPrefix, dynamicSubjectTmpl, noopHandler{},
+			ijs, o.DataStreamName, dynamicPrefix, dynamicSubjectTmpl, handler,
 			consumer.WithFetchTimeout(o.FetchTimeout),
+			consumer.WithBatchSize(o.BatchSize),
+			consumer.WithMaxWaiting(o.MaxWaiting),
+			consumer.WithMaxAckPending(o.MaxAckPending),
+			consumer.WithAckWait(o.AckWait),
 		)
 		if derr != nil {
 			nc.Close()
@@ -471,8 +515,12 @@ func StartWorker(
 		// Queue is single-consumer-name across the cluster; all
 		// workers join the same durable.
 		q, qerr := consumer.NewQueue(
-			ijs, o.DataStreamName, queueConsumerName, queueFilterSubject, noopHandler{},
+			ijs, o.DataStreamName, queueConsumerName, queueFilterSubject, handler,
 			consumer.WithFetchTimeout(o.FetchTimeout),
+			consumer.WithBatchSize(o.BatchSize),
+			consumer.WithMaxWaiting(o.MaxWaiting),
+			consumer.WithMaxAckPending(o.MaxAckPending),
+			consumer.WithAckWait(o.AckWait),
 		)
 		if qerr != nil {
 			nc.Close()
@@ -495,23 +543,41 @@ func StartWorker(
 		return nil, fmt.Errorf("worker %d: Start: %w", idx, err)
 	}
 	// Manager.Start returns after the synchronous sanity-check phase
-	// (StateWaitingAssignment); wait for Stable so the harness's
-	// downstream consumer setup observes a fully-initialised manager.
-	if err := <-mgr.WaitState(parti.StateStable, 30*time.Second); err != nil {
-		_ = mgr.Stop(ctx)
-		nc.Close()
-		return nil, fmt.Errorf("worker %d: Manager did not reach StateStable: %w", idx, err)
-	}
-
-	if wh.consumerQ != nil {
-		if err := wh.consumerQ.Start(ctx); err != nil {
-			_ = mgr.Stop(ctx)
-			nc.Close()
-			return nil, fmt.Errorf("worker %d: Queue.Start: %w", idx, err)
-		}
-	}
-
+	// (StateWaitingAssignment). We deliberately do NOT block here on Stable:
+	// blocking per-worker serializes startup, forcing the first worker to
+	// single-handedly create ALL N consumers (and triggering an O(M) rebalance
+	// storm as each subsequent worker joins) — which blows the budget at large
+	// N / high RF. Instead the caller (Run) starts every worker, THEN gates on
+	// the cluster-wide WaitStableAll so the calculator distributes ~N/M
+	// partitions per worker and the consumers are created M-way in parallel.
+	// Queue-mode consumers are started by the caller after WaitStableAll.
 	return wh, nil
+}
+
+// StartQueueConsumer starts the worker's Queue consumer (no-op for other
+// modes). Called by Run AFTER the cluster reaches Stable, so the manager is
+// fully initialised before the single-durable queue consumer attaches.
+func (wh *WorkerHandle) StartQueueConsumer(ctx context.Context) error {
+	if wh.consumerQ == nil {
+		return nil
+	}
+	if err := wh.consumerQ.Start(ctx); err != nil {
+		return fmt.Errorf("worker %d: Queue.Start: %w", wh.idx, err)
+	}
+	return nil
+}
+
+// defaultStartupBudget scales the Stable-wait budget with partition count;
+// the rig's old fixed 30s is too small for N=5000/RF=5 (design §9). The slope
+// (120ms/partition, floor 120s) encodes the one empirically-proven datapoint —
+// N=2000 converged under a 240s budget in the first campaign round — and a
+// generous ceiling is mandatory for a saturation study: a too-tight budget at
+// N=5000 would masquerade as a saturation finding ("can't converge") when it is
+// really just the timeout. The budget is a ceiling, not a fixed wait —
+// WaitStableAll returns the instant the cluster is Stable — so the headroom
+// costs nothing on a fast cold-start.
+func defaultStartupBudget(n int) time.Duration {
+	return max(120*time.Second, time.Duration(n)*120*time.Millisecond)
 }
 
 // Stop performs a best-effort orderly shutdown of one worker. Errors
@@ -537,6 +603,7 @@ func (wh *WorkerHandle) Stop(ctx context.Context) error {
 	if wh.nc != nil {
 		wh.nc.Close()
 	}
+
 	return errors.Join(errs...)
 }
 
@@ -606,15 +673,16 @@ func AggregateSnapshots(t time.Time, workers []*WorkerHandle) []SnapshotRow {
 			})
 		}
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].WorkerID != out[j].WorkerID {
-			return out[i].WorkerID < out[j].WorkerID
+	slices.SortFunc(out, func(a, b SnapshotRow) int {
+		if a.WorkerID != b.WorkerID {
+			return cmp.Compare(a.WorkerID, b.WorkerID)
 		}
-		if out[i].Bucket != out[j].Bucket {
-			return out[i].Bucket < out[j].Bucket
+		if a.Bucket != b.Bucket {
+			return cmp.Compare(a.Bucket, b.Bucket)
 		}
-		return out[i].Op < out[j].Op
+		return cmp.Compare(a.Op, b.Op)
 	})
+
 	return out
 }
 
@@ -647,27 +715,35 @@ type Manifest struct {
 // the bool/storage/duration fields so the YAML is round-trippable by
 // any reader, not just Go.
 type ManifestOptions struct {
-	NATSURLs          string `yaml:"natsUrls"`
-	Workers           int    `yaml:"workers"`
-	N                 int    `yaml:"n"`
-	Replicas          int    `yaml:"replicas"`
-	TwoPhase          bool   `yaml:"twoPhase"`
-	SweepInterval     string `yaml:"sweepInterval"`
-	FetchTimeout      string `yaml:"fetchTimeout"`
-	ConsumerMode      string `yaml:"consumerMode"`
-	HeartbeatInterval string `yaml:"heartbeatInterval"`
-	HeartbeatTTL      string `yaml:"heartbeatTtl"`
-	WorkerIDTTL       string `yaml:"workerIdTtl"`
-	ElectionTimeout   string `yaml:"electionTimeout"`
-	KVStorage             string `yaml:"kvStorage"`
-	DataStorage           string `yaml:"dataStorage"`
-	DataStreamName        string `yaml:"dataStreamName"`
-	ConsumerMemoryStorage bool   `yaml:"consumerMemoryStorage"`
-	ConsumerReplicas      int    `yaml:"consumerReplicas"`
-	Warmup                string `yaml:"warmup"`
-	CaptureWindow     string `yaml:"captureWindow"`
-	RPCDumpInterval   string `yaml:"rpcDumpInterval"`
-	OutputDir         string `yaml:"outputDir"`
+	NATSURLs              string  `yaml:"natsUrls"`
+	Workers               int     `yaml:"workers"`
+	N                     int     `yaml:"n"`
+	Replicas              int     `yaml:"replicas"`
+	TwoPhase              bool    `yaml:"twoPhase"`
+	SweepInterval         string  `yaml:"sweepInterval"`
+	FetchTimeout          string  `yaml:"fetchTimeout"`
+	ConsumerMode          string  `yaml:"consumerMode"`
+	HeartbeatInterval     string  `yaml:"heartbeatInterval"`
+	HeartbeatTTL          string  `yaml:"heartbeatTtl"`
+	WorkerIDTTL           string  `yaml:"workerIdTtl"`
+	ElectionTimeout       string  `yaml:"electionTimeout"`
+	KVStorage             string  `yaml:"kvStorage"`
+	DataStorage           string  `yaml:"dataStorage"`
+	DataStreamName        string  `yaml:"dataStreamName"`
+	ConsumerMemoryStorage bool    `yaml:"consumerMemoryStorage"`
+	ConsumerReplicas      int     `yaml:"consumerReplicas"`
+	Warmup                string  `yaml:"warmup"`
+	CaptureWindow         string  `yaml:"captureWindow"`
+	RPCDumpInterval       string  `yaml:"rpcDumpInterval"`
+	OutputDir             string  `yaml:"outputDir"`
+	Load                  bool    `yaml:"load"`
+	PerWorkerRate         float64 `yaml:"perWorkerRate"`
+	AggregateX            float64 `yaml:"aggregateX"`
+	BatchSize             int     `yaml:"batchSize"`
+	MaxWaiting            int     `yaml:"maxWaiting"`
+	MaxAckPending         int     `yaml:"maxAckPending"`
+	AckWait               string  `yaml:"ackWait"`
+	StartupBudget         string  `yaml:"startupBudget"`
 }
 
 // ManifestStream records the storage class confirmed by
@@ -692,27 +768,35 @@ func storageTypeName(s jetstream.StorageType) string {
 // buildManifestOptions snapshots o for emission.
 func buildManifestOptions(o Options) ManifestOptions {
 	return ManifestOptions{
-		NATSURLs:          o.NATSURLs,
-		Workers:           o.Workers,
-		N:                 o.N,
-		Replicas:          o.Replicas,
-		TwoPhase:          o.TwoPhase,
-		SweepInterval:     o.SweepInterval.String(),
-		FetchTimeout:      o.FetchTimeout.String(),
-		ConsumerMode:      string(o.ConsumerMode),
-		HeartbeatInterval: o.HeartbeatInterval.String(),
-		HeartbeatTTL:      o.HeartbeatTTL.String(),
-		WorkerIDTTL:       o.WorkerIDTTL.String(),
-		ElectionTimeout:   o.ElectionTimeout.String(),
+		NATSURLs:              o.NATSURLs,
+		Workers:               o.Workers,
+		N:                     o.N,
+		Replicas:              o.Replicas,
+		TwoPhase:              o.TwoPhase,
+		SweepInterval:         o.SweepInterval.String(),
+		FetchTimeout:          o.FetchTimeout.String(),
+		ConsumerMode:          string(o.ConsumerMode),
+		HeartbeatInterval:     o.HeartbeatInterval.String(),
+		HeartbeatTTL:          o.HeartbeatTTL.String(),
+		WorkerIDTTL:           o.WorkerIDTTL.String(),
+		ElectionTimeout:       o.ElectionTimeout.String(),
 		KVStorage:             storageTypeName(o.KVStorage),
 		DataStorage:           storageTypeName(o.DataStorage),
 		DataStreamName:        o.DataStreamName,
 		ConsumerMemoryStorage: o.ConsumerMemoryStorage,
 		ConsumerReplicas:      o.ConsumerReplicas,
 		Warmup:                o.Warmup.String(),
-		CaptureWindow:     o.CaptureWindow.String(),
-		RPCDumpInterval:   o.RPCDumpInterval.String(),
-		OutputDir:         o.OutputDir,
+		CaptureWindow:         o.CaptureWindow.String(),
+		RPCDumpInterval:       o.RPCDumpInterval.String(),
+		OutputDir:             o.OutputDir,
+		Load:                  o.Load,
+		PerWorkerRate:         o.PerWorkerRate,
+		AggregateX:            o.PerWorkerRate * float64(o.Workers),
+		BatchSize:             o.BatchSize,
+		MaxWaiting:            o.MaxWaiting,
+		MaxAckPending:         o.MaxAckPending,
+		AckWait:               o.AckWait.String(),
+		StartupBudget:         o.StartupBudget.String(),
 	}
 }
 
@@ -733,7 +817,55 @@ func WriteManifest(dir string, m Manifest) error {
 	if err := writeFileAtomic(path, buf, 0o644); err != nil {
 		return fmt.Errorf("write %q: %w", path, err)
 	}
+
 	return nil
+}
+
+// LatencyReport is the JSON artifact written per load cell. Snapshot holds the
+// serialized merged histogram so cmd/fitmodel can Import + Merge the 3 reps
+// and compute POOLED percentiles (§6/§11) — per-rep summary percentiles
+// cannot be averaged.
+type LatencyReport struct {
+	Count         int64         `json:"count"`
+	InWindowSent  int64         `json:"inWindowSent"`
+	Delivered     int64         `json:"delivered"`
+	DeliveryRatio float64       `json:"deliveryRatio"`
+	P50Ns         int64         `json:"p50Ns"`
+	P90Ns         int64         `json:"p90Ns"`
+	P95Ns         int64         `json:"p95Ns"`
+	P99Ns         int64         `json:"p99Ns"`
+	P999Ns        int64         `json:"p999Ns"`
+	P999Present   bool          `json:"p999Present"`
+	MaxNs         int64         `json:"maxNs"`
+	ProducerBound bool          `json:"producerBound"`
+	SkewP99Ns     int64         `json:"skewP99Ns"`
+	AsyncErrors   int64         `json:"asyncErrors"`
+	LateSends     int64         `json:"lateSends"`
+	Snapshot      *hdr.Snapshot `json:"snapshot"`
+}
+
+// WriteLatencyReport writes <outputDir>/latency.json atomically.
+func WriteLatencyReport(dir string, rep latency.Report, h load.ProducerHealth, delivered int64, snap *hdr.Snapshot) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	ratio := 0.0
+	if h.InWindowSent > 0 {
+		ratio = float64(delivered) / float64(h.InWindowSent)
+	}
+	lr := LatencyReport{
+		Count: rep.Count, InWindowSent: h.InWindowSent, Delivered: delivered, DeliveryRatio: ratio,
+		P50Ns: rep.P50Ns, P90Ns: rep.P90Ns, P95Ns: rep.P95Ns, P99Ns: rep.P99Ns,
+		P999Ns: rep.P999Ns, P999Present: rep.P999Present, MaxNs: rep.MaxNs,
+		ProducerBound: h.ProducerBound, SkewP99Ns: h.SkewP99Ns, AsyncErrors: h.AsyncErrors, LateSends: h.LateSends,
+		Snapshot: snap,
+	}
+	buf, err := json.MarshalIndent(lr, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return writeFileAtomic(filepath.Join(dir, "latency.json"), buf, 0o644)
 }
 
 // writeFileAtomic writes data to path via a sibling tmp file, fsyncs,
@@ -760,6 +892,7 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		_ = os.Remove(tmp)
 		return err
 	}
+
 	return commitAtomic(tmp, path)
 }
 
@@ -778,6 +911,7 @@ func commitAtomic(tmp, final string) error {
 		_ = d.Sync()
 		_ = d.Close()
 	}
+
 	return nil
 }
 
@@ -821,5 +955,6 @@ func confirmedStreams(o Options, cfg parti.Config) []ManifestStream {
 			Stream: s.Stream, Storage: storageTypeName(s.Storage), Replicas: s.Replicas,
 		})
 	}
+
 	return out
 }

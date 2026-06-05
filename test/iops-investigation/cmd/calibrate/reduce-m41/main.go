@@ -62,7 +62,7 @@ func run(pointDir, output string, emitHeader, allowSingle bool) error {
 		return fmt.Errorf("open driver csv: %w", err)
 	}
 	driver, err := calibrate.ParseDriverRow(df)
-	df.Close()
+	_ = df.Close()
 	if err != nil {
 		return fmt.Errorf("parse driver csv %q: %w", calibCSV, err)
 	}
@@ -105,5 +105,6 @@ func run(pointDir, output string, emitHeader, allowSingle bool) error {
 	if _, err := fmt.Fprintln(w, follower.CSV()); err != nil {
 		return err
 	}
+
 	return nil
 }

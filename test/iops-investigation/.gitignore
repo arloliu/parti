@@ -1,10 +1,18 @@
 results/
 
+# Auto-created NATS JetStream data directories (default IOPS_RIG_DIR).
+docker/data/
+
 # Built binaries (operator's go build output).
 cmd/harness/harness
 cmd/aggregate/aggregate
 cmd/calibrate/calibrate
 cmd/calibrate/reduce-m41/reduce-m41
+cmd/estimator/estimator
+cmd/fitmodel/fitmodel
 
 # Python venv created from scripts/requirements.txt for analyze.py.
 .venv/
+
+# Scratch: one-off campaign wrappers + their logs.
+tmp/

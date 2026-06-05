@@ -8,10 +8,11 @@ package aggregate
 
 import (
 	"bufio"
+	"cmp"
 	"fmt"
 	"io"
 	"os"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -49,10 +50,10 @@ func ParseCgroup(path string) ([]CgroupSample, error) {
 		return nil, fmt.Errorf("open cgroup: %w", err)
 	}
 	defer f.Close()
-	return parseCgroup(f)
+	return parseCgroupReader(f)
 }
 
-func parseCgroup(r io.Reader) ([]CgroupSample, error) {
+func parseCgroupReader(r io.Reader) ([]CgroupSample, error) {
 	var out []CgroupSample
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -100,6 +101,7 @@ func parseCgroup(r io.Reader) ([]CgroupSample, error) {
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("scan cgroup: %w", err)
 	}
+
 	return out, nil
 }
 
@@ -153,12 +155,13 @@ func CgroupDeltas(samples []CgroupSample) []CgroupDelta {
 	for _, d := range bucket {
 		out = append(out, *d)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].TSec != out[j].TSec {
-			return out[i].TSec < out[j].TSec
+	slices.SortFunc(out, func(a, b CgroupDelta) int {
+		if a.TSec != b.TSec {
+			return cmp.Compare(a.TSec, b.TSec)
 		}
-		return out[i].Container < out[j].Container
+		return cmp.Compare(a.Container, b.Container)
 	})
+
 	return out
 }
 

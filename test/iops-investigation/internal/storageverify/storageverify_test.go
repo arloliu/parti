@@ -42,9 +42,10 @@ func startEmbeddedNATS(t *testing.T) (jetstream.JetStream, func()) {
 	return js, cleanup
 }
 
-// createStream is a test helper that creates a JetStream stream with
-// the given name, storage type, and replica count.
-func createStream(t *testing.T, js jetstream.JetStream, name string, storage jetstream.StorageType, replicas int) {
+// createStream is a test helper that creates a single-replica JetStream
+// stream with the given name and storage type (the embedded test server is
+// single-node, so replicas is always 1).
+func createStream(t *testing.T, js jetstream.JetStream, name string, storage jetstream.StorageType) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -52,7 +53,7 @@ func createStream(t *testing.T, js jetstream.JetStream, name string, storage jet
 		Name:     name,
 		Subjects: []string{name + ".>"},
 		Storage:  storage,
-		Replicas: replicas,
+		Replicas: 1,
 	})
 	require.NoError(t, err)
 }
@@ -63,7 +64,7 @@ func TestVerify_Match(t *testing.T) {
 	js, teardown := startEmbeddedNATS(t)
 	defer teardown()
 
-	createStream(t, js, "match-stream", jetstream.MemoryStorage, 1)
+	createStream(t, js, "match-stream", jetstream.MemoryStorage)
 
 	ctx := context.Background()
 	err := Verify(ctx, js, []Expected{
@@ -79,7 +80,7 @@ func TestVerify_StorageMismatch(t *testing.T) {
 	js, teardown := startEmbeddedNATS(t)
 	defer teardown()
 
-	createStream(t, js, "storage-stream", jetstream.FileStorage, 1)
+	createStream(t, js, "storage-stream", jetstream.FileStorage)
 
 	ctx := context.Background()
 	err := Verify(ctx, js, []Expected{
@@ -101,7 +102,7 @@ func TestVerify_ReplicasMismatch(t *testing.T) {
 	js, teardown := startEmbeddedNATS(t)
 	defer teardown()
 
-	createStream(t, js, "replicas-stream", jetstream.MemoryStorage, 1)
+	createStream(t, js, "replicas-stream", jetstream.MemoryStorage)
 
 	ctx := context.Background()
 	err := Verify(ctx, js, []Expected{
@@ -137,11 +138,11 @@ func TestVerify_MultipleExpected_PartialMismatch(t *testing.T) {
 	defer teardown()
 
 	// ok-stream: matches exactly — should not appear in the error.
-	createStream(t, js, "ok-stream", jetstream.MemoryStorage, 1)
+	createStream(t, js, "ok-stream", jetstream.MemoryStorage)
 	// wrong-storage: created with File, expected Memory.
-	createStream(t, js, "wrong-storage", jetstream.FileStorage, 1)
+	createStream(t, js, "wrong-storage", jetstream.FileStorage)
 	// wrong-replicas: created with 1 replica, expected 3.
-	createStream(t, js, "wrong-replicas", jetstream.MemoryStorage, 1)
+	createStream(t, js, "wrong-replicas", jetstream.MemoryStorage)
 
 	ctx := context.Background()
 	err := Verify(ctx, js, []Expected{

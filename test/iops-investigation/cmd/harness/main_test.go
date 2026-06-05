@@ -244,6 +244,7 @@ func startEmbeddedNATS(t *testing.T) string {
 		ns.Shutdown()
 		ns.WaitForShutdown()
 	})
+
 	return ns.ClientURL()
 }
 
@@ -269,6 +270,16 @@ func TestParseFlags_Defaults(t *testing.T) {
 	require.Equal(t, "iops-rig-data", o.DataStreamName)
 	require.Equal(t, 5*time.Minute, o.Warmup)
 	require.Equal(t, 10*time.Minute, o.CaptureWindow)
+}
+
+// TestParseFlags_LoadFlags confirms the perf-measurement load-mode flags
+// (§5) flow through parseFlags into Options.
+func TestParseFlags_LoadFlags(t *testing.T) {
+	o, err := parseFlags([]string{"--load", "--per-worker-rate", "4", "--batch-size", "8"})
+	require.NoError(t, err)
+	require.True(t, o.Load)
+	require.Equal(t, 4.0, o.PerWorkerRate)
+	require.Equal(t, 8, o.BatchSize)
 }
 
 // TestBuildPartiConfig_AppliesFlagOverrides spot-checks that the
@@ -390,9 +401,9 @@ func TestSmoke_RunHarness(t *testing.T) {
 		tsSet[row[0]] = struct{}{}
 		if row[2] == "parti-heartbeat" && row[3] == "Put" {
 			var n int64
-			_, _ = fmtScan(row[4], &n)
+			_ = fmtScan(row[4], &n)
 			widx := 0
-			_, _ = fmtScan(row[1], &widx)
+			_ = fmtScan(row[1], &widx)
 			if n > hbPuts[widx] {
 				hbPuts[widx] = n
 			}
@@ -461,27 +472,27 @@ func TestSmoke_ConsumerModeNone(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// fmtScan is a tiny strconv helper used to keep the smoke test
-// readable. It returns the same (n, err) shape as fmt.Sscanf so the
-// inline _, _ = fmtScan(...) pattern stays terse.
-func fmtScan(s string, dst any) (int, error) {
+// fmtScan is a tiny strconv helper used to keep the smoke test readable.
+// It parses s into *int64 or *int (the only shapes the smoke test needs).
+func fmtScan(s string, dst any) error {
 	switch v := dst.(type) {
 	case *int64:
 		n, err := parseInt64(s)
 		if err != nil {
-			return 0, err
+			return err
 		}
 		*v = n
-		return 1, nil
+		return nil
 	case *int:
 		n, err := parseInt64(s)
 		if err != nil {
-			return 0, err
+			return err
 		}
 		*v = int(n)
-		return 1, nil
+		return nil
 	}
-	return 0, nil
+
+	return nil
 }
 
 func parseInt64(s string) (int64, error) {
@@ -492,14 +503,15 @@ func parseInt64(s string) (int64, error) {
 		}
 		n = n*10 + int64(c-'0')
 	}
+
 	return n, nil
 }
 
-var errBadInt = &errString{"bad int"}
+var errBadInt = &stringError{"bad int"}
 
-type errString struct{ s string }
+type stringError struct{ s string }
 
-func (e *errString) Error() string { return e.s }
+func (e *stringError) Error() string { return e.s }
 
 // unused — kept to make sure nats import is reachable in builds that
 // statically check imports against test files.

@@ -19,7 +19,7 @@ import (
 // (rDelta, wDelta).
 func buildCgroup(containers map[string]struct{ R, W uint64 }) []aggregate.CgroupSample {
 	const device = "8:0"
-	var out []aggregate.CgroupSample
+	out := make([]aggregate.CgroupSample, 0, 4*len(containers))
 	baseTs := int64(1_000_000_000)
 	for name, step := range containers {
 		var r, w uint64
@@ -37,6 +37,7 @@ func buildCgroup(containers map[string]struct{ R, W uint64 }) []aggregate.Cgroup
 			w += step.W
 		}
 	}
+
 	return out
 }
 
