@@ -49,7 +49,8 @@ func TestFullNATSOutage_UnlimitedReconnects_RecoversFleet(t *testing.T) {
 	require.Eventually(t, func() bool { return nc.Status() != nats.CONNECTED },
 		5*time.Second, 50*time.Millisecond, "client did not observe NATS outage")
 	require.NoError(t, <-stack.mgr.WaitState(parti.StateDegraded, 10*time.Second))
-	require.Positive(t, degradedCalls.Load(), "OnDegraded must report NATS connection down")
+	require.Eventually(t, func() bool { return degradedCalls.Load() > 0 },
+		5*time.Second, 20*time.Millisecond, "OnDegraded must report NATS connection down")
 	require.Len(t, stack.mgr.CurrentAssignment().Partitions, 1,
 		"manager must retain cached assignment while NATS is down")
 
