@@ -137,6 +137,6 @@ point near-perfectly:
   array previously blew the curl timeout).
 
 ## Raw data
-`test/iops-investigation/results/meta-N5000/meta-{default,1MB,4MB}-N5000/rep{1,2,3}/`
+`test/perf-measurement/results/meta-N5000/meta-{default,1MB,4MB}-N5000/rep{1,2,3}/`
 and `results/meta-N10000/meta-{default,1MB}-N10000/rep{1,2}/` (gitignored).
 Extract: `jq -rs '[.[]|select(.endpoint=="jsz")|.body.meta_cluster.snapshot]' <jsz.raw>`.

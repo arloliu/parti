@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Extend the `test/iops-investigation/` rig with an open-loop producer, end-to-end delivery-latency measurement, metacontroller-snapshot capture, CPU/disk isolation, and a cost model + estimator CLI, then run the matrix in `00-design.md` and publish `findings.md`.
+**Goal:** Extend the `test/perf-measurement/` rig with an open-loop producer, end-to-end delivery-latency measurement, metacontroller-snapshot capture, CPU/disk isolation, and a cost model + estimator CLI, then run the matrix in `00-design.md` and publish `findings.md`.
 
 **Architecture:** The idle IOPS rig (noopHandler, no publish) gains a `--load` mode. A new in-process open-loop producer publishes ~256 B messages at aggregate rate `X = k·M` carrying a host-wide `CLOCK_MONOTONIC` intended-send timestamp; a latency-recording handler replaces the noop and folds `recv−intended` into per-worker HDR histograms merged at the end. New `internal/load`, `internal/latency`, `internal/costmodel` packages and a `cmd/estimator` CLI are added under the rig's module. cgroup `cpuset` + a dedicated NVMe volume isolate NATS from the harness.
 
-**Tech Stack:** Go 1.25 (module `github.com/arloliu/parti/test/iops-investigation`), NATS JetStream 2.12.6, `golang.org/x/sys/unix` (CLOCK_MONOTONIC), `github.com/HdrHistogram/hdrhistogram-go` (percentiles), Docker Compose, bash.
+**Tech Stack:** Go 1.25 (module `github.com/arloliu/parti/test/perf-measurement`), NATS JetStream 2.12.6, `golang.org/x/sys/unix` (CLOCK_MONOTONIC), `github.com/HdrHistogram/hdrhistogram-go` (percentiles), Docker Compose, bash.
 
 **Design reference:** `docs/plans/perf-measurement/00-design.md` (consensus-approved, codex round 4). Section numbers below (§N) refer to it.
 
@@ -14,7 +14,7 @@
 - Handler interface: `consumer.MessageHandler` — `Handle(ctx context.Context, msg jetstream.Msg) error` (`consumer/handler.go:11`). With `ManualAck=false` (default) a `nil` return auto-acks exactly once (`consumer/queue.go:476`, `internal/ipartition/key_dispatcher.go:242`). **The latency handler returns `nil` and never calls `msg.Ack()`.**
 - Consumer options (all exist, accepted by both `NewDynamic`/`NewQueue` like the existing `WithFetchTimeout`): `WithBatchSize(int)`, `WithMaxWaiting(int)`, `WithMaxAckPending(int)`, `WithAckWait(time.Duration)`, `WithManualAck(bool)`, `WithFetchTimeout(time.Duration)`.
 - `consumer.NewDynamic(js, stream, prefix, subjectTmpl, handler, opts...) (*consumer.Dynamic, error)`; driven by the manager via `WithWorkerConsumerUpdater` (no `Start`; has `Stop(ctx)`). `consumer.NewQueue(js, stream, name, filterSubj, handler, opts...) (*consumer.Queue, error)` has `Start(ctx)`/`Stop(ctx)`.
-- Per-partition subject: template `iops.rig.{{.PartitionID}}` renders `PartitionID = partition.SubjectKey()` = `strings.Join(Keys,".")`. Partitions are seeded `{Keys:["p-<i>"]}` (`harness.go:378`), so **partition `i`'s subject is `iops.rig.p-<i>`**. The producer publishes to exactly these.
+- Per-partition subject: template `perf.rig.{{.PartitionID}}` renders `PartitionID = partition.SubjectKey()` = `strings.Join(Keys,".")`. Partitions are seeded `{Keys:["p-<i>"]}` (`harness.go:378`), so **partition `i`'s subject is `perf.rig.p-<i>`**. The producer publishes to exactly these.
 - HDR histogram is NOT yet a dependency. `golang.org/x/sys` already is (indirect) — promote to direct.
 - Capture lifecycle (`cmd/harness/main.go`): connect setup → `WaitForJetStream` → `PreCreate` → `SeedPartitions` → `storageverify.Verify` → spawn workers (`StartWorker`) → `WaitStableAll` → sleep `--warmup` → `ResetAll` → capture loop streaming `rpc_counts.csv` → `WriteManifest`. The latency window aligns to the capture window (warmup=120s, capture-window=120s ⇒ t∈[120,240]s).
 
@@ -25,14 +25,14 @@
 ### Task 0.1: Add HDR + promote x/sys to direct deps
 
 **Files:**
-- Modify: `test/iops-investigation/go.mod`
-- Modify: `test/iops-investigation/go.sum` (via `go get`)
+- Modify: `test/perf-measurement/go.mod`
+- Modify: `test/perf-measurement/go.sum` (via `go get`)
 
 - [ ] **Step 1: Add the HDR histogram dependency**
 
 Run (from repo root):
 ```bash
-cd test/iops-investigation
+cd test/perf-measurement
 go get github.com/HdrHistogram/hdrhistogram-go@v1.1.2
 go get golang.org/x/sys/unix
 ```
@@ -40,13 +40,13 @@ Expected: `go.mod` now lists `github.com/HdrHistogram/hdrhistogram-go v1.1.2` an
 
 - [ ] **Step 2: Verify the module still builds**
 
-Run: `cd test/iops-investigation && go build ./...`
+Run: `cd test/perf-measurement && go build ./...`
 Expected: exit 0, no output.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add test/iops-investigation/go.mod test/iops-investigation/go.sum
+git add test/perf-measurement/go.mod test/perf-measurement/go.sum
 git commit -m "build(perf): add hdrhistogram + promote x/sys to direct deps"
 ```
 
@@ -57,8 +57,8 @@ git commit -m "build(perf): add hdrhistogram + promote x/sys to direct deps"
 ### Task 1.1: Host-wide CLOCK_MONOTONIC reader
 
 **Files:**
-- Create: `test/iops-investigation/internal/load/clock.go`
-- Test: `test/iops-investigation/internal/load/clock_test.go`
+- Create: `test/perf-measurement/internal/load/clock.go`
+- Test: `test/perf-measurement/internal/load/clock_test.go`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -85,7 +85,7 @@ func TestMonoNanos_Monotonic(t *testing.T) {
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cd test/iops-investigation && go test ./internal/load/ -run TestMonoNanos -v`
+Run: `cd test/perf-measurement && go test ./internal/load/ -run TestMonoNanos -v`
 Expected: FAIL (undefined: MonoNanos).
 
 - [ ] **Step 3: Implement**
@@ -118,21 +118,21 @@ func MonoNanos() int64 {
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `cd test/iops-investigation && go test ./internal/load/ -run TestMonoNanos -v`
+Run: `cd test/perf-measurement && go test ./internal/load/ -run TestMonoNanos -v`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add test/iops-investigation/internal/load/
+git add test/perf-measurement/internal/load/
 git commit -m "feat(perf): host-wide CLOCK_MONOTONIC reader for latency stamping"
 ```
 
 ### Task 1.2: Fixed-size message codec
 
 **Files:**
-- Create: `test/iops-investigation/internal/load/message.go`
-- Test: `test/iops-investigation/internal/load/message_test.go`
+- Create: `test/perf-measurement/internal/load/message.go`
+- Test: `test/perf-measurement/internal/load/message_test.go`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -165,7 +165,7 @@ func TestDecodeRejectsShort(t *testing.T) {
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cd test/iops-investigation && go test ./internal/load/ -run TestMessage -v && go test ./internal/load/ -run TestDecode -v`
+Run: `cd test/perf-measurement && go test ./internal/load/ -run TestMessage -v && go test ./internal/load/ -run TestDecode -v`
 Expected: FAIL (undefined: Message/Encode/Decode/PayloadSize).
 
 - [ ] **Step 3: Implement**
@@ -220,13 +220,13 @@ func Decode(b []byte) (Message, error) {
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `cd test/iops-investigation && go test ./internal/load/ -v`
+Run: `cd test/perf-measurement && go test ./internal/load/ -v`
 Expected: PASS (all load tests).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add test/iops-investigation/internal/load/
+git add test/perf-measurement/internal/load/
 git commit -m "feat(perf): fixed-256B message codec with intended-mono timestamp"
 ```
 
@@ -237,8 +237,8 @@ git commit -m "feat(perf): fixed-256B message codec with intended-mono timestamp
 ### Task 2.1: Producer options + subject builder
 
 **Files:**
-- Create: `test/iops-investigation/internal/load/producer.go`
-- Test: `test/iops-investigation/internal/load/producer_test.go`
+- Create: `test/perf-measurement/internal/load/producer.go`
+- Test: `test/perf-measurement/internal/load/producer_test.go`
 
 - [ ] **Step 1: Write the failing test (subject + interval math, pure)**
 
@@ -251,10 +251,10 @@ import (
 )
 
 func TestPartitionSubject(t *testing.T) {
-	if got := PartitionSubject(0); got != "iops.rig.p-0" {
+	if got := PartitionSubject(0); got != "perf.rig.p-0" {
 		t.Fatalf("got %q", got)
 	}
-	if got := PartitionSubject(4999); got != "iops.rig.p-4999" {
+	if got := PartitionSubject(4999); got != "perf.rig.p-4999" {
 		t.Fatalf("got %q", got)
 	}
 }
@@ -273,7 +273,7 @@ func TestIntervalForRate(t *testing.T) {
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cd test/iops-investigation && go test ./internal/load/ -run 'TestPartitionSubject|TestIntervalForRate' -v`
+Run: `cd test/perf-measurement && go test ./internal/load/ -run 'TestPartitionSubject|TestIntervalForRate' -v`
 Expected: FAIL (undefined).
 
 - [ ] **Step 3: Implement the pure helpers + the Producer skeleton**
@@ -292,9 +292,9 @@ import (
 )
 
 // PartitionSubject returns the data-stream subject for partition index i,
-// matching parti's Dynamic subject template iops.rig.{{.PartitionID}} with
+// matching parti's Dynamic subject template perf.rig.{{.PartitionID}} with
 // PartitionID = "p-<i>" (see plan header "Verified API facts").
-func PartitionSubject(i int) string { return fmt.Sprintf("iops.rig.p-%d", i) }
+func PartitionSubject(i int) string { return fmt.Sprintf("perf.rig.p-%d", i) }
 
 // intervalForRate converts an aggregate rate (msg/s) to the inter-send
 // interval. Rate <= 0 returns 0 (caller treats as idle).
@@ -368,21 +368,21 @@ func (p *Producer) SetWindow(startMono, endMono int64) {
 
 - [ ] **Step 4: Run to verify the pure tests pass**
 
-Run: `cd test/iops-investigation && go test ./internal/load/ -run 'TestPartitionSubject|TestIntervalForRate' -v`
+Run: `cd test/perf-measurement && go test ./internal/load/ -run 'TestPartitionSubject|TestIntervalForRate' -v`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add test/iops-investigation/internal/load/
+git add test/perf-measurement/internal/load/
 git commit -m "feat(perf): producer config, subject builder, interval math"
 ```
 
 ### Task 2.2: Producer run loop + health
 
 **Files:**
-- Modify: `test/iops-investigation/internal/load/producer.go`
-- Test: `test/iops-investigation/internal/load/producer_run_test.go`
+- Modify: `test/perf-measurement/internal/load/producer.go`
+- Test: `test/perf-measurement/internal/load/producer_run_test.go`
 
 - [ ] **Step 1: Write the failing test (drive against a NATS test server)**
 
@@ -397,7 +397,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	natssrv "github.com/arloliu/parti/test/iops-investigation/internal/testnats" // see Step 3 note
+	natssrv "github.com/arloliu/parti/test/perf-measurement/internal/testnats" // see Step 3 note
 )
 
 func TestProducerRun_PublishesAtRate(t *testing.T) {
@@ -411,7 +411,7 @@ func TestProducerRun_PublishesAtRate(t *testing.T) {
 
 	ctx := context.Background()
 	if _, err := js.CreateStream(ctx, jetstream.StreamConfig{
-		Name: "perf-test", Subjects: []string{"iops.rig.>"}, Storage: jetstream.MemoryStorage,
+		Name: "perf-test", Subjects: []string{"perf.rig.>"}, Storage: jetstream.MemoryStorage,
 	}); err != nil { t.Fatal(err) }
 
 	p := NewProducer(ProducerConfig{
@@ -441,10 +441,10 @@ func TestProducerRun_PublishesAtRate(t *testing.T) {
 - [ ] **Step 2: Create the embedded-server helper, then run to verify the test fails**
 
 First inspect the existing embedded-server bring-up:
-Run: `sed -n '1,80p' test/iops-investigation/cmd/harness/e2e_smoke_test.go`
+Run: `sed -n '1,80p' test/perf-measurement/cmd/harness/e2e_smoke_test.go`
 Then create `internal/testnats/testnats.go` with the same `server.Options{JetStream:true, StoreDir:t.TempDir(), Port:-1}` + `natsserver.RunServer` + `srv.ReadyForConnections(10*time.Second)` pattern, returning `srv.ClientURL()` and `srv.Shutdown`.
 
-Run: `cd test/iops-investigation && go test ./internal/load/ -run TestProducerRun -v`
+Run: `cd test/perf-measurement && go test ./internal/load/ -run TestProducerRun -v`
 Expected: FAIL (undefined: p.Run / p.Health).
 
 - [ ] **Step 3: Implement Run + Health**
@@ -581,13 +581,13 @@ func sortInt64(s []int64) {
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `cd test/iops-investigation && go test ./internal/load/ -v`
+Run: `cd test/perf-measurement && go test ./internal/load/ -v`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add test/iops-investigation/internal/load/ test/iops-investigation/internal/testnats/
+git add test/perf-measurement/internal/load/ test/perf-measurement/internal/testnats/
 git commit -m "feat(perf): open-loop async producer with coordinated-omission skew guard"
 ```
 
@@ -598,8 +598,8 @@ git commit -m "feat(perf): open-loop async producer with coordinated-omission sk
 ### Task 3.1: Per-worker recorder + window gating + handler
 
 **Files:**
-- Create: `test/iops-investigation/internal/latency/recorder.go`
-- Test: `test/iops-investigation/internal/latency/recorder_test.go`
+- Create: `test/perf-measurement/internal/latency/recorder.go`
+- Test: `test/perf-measurement/internal/latency/recorder_test.go`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -612,7 +612,7 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/arloliu/parti/test/iops-investigation/internal/load"
+	"github.com/arloliu/parti/test/perf-measurement/internal/load"
 )
 
 // fakeMsg is a minimal jetstream.Msg carrying only Data(); the handler only
@@ -673,7 +673,7 @@ func TestRecorder_ConcurrentHandle(t *testing.T) {
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cd test/iops-investigation && go test -race ./internal/latency/ -v`
+Run: `cd test/perf-measurement && go test -race ./internal/latency/ -v`
 Expected: FAIL (undefined: NewRecorder/Handle/Count). (Use `-race` for this package from now on — it is the one with cross-goroutine handler dispatch.)
 
 - [ ] **Step 3: Implement**
@@ -693,7 +693,7 @@ import (
 	hdr "github.com/HdrHistogram/hdrhistogram-go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/arloliu/parti/test/iops-investigation/internal/load"
+	"github.com/arloliu/parti/test/perf-measurement/internal/load"
 )
 
 const (
@@ -784,22 +784,22 @@ func (r *Recorder) Histogram() *hdr.Histogram { return r.hist }
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `cd test/iops-investigation && go test -race ./internal/latency/ -v`
+Run: `cd test/perf-measurement && go test -race ./internal/latency/ -v`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add test/iops-investigation/internal/latency/
+git add test/perf-measurement/internal/latency/
 git commit -m "feat(perf): window-gated per-worker HDR latency recorder (auto-ack)"
 ```
 
 ### Task 3.2: Merge + sample-gated percentile export
 
 **Files:**
-- Modify: `test/iops-investigation/internal/latency/recorder.go`
-- Create: `test/iops-investigation/internal/latency/report.go`
-- Test: `test/iops-investigation/internal/latency/report_test.go`
+- Modify: `test/perf-measurement/internal/latency/recorder.go`
+- Create: `test/perf-measurement/internal/latency/report.go`
+- Test: `test/perf-measurement/internal/latency/report_test.go`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -844,7 +844,7 @@ func TestReport_SampleGating(t *testing.T) {
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cd test/iops-investigation && go test -race ./internal/latency/ -run TestReport -v`
+Run: `cd test/perf-measurement && go test -race ./internal/latency/ -run TestReport -v`
 Expected: FAIL (undefined: BuildReport).
 
 - [ ] **Step 3: Implement**
@@ -921,13 +921,13 @@ func ExportSnapshot(recs []*Recorder) *hdr.Snapshot {
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `cd test/iops-investigation && go test -race ./internal/latency/ -v`
+Run: `cd test/perf-measurement && go test -race ./internal/latency/ -v`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add test/iops-investigation/internal/latency/
+git add test/perf-measurement/internal/latency/
 git commit -m "feat(perf): merge recorders + sample-gated percentile report"
 ```
 
@@ -938,9 +938,9 @@ git commit -m "feat(perf): merge recorders + sample-gated percentile report"
 ### Task 4.1: Extend Options + flags (rate, fetch params, startup budget, load toggle)
 
 **Files:**
-- Modify: `test/iops-investigation/cmd/harness/harness.go` (`Options`, `ManifestOptions`, `buildManifestOptions`)
-- Modify: `test/iops-investigation/cmd/harness/main.go` (`parseFlags`)
-- Test: `test/iops-investigation/cmd/harness/main_test.go` (extend the existing parseFlags test)
+- Modify: `test/perf-measurement/cmd/harness/harness.go` (`Options`, `ManifestOptions`, `buildManifestOptions`)
+- Modify: `test/perf-measurement/cmd/harness/main.go` (`parseFlags`)
+- Test: `test/perf-measurement/cmd/harness/main_test.go` (extend the existing parseFlags test)
 
 - [ ] **Step 1: Add fields to `Options`** (after `FastConfig` in `harness.go`)
 
@@ -1007,24 +1007,24 @@ In the returned `Options{...}` literal:
 
 - [ ] **Step 5: Run + commit**
 
-Run: `cd test/iops-investigation && go test ./cmd/harness/ -run ParseFlags -v && go build ./...`
+Run: `cd test/perf-measurement && go test ./cmd/harness/ -run ParseFlags -v && go build ./...`
 Expected: PASS, build clean.
 ```bash
-git add test/iops-investigation/cmd/harness/
+git add test/perf-measurement/cmd/harness/
 git commit -m "feat(perf): harness flags for load mode, fetch params, startup budget"
 ```
 
 ### Task 4.2: Wire the latency handler + pinned fetch params into StartWorker
 
 **Files:**
-- Modify: `test/iops-investigation/cmd/harness/harness.go` (`WorkerHandle`, `StartWorker`)
+- Modify: `test/perf-measurement/cmd/harness/harness.go` (`WorkerHandle`, `StartWorker`)
 
 - [ ] **Step 1: Add a recorder field to `WorkerHandle`**
 
 ```go
 	recorder *latency.Recorder // non-nil in --load mode
 ```
-Add **only** import `"github.com/arloliu/parti/test/iops-investigation/internal/latency"` here. (The `internal/load` import is added in Task 4.3, where `load.ProducerHealth`/`load.MonoNanos` are first used — adding it now would be an unused import and fail `go build` at Step 4.)
+Add **only** import `"github.com/arloliu/parti/test/perf-measurement/internal/latency"` here. (The `internal/load` import is added in Task 4.3, where `load.ProducerHealth`/`load.MonoNanos` are first used — adding it now would be an unused import and fail `go build` at Step 4.)
 
 - [ ] **Step 2: Build the handler in StartWorker (window armed later)**
 
@@ -1074,14 +1074,14 @@ Replace the hard-coded `30*time.Second` in StartWorker's `WaitState` call:
 
 - [ ] **Step 4: Build** (StartWorker signature unchanged, so the `main.go` call site is untouched here; window arming is added in Task 4.3)
 
-Run: `cd test/iops-investigation && go build ./...`
+Run: `cd test/perf-measurement && go build ./...`
 Expected: clean (Task 4.3 adds the producer + window arming).
 
 ### Task 4.3: Start producer, align window, emit `latency.json`, gate on producer-bound/delivery deficit
 
 **Files:**
-- Modify: `test/iops-investigation/cmd/harness/main.go` (`Run`)
-- Modify: `test/iops-investigation/cmd/harness/harness.go` (add `WriteLatencyReport`, extend `Manifest`)
+- Modify: `test/perf-measurement/cmd/harness/main.go` (`Run`)
+- Modify: `test/perf-measurement/cmd/harness/harness.go` (add `WriteLatencyReport`, extend `Manifest`)
 
 **Lifecycle ordering (trace this — the bugs live here):** `Run` order is
 spawn workers → `WaitStableAll` → start producer → sleep `--warmup` →
@@ -1113,7 +1113,7 @@ with
 
 - [ ] **Step 1: Start the producer on a dedicated connection (load mode), right after `WaitStableAll`**
 
-Add import `"github.com/arloliu/parti/test/iops-investigation/internal/load"` and `"github.com/arloliu/parti/test/iops-investigation/internal/latency"` (and `hdr "github.com/HdrHistogram/hdrhistogram-go"` for `WriteLatencyReport`'s `*hdr.Snapshot`). After the `WaitStableAll` block:
+Add import `"github.com/arloliu/parti/test/perf-measurement/internal/load"` and `"github.com/arloliu/parti/test/perf-measurement/internal/latency"` (and `hdr "github.com/HdrHistogram/hdrhistogram-go"` for `WriteLatencyReport`'s `*hdr.Snapshot`). After the `WaitStableAll` block:
 ```go
 	var producer *load.Producer
 	var prodCancel context.CancelFunc
@@ -1263,21 +1263,21 @@ func WriteLatencyReport(dir string, rep latency.Report, h load.ProducerHealth, d
 	return writeFileAtomic(filepath.Join(dir, "latency.json"), buf, 0o644)
 }
 ```
-Add imports to `harness.go`: `"encoding/json"`, `hdr "github.com/HdrHistogram/hdrhistogram-go"`, `"github.com/arloliu/parti/test/iops-investigation/internal/latency"`, `"github.com/arloliu/parti/test/iops-investigation/internal/load"`.
+Add imports to `harness.go`: `"encoding/json"`, `hdr "github.com/HdrHistogram/hdrhistogram-go"`, `"github.com/arloliu/parti/test/perf-measurement/internal/latency"`, `"github.com/arloliu/parti/test/perf-measurement/internal/load"`.
 
 - [ ] **Step 5: Build, smoke-test, commit**
 
-Run: `cd test/iops-investigation && go build ./... && go test ./cmd/harness/ -run Smoke -v`
+Run: `cd test/perf-measurement && go build ./... && go test ./cmd/harness/ -run Smoke -v`
 Expected: build clean; smoke test passes (existing e2e smoke still green with `--load` defaulting off).
 ```bash
-git add test/iops-investigation/cmd/harness/
+git add test/perf-measurement/cmd/harness/
 git commit -m "feat(perf): start producer, gate window, emit latency.json with guards"
 ```
 
 ### Task 4.4: Load-mode e2e smoke test
 
 **Files:**
-- Create: `test/iops-investigation/cmd/harness/load_smoke_test.go`
+- Create: `test/perf-measurement/cmd/harness/load_smoke_test.go`
 
 - [ ] **Step 1: Write the test** — start an embedded JS server (reuse `internal/testnats`), run `Run` with `Load:true, FastConfig:true, Workers:2, N:8, PerWorkerRate:50, Warmup:1s, CaptureWindow:2s`, then assert `results/.../latency.json` exists, `count > 0`, `deliveryRatio > 0.5`, `producerBound == false`.
 
@@ -1289,7 +1289,7 @@ func TestRun_LoadMode_EmitsLatency(t *testing.T) {
 	o := Options{
 		NATSURLs: url, Workers: 2, N: 8, Replicas: 1,
 		ConsumerMode: ConsumerModeDynamic, KVStorage: jetstream.MemoryStorage, DataStorage: jetstream.MemoryStorage,
-		DataStreamName: "iops-rig-data", PartitionSourceKey: DefaultPartitionSourceKey,
+		DataStreamName: "perf-rig-data", PartitionSourceKey: DefaultPartitionSourceKey,
 		Warmup: time.Second, CaptureWindow: 2 * time.Second, RPCDumpInterval: 500 * time.Millisecond,
 		FetchTimeout: 1 * time.Second, // MIN legal pull expiry (NATS rejects <1s); 3× drain = 3s
 		OutputDir: dir, FastConfig: true,
@@ -1312,7 +1312,7 @@ func TestRun_LoadMode_EmitsLatency(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run** — `cd test/iops-investigation && go test ./cmd/harness/ -run LoadMode -v` → PASS.
+- [ ] **Step 2: Run** — `cd test/perf-measurement && go test ./cmd/harness/ -run LoadMode -v` → PASS.
 - [ ] **Step 3: Commit** — `git commit -am "test(perf): load-mode e2e smoke (latency.json delivery)"`.
 
 ---
@@ -1322,7 +1322,7 @@ func TestRun_LoadMode_EmitsLatency(t *testing.T) {
 ### Task 5.1: Verify the /jsz meta-snapshot schema (gated, verify-first) — ✅ DONE
 
 **DONE 2026-06-04** (captured live on a 3-node `nats:2.12.6` cluster). Fixture
-committed at `test/iops-investigation/testdata/jsz_meta_sample.ndjson` (3 lines
+committed at `test/perf-measurement/testdata/jsz_meta_sample.ndjson` (3 lines
 in `capture-jsz.sh` ndjson-envelope form: two `jsz` polls + one `varz` line to
 confirm it is ignored).
 
@@ -1345,8 +1345,8 @@ body, sibling of `account_details`):
 ### Task 5.2: Parse meta-snapshot stats into samples
 
 **Files:**
-- Modify: `test/iops-investigation/internal/aggregate/jsz.go`
-- Test: `test/iops-investigation/internal/aggregate/jsz_meta_test.go`
+- Modify: `test/perf-measurement/internal/aggregate/jsz.go`
+- Test: `test/perf-measurement/internal/aggregate/jsz_meta_test.go`
 
 - [ ] **Step 1: Write the failing test against the captured fixture**
 
@@ -1395,18 +1395,18 @@ func TestParseMetaSnapshot(t *testing.T) {
 
 > The exact struct tags come from the captured fixture, not from memory. Write the struct to match `testdata/jsz_meta_sample.json` field-for-field.
 
-- [ ] **Step 3: Run** — `cd test/iops-investigation && go test ./internal/aggregate/ -run Meta -v` → PASS.
+- [ ] **Step 3: Run** — `cd test/perf-measurement && go test ./internal/aggregate/ -run Meta -v` → PASS.
 - [ ] **Step 4: Commit** — `git commit -am "feat(perf): parse /jsz meta-snapshot duration/size/count"`.
 
 ### Task 5.3: Capture meta stats during the run (extend capture-jsz.sh consumers)
 
 **Files:**
-- Modify: `test/iops-investigation/scripts/capture-jsz.sh` (ensure it polls from cluster startup, not just the window)
-- Modify: `test/iops-investigation/cmd/aggregate/main.go` (emit a `meta_snapshot_*` column if the aggregate binary joins jsz)
+- Modify: `test/perf-measurement/scripts/capture-jsz.sh` (ensure it polls from cluster startup, not just the window)
+- Modify: `test/perf-measurement/cmd/aggregate/main.go` (emit a `meta_snapshot_*` column if the aggregate binary joins jsz)
 
 - [ ] **Step 1:** Confirm `capture-jsz.sh` already records the field (it stores the raw `/jsz` body, so Task 5.2's parser can read it post-hoc). Add a `--from-startup` note in the script header and ensure `run-matrix.sh` starts the jsz poller *before* worker spawn for the meta cells (Phase 8). No code change if the body is already captured; verify with: `grep -n 'body' scripts/capture-jsz.sh`.
 - [ ] **Step 2:** Extend `cmd/aggregate` to surface `meta_snapshot_last_duration_ms`, `meta_snapshot_count`, `meta_snapshot_bytes` per second-bucket from `ParseMetaSnapshot`, gated on count ≥ 5 (§8.1). Add a unit test feeding the fixture.
-- [ ] **Step 3:** Run `cd test/iops-investigation && go test ./cmd/aggregate/ -v` → PASS. Commit.
+- [ ] **Step 3:** Run `cd test/perf-measurement && go test ./cmd/aggregate/ -v` → PASS. Commit.
 
 ---
 
@@ -1415,17 +1415,17 @@ func TestParseMetaSnapshot(t *testing.T) {
 ### Task 6.1: docker-compose cpuset + dedicated NVMe volume
 
 **Files:**
-- Modify: `test/iops-investigation/docker/docker-compose.yaml`
+- Modify: `test/perf-measurement/docker/docker-compose.yaml`
 
 - [ ] **Step 1:** Add `cpuset: "0-7,16-23"` to each of the 5 NATS services (design §10). Add `cpu` reservation is NOT needed — cpuset pins the cores.
-- [ ] **Step 2:** Point each node's JetStream `store_dir` volume at a bind mount on the Crucial T710. Inspect the current volume wiring first: `grep -n 'volumes\|store_dir\|/data' docker/docker-compose.yaml docker/nats-server.conf`. Then change the named volumes to bind mounts under a T710 mount path (e.g. `/mnt/t710/iops-nats-<n>`), documented in `README.md`. If the T710 is not mounted, add a `make mount-t710` note.
-- [ ] **Step 3:** Validate compose parses: `cd test/iops-investigation && docker compose -f docker/docker-compose.yaml config >/dev/null && echo OK`.
+- [ ] **Step 2:** Point each node's JetStream `store_dir` volume at a bind mount on the Crucial T710. Inspect the current volume wiring first: `grep -n 'volumes\|store_dir\|/data' docker/docker-compose.yaml docker/nats-server.conf`. Then change the named volumes to bind mounts under a T710 mount path (e.g. `/mnt/t710/perf-nats-<n>`), documented in `README.md`. If the T710 is not mounted, add a `make mount-t710` note.
+- [ ] **Step 3:** Validate compose parses: `cd test/perf-measurement && docker compose -f docker/docker-compose.yaml config >/dev/null && echo OK`.
 - [ ] **Step 4:** Commit.
 
 ### Task 6.2: Isolation verification helper
 
 **Files:**
-- Create: `test/iops-investigation/scripts/verify-isolation.sh`
+- Create: `test/perf-measurement/scripts/verify-isolation.sh`
 
 - [ ] **Step 1:** Write a bash script that, given the harness PID and the NATS container names, asserts (design §10):
   - NATS: `cat /sys/fs/cgroup/$(docker inspect -f '{{.Id}}' <ctr>)/cpuset.cpus.effective` (or `docker exec <ctr> cat /sys/fs/cgroup/cpuset.cpus.effective`) equals `0-7,16-23`.
@@ -1436,7 +1436,7 @@ func TestParseMetaSnapshot(t *testing.T) {
 ### Task 6.3: Pin harness affinity in run-matrix
 
 **Files:**
-- Modify: `test/iops-investigation/scripts/run-matrix.sh` (Phase 8 also touches this)
+- Modify: `test/perf-measurement/scripts/run-matrix.sh` (Phase 8 also touches this)
 
 - [ ] **Step 1:** The harness must be running when isolation is verified (you cannot check a live PID's affinity after the process exits — design §10 requires a pre-run abort). So launch it in the **background** and verify against its PID before the window opens:
 ```bash
@@ -1460,8 +1460,8 @@ wait "$HARNESS_PID"   # then let the run complete normally
 ### Task 7.1: Multivariate OLS fit `cost ≈ a + b·N + c·X`
 
 **Files:**
-- Create: `test/iops-investigation/internal/costmodel/fit.go`
-- Test: `test/iops-investigation/internal/costmodel/fit_test.go`
+- Create: `test/perf-measurement/internal/costmodel/fit.go`
+- Test: `test/perf-measurement/internal/costmodel/fit_test.go`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1505,7 +1505,7 @@ func TestFitAffine_RejectsUnderdetermined(t *testing.T) {
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cd test/iops-investigation && go test ./internal/costmodel/ -v`
+Run: `cd test/perf-measurement && go test ./internal/costmodel/ -v`
 Expected: FAIL (undefined).
 
 - [ ] **Step 3: Implement OLS via 3×3 normal equations**
@@ -1614,7 +1614,7 @@ func solve3(m [3][3]float64, b [3]float64) ([3]float64, bool) {
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `cd test/iops-investigation && go test ./internal/costmodel/ -v`
+Run: `cd test/perf-measurement && go test ./internal/costmodel/ -v`
 Expected: PASS.
 
 - [ ] **Step 5: Commit** — `git commit -am "feat(perf): load-aware affine cost model (a+bN+cX) via OLS"`.
@@ -1622,8 +1622,8 @@ Expected: PASS.
 ### Task 7.2: Model JSON I/O (one Fit per metric per storage)
 
 **Files:**
-- Modify: `test/iops-investigation/internal/costmodel/fit.go`
-- Test: `test/iops-investigation/internal/costmodel/model_test.go`
+- Modify: `test/perf-measurement/internal/costmodel/fit.go`
+- Test: `test/perf-measurement/internal/costmodel/model_test.go`
 
 - [ ] **Step 1: Test** — define `Model map[string]map[string]Fit` (metric → storage → Fit); round-trip JSON via `WriteModel`/`LoadModel`. Assert a loaded model predicts identically.
 - [ ] **Step 2: Implement** `WriteModel(path, Model)` / `LoadModel(path) (Model, error)` using `encoding/json` + `writeFileAtomic`-style temp+rename (or `os.WriteFile`).
@@ -1632,8 +1632,8 @@ Expected: PASS.
 ### Task 7.3: Estimator CLI
 
 **Files:**
-- Create: `test/iops-investigation/cmd/estimator/main.go`
-- Test: `test/iops-investigation/cmd/estimator/main_test.go`
+- Create: `test/perf-measurement/cmd/estimator/main.go`
+- Test: `test/perf-measurement/cmd/estimator/main_test.go`
 
 - [ ] **Step 1: Test** — table test on a pure `predict(model, n, k, rf int, storage string)` function:
   - derives `M=n/50`, `X=k·M`;
@@ -1641,7 +1641,7 @@ Expected: PASS.
   - `n` outside `[1000,5000]` ⇒ result carries an `extrapolation=true` flag;
   - returns predicted values per metric from the loaded `Model`.
 - [ ] **Step 2: Implement** `main.go` with flags `--model <path> --n --k --rf --storage`, calling the pure `predict`, printing a table + the caveat banner when extrapolating, and exiting non-zero on `rf != 5`.
-- [ ] **Step 3:** Run `cd test/iops-investigation && go test ./cmd/estimator/ -v && go build ./...` → PASS/clean. Commit.
+- [ ] **Step 3:** Run `cd test/perf-measurement && go test ./cmd/estimator/ -v && go build ./...` → PASS/clean. Commit.
 
 ---
 
@@ -1650,7 +1650,7 @@ Expected: PASS.
 ### Task 8.1: Load-matrix runner
 
 **Files:**
-- Create: `test/iops-investigation/scripts/run-load-matrix.sh`
+- Create: `test/perf-measurement/scripts/run-load-matrix.sh`
 
 - [ ] **Step 1:** Write a runner (modeled on `run-matrix.sh`, reuse its capture/teardown helpers) that iterates the design §8 matrix:
   - dynamic: `N ∈ {1000,2000,3000,5000} × k ∈ {1,2,4} × storage ∈ {file,memory}` (24 cells);
@@ -1664,9 +1664,9 @@ Expected: PASS.
 ### Task 8.2: meta_compact sweep + (stretch) out-of-process cell
 
 **Files:**
-- Create: `test/iops-investigation/docker/nats-server-meta16.conf`, `nats-server-meta64.conf`
+- Create: `test/perf-measurement/docker/nats-server-meta16.conf`, `nats-server-meta64.conf`
 - Modify: `scripts/run-load-matrix.sh`
-- Create (stretch): `test/iops-investigation/cmd/worker/main.go`
+- Create (stretch): `test/perf-measurement/cmd/worker/main.go`
 
 - [ ] **Step 1:** Create two server configs adding `jetstream { meta_compact_size: 16MB }` and `64MB` to the base `nats-server.conf` (design §8.1). **NOTE: the value must be UNQUOTED** — `nats-server -c` rejects the quoted `"16MB"` (`strconv.ParseInt parsing "16M"`); unquoted `16MB` parses to 16777216 (verified against nats:2.12.6 with `nats-server -c <conf> -t`). Add a `--meta-sweep` mode to the runner that runs `N=5000,k=2,file,dynamic` against {default, 16MB, 64MB}, capturing jsz from startup and gating on snapshot count ≥ 5.
 - [ ] **Step 2 (stretch, §8.2):** Create `cmd/worker` — a single-worker process variant of `StartWorker` that reads window bounds + config from flags/env and writes its own `latency.json`; add a `--out-of-process` runner mode at `N=1000,k=2` spawning `M=20` worker processes. If descoped, the runner logs "§8.2 out-of-process: not run" and latency stays in-process-only.
@@ -1678,14 +1678,14 @@ Expected: PASS.
 
 ### Task 9.1: Execute the matrix
 
-- [ ] **Step 1:** Build binaries: `cd test/iops-investigation && go build ./cmd/harness ./cmd/aggregate ./cmd/estimator`.
-- [ ] **Step 2:** `IOPS_RIG_NATS_REPLICAS=5 make up` (or via the runner). Run `scripts/run-load-matrix.sh --seed 42 --results-dir results/load1/` (multi-hour; ramps N upward; stops honestly per §9).
+- [ ] **Step 1:** Build binaries: `cd test/perf-measurement && go build ./cmd/harness ./cmd/aggregate ./cmd/estimator`.
+- [ ] **Step 2:** `PERF_RIG_NATS_REPLICAS=5 make up` (or via the runner). Run `scripts/run-load-matrix.sh --seed 42 --results-dir results/load1/` (multi-hour; ramps N upward; stops honestly per §9).
 - [ ] **Step 3:** Run `--meta-sweep`. Tear down with `make down` (or `make reset` between campaigns).
 
 ### Task 9.2: Fit the model + write findings
 
 **Files:**
-- Create: `test/iops-investigation/cmd/fitmodel/main.go` (reads results/, builds `Model`, writes `model.json`)
+- Create: `test/perf-measurement/cmd/fitmodel/main.go` (reads results/, builds `Model`, writes `model.json`)
 - Create: `docs/plans/perf-measurement/findings.md`
 
 - [ ] **Step 1:** Write `cmd/fitmodel` that walks `results/load1/`, reads each cell's `latency.json` + the aggregated NATS-side IOPS/CPU/RSS (from the existing aggregate output), assembles `[]Point` per (metric, storage) **with `Point.N` = the cell's PARTITION COUNT** (the structural axis — matches `cmd/estimator` and `costmodel.Point`; do NOT use worker count), `Point.X` = the cell's aggregate load, calls `costmodel.FitAffine`, and writes `model.json`. **NATS-side cost metrics:** `<mode>_write_iops` (from `cgroup_io.raw`), plus `<mode>_cpu_cores` and `<mode>_rss_bytes` (from `cgroup_cpumem.raw` via `ParseCgroupCPUMem`→`CPUMemDeltas`: CPU as fraction-of-one-core where 1.0 = one full core, RSS as instantaneous bytes), each summed across the 5 NATS containers per second and meaned over the same post-warmup window. The cpumem metrics are optional — a cell without `cgroup_cpumem.raw` logs a note and skips them (backward compatible with IOPS-only runs). **Cross-rep latency pooling (§6/§11):** for each cell, `hdr.Import` the 3 reps' `Snapshot` fields, `Merge` them into one histogram, sum the 3 `inWindowSent`/`delivered`, then call `latency.PercentilesFrom(merged, pooledN)` so percentiles and the P99.9 gate use the POOLED count — never average per-rep percentiles. Unit-test the results-walk + the snapshot-merge on a tiny fixture tree (two rep dirs with hand-written `latency.json` snapshots whose merged P50 is known).
@@ -1694,7 +1694,7 @@ Expected: PASS.
 
 ### Task 9.3: Pre-PR gate + finish
 
-- [ ] **Step 1:** From the rig module: `cd test/iops-investigation && go vet ./... && go test ./...` → all green.
+- [ ] **Step 1:** From the rig module: `cd test/perf-measurement && go vet ./... && go test ./...` → all green.
 - [ ] **Step 2:** Lint per repo convention (`make lint` at repo root; the rig module is separate but keep it clean).
 - [ ] **Step 3:** Use `superpowers:finishing-a-development-branch` to decide merge/PR. The rig is a measurement artifact (separate module, not shipped in parti), so this does NOT trigger the parti pre-PR gate in AGENTS.md (no `manager/`,`source/` etc. touched) — but note the measurement informs the dynamic-consumer-collapse design.
 

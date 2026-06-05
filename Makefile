@@ -11,7 +11,7 @@ COVERAGE_HTML   := $(COVERAGE_DIR)/coverage.html
 
 # Source files
 ALL_GO_FILES    := $(shell find . -name "*.go" -not -path "./vendor/*" -not -path "./.claude/*")
-TEST_DIRS       := $(sort $(dir $(shell find . -name "*_test.go" -not -path "./vendor/*" -not -path "./.claude/*" -not -path "./test/integration/*" -not -path "./test/stress/*" -not -path "./test/iops-investigation/*" -not -path "./k8s/*" -not -path "./tmp/*")))
+TEST_DIRS       := $(sort $(dir $(shell find . -name "*_test.go" -not -path "./vendor/*" -not -path "./.claude/*" -not -path "./test/integration/*" -not -path "./test/stress/*" -not -path "./test/perf-measurement/*" -not -path "./k8s/*" -not -path "./tmp/*")))
 INTEGRATION_DIR := ./test/integration/...
 STRESS_DIR      := ./test/stress/...
 LATEST_GIT_TAG  := $(shell git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
@@ -26,7 +26,7 @@ GOLANGCI_LINT_VERSION := 2.11.4
 # Default target
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-race test-short coverage coverage-html lint lint-k8s lint-iops fmt vet bench clean gomod-tidy update-pkg-cache ci test-unit test-integration test-stress test-all test-smoke clean-test-results test-quick test-k8s generate-k8s pre-pr herd-diagnostic
+.PHONY: help test test-race test-short coverage coverage-html lint lint-k8s lint-perf fmt vet bench clean gomod-tidy update-pkg-cache ci test-unit test-integration test-stress test-all test-smoke clean-test-results test-quick test-k8s generate-k8s pre-pr herd-diagnostic
 
 ## help: Show this help message
 help:
@@ -149,10 +149,10 @@ lint-k8s:
 	@echo "Running linters in k8s/..."
 	@cd k8s && go tool -modfile=../linter.go.mod golangci-lint run --timeout=$(LINT_TIMEOUT)
 
-## lint-iops: Run linters in the test/iops-investigation/ nested module
-lint-iops:
-	@echo "Running linters in test/iops-investigation/..."
-	@cd test/iops-investigation && go tool -modfile=../../linter.go.mod golangci-lint run --timeout=$(LINT_TIMEOUT)
+## lint-perf: Run linters in the test/perf-measurement/ nested module
+lint-perf:
+	@echo "Running linters in test/perf-measurement/..."
+	@cd test/perf-measurement && go tool -modfile=../../linter.go.mod golangci-lint run --timeout=$(LINT_TIMEOUT)
 
 ## test-k8s: Run tests in the k8s/ nested module
 test-k8s: clean-test-results
@@ -202,7 +202,7 @@ clean: clean-test-results
 ##@ CI/CD
 
 ## ci: Run all CI checks (lint, test, coverage)
-ci: lint lint-k8s lint-iops vet test-all test-k8s coverage
+ci: lint lint-k8s lint-perf vet test-all test-k8s coverage
 
 ##@ Inspection
 

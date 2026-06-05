@@ -273,7 +273,7 @@ N-replica NATS setup that mirrors the user's topology cheaply.
 
 ### R1 — NATS cluster topology
 
-`test/iops-investigation/docker/` holds the docker-compose stack
+`test/perf-measurement/docker/` holds the docker-compose stack
 (mirroring the existing `test/simulation/docker/` convention):
 
 - 3 (and, for one comparison run, 5) `nats-server` containers, each
@@ -290,18 +290,18 @@ registry) and any NATS server version they care about:
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `IOPS_RIG_NATS_IMAGE` | `nats:2.12.6` | Full image reference, including registry + tag. Override to test a private-registry build or a different version (e.g. `private.registry.example.com/nats:2.11.0`). |
-| `IOPS_RIG_NATS_REPLICAS` | `3` | Number of NATS containers in the cluster. Set to `5` for the M1.10 R=5 comparison run. |
+| `PERF_RIG_NATS_IMAGE` | `nats:2.12.6` | Full image reference, including registry + tag. Override to test a private-registry build or a different version (e.g. `private.registry.example.com/nats:2.11.0`). |
+| `PERF_RIG_NATS_REPLICAS` | `3` | Number of NATS containers in the cluster. Set to `5` for the M1.10 R=5 comparison run. |
 
 In the compose YAML:
 ```yaml
 services:
   nats-1:
-    image: ${IOPS_RIG_NATS_IMAGE:-nats:2.12.6}
+    image: ${PERF_RIG_NATS_IMAGE:-nats:2.12.6}
     ...
 ```
 
-The harness reads `IOPS_RIG_NATS_IMAGE` at run time and records the
+The harness reads `PERF_RIG_NATS_IMAGE` at run time and records the
 **resolved digest** (not just the tag) in `manifest.yaml` via
 `docker image inspect` so re-runs can be reproduced exactly. NATS
 server version mismatches between the rig and the user's prod are
@@ -311,7 +311,7 @@ load-bearing for H2.
 
 ### R2 — Parti workload harness
 
-`test/iops-investigation/cmd/harness/main.go` — a single binary that:
+`test/perf-measurement/cmd/harness/main.go` — a single binary that:
 
 1. Connects to the NATS cluster.
 2. **Pre-creates every Parti-managed KV bucket** as a JetStream stream
@@ -410,7 +410,7 @@ cross-checks only.
 All outputs land under `results/run-NNN/` with `manifest.yaml` (parti
 version, NATS server version, full config, partition count, replica
 count, wall-clock window, storage classes confirmed). The aggregator
-script (`test/iops-investigation/cmd/aggregate/main.go`, Go for parity
+script (`test/perf-measurement/cmd/aggregate/main.go`, Go for parity
 with the rest of the rig) produces a per-run CSV:
 `(t_s, node, iops_read, iops_write, bytes_read, bytes_write,
 rpc_read_<bucket>, rpc_write_<bucket>, stream_msgs_<name>, ...)`.
@@ -860,7 +860,7 @@ docs/plans/iops-investigation/
 **Runnable rig (built in Phase 1 onwards):**
 
 ```
-test/iops-investigation/
+test/perf-measurement/
 ├── README.md                              (TODO — how to run the rig)
 ├── Makefile                               (TODO — make up/down/reset/image-digest)
 ├── go.mod                                 (TODO — separate module so the rig
@@ -868,8 +868,8 @@ test/iops-investigation/
 │                                           matrix and HEAD for M1.11)
 ├── docker/
 │   ├── docker-compose.yaml                (TODO — image overridable via
-│   │                                       IOPS_RIG_NATS_IMAGE; replicas via
-│   │                                       IOPS_RIG_NATS_REPLICAS)
+│   │                                       PERF_RIG_NATS_IMAGE; replicas via
+│   │                                       PERF_RIG_NATS_REPLICAS)
 │   └── nats-server.conf                   (TODO)
 ├── cmd/
 │   ├── harness/main.go                    (TODO — workload binary)

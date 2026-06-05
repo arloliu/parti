@@ -1,0 +1,115 @@
+# NATS JetStream cluster for the IOPS investigation rig.
+#
+# Environment variables (set in the shell or in a .env file):
+#   PERF_RIG_NATS_IMAGE    — full image reference (default: nats:2.14.2)
+#   PERF_RIG_NATS_CONFIG   — host-side path to the server config file
+#                            (default: ./nats-server.conf). Used to swap
+#                            in per-cell tuning configs such as
+#                            nats-server-M2C.conf for Plan 02 §M2.C
+#                            (jetstream.sync_interval=10m).
+#   PERF_RIG_NATS_REPLICAS — not directly consumed here; use profiles instead.
+#   PERF_RIG_DIR           — base directory for NATS JetStream data. Each node
+#                            binds a subdirectory: ${PERF_RIG_DIR}/perf-nats-<n>.
+#                            Default: ./data (relative to this compose file,
+#                            i.e. test/perf-measurement/docker/data/). Docker
+#                            auto-creates host directories for bind mounts, so
+#                            no manual provisioning is required for local runs.
+#                            Override to a dedicated mount point for measurement
+#                            runs that require isolated storage (e.g. a T710
+#                            NVMe): export PERF_RIG_DIR=/mnt/t710
+#
+# Profiles:
+#   r3  — bring up nats-1, nats-2, nats-3 (3-node cluster, the default)
+#   r5  — bring up all five nodes (5-node cluster, used for M1.10)
+#
+# Usage:
+#   docker compose --profile r3 up -d                              # default config
+#   PERF_RIG_NATS_CONFIG=./nats-server-M2C.conf \
+#     docker compose --profile r3 up -d                            # M2.C tuning
+#   docker compose --profile r5 up -d                              # 5-node cluster
+#
+# Only nats-1 exposes host ports (4222 client, 8222 monitoring) so the
+# harness can connect via a single URL (nats://localhost:4222).
+
+services:
+  nats-1:
+    image: ${PERF_RIG_NATS_IMAGE:-nats:2.14.2}
+    container_name: perf-nats-1
+    profiles: [r3, r5]
+    cpuset: "0-7,16-23"
+    command: ["-c", "/etc/nats/nats-server.conf"]
+    environment:
+      - SERVER_NAME=nats-1
+    ports:
+      - "4222:4222"   # client port — only nats-1 is exposed to the host
+      - "8222:8222"   # monitoring port
+    volumes:
+      - ${PERF_RIG_NATS_CONFIG:-./nats-server.conf}:/etc/nats/nats-server.conf:ro
+      - ${PERF_RIG_DIR:-./data}/perf-nats-1:/data
+    networks:
+      - perf-net
+    restart: unless-stopped
+
+  nats-2:
+    image: ${PERF_RIG_NATS_IMAGE:-nats:2.14.2}
+    container_name: perf-nats-2
+    profiles: [r3, r5]
+    cpuset: "0-7,16-23"
+    command: ["-c", "/etc/nats/nats-server.conf"]
+    environment:
+      - SERVER_NAME=nats-2
+    volumes:
+      - ${PERF_RIG_NATS_CONFIG:-./nats-server.conf}:/etc/nats/nats-server.conf:ro
+      - ${PERF_RIG_DIR:-./data}/perf-nats-2:/data
+    networks:
+      - perf-net
+    restart: unless-stopped
+
+  nats-3:
+    image: ${PERF_RIG_NATS_IMAGE:-nats:2.14.2}
+    container_name: perf-nats-3
+    profiles: [r3, r5]
+    cpuset: "0-7,16-23"
+    command: ["-c", "/etc/nats/nats-server.conf"]
+    environment:
+      - SERVER_NAME=nats-3
+    volumes:
+      - ${PERF_RIG_NATS_CONFIG:-./nats-server.conf}:/etc/nats/nats-server.conf:ro
+      - ${PERF_RIG_DIR:-./data}/perf-nats-3:/data
+    networks:
+      - perf-net
+    restart: unless-stopped
+
+  nats-4:
+    image: ${PERF_RIG_NATS_IMAGE:-nats:2.14.2}
+    container_name: perf-nats-4
+    profiles: [r5]
+    cpuset: "0-7,16-23"
+    command: ["-c", "/etc/nats/nats-server.conf"]
+    environment:
+      - SERVER_NAME=nats-4
+    volumes:
+      - ${PERF_RIG_NATS_CONFIG:-./nats-server.conf}:/etc/nats/nats-server.conf:ro
+      - ${PERF_RIG_DIR:-./data}/perf-nats-4:/data
+    networks:
+      - perf-net
+    restart: unless-stopped
+
+  nats-5:
+    image: ${PERF_RIG_NATS_IMAGE:-nats:2.14.2}
+    container_name: perf-nats-5
+    profiles: [r5]
+    cpuset: "0-7,16-23"
+    command: ["-c", "/etc/nats/nats-server.conf"]
+    environment:
+      - SERVER_NAME=nats-5
+    volumes:
+      - ${PERF_RIG_NATS_CONFIG:-./nats-server.conf}:/etc/nats/nats-server.conf:ro
+      - ${PERF_RIG_DIR:-./data}/perf-nats-5:/data
+    networks:
+      - perf-net
+    restart: unless-stopped
+
+networks:
+  perf-net:
+    driver: bridge

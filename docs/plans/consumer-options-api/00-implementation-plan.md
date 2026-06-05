@@ -45,7 +45,7 @@ The four parti consumer types do NOT share a common create-time `jetstream.Consu
 ### Out of scope (do NOT add)
 
 - A `RescaleConsumerReplicas(ctx, name, n)` helper to live-edit Replicas. Mentioned in earlier discussion as a possible follow-up; defer to a separate PR.
-- Removing the `InstrumentedJS.SetConsumerOverrides` interceptor in `test/iops-investigation/`. That cleanup is gated on (a) the iops-investigation merge to origin/main and (b) this PR merging. Will happen in a third, smaller PR.
+- Removing the `InstrumentedJS.SetConsumerOverrides` interceptor in `test/perf-measurement/`. That cleanup is gated on (a) the iops-investigation merge to origin/main and (b) this PR merging. Will happen in a third, smaller PR.
 - Refactoring the duplicated `jetstream.ConsumerConfig` literal in `internal/durable/worker_consumer.go` into a helper. Pre-existing duplication; outside this PR's scope. Track as future-work.
 - Stream-level `MemoryStorage` / `Replicas` exposure (those are on `StreamConfig`).
 - A placement/affinity option for the consumer raft group. JetStream picks the node for single-replica consumers; controlling it is a separate JetStream feature (`Placement` config) not requested here.
