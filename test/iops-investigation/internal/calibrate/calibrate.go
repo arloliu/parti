@@ -15,6 +15,7 @@ package calibrate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -51,6 +52,7 @@ func NewInstrumentedJS(natsURL string) (*instrumentedjs.InstrumentedJS, *nats.Co
 		nc.Close()
 		return nil, nil, fmt.Errorf("jetstream.New: %w", err)
 	}
+
 	return instrumentedjs.New(js), nc, nil
 }
 
@@ -69,6 +71,7 @@ func CreateIdleStream(ctx context.Context, ijs *instrumentedjs.InstrumentedJS, n
 	if err != nil {
 		return nil, fmt.Errorf("create stream %q: %w", name, err)
 	}
+
 	return s, nil
 }
 
@@ -164,6 +167,7 @@ func CreatePullConsumers(ctx context.Context, stream jetstream.Stream, prefix st
 
 		out = append(out, pc)
 	}
+
 	return out, nil
 }
 
@@ -177,6 +181,7 @@ func LeaderOf(ctx context.Context, stream jetstream.Stream) (string, error) {
 	if info.Cluster == nil || info.Cluster.Leader == "" {
 		return "single", nil
 	}
+
 	return info.Cluster.Leader, nil
 }
 
@@ -255,7 +260,7 @@ func LeaderMoved(baseline string, samples []string) bool {
 // backpressure accumulation.
 func RunRate(ctx context.Context, rate int, fn func() error) error {
 	if rate <= 0 {
-		return fmt.Errorf("rate must be > 0")
+		return errors.New("rate must be > 0")
 	}
 	interval := time.Second / time.Duration(rate)
 	ticker := time.NewTicker(interval)

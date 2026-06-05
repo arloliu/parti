@@ -257,6 +257,7 @@ func (i *InstrumentedJS) CreateOrUpdateConsumer(ctx context.Context, stream stri
 	if i.consumerReplicas > 0 {
 		cfg.Replicas = i.consumerReplicas
 	}
+
 	return i.JetStream.CreateOrUpdateConsumer(ctx, stream, cfg)
 }
 

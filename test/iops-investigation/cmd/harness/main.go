@@ -33,6 +33,8 @@ import (
 	"github.com/arloliu/parti/v2"
 
 	"github.com/arloliu/parti/test/iops-investigation/internal/instrumentedjs"
+	"github.com/arloliu/parti/test/iops-investigation/internal/latency"
+	"github.com/arloliu/parti/test/iops-investigation/internal/load"
 	"github.com/arloliu/parti/test/iops-investigation/internal/storageverify"
 )
 
@@ -42,10 +44,11 @@ func main() {
 		log.Fatalf("flag parse: %v", err)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	if err := Run(ctx, o, os.Stderr); err != nil {
-		log.Fatalf("run: %v", err)
+	// Call stop() explicitly before any log.Fatalf (which would skip a defer).
+	runErr := Run(ctx, o, os.Stderr)
+	stop()
+	if runErr != nil {
+		log.Fatalf("run: %v", runErr)
 	}
 }
 
@@ -78,6 +81,14 @@ func parseFlags(args []string) (Options, error) {
 		outputDir       = fs.String("output-dir", "./results/run", "manifest + counter CSV destination")
 		partiVersion    = fs.String("parti-version", "v2.3.0", "parti version recorded in manifest")
 		fastConfig      = fs.Bool("fast-config", false, "use parti.TestConfig() timings (smoke-test only)")
+
+		loadMode      = fs.Bool("load", false, "enable open-loop producer + latency measurement (design §5)")
+		perWorkerRate = fs.Float64("per-worker-rate", 2, "k: msg/s per worker; aggregate X = k·workers")
+		batchSize     = fs.Int("batch-size", 1, "consumer fetch batch size (pinned, §7)")
+		maxWaiting    = fs.Int("max-waiting", 512, "consumer MaxWaiting (§7)")
+		maxAckPending = fs.Int("max-ack-pending", 1000, "consumer MaxAckPending (§7)")
+		ackWait       = fs.Duration("ack-wait", 30*time.Second, "consumer AckWait (§7)")
+		startupBudget = fs.Duration("startup-budget", 0, "WaitStable budget; 0 ⇒ max(60s, N·60ms) (§9)")
 	)
 
 	if err := fs.Parse(args); err != nil {
@@ -122,6 +133,13 @@ func parseFlags(args []string) (Options, error) {
 		OutputDir:             *outputDir,
 		PartiVersion:          *partiVersion,
 		FastConfig:            *fastConfig,
+		Load:                  *loadMode,
+		PerWorkerRate:         *perWorkerRate,
+		BatchSize:             *batchSize,
+		MaxWaiting:            *maxWaiting,
+		MaxAckPending:         *maxAckPending,
+		AckWait:               *ackWait,
+		StartupBudget:         *startupBudget,
 	}, nil
 }
 
@@ -150,9 +168,17 @@ func parseFlags(args []string) (Options, error) {
 //
 // On signal (SIGINT/SIGTERM), Run aborts the capture window early and
 // writes a manifest with status="interrupted".
+//
+//nolint:gocyclo,cyclop,revive // load-harness orchestration: a single sequential lifecycle (setup -> wait-stable -> produce -> capture -> drain -> manifest); splitting it would obscure the flow.
 func Run(ctx context.Context, o Options, errLog io.Writer) error {
 	started := time.Now()
 	cfg := BuildPartiConfig(o)
+
+	// Step 0: resolve the startup budget once so the per-worker wait, the
+	// cluster gate, and the manifest all agree (§9).
+	if o.StartupBudget <= 0 {
+		o.StartupBudget = defaultStartupBudget(o.N)
+	}
 
 	// Step 1: setup NATS + wrapper. The setup wrapper is intentionally
 	// disjoint from per-worker wrappers — its counters reflect
@@ -201,13 +227,11 @@ func Run(ctx context.Context, o Options, errLog io.Writer) error {
 		defer cancel()
 		var wg sync.WaitGroup
 		for _, w := range workers {
-			wg.Add(1)
-			go func(w *WorkerHandle) {
-				defer wg.Done()
+			wg.Go(func() {
 				if err := w.Stop(stopCtx); err != nil {
 					fmt.Fprintf(errLog, "worker %d stop: %v\n", w.idx, err)
 				}
-			}(w)
+			})
 		}
 		wg.Wait()
 	}
@@ -222,10 +246,48 @@ func Run(ctx context.Context, o Options, errLog io.Writer) error {
 	}
 	defer cleanup()
 
-	// Step 6: wait for cluster Stable.
-	gateTimeout := max(3*o.Warmup, 30*time.Second)
-	if err := WaitStableAll(workers, gateTimeout); err != nil {
+	// Step 6: wait for cluster Stable. Workers were all started (above) without
+	// per-worker Stable gating, so the calculator distributes ~N/M partitions
+	// per worker and consumers are created M-way in parallel; this gate waits
+	// for the whole cluster to converge.
+	if err := WaitStableAll(workers, o.StartupBudget); err != nil {
 		return fmt.Errorf("wait stable: %w", err)
+	}
+
+	// Step 6b: now that the cluster is Stable, start any Queue-mode consumers
+	// (StartWorker no longer does this, since it no longer blocks on Stable).
+	for _, w := range workers {
+		if err := w.StartQueueConsumer(ctx); err != nil {
+			return fmt.Errorf("start queue consumers: %w", err)
+		}
+	}
+
+	// Start the open-loop producer on a dedicated connection (load mode)
+	// so it runs through both warmup (warming consumers) and the capture
+	// window. The window is armed at captureStart so only in-window sends
+	// are counted (Step 2 below).
+	var producer *load.Producer
+	var prodCancel context.CancelFunc
+	if o.Load {
+		prodConn, perr := ConnectNATS(o.NATSURLs)
+		if perr != nil {
+			cleanup()
+			return fmt.Errorf("producer connect: %w", perr)
+		}
+		defer prodConn.Close()
+		prodJS, perr := jetstream.New(prodConn, jetstream.WithPublishAsyncMaxPending(4096))
+		if perr != nil {
+			cleanup()
+			return fmt.Errorf("producer jetstream.New: %w", perr)
+		}
+		producer = load.NewProducer(load.ProducerConfig{
+			JS: prodJS, N: o.N, AggregateX: o.PerWorkerRate * float64(o.Workers),
+			SkewP99Limit: 5 * time.Millisecond, LateLimit: 10 * time.Millisecond, LateFraction: 0.01,
+		})
+		var pctx context.Context
+		pctx, prodCancel = context.WithCancel(ctx)
+		go producer.Run(pctx)
+		defer prodCancel()
 	}
 
 	// Step 7: warmup.
@@ -251,6 +313,20 @@ func Run(ctx context.Context, o Options, errLog io.Writer) error {
 	// Step 8: reset counters.
 	ResetAll(workers)
 	captureStart := time.Now()
+
+	// Arm the in-window interval on every recorder and the producer at the
+	// real capture start, both in CLOCK_MONOTONIC, so delivery is compared
+	// against in-window sends (NOT total Sent, which spans warmup+capture).
+	if o.Load {
+		captureStartMono := load.MonoNanos()
+		captureEndMono := captureStartMono + o.CaptureWindow.Nanoseconds()
+		for _, w := range workers {
+			if w.recorder != nil {
+				w.recorder.SetWindow(captureStartMono, captureEndMono)
+			}
+		}
+		producer.SetWindow(captureStartMono, captureEndMono)
+	}
 
 	// Step 9: capture loop.
 	//
@@ -310,6 +386,7 @@ func Run(ctx context.Context, o Options, errLog io.Writer) error {
 			return fmt.Errorf("rename csv: %w", err)
 		}
 		csvCommitted = true
+
 		return nil
 	}
 
@@ -328,6 +405,7 @@ captureLoop:
 				fmt.Fprintf(errLog, "interrupt: csv commit failed, no manifest written: %v\n", cerr)
 				return cerr
 			}
+
 			return finishRun(o, cfg, workers, started, "interrupted", ctx.Err())
 		case t := <-ticker.C:
 			if err := writeSnapshot(w, t, workers); err != nil {
@@ -352,6 +430,46 @@ captureLoop:
 
 	// Final post-capture degraded check, then commit CSV and manifest.
 	status, derr := DecideRunStatus(workers)
+
+	if o.Load {
+		// Drain: let in-flight in-window messages arrive before reading
+		// counts (fetch-floor latency ≈ FetchTimeout). Producer keeps running
+		// during the drain but those sends are out-of-window and ignored.
+		_ = sleepCtx(ctx, 3*o.FetchTimeout)
+		prodCancel()
+		producer.Wait() // block until Run drains all async futures (accurate AsyncErrors)
+		h := producer.Health()
+		recs := make([]*latency.Recorder, 0, len(workers))
+		var delivered int64
+		for _, w := range workers {
+			if w.recorder != nil {
+				recs = append(recs, w.recorder)
+				delivered += w.recorder.Count()
+			}
+		}
+		rep := latency.BuildReport(recs)
+		snap := latency.ExportSnapshot(recs) // serialized histogram for cross-rep pooling
+		// Delivery-deficit guard (§9): delivered / IN-WINDOW produced < 0.95.
+		inWindow := h.InWindowSent
+		deficit := inWindow > 0 && float64(delivered)/float64(inWindow) < 0.95
+		if err := WriteLatencyReport(o.OutputDir, rep, h, delivered, snap); err != nil {
+			return fmt.Errorf("write latency report: %w", err)
+		}
+		// Only override status when the run was otherwise clean (derr == nil);
+		// never downgrade an already-degraded run's label.
+		if h.ProducerBound {
+			if derr == nil {
+				status = "producer-bound"
+				derr = fmt.Errorf("producer-bound: %+v", h)
+			}
+		} else if deficit {
+			if derr == nil {
+				status = "delivery-deficit"
+				derr = fmt.Errorf("delivery deficit: delivered=%d in-window-produced=%d", delivered, inWindow)
+			}
+		}
+	}
+
 	if err := commitCSV(); err != nil {
 		return err
 	}
@@ -390,6 +508,7 @@ func writeSnapshot(w *csv.Writer, t time.Time, workers []*WorkerHandle) error {
 			return fmt.Errorf("write csv row: %w", err)
 		}
 	}
+
 	return nil
 }
 

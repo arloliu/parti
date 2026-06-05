@@ -1,11 +1,13 @@
 package aggregate
 
 import (
+	"cmp"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"io"
 	"os"
-	"sort"
+	"slices"
 	"strconv"
 )
 
@@ -22,10 +24,10 @@ type RPCRow struct {
 
 // BucketRate is per-bucket read/write ops/s for one second-bucket.
 type BucketRate struct {
-	TSec      int64
-	Bucket    string
-	ReadOps   float64
-	WriteOps  float64
+	TSec     int64
+	Bucket   string
+	ReadOps  float64
+	WriteOps float64
 }
 
 // ParseRPC reads rpc_counts.csv and returns rows in file order.
@@ -35,10 +37,10 @@ func ParseRPC(path string) ([]RPCRow, error) {
 		return nil, fmt.Errorf("open rpc_counts: %w", err)
 	}
 	defer f.Close()
-	return parseRPC(f)
+	return parseRPCReader(f)
 }
 
-func parseRPC(r io.Reader) ([]RPCRow, error) {
+func parseRPCReader(r io.Reader) ([]RPCRow, error) {
 	cr := csv.NewReader(r)
 	cr.FieldsPerRecord = -1
 	head, err := cr.Read()
@@ -60,7 +62,7 @@ func parseRPC(r io.Reader) ([]RPCRow, error) {
 	var out []RPCRow
 	for {
 		rec, err := cr.Read()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
@@ -83,6 +85,7 @@ func parseRPC(r io.Reader) ([]RPCRow, error) {
 		}
 		out = append(out, RPCRow{TUnixNs: ts, Worker: w, Bucket: rec[2], Op: rec[3], Count: c})
 	}
+
 	return out, nil
 }
 
@@ -145,6 +148,7 @@ func CaptureStartNs(rows []RPCRow) int64 {
 			mn = r.TUnixNs
 		}
 	}
+
 	return mn
 }
 
@@ -198,7 +202,10 @@ func ClassifyOp(op string) string {
 // from a CaptureStartNs helper.
 func RPCBucketRates(rows []RPCRow, captureStartNs int64) (rates []BucketRate, unknownOps []string) {
 	// Group cumulative samples by (worker, bucket, op).
-	type k3 struct{ w int; b, o string }
+	type k3 struct {
+		w    int
+		b, o string
+	}
 	groups := map[k3][]RPCRow{}
 	for _, r := range rows {
 		groups[k3{r.Worker, r.Bucket, r.Op}] = append(groups[k3{r.Worker, r.Bucket, r.Op}], r)
@@ -243,11 +250,9 @@ func RPCBucketRates(rows []RPCRow, captureStartNs int64) (rates []BucketRate, un
 				switch cls {
 				case "read":
 					br.ReadOps += rate
-				case "write":
-					br.WriteOps += rate
 				default:
-					// Unknown ops fold into the write column
-					// (pessimistic attribution); surfaced via UnknownOps.
+					// "write" and unknown ops both fold into the write column
+					// (unknown = pessimistic attribution; surfaced via UnknownOps).
 					br.WriteOps += rate
 				}
 			}
@@ -257,16 +262,17 @@ func RPCBucketRates(rows []RPCRow, captureStartNs int64) (rates []BucketRate, un
 	for _, br := range acc {
 		rates = append(rates, *br)
 	}
-	sort.Slice(rates, func(i, j int) bool {
-		if rates[i].TSec != rates[j].TSec {
-			return rates[i].TSec < rates[j].TSec
+	slices.SortFunc(rates, func(a, b BucketRate) int {
+		if a.TSec != b.TSec {
+			return cmp.Compare(a.TSec, b.TSec)
 		}
-		return rates[i].Bucket < rates[j].Bucket
+		return cmp.Compare(a.Bucket, b.Bucket)
 	})
 	unknownOps = make([]string, 0, len(unknown))
 	for o := range unknown {
 		unknownOps = append(unknownOps, o)
 	}
-	sort.Strings(unknownOps)
+	slices.Sort(unknownOps)
+
 	return rates, unknownOps
 }

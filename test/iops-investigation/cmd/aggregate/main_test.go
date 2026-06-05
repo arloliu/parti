@@ -65,14 +65,14 @@ func (f fixtureSpec) materialize(t *testing.T, dir string) {
 		var b strings.Builder
 		b.WriteString("# t_unix_ns container device rbytes wbytes rios wios\n")
 		for i := 0; i <= f.secondsAfter; i++ {
-			t0 := base.Add(time.Duration(i) * time.Second).UnixNano()
+			t0Ns := base.Add(time.Duration(i) * time.Second).UnixNano()
 			for _, c := range f.containers {
 				// Single device per container, cumulative since "boot".
 				ri := f.perRIOs * uint64(i)
 				wi := f.perWIOs * uint64(i)
 				rb := f.perRBytes * uint64(i)
 				wb := f.perWBytes * uint64(i)
-				fmt.Fprintf(&b, "%d %s 259:0 %d %d %d %d\n", t0, c, rb, wb, ri, wi)
+				fmt.Fprintf(&b, "%d %s 259:0 %d %d %d %d\n", t0Ns, c, rb, wb, ri, wi)
 			}
 		}
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "cgroup_io.raw"), []byte(b.String()), 0o644))
@@ -106,7 +106,7 @@ func (f fixtureSpec) materialize(t *testing.T, dir string) {
 		var b strings.Builder
 		polls := f.secondsAfter/5 + 1
 		for p := range polls {
-			ts := base.Add(time.Duration(p*5) * time.Second).UnixNano()
+			tsNs := base.Add(time.Duration(p*5) * time.Second).UnixNano()
 			var streamJSON strings.Builder
 			streamJSON.WriteString(`[`)
 			first := true
@@ -120,7 +120,7 @@ func (f fixtureSpec) materialize(t *testing.T, dir string) {
 			}
 			streamJSON.WriteString(`]`)
 			fmt.Fprintf(&b, `{"t_unix_ns":%d,"node":"localhost:8222","endpoint":"jsz","body":{"account_details":[{"stream_detail":%s}]}}`+"\n",
-				ts, streamJSON.String())
+				tsNs, streamJSON.String())
 		}
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "jsz.raw"), []byte(b.String()), 0o644))
 	}
@@ -138,9 +138,9 @@ func (f fixtureSpec) materialize(t *testing.T, dir string) {
 		var b strings.Builder
 		b.WriteString("t_unix_ns,worker_idx,bucket,op,count\n")
 		for i := 0; i <= f.secondsAfter; i++ {
-			ts := base.Add(time.Duration(i) * time.Second).UnixNano()
+			tsNs := base.Add(time.Duration(i) * time.Second).UnixNano()
 			for k, perTick := range f.rpcOps {
-				fmt.Fprintf(&b, "%d,%d,%s,%s,%d\n", ts, k.worker, k.bucket, k.op, perTick*int64(i))
+				fmt.Fprintf(&b, "%d,%d,%s,%s,%d\n", tsNs, k.worker, k.bucket, k.op, perTick*int64(i))
 			}
 		}
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "rpc_counts.csv"), []byte(b.String()), 0o644))
@@ -158,17 +158,17 @@ func (f fixtureSpec) materialize(t *testing.T, dir string) {
 // iostat's host-wide r/s+w/s.
 func happyFixture() fixtureSpec {
 	containers := []string{"iops-nats-1", "iops-nats-2", "iops-nats-3"}
-	const rPerContainer = 4.0  // ops/s read per container
-	const wPerContainer = 6.0  // ops/s write per container
+	const rPerContainer = 4.0 // ops/s read per container
+	const wPerContainer = 6.0 // ops/s write per container
 	iostatR := rPerContainer * float64(len(containers))
 	iostatW := wPerContainer * float64(len(containers))
 	return fixtureSpec{
-		secondsAfter: 10,
-		containers:   containers,
-		perRIOs:      uint64(rPerContainer),
-		perWIOs:      uint64(wPerContainer),
-		perRBytes:    4096,
-		perWBytes:    8192,
+		secondsAfter:     10,
+		containers:       containers,
+		perRIOs:          uint64(rPerContainer),
+		perWIOs:          uint64(wPerContainer),
+		perRBytes:        4096,
+		perWBytes:        8192,
 		iostatRIOsPerSec: iostatR,
 		iostatWIOsPerSec: iostatW,
 		streams: map[string]struct{ msgsPer5s, bytesPer5s uint64 }{
@@ -176,9 +176,9 @@ func happyFixture() fixtureSpec {
 			"PARTI_DATA":      {msgsPer5s: 0, bytesPer5s: 0},
 		},
 		rpcOps: map[rpcKey]int64{
-			{worker: 0, bucket: "PARTI_HEARTBEAT", op: "Put"}:   1, // 1 Put/s/worker
-			{worker: 1, bucket: "PARTI_HEARTBEAT", op: "Put"}:   1,
-			{worker: 0, bucket: "PARTI_HEARTBEAT", op: "Keys"}:  1, // leader-only fallback, but fine for fixture
+			{worker: 0, bucket: "PARTI_HEARTBEAT", op: "Put"}:    1, // 1 Put/s/worker
+			{worker: 1, bucket: "PARTI_HEARTBEAT", op: "Put"}:    1,
+			{worker: 0, bucket: "PARTI_HEARTBEAT", op: "Keys"}:   1, // leader-only fallback, but fine for fixture
 			{worker: 0, bucket: "PARTI_HANDOFF", op: "ListKeys"}: 1,
 			{worker: 0, bucket: "PARTI_HANDOFF", op: "Get"}:      2,
 		},
@@ -422,12 +422,12 @@ func TestRun_SparseFirstObservedDiffsAgainstCaptureStart(t *testing.T) {
 	var sb strings.Builder
 	sb.WriteString("t_unix_ns,worker_idx,bucket,op,count\n")
 	for i := range 4 {
-		ts := base.Add(time.Duration(i) * time.Second).UnixNano()
+		tsNs := base.Add(time.Duration(i) * time.Second).UnixNano()
 		// HEARTBEAT/Put present at every tick (cumulative 0, 1, 2, 3).
-		fmt.Fprintf(&sb, "%d,0,%s,%s,%d\n", ts, "PARTI_HEARTBEAT", "Put", int64(i))
+		fmt.Fprintf(&sb, "%d,0,%s,%s,%d\n", tsNs, "PARTI_HEARTBEAT", "Put", int64(i))
 		// HANDOFF/Put only appears at i>=2.
 		if i >= 2 {
-			fmt.Fprintf(&sb, "%d,0,%s,%s,%d\n", ts, "PARTI_HANDOFF", "Put", int64(10*(i-1)))
+			fmt.Fprintf(&sb, "%d,0,%s,%s,%d\n", tsNs, "PARTI_HANDOFF", "Put", int64(10*(i-1)))
 		}
 	}
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "rpc_counts.csv"), []byte(sb.String()), 0o644))

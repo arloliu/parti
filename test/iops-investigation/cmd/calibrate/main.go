@@ -47,6 +47,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -102,14 +103,11 @@ func main() {
 	}
 }
 
+//nolint:revive // deep-exit: top-level CLI usage helper, exiting here is intentional.
 func usageAndExit() {
 	fmt.Fprintln(os.Stderr, "usage: calibrate <kv-put|kv-get|kv-keys|kv-watch|idle-pull> [flags]")
 	os.Exit(2)
 }
-
-// csvHeader is printed by the test helper; sub-commands skip it because
-// the matrix post-processor concatenates many runs and provides its own header.
-const csvHeader = "path,storage,replicas,rate,duration_s,bytes_per_op,read_rpc_ops,write_rpc_ops,wrapper_total_ops"
 
 // emitCSV writes one result row to writer (os.Stdout by default; tests redirect it).
 func emitCSV(path, storage string, replicas, rate int, durationS float64, bytesPerOp, readRPCs, writeRPCs int64) {
@@ -142,6 +140,7 @@ func parseCommonFlags(fs *flag.FlagSet, args []string) (commonFlags, error) {
 	if _, err := calibrate.ParseStorage(f.storage); err != nil {
 		return f, err
 	}
+
 	return f, nil
 }
 
@@ -160,6 +159,7 @@ func freshBucket(ctx context.Context, ijs *instrumentedjs.InstrumentedJS, bucket
 	if err != nil {
 		return nil, fmt.Errorf("create bucket %q: %w", bucket, err)
 	}
+
 	return kv, nil
 }
 
@@ -210,6 +210,7 @@ func runKVPut(args []string) error {
 	snap := ijs.Snapshot()
 	reads, writes := countRPCs(snap)
 	emitCSV("kv-put", f.storage, f.replicas, f.rate, elapsed, int64(f.valueSize), reads, writes)
+
 	return nil
 }
 
@@ -256,6 +257,7 @@ func runKVGet(args []string) error {
 	snap := ijs.Snapshot()
 	reads, writes := countRPCs(snap)
 	emitCSV("kv-get", f.storage, f.replicas, f.rate, elapsed, int64(f.valueSize), reads, writes)
+
 	return nil
 }
 
@@ -317,7 +319,7 @@ func runKVKeys(args []string) error {
 		start := time.Now()
 		for range samples {
 			if _, err := kv.Keys(ctx); err != nil {
-				return fmt.Errorf("Keys: %w", err)
+				return fmt.Errorf("keys: %w", err)
 			}
 		}
 		elapsed := time.Since(start).Seconds()
@@ -446,6 +448,8 @@ func runKVWatch(args []string) error {
 // quotes so a single column survives CSV parsers despite containing
 // semicolons; "<error>" appears for any sample whose stream.Info call
 // failed and is treated as a leader-move by leaderChanged.
+//
+//nolint:revive // argument-limit: CSV emitter with one positional arg per output column.
 func emitIdlePullCSV(path, storage string, replicas int, durationS float64, readRPCs, writeRPCs int64, cStream int, fetchTimeout time.Duration, leaderPre, leaderPost string, leaderChanged bool, leaderSamples []string) {
 	total := readRPCs + writeRPCs
 	samplesJoined := strings.Join(leaderSamples, ";")
@@ -493,13 +497,13 @@ func runIdlePull(args []string) error {
 		return err
 	}
 	if cStream < 0 {
-		return fmt.Errorf("--c-stream must be >= 0")
+		return errors.New("--c-stream must be >= 0")
 	}
 	if fetchTimeout <= 0 {
-		return fmt.Errorf("--fetch-timeout must be > 0")
+		return errors.New("--fetch-timeout must be > 0")
 	}
 	if duration <= 0 {
-		return fmt.Errorf("--duration must be > 0")
+		return errors.New("--duration must be > 0")
 	}
 	storage, err := calibrate.ParseStorage(dataStorage)
 	if err != nil {
@@ -602,6 +606,7 @@ func runIdlePull(args []string) error {
 	path := fmt.Sprintf("idle-pull-c%d-t%s", cStream, formatFetchTimeout(fetchTimeout))
 	emitIdlePullCSV(path, dataStorage, replicas, elapsed, reads, writes,
 		cStream, fetchTimeout, leaderPre, leaderPost, leaderChanged, leaderSamples)
+
 	return nil
 }
 
@@ -637,6 +642,7 @@ func countRPCs(snap instrumentedjs.Snapshot) (reads, writes int64) {
 			writes += v
 		}
 	}
+
 	return reads, writes
 }
 
@@ -657,7 +663,8 @@ func parseIntList(s string) ([]int, error) {
 		out = append(out, n)
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("empty list")
+		return nil, errors.New("empty list")
 	}
+
 	return out, nil
 }

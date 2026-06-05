@@ -10,7 +10,6 @@ import (
 
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
-	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
 	"github.com/arloliu/parti/test/iops-investigation/internal/instrumentedjs"
@@ -34,19 +33,8 @@ func startEmbeddedNATS(t *testing.T) string {
 		ns.Shutdown()
 		ns.WaitForShutdown()
 	})
-	return ns.ClientURL()
-}
 
-// newTestIJS connects to the given URL and returns a wrapped InstrumentedJS
-// plus a cleanup function.
-func newTestIJS(t *testing.T, url string) *instrumentedjs.InstrumentedJS {
-	t.Helper()
-	nc, err := nats.Connect(url)
-	require.NoError(t, err)
-	t.Cleanup(func() { nc.Close() })
-	js, err := jetstream.New(nc)
-	require.NoError(t, err)
-	return instrumentedjs.New(js)
+	return ns.ClientURL()
 }
 
 // parseCSVRow splits a single CSV line (no newline needed) into a slice of

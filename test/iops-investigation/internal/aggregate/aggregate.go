@@ -6,7 +6,6 @@ import (
 	"io"
 	"math"
 	"slices"
-	"sort"
 	"strconv"
 )
 
@@ -108,6 +107,7 @@ func DivergenceCheck(cg []CgroupDelta, ios []IostatSample, warmupSec int) Diverg
 			rep.WorstIostatTotal = iosV
 		}
 	}
+
 	return rep
 }
 
@@ -127,6 +127,8 @@ func DivergenceCheck(cg []CgroupDelta, ios []IostatSample, warmupSec int) Diverg
 //
 // One row per (t_sec, node). Within a second, the host row is emitted
 // last for readability.
+//
+//nolint:cyclop // CSV writer: one branch per optional dimension column (cgroup/rpc/jsz, per-container vs host); flat by design and clearer as one pass.
 func WriteCSV(w io.Writer, data RunData) error {
 	// Discover dimension members.
 	bucketSet := map[string]bool{}
@@ -159,19 +161,7 @@ func WriteCSV(w io.Writer, data RunData) error {
 	slices.Sort(tSecs)
 
 	// Build the header.
-	header := []string{"t_s", "node", "iops_read", "iops_write", "bytes_read", "bytes_write"}
-	for _, b := range buckets {
-		header = append(header, "rpc_read_"+b)
-	}
-	for _, b := range buckets {
-		header = append(header, "rpc_write_"+b)
-	}
-	for _, s := range streams {
-		header = append(header, "stream_msgs_"+s)
-	}
-	for _, s := range streams {
-		header = append(header, "stream_bytes_"+s)
-	}
+	header := buildCSVHeader(buckets, streams)
 
 	// Index cgroup by (tSec, container) for O(1) lookup.
 	cgIdx := map[int64]map[string]CgroupDelta{}
@@ -265,6 +255,7 @@ func WriteCSV(w io.Writer, data RunData) error {
 		}
 	}
 	cw.Flush()
+
 	return cw.Error()
 }
 
@@ -273,8 +264,30 @@ func sortedKeys(m map[string]bool) []string {
 	for k := range m {
 		out = append(out, k)
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out
+}
+
+// buildCSVHeader assembles the fixed columns plus the per-bucket rpc_* and
+// per-stream stream_* dimension columns (kept out of WriteCSV to bound its
+// cyclomatic complexity and to preallocate the exact column count).
+func buildCSVHeader(buckets, streams []string) []string {
+	header := make([]string, 0, 6+2*len(buckets)+2*len(streams))
+	header = append(header, "t_s", "node", "iops_read", "iops_write", "bytes_read", "bytes_write")
+	for _, b := range buckets {
+		header = append(header, "rpc_read_"+b)
+	}
+	for _, b := range buckets {
+		header = append(header, "rpc_write_"+b)
+	}
+	for _, s := range streams {
+		header = append(header, "stream_msgs_"+s)
+	}
+	for _, s := range streams {
+		header = append(header, "stream_bytes_"+s)
+	}
+
+	return header
 }
 
 // formatFloat formats x with up to 6 significant digits, trimming

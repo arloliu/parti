@@ -438,6 +438,7 @@ run-meta.yaml       pre-run sidecar (seed, position, cell, N, rep, flags)
 manifest.yaml       harness metadata; presence = CSV complete
 rpc_counts.csv      per-tick JetStream RPC counters
 cgroup_io.raw       cgroup v2 io.stat (primary IOPS source)
+cgroup_cpumem.raw   cgroup v2 cpu.stat usage_usec + memory.current (NATS CPU/RSS; load mode)
 iostat.raw          host-level cross-check
 jsz.raw             NATS server stats (ndjson)
 node_exporter.prom  host sanity metrics

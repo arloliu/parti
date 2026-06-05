@@ -8,6 +8,15 @@
 #                            nats-server-M2C.conf for Plan 02 §M2.C
 #                            (jetstream.sync_interval=10m).
 #   IOPS_RIG_NATS_REPLICAS — not directly consumed here; use profiles instead.
+#   IOPS_RIG_DIR           — base directory for NATS JetStream data. Each node
+#                            binds a subdirectory: ${IOPS_RIG_DIR}/iops-nats-<n>.
+#                            Default: ./data (relative to this compose file,
+#                            i.e. test/iops-investigation/docker/data/). Docker
+#                            auto-creates host directories for bind mounts, so
+#                            no manual provisioning is required for local runs.
+#                            Override to a dedicated mount point for measurement
+#                            runs that require isolated storage (e.g. a T710
+#                            NVMe): export IOPS_RIG_DIR=/mnt/t710
 #
 # Profiles:
 #   r3  — bring up nats-1, nats-2, nats-3 (3-node cluster, the default)
@@ -27,6 +36,7 @@ services:
     image: ${IOPS_RIG_NATS_IMAGE:-nats:2.14.2}
     container_name: iops-nats-1
     profiles: [r3, r5]
+    cpuset: "0-7,16-23"
     command: ["-c", "/etc/nats/nats-server.conf"]
     environment:
       - SERVER_NAME=nats-1
@@ -35,7 +45,7 @@ services:
       - "8222:8222"   # monitoring port
     volumes:
       - ${IOPS_RIG_NATS_CONFIG:-./nats-server.conf}:/etc/nats/nats-server.conf:ro
-      - nats-1-data:/data
+      - ${IOPS_RIG_DIR:-./data}/iops-nats-1:/data
     networks:
       - iops-net
     restart: unless-stopped
@@ -44,12 +54,13 @@ services:
     image: ${IOPS_RIG_NATS_IMAGE:-nats:2.14.2}
     container_name: iops-nats-2
     profiles: [r3, r5]
+    cpuset: "0-7,16-23"
     command: ["-c", "/etc/nats/nats-server.conf"]
     environment:
       - SERVER_NAME=nats-2
     volumes:
       - ${IOPS_RIG_NATS_CONFIG:-./nats-server.conf}:/etc/nats/nats-server.conf:ro
-      - nats-2-data:/data
+      - ${IOPS_RIG_DIR:-./data}/iops-nats-2:/data
     networks:
       - iops-net
     restart: unless-stopped
@@ -58,12 +69,13 @@ services:
     image: ${IOPS_RIG_NATS_IMAGE:-nats:2.14.2}
     container_name: iops-nats-3
     profiles: [r3, r5]
+    cpuset: "0-7,16-23"
     command: ["-c", "/etc/nats/nats-server.conf"]
     environment:
       - SERVER_NAME=nats-3
     volumes:
       - ${IOPS_RIG_NATS_CONFIG:-./nats-server.conf}:/etc/nats/nats-server.conf:ro
-      - nats-3-data:/data
+      - ${IOPS_RIG_DIR:-./data}/iops-nats-3:/data
     networks:
       - iops-net
     restart: unless-stopped
@@ -72,12 +84,13 @@ services:
     image: ${IOPS_RIG_NATS_IMAGE:-nats:2.14.2}
     container_name: iops-nats-4
     profiles: [r5]
+    cpuset: "0-7,16-23"
     command: ["-c", "/etc/nats/nats-server.conf"]
     environment:
       - SERVER_NAME=nats-4
     volumes:
       - ${IOPS_RIG_NATS_CONFIG:-./nats-server.conf}:/etc/nats/nats-server.conf:ro
-      - nats-4-data:/data
+      - ${IOPS_RIG_DIR:-./data}/iops-nats-4:/data
     networks:
       - iops-net
     restart: unless-stopped
@@ -86,12 +99,13 @@ services:
     image: ${IOPS_RIG_NATS_IMAGE:-nats:2.14.2}
     container_name: iops-nats-5
     profiles: [r5]
+    cpuset: "0-7,16-23"
     command: ["-c", "/etc/nats/nats-server.conf"]
     environment:
       - SERVER_NAME=nats-5
     volumes:
       - ${IOPS_RIG_NATS_CONFIG:-./nats-server.conf}:/etc/nats/nats-server.conf:ro
-      - nats-5-data:/data
+      - ${IOPS_RIG_DIR:-./data}/iops-nats-5:/data
     networks:
       - iops-net
     restart: unless-stopped
@@ -99,10 +113,3 @@ services:
 networks:
   iops-net:
     driver: bridge
-
-volumes:
-  nats-1-data:
-  nats-2-data:
-  nats-3-data:
-  nats-4-data:
-  nats-5-data:

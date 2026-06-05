@@ -58,12 +58,12 @@ func syntheticCaptureFixture(t *testing.T, dir string) {
 		var b strings.Builder
 		b.WriteString("# t_unix_ns container device rbytes wbytes rios wios\n")
 		for i := range seconds + 1 {
-			ts := base.Add(time.Duration(i) * time.Second).UnixNano()
+			tsNs := base.Add(time.Duration(i) * time.Second).UnixNano()
 			rios := uint64(4) * uint64(i)
 			wios := uint64(6) * uint64(i)
 			rbytes := uint64(4096) * uint64(i)
 			wbytes := uint64(8192) * uint64(i)
-			fmt.Fprintf(&b, "%d iops-nats-1 259:0 %d %d %d %d\n", ts, rbytes, wbytes, rios, wios)
+			fmt.Fprintf(&b, "%d iops-nats-1 259:0 %d %d %d %d\n", tsNs, rbytes, wbytes, rios, wios)
 		}
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "cgroup_io.raw"), []byte(b.String()), 0o644))
 	}
@@ -89,10 +89,10 @@ func syntheticCaptureFixture(t *testing.T, dir string) {
 
 	// jsz.raw — one ndjson poll point so WriteCSV can produce stream_* columns.
 	{
-		ts := base.UnixNano()
+		tsNs := base.UnixNano()
 		line := fmt.Sprintf(
 			`{"t_unix_ns":%d,"node":"localhost:8222","endpoint":"jsz","body":{"account_details":[{"stream_detail":[{"name":"PARTI_HEARTBEAT","state":{"messages":10,"bytes":512}}]}]}}`+"\n",
-			ts,
+			tsNs,
 		)
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "jsz.raw"), []byte(line), 0o644))
 	}

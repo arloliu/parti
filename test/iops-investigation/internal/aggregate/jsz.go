@@ -2,11 +2,12 @@ package aggregate
 
 import (
 	"bufio"
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
-	"sort"
+	"slices"
 )
 
 // JSZSample is one snapshot of a single stream's cumulative
@@ -36,18 +37,118 @@ type jszLine struct {
 	Body     json.RawMessage `json:"body"`
 }
 
+// jszStreamState is the per-stream message/byte state in a /jsz body.
+type jszStreamState struct {
+	Messages uint64 `json:"messages"`
+	Bytes    uint64 `json:"bytes"`
+}
+
+// jszStreamDetail is one stream entry under an account's stream_detail.
+type jszStreamDetail struct {
+	Name  string         `json:"name"`
+	State jszStreamState `json:"state"`
+}
+
+// jszAccountDetail is one account entry under account_details.
+type jszAccountDetail struct {
+	StreamDetail []jszStreamDetail `json:"stream_detail"`
+}
+
+// jszMetaSnapshot is the metacontroller snapshot timing/size block.
+type jszMetaSnapshot struct {
+	PendingEntries int64  `json:"pending_entries"`
+	PendingSize    int64  `json:"pending_size"`
+	LastTime       string `json:"last_time"`
+	LastDurationNs int64  `json:"last_duration"` // ns, omitempty (0 until first snapshot fires)
+}
+
+// jszMetaCluster is the meta_cluster block carrying the snapshot stats.
+type jszMetaCluster struct {
+	Snapshot jszMetaSnapshot `json:"snapshot"`
+}
+
 // jszBody is the minimal subset of /jsz output we read. NATS includes
-// account_details[*].stream_detail[*] with state.messages / state.bytes.
+// account_details[*].stream_detail[*] with state.messages / state.bytes,
+// and meta_cluster.snapshot with metacontroller snapshot timing/size data.
 type jszBody struct {
-	AccountDetails []struct {
-		StreamDetail []struct {
-			Name  string `json:"name"`
-			State struct {
-				Messages uint64 `json:"messages"`
-				Bytes    uint64 `json:"bytes"`
-			} `json:"state"`
-		} `json:"stream_detail"`
-	} `json:"account_details"`
+	AccountDetails []jszAccountDetail `json:"account_details"`
+	MetaCluster    jszMetaCluster     `json:"meta_cluster"`
+}
+
+// MetaSnapshotSample holds one poll's metacontroller snapshot stats from
+// the /jsz endpoint. LastDurationNs is 0 when the server has not yet
+// taken a snapshot (last_duration is omitempty in the wire format).
+type MetaSnapshotSample struct {
+	TUnixNs        int64
+	Node           string
+	LastDurationNs int64
+	PendingSize    int64
+	PendingEntries int64
+	LastTime       string
+}
+
+// ParseMetaSnapshot reads a capture-jsz.sh ndjson file and returns one
+// MetaSnapshotSample per jsz poll line. varz lines are ignored. A missing
+// last_duration field (omitempty on the wire) is treated as 0 — not an error.
+func ParseMetaSnapshot(path string) ([]MetaSnapshotSample, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open jsz: %w", err)
+	}
+	defer f.Close()
+	return parseMetaSnapshotReader(f)
+}
+
+func parseMetaSnapshotReader(r io.Reader) ([]MetaSnapshotSample, error) {
+	var out []MetaSnapshotSample
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	lineNo := 0
+	for sc.Scan() {
+		lineNo++
+		raw := sc.Bytes()
+		if len(raw) == 0 {
+			continue
+		}
+		var l jszLine
+		if err := json.Unmarshal(raw, &l); err != nil {
+			return nil, fmt.Errorf("jsz line %d: %w", lineNo, err)
+		}
+		if l.Endpoint != "jsz" {
+			continue
+		}
+		var body jszBody
+		if err := json.Unmarshal(l.Body, &body); err != nil {
+			return nil, fmt.Errorf("jsz line %d body: %w", lineNo, err)
+		}
+		snap := body.MetaCluster.Snapshot
+		out = append(out, MetaSnapshotSample{
+			TUnixNs:        l.TUnixNs,
+			Node:           l.Node,
+			LastDurationNs: snap.LastDurationNs,
+			PendingSize:    snap.PendingSize,
+			PendingEntries: snap.PendingEntries,
+			LastTime:       snap.LastTime,
+		})
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("scan jsz: %w", err)
+	}
+
+	return out, nil
+}
+
+// MetaSnapshotCount returns the number of DISTINCT non-zero LastTime values
+// across the samples. This counts how many distinct metacontroller snapshots
+// fired during the capture window — used by the §8.1 "count ≥ 5" gate.
+func MetaSnapshotCount(samples []MetaSnapshotSample) int {
+	seen := map[string]struct{}{}
+	for _, s := range samples {
+		if s.LastTime != "" {
+			seen[s.LastTime] = struct{}{}
+		}
+	}
+	return len(seen)
 }
 
 // ParseJSZ reads a capture-jsz.sh ndjson file and returns the per-stream
@@ -59,10 +160,10 @@ func ParseJSZ(path string) ([]JSZSample, error) {
 		return nil, fmt.Errorf("open jsz: %w", err)
 	}
 	defer f.Close()
-	return parseJSZ(f)
+	return parseJSZReader(f)
 }
 
-func parseJSZ(r io.Reader) ([]JSZSample, error) {
+func parseJSZReader(r io.Reader) ([]JSZSample, error) {
 	var out []JSZSample
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
@@ -98,6 +199,7 @@ func parseJSZ(r io.Reader) ([]JSZSample, error) {
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("scan jsz: %w", err)
 	}
+
 	return out, nil
 }
 
@@ -131,11 +233,12 @@ func JSZRates(samples []JSZSample) []StreamRate {
 			}
 		}
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].TSec != out[j].TSec {
-			return out[i].TSec < out[j].TSec
+	slices.SortFunc(out, func(a, b StreamRate) int {
+		if a.TSec != b.TSec {
+			return cmp.Compare(a.TSec, b.TSec)
 		}
-		return out[i].Stream < out[j].Stream
+		return cmp.Compare(a.Stream, b.Stream)
 	})
+
 	return out
 }

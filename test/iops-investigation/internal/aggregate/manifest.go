@@ -1,6 +1,7 @@
 package aggregate
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -25,7 +26,8 @@ func ParseManifest(path string) (Manifest, error) {
 		return Manifest{}, fmt.Errorf("parse manifest: %w", err)
 	}
 	if m.Status == "" {
-		return Manifest{}, fmt.Errorf("manifest: status field is empty")
+		return Manifest{}, errors.New("manifest: status field is empty")
 	}
+
 	return m, nil
 }

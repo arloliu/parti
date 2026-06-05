@@ -26,7 +26,7 @@ GOLANGCI_LINT_VERSION := 2.11.4
 # Default target
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-race test-short coverage coverage-html lint lint-k8s fmt vet bench clean gomod-tidy update-pkg-cache ci test-unit test-integration test-stress test-all test-smoke clean-test-results test-quick test-k8s generate-k8s pre-pr herd-diagnostic
+.PHONY: help test test-race test-short coverage coverage-html lint lint-k8s lint-iops fmt vet bench clean gomod-tidy update-pkg-cache ci test-unit test-integration test-stress test-all test-smoke clean-test-results test-quick test-k8s generate-k8s pre-pr herd-diagnostic
 
 ## help: Show this help message
 help:
@@ -149,6 +149,11 @@ lint-k8s:
 	@echo "Running linters in k8s/..."
 	@cd k8s && go tool -modfile=../linter.go.mod golangci-lint run --timeout=$(LINT_TIMEOUT)
 
+## lint-iops: Run linters in the test/iops-investigation/ nested module
+lint-iops:
+	@echo "Running linters in test/iops-investigation/..."
+	@cd test/iops-investigation && go tool -modfile=../../linter.go.mod golangci-lint run --timeout=$(LINT_TIMEOUT)
+
 ## test-k8s: Run tests in the k8s/ nested module
 test-k8s: clean-test-results
 	@echo "Running tests in k8s/..."
@@ -197,7 +202,7 @@ clean: clean-test-results
 ##@ CI/CD
 
 ## ci: Run all CI checks (lint, test, coverage)
-ci: lint lint-k8s vet test-all test-k8s coverage
+ci: lint lint-k8s lint-iops vet test-all test-k8s coverage
 
 ##@ Inspection
 

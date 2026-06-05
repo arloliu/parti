@@ -28,10 +28,10 @@ func ParseIostat(path string) ([]IostatSample, error) {
 		return nil, fmt.Errorf("open iostat: %w", err)
 	}
 	defer f.Close()
-	return parseIostat(f)
+	return parseIostatReader(f)
 }
 
-// parseIostat consumes the iostat block format:
+// parseIostatReader consumes the iostat block format:
 //
 //	# iostat -x -d -t 1                  (capture-iostat.sh header)
 //	Linux 6.8.0 (host) 03/14/2024 ...    (iostat header, optional)
@@ -45,7 +45,7 @@ func ParseIostat(path string) ([]IostatSample, error) {
 //
 // We skip the first block (since-boot averages) and emit one sample per
 // later block.
-func parseIostat(r io.Reader) ([]IostatSample, error) {
+func parseIostatReader(r io.Reader) ([]IostatSample, error) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
@@ -108,6 +108,7 @@ func parseIostat(r io.Reader) ([]IostatSample, error) {
 				return nil, fmt.Errorf("iostat: device header missing r/s or w/s: %q", trim)
 			}
 			inDeviceBlock = true
+
 			continue
 		}
 		if inDeviceBlock {
@@ -130,6 +131,7 @@ func parseIostat(r io.Reader) ([]IostatSample, error) {
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("scan iostat: %w", err)
 	}
+
 	return samples, nil
 }
 
@@ -149,5 +151,6 @@ func tryParseIostatTimestamp(s string) (int64, bool) {
 			return t.Unix(), true
 		}
 	}
+
 	return 0, false
 }

@@ -9,6 +9,7 @@ investigation. See `docs/plans/iops-investigation/` for the measurement plan.
 |---|---|---|
 | `IOPS_RIG_NATS_IMAGE` | `nats:2.12.6` | Full image reference, including registry and tag. Override to test a specific NATS version or a private-registry build. |
 | `IOPS_RIG_NATS_REPLICAS` | `3` | Cluster size. Set to `5` for the M1.10 R=5 comparison run. |
+| `IOPS_RIG_DIR` | `./data` (auto-created) | Base directory for NATS JetStream data. Resolves relative to `docker/`, i.e. `test/iops-investigation/docker/data/`. Docker auto-creates the subdirectories on first `up` — no manual provisioning needed for local runs. Override to a dedicated mount point for measurement runs requiring isolated storage. |
 
 ## Bring the rig up and down
 
@@ -33,6 +34,22 @@ Run `make reset` at the start of every measurement run to guarantee fresh
 JetStream state. Partial teardowns leave stale stream metadata and will
 confound measurements.
 
+**Note (bind mounts + root ownership):** NATS writes `/data` as **root**, so the
+bind-mounted host dirs are root-owned and a plain `rm -rf` fails with EPERM.
+`make reset` handles this for you — it clears the data from inside a throwaway
+root container, then restarts a fresh cluster. To clear manually (e.g. if you
+used a custom `IOPS_RIG_DIR`):
+
+```bash
+docker run --rm -v "$(pwd)/docker/data:/d" alpine sh -c 'rm -rf /d/iops-nats-*'
+# or for a custom IOPS_RIG_DIR:
+docker run --rm -v "${IOPS_RIG_DIR}:/d" alpine sh -c 'rm -rf /d/iops-nats-*'
+```
+
+Root-owned `docker/data/` also breaks `go ./...` tree-walks (`go build/vet/test`)
+with "permission denied" — always clear it (via `make reset` or the command
+above) before running Go tooling from the module root.
+
 ## Connecting to the cluster
 
 Only `nats-1` exposes host ports. Use `nats://localhost:4222` as the single
@@ -54,6 +71,38 @@ If the `nats` CLI is available, the equivalent check is:
 ```bash
 nats stream ls --server localhost:4222
 # Expected: no streams found
+```
+
+## NATS data directory
+
+The NATS JetStream `store_dir` (`/data` inside each container) is bind-mounted
+to the host. By default it lands under `docker/data/` relative to this
+directory (i.e. `test/iops-investigation/docker/data/iops-nats-N`). Docker
+auto-creates that directory tree on the first `docker compose up` — no manual
+provisioning is required for local development and CI runs.
+
+To redirect NATS data to a dedicated mount point (e.g. a T710 NVMe for
+measurement runs requiring isolated storage), set `IOPS_RIG_DIR`:
+
+```bash
+export IOPS_RIG_DIR=/mnt/t710
+```
+
+The per-node subdirectories (`$IOPS_RIG_DIR/iops-nats-1` … `iops-nats-5`) are
+also auto-created by Docker on first `up`.
+
+**Cleanup between runs:** `docker compose down -v` does not clear bind-mounted
+directories, and the data is **root-owned** (NATS writes as root) so a plain
+`rm -rf` fails. **`make reset` does the right thing** — it deletes the data via
+a throwaway root container and restarts a fresh cluster, so run it between
+measurement runs to guarantee fresh JetStream state. To clear manually:
+
+```bash
+# Default path (no IOPS_RIG_DIR set):
+docker run --rm -v "$(pwd)/docker/data:/d" alpine sh -c 'rm -rf /d/iops-nats-*'
+
+# Custom path:
+docker run --rm -v "${IOPS_RIG_DIR}:/d" alpine sh -c 'rm -rf /d/iops-nats-*'
 ```
 
 ## Image override
@@ -122,6 +171,29 @@ Raw cumulative counters — Phase 3e diffs `row[n] - row[n-1]` per device.
 ```bash
 scripts/capture-cgroup-io.sh \
   --output results/run-001/cgroup_io.raw \
+  --duration 600 \
+  --containers iops-nats-1,iops-nats-2,iops-nats-3
+```
+
+### capture-cgroup-cpumem.sh (NATS CPU + RSS source)
+
+Sibling of `capture-cgroup-io.sh`: same containers, cadence, and full-ID
+resolution, but reads two files in each container's cgroup v2 scope dir —
+`cpu.stat`'s `usage_usec` (cumulative CPU time, µs) and `memory.current`
+(instantaneous RSS, bytes).
+
+Output format (space-separated, one row per container per sample):
+```
+# t_unix_ns container usage_usec memory_current_bytes
+<unix_ns> iops-nats-1 1234567890 268435456
+```
+`cmd/fitmodel` diffs consecutive `usage_usec` into a per-second CPU
+fraction-of-one-core (1.0 = one full core) and carries `memory.current`
+through as instantaneous RSS.
+
+```bash
+scripts/capture-cgroup-cpumem.sh \
+  --output results/run-001/cgroup_cpumem.raw \
   --duration 600 \
   --containers iops-nats-1,iops-nats-2,iops-nats-3
 ```
