@@ -17,7 +17,7 @@ human inspection done below.
 | `manager.go:394` | Manager.Start Godoc example. Migrated in Task 11. |
 | `examples/basic/main.go:133` | Basic example reads `mgr.CurrentAssignment()` (line 154). MIGRATE. |
 | `test/simulation/internal/worker/worker.go:433` | Simulation worker — needs Stable before producing load. MIGRATE. |
-| `test/iops-investigation/cmd/harness/harness.go:493` | IOPS harness. MIGRATE. |
+| `test/perf-measurement/cmd/harness/harness.go:493` | IOPS harness. MIGRATE. |
 | `internal/testutil/nats.go:313` (`StartWorkers`) | Used by clusters that expect ready managers. MIGRATE inside helper. |
 | `internal/testutil/manager_helpers.go` (`StartManagerWithHandoffRecorder`) | Explicitly migrated by Task 10 Step 3. |
 | `test/integration/handoff/handoff_sweeper_integration_test.go:67` | Sweeper test reads assignment. MIGRATE. |

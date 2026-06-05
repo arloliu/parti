@@ -109,7 +109,7 @@ requires the N-sweep to see if IOPS/RSS grow linearly or worse.
   post-warmup window, averaged across reps).
 
 ## Raw data
-`test/iops-investigation/results/first/dyn-n2000-k2_5-file/rep{1,2,3}/`
+`test/perf-measurement/results/first/dyn-n2000-k2_5-file/rep{1,2,3}/`
 (`latency.json`, `cgroup_io.raw`, `cgroup_cpumem.raw`, `jsz.raw`,
 `manifest.yaml`).
 

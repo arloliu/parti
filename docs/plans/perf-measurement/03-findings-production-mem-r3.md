@@ -157,9 +157,9 @@ RSS (~1.6 GiB/node). Still no wall; **RSS is the first thing you'd budget for**
 
 ## Raw data & model
 - Fitted model (committed): [`model-production-mem-r3.json`](model-production-mem-r3.json)
-  (= `test/iops-investigation/results/armb/model-armb.json`).
+  (= `test/perf-measurement/results/armb/model-armb.json`).
 - Raw per-cell captures (gitignored):
-  `test/iops-investigation/results/armb/armb-N{1000,2000,3000,5000}-k{1,2,4}/rep{1,2,3}/`
+  `test/perf-measurement/results/armb/armb-N{1000,2000,3000,5000}-k{1,2,4}/rep{1,2,3}/`
   (`latency.json`, `cgroup_io.raw`, `cgroup_cpumem.raw`, `manifest.yaml`).
 - Reproduce metrics: `cmd/fitmodel/fitmodel --results results/armb --dump`.
 - Predict: `cmd/estimator/estimator --model docs/plans/perf-measurement/model-production-mem-r3.json --n <N> --k <k> --storage file`.

@@ -92,7 +92,7 @@ The plan does **not** commit to a code change; it commits to data.
 ## Layout
 
 The investigation is split between two trees: planning artefacts here
-under `docs/plans/`, and the runnable rig under `test/iops-investigation/`
+under `docs/plans/`, and the runnable rig under `test/perf-measurement/`
 (mirroring the existing `test/simulation/` convention).
 
 **Planning artefacts — this directory:**
@@ -104,12 +104,12 @@ under `docs/plans/`, and the runnable rig under `test/iops-investigation/`
 | `findings.md` | Written conclusions after enough runs to draw them. Added at the end. |
 | `reviews/` | External review reports (e.g. `/post-impl-review` output) if produced. |
 
-**Runnable rig — `test/iops-investigation/` (added during Phase 1):**
+**Runnable rig — `test/perf-measurement/` (added during Phase 1):**
 
 | Path | Content |
 |---|---|
 | `Makefile` | `make up`, `make down`, `make reset`, `make image-digest`. |
-| `docker/docker-compose.yaml` | 3 / 5-replica NATS cluster; image overridable via `IOPS_RIG_NATS_IMAGE` (default `nats:2.12.6`). |
+| `docker/docker-compose.yaml` | 3 / 5-replica NATS cluster; image overridable via `PERF_RIG_NATS_IMAGE` (default `nats:2.12.6`). |
 | `docker/nats-server.conf` | Minimal JS configuration. |
 | `cmd/harness/main.go` | Workload binary with every knob in §M1 of the plan. |
 | `cmd/calibrate/main.go` | M4 / M4.1 calibration driver. |
@@ -128,9 +128,9 @@ under `docs/plans/`, and the runnable rig under `test/iops-investigation/`
 |---|---|
 | Hypothesis written down | Done (this README + `00-attribution-plan.md`) |
 | Plan reviewed | Done — 8 rounds of Copilot `gpt-5.5 xhigh` review + 1 Gemini 3.1 Pro pass. Consensus: ready for execution. See `tmp/00-attribution-plan_iops-investigation_review*.md`. |
-| Rig built | Done — Phases 1–4 implementation-complete; e2e smoke test (`TestE2E_HarnessToAggregatedCSV`) exercises the full harness → aggregate → CSV pipeline. See `test/iops-investigation/`. |
-| Phase 5 — Matrix execution | Pending operator. Follow `test/iops-investigation/RUNBOOK.md`: M4 calibration → M1.0 MDE gate → full 190-run campaign → Tukey outlier handling → M1.11 pin-swap. |
-| Phase 6 — Analysis & findings | Toolchain ready; findings TBD after Phase 5 data. `test/iops-investigation/scripts/analyze.py` produces `slope_table.csv` / `attribution_table.csv` / `mitigation_table.csv` / `mde.csv`. `findings.md` scaffold in place with `<TBD>` placeholders for every quantitative claim. See `RUNBOOK.md` §9. |
+| Rig built | Done — Phases 1–4 implementation-complete; e2e smoke test (`TestE2E_HarnessToAggregatedCSV`) exercises the full harness → aggregate → CSV pipeline. See `test/perf-measurement/`. |
+| Phase 5 — Matrix execution | Pending operator. Follow `test/perf-measurement/RUNBOOK.md`: M4 calibration → M1.0 MDE gate → full 190-run campaign → Tukey outlier handling → M1.11 pin-swap. |
+| Phase 6 — Analysis & findings | Toolchain ready; findings TBD after Phase 5 data. `test/perf-measurement/scripts/analyze.py` produces `slope_table.csv` / `attribution_table.csv` / `mitigation_table.csv` / `mde.csv`. `findings.md` scaffold in place with `<TBD>` placeholders for every quantitative claim. See `RUNBOOK.md` §9. |
 | Findings written up | TODO |
 
 Phases 1–4 delivered: docker-compose rig, instrumented JetStream harness,

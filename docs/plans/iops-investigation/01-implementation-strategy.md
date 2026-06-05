@@ -62,20 +62,20 @@ between runs, and the cluster reachable from the harness binary.
 
 **Tasks:**
 
-1. `test/iops-investigation/docker/docker-compose.yaml` — 3-node and
-   5-node variants (override via `IOPS_RIG_NATS_REPLICAS`),
-   `image: ${IOPS_RIG_NATS_IMAGE:-nats:2.12.6}`, JetStream enabled,
+1. `test/perf-measurement/docker/docker-compose.yaml` — 3-node and
+   5-node variants (override via `PERF_RIG_NATS_REPLICAS`),
+   `image: ${PERF_RIG_NATS_IMAGE:-nats:2.12.6}`, JetStream enabled,
    named volumes per node, cluster routes. Mirrors the
    `test/simulation/docker/` convention.
-2. `test/iops-investigation/docker/nats-server.conf` — minimal JS
+2. `test/perf-measurement/docker/nats-server.conf` — minimal JS
    configuration matching the user's prod where known
    (`jetstream { store_dir: /data }`, cluster section, sizing).
-3. `test/iops-investigation/Makefile` — `make up`, `make down`,
+3. `test/perf-measurement/Makefile` — `make up`, `make down`,
    `make reset` (= `down -v && up`), and `make image-digest` (records
    `docker image inspect` output for the manifest).
-4. `test/iops-investigation/.gitignore` — `results/`.
+4. `test/perf-measurement/.gitignore` — `results/`.
 5. Document the env-var contract in
-   `test/iops-investigation/README.md`.
+   `test/perf-measurement/README.md`.
 
 **Suggested model + effort:** **Sonnet 4.6 (medium)**. Pure templating
 + compose. Promote to Opus only if the user's prod has unusual NATS
@@ -96,16 +96,16 @@ and exposes flags for every independent variable in §M1.
 
 **Tasks:**
 
-1. `test/iops-investigation/internal/instrumentedjs/` — wrapper for
+1. `test/perf-measurement/internal/instrumentedjs/` — wrapper for
    `jetstream.JetStream` and `jetstream.KeyValue` with per-`(bucket,
    op)` counters. **Load-bearing for the entire attribution story.**
-2. `test/iops-investigation/internal/storageverify/` — given the
+2. `test/perf-measurement/internal/storageverify/` — given the
    manifest's expected storage class for each stream, calls
    `stream info` and asserts.
-3. `test/iops-investigation/cmd/harness/main.go` — workload binary with
+3. `test/perf-measurement/cmd/harness/main.go` — workload binary with
    the flags in §R2, hygiene checks from §R4 (Stable / not Degraded
    before capture), and a clean shutdown.
-4. `test/iops-investigation/go.mod` — separate module so the rig can
+4. `test/perf-measurement/go.mod` — separate module so the rig can
    pin its own parti version (`v2.3.0` for the main matrix, HEAD for
    M1.11). Co-locates harness, calibrate, aggregate binaries under one
    module.
@@ -137,20 +137,20 @@ node_exporter, jsz, and the harness counters.
 
 **Tasks:**
 
-1. `test/iops-investigation/scripts/capture-cgroup-io.sh` — 1 Hz poller
+1. `test/perf-measurement/scripts/capture-cgroup-io.sh` — 1 Hz poller
    reading `/sys/fs/cgroup/system.slice/docker-<id>.scope/io.stat` for
    each NATS container, diffing between samples.
-2. `test/iops-investigation/scripts/capture-iostat.sh` — secondary
+2. `test/perf-measurement/scripts/capture-iostat.sh` — secondary
    host-level `iostat -x -d -t 1`.
-3. `test/iops-investigation/scripts/capture-jsz.sh` — `curl :8222/jsz`
+3. `test/perf-measurement/scripts/capture-jsz.sh` — `curl :8222/jsz`
    and `:8222/varz` polled at 5 s.
-4. `test/iops-investigation/scripts/prometheus-node-exporter.yaml` —
+4. `test/perf-measurement/scripts/prometheus-node-exporter.yaml` —
    drop-in compose service exporting host-level disk metrics.
-5. `test/iops-investigation/cmd/aggregate/main.go` — reads all four
+5. `test/perf-measurement/cmd/aggregate/main.go` — reads all four
    sources + harness counters, reconciles them into one per-run CSV
    with the columns §R3 specifies. Aborts loudly if cgroup-totals and
    iostat disagree by > 5 %. Go for parity with the rest of the rig.
-6. `test/iops-investigation/scripts/run-matrix.sh` — drives M1.0–M1.11
+6. `test/perf-measurement/scripts/run-matrix.sh` — drives M1.0–M1.11
    according to a pre-registered random schedule (R5), with seed
    recorded.
 
@@ -180,7 +180,7 @@ KV-paths table; M4.1 is the 48-grid idle-pull table.
 
 **Tasks:**
 
-1. `test/iops-investigation/cmd/calibrate/main.go` — calibration driver
+1. `test/perf-measurement/cmd/calibrate/main.go` — calibration driver
    binary. Sub-commands: `kv-put`, `kv-get`, `kv-keys`, `kv-watch`,
    `kv-put-mem`, `idle-pull`.
 2. The `idle-pull` sub-command takes flags `--c-stream`,
@@ -189,9 +189,9 @@ KV-paths table; M4.1 is the 48-grid idle-pull table.
    durable pull consumers, runs them at idle for 60 s, captures
    per-node iostat/cgroup output, classifies node-role from
    `stream info`. Discards captures where leadership moves.
-3. `test/iops-investigation/scripts/run-m4.sh` — sweeps the grid,
+3. `test/perf-measurement/scripts/run-m4.sh` — sweeps the grid,
    writes results to
-   `test/iops-investigation/results/m4/m4_calibration.csv`.
+   `test/perf-measurement/results/m4/m4_calibration.csv`.
 
 **Suggested model + effort:**
 
@@ -228,7 +228,7 @@ Stable, storage class mismatch, leader churn), promote to **Opus 4.7
 (high)** for the diagnosis pass; the rig is now interacting with
 parti's real state machine and the right call may be non-obvious.
 
-**Done means:** `test/iops-investigation/results/run-NNN-<label>/aggregated.csv`
+**Done means:** `test/perf-measurement/results/run-NNN-<label>/aggregated.csv`
 exists for all 190 runs.
 
 **Review:** none per-run. Audit at the end: a spot-check pass over a
@@ -243,7 +243,7 @@ actions.
 
 **Tasks:**
 
-1. `test/iops-investigation/scripts/analyze.py` — runs the OLS fits per
+1. `test/perf-measurement/scripts/analyze.py` — runs the OLS fits per
    §M2 across all configs, produces a slope/intercept/CI table per
    column. Python here (pandas / statsmodels) — the stats glue is more
    ergonomic in Python than Go; this is the only Python in the rig.

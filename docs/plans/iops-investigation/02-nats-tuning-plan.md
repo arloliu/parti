@@ -30,16 +30,16 @@ tuning explored here.
 Read in this order:
 1. `docs/plans/iops-investigation/findings.md` — current state of the investigation, operator-facing.
 2. `docs/plans/iops-investigation/tier1-findings.md`, `m17-findings.md`, `m19-findings.md` — prior result details.
-3. `test/iops-investigation/RUNBOOK.md` §3 — execution-tier framework + cadence rationale.
-4. `test/iops-investigation/docker/nats-server.conf` — where most server-side knobs go.
+3. `test/perf-measurement/RUNBOOK.md` §3 — execution-tier framework + cadence rationale.
+4. `test/perf-measurement/docker/nats-server.conf` — where most server-side knobs go.
 5. This file (Plan 02).
 
 Worktree state at handoff:
 - Branch: `worktree-iops-investigation`, rebased onto `origin/main`, 42 commits ahead.
-- HEAD: `7dcb0ba build: exclude test/iops-investigation/ from TEST_DIRS`.
+- HEAD: `7dcb0ba build: exclude test/perf-measurement/ from TEST_DIRS`.
 - `make lint` ✓, `make test` ✓, working tree clean.
 - Rig: docker compose R=3 profile is currently up.
-- Python venv: `test/iops-investigation/.venv/` with pandas/numpy/statsmodels installed.
+- Python venv: `test/perf-measurement/.venv/` with pandas/numpy/statsmodels installed.
 
 Reference data for comparison (capture-window mean iops_write, cluster-summed):
 
@@ -108,7 +108,7 @@ Each cell: N∈{1000, 3000} × 3 reps = 6 runs.
 
 ### 5a. Server-config knobs (M2.1, M2.2)
 
-Edit `test/iops-investigation/docker/nats-server.conf`. Current content includes server name, jetstream block, cluster block. Add the new tuning keyword inside the `jetstream` block. Example:
+Edit `test/perf-measurement/docker/nats-server.conf`. Current content includes server name, jetstream block, cluster block. Add the new tuning keyword inside the `jetstream` block. Example:
 
 ```hcl
 jetstream {
@@ -125,7 +125,7 @@ Option (a) is cleaner; (b) is less invasive. Start with (a).
 
 ### 5b. Consumer-side knobs (M2.3, M2.4)
 
-Check `test/iops-investigation/cmd/harness/main.go` for existing flags. `--consumer-mode` already supports `dynamic` / `queue` / `static`. `--max-ack-pending` may need to be added. Pattern follows existing `--kv-storage` / `--data-storage` flags.
+Check `test/perf-measurement/cmd/harness/main.go` for existing flags. `--consumer-mode` already supports `dynamic` / `queue` / `static`. `--max-ack-pending` may need to be added. Pattern follows existing `--kv-storage` / `--data-storage` flags.
 
 If a flag is missing, add it following existing conventions, write a unit test, run `make lint` + sub-module `go test`, commit.
 
@@ -148,7 +148,7 @@ _def_cell M2.2 3 "1000 3000" "--two-phase=true --consumer-mode=dynamic --nats-co
 Same shape as M1.7 / M1.9 focused tests:
 
 ```bash
-cd test/iops-investigation
+cd test/perf-measurement
 RESULTS_DIR=$(pwd)/results/m2-$(date +%Y%m%d-%H%M%S)
 mkdir -p "$RESULTS_DIR"
 nohup bash scripts/run-matrix.sh \
@@ -258,7 +258,7 @@ cd /home/arlo/projects/parti/.claude/worktrees/iops-investigation
 cat docs/plans/iops-investigation/findings.md          # what we know
 cat docs/plans/iops-investigation/02-nats-tuning-plan.md  # this plan
 git log --oneline -5                                   # latest commits
-docker compose -f test/iops-investigation/docker/docker-compose.yaml --profile r3 ps  # rig state
+docker compose -f test/perf-measurement/docker/docker-compose.yaml --profile r3 ps  # rig state
 ```
 
 Start at §3 (R1 research) of this plan.

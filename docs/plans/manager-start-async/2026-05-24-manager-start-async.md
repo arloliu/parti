@@ -177,7 +177,7 @@ Known matches (expand via the grep):
 - `examples/basic/main.go:133` — MIGRATE
 - `examples/degraded-readiness/main.go:97` — REVIEW (degraded-mode example)
 - `test/simulation/internal/worker/worker.go:433` — MIGRATE
-- `test/iops-investigation/cmd/harness/harness.go:493` — MIGRATE
+- `test/perf-measurement/cmd/harness/harness.go:493` — MIGRATE
 - `test/integration/consumer/dynamic_test.go:277` — REVIEW
 - `test/integration/manager/manager_lifecycle_idempotency_test.go:47,57` — REVIEW
 - `test/integration/failure/degraded_mode_test.go:46,110,197,256,333` — REVIEW (testing degraded; Start may intentionally not reach Stable)

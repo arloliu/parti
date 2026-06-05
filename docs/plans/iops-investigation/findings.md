@@ -197,7 +197,7 @@ worth taking.
 **Parti API status:** `MemoryStorage` and `Replicas` are not yet
 exposed on `consumer.Dynamic`. The IOPS investigation harness applies
 them by intercepting `CreateOrUpdateConsumer` in its NATS wrapper
-(see `test/iops-investigation/internal/instrumentedjs/`). Promoting
+(see `test/perf-measurement/internal/instrumentedjs/`). Promoting
 the fields to public options on `consumer.Dynamic` is a small follow-up
 (~1–2 h) — recommended once an operator wants to deploy either M2.A
 or M2.B.
@@ -330,7 +330,7 @@ Full methodology and validation: `00-attribution-plan.md`,
 
 ## 8. Raw data
 
-All under `test/iops-investigation/results/`. Campaign seed `42`,
+All under `test/perf-measurement/results/`. Campaign seed `42`,
 NATS image `nats:2.12.6`, R=3.
 
 - `tier1-20260517-032602/` — M1.0 / M1.1 / M1.2 / M1.3 (36 runs)

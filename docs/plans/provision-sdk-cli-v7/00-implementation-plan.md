@@ -68,7 +68,7 @@ status.
 `github.com/arloliu/parti/v2` is a NATS partitioning library; every consumer
 of it would inherit that tree if the controller lived in the main module. The
 repo already isolates a heavy, optional component this way —
-`test/iops-investigation/go.mod` is a nested module with a
+`test/perf-measurement/go.mod` is a nested module with a
 `replace github.com/arloliu/parti/v2 => ../..` directive, and the root
 `Makefile`'s `TEST_DIRS` explicitly excludes it. Phase 7 follows that
 precedent.
@@ -156,7 +156,7 @@ Create the `k8s/` module skeleton.
 
 - **`k8s/go.mod`** — `module github.com/arloliu/parti/v2/k8s`, `go 1.26.0`,
   and `replace github.com/arloliu/parti/v2 => ../` (the parent is one
-  directory up, unlike `iops-investigation`'s `../..`). The `go` directive is
+  directory up, unlike `perf-measurement`'s `../..`). The `go` directive is
   `1.26.0`, **not** `1.25.0`: every pinned Kubernetes / controller module
   below declares `go 1.26.0` in its own `go.mod`, and a module's `go`
   directive must be ≥ the maximum of its dependencies', so `1.25.0` would

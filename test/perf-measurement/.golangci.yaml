@@ -1,0 +1,312 @@
+# golangci-lint configuration for the test/perf-measurement nested module
+# ========================================================================
+# Copied from the root .golangci.yaml so the measurement rig is held to the
+# same rules as the shipped library. The one tailoring (mirroring k8s/) is
+# gomoddirectives.replace-local: this nested module intentionally uses a local
+# `replace github.com/arloliu/parti/v2 => ../..` to build against the parent.
+#
+# Run via the root `make lint-perf` or the rig `make lint` (both use the pinned
+# golangci-lint from ../../linter.go.mod).
+#
+# Tested against golangci-lint v2.11.4 (see root Makefile GOLANGCI_LINT_VERSION).
+
+version: "2"
+
+linters:
+  enable:
+    # -- Correctness (catches real bugs) --
+    - bodyclose        # close HTTP response bodies
+    - copyloopvar      # Go 1.22+ loop-variable semantics
+    - durationcheck    # multiplying two durations
+    - errname          # error sentinel/type naming
+    - errorlint        # %w vs %s, errors.Is / errors.As
+    - exhaustive       # exhaustive switch / map
+    - fatcontext       # deep / pointless context wrapping
+    - goprintffuncname # custom printf-like funcs named *f
+    - loggercheck      # structured-logger key/value pairs
+    - makezero         # non-zero initial make() length
+    - musttag          # struct tags on marshaled types
+    - nilnil           # return (nil, nil)
+    - noctx            # HTTP calls without context
+    - reassign         # reassigning top-level vars
+    - rowserrcheck     # database/sql rows.Err
+    - sqlclosecheck    # close database/sql rows/stmts
+    - wastedassign     # assignments never read
+
+    # -- Security --
+    - asasalint   # arg-as-arg (slice-unpacking gotchas)
+    - asciicheck  # non-ASCII identifiers
+    - bidichk     # bidirectional text attacks
+    - gosec       # security static analysis
+
+    # -- Style / readability --
+    - decorder          # consistent file structure
+    - misspell          # common misspellings
+    - nakedret          # naked returns
+    - nlreturn          # blank line before return
+    # nolintlint disabled: its "unused directive" check races with the
+    # analyzers it depends on (revive in particular). Under CI concurrency
+    # it intermittently reports legitimately-used //nolint directives as
+    # unused, producing flaky lint failures. The other nolintlint checks
+    # (require-specific, require-explanation) provide marginal value and
+    # aren't worth the recurring CI noise. Re-evaluate after upstream
+    # golangci-lint fixes the race (tracked: golangci-lint v2.12.x still
+    # racy at concurrency=8; not fixed by upgrade as of v2.12.2).
+    - nosprintfhostport # host:port via Sprintf
+    - predeclared       # shadowing predeclared identifiers
+    - unconvert         # redundant type conversions
+    - unparam           # unused function parameters
+    - usestdlibvars     # use stdlib constants
+    - whitespace        # trailing whitespace
+
+    # -- Complexity / performance --
+    - cyclop   # cyclomatic complexity per function
+    - gocyclo  # cyclomatic complexity per function (alt)
+    - prealloc # preallocate slice capacity
+
+    # -- Module hygiene --
+    - gomoddirectives # go.mod directive hygiene
+    - gomodguard      # blocked / replace modules
+
+    # -- Meta-linters (umbrella) --
+    - gocritic # large opinionated check suite
+    - revive   # configurable linter (see settings)
+
+    # -- Compiler / build --
+    - gocheckcompilerdirectives # //go: directive correctness
+
+    # -- Test-only --
+    - testableexamples # Godoc examples actually runnable
+    - tparallel        # t.Parallel discipline
+
+  # Settings are sorted alphabetically by linter name for easy lookup.
+  settings:
+    cyclop:
+      max-complexity: 22
+      package-average: 15
+
+    errcheck:
+      check-type-assertions: true
+
+    exhaustive:
+      check:
+        - switch
+        - map
+
+    gocritic:
+      settings:
+        captLocal:
+          paramsOnly: true
+        ifElseChain:
+          minThreshold: 3
+        underef:
+          skipRecvDeref: false
+
+    gocyclo:
+      min-complexity: 30
+
+    gomoddirectives:
+      # This nested module intentionally uses a local replace directive to
+      # resolve the parent github.com/arloliu/parti/v2 module from ../.. .
+      replace-local: true
+
+    gomodguard:
+      blocked:
+        modules:
+          - github.com/golang/protobuf:
+              recommendations:
+                - google.golang.org/protobuf
+              reason: see https://developers.google.com/protocol-buffers/docs/reference/go/faq#modules
+          - github.com/satori/go.uuid:
+              recommendations:
+                - github.com/google/uuid
+              reason: satori's package is not maintained
+          - github.com/gofrs/uuid:
+              recommendations:
+                - github.com/google/uuid
+              reason: gofrs' package is not a Go module
+
+    gosec:
+      # G706 (log-injection via taint analysis) produces false positives in
+      # test/simulation code where inputs are internally generated. G118
+      # (context discipline) is intentionally kept on — it catches real
+      # cancel-fn leaks.
+      excludes:
+        - G706
+
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment # memory-layout micro-optimization, noisy
+        - shadow         # too many false positives on err shadowing
+
+    nakedret:
+      max-func-lines: 40
+
+    nlreturn:
+      block-size: 7
+
+    revive:
+      enable-all-rules: true
+      rules:
+        # -- Disabled: not applicable to this codebase --
+        - name: add-constant        # magic-number policing is too noisy
+          disabled: true
+        - name: cognitive-complexity # covered by cyclop/gocyclo
+          disabled: true
+        - name: cyclomatic           # covered by cyclop/gocyclo
+          disabled: true
+        - name: flag-parameter       # library API takes bool toggles legitimately
+          disabled: true
+        - name: line-length-limit    # formatting is enforced by gofmt
+          disabled: true
+        - name: max-public-structs   # leaf-package types/ intentionally exposes many
+          disabled: true
+        - name: package-naming
+          # types/ is this module's public leaf package
+          # (github.com/arloliu/parti/v2/types). Renaming is a breaking v2.x
+          # change for every downstream user.
+          disabled: true
+        - name: unchecked-type-assertion
+          # errcheck check-type-assertions already covers this with fewer
+          # false positives.
+          disabled: true
+        - name: unexported-return  # helpers returning internal types are fine
+          disabled: true
+        - name: unused-parameter   # too noisy on interface implementations
+          disabled: true
+        - name: unused-receiver    # too noisy on method-set conformance
+          disabled: true
+        - name: var-declaration    # stylistic, not a correctness issue
+          disabled: true
+
+        # -- Customized: enabled with specific arguments or excludes --
+        - name: comment-spacings
+          arguments:
+            - nolint
+          severity: warning
+          exclude:
+            - ""
+
+        - name: context-as-argument
+          severity: warning
+          exclude:
+            - '**/*_test.go'
+
+        - name: enforce-switch-style
+          arguments: ["allowNoDefault"]
+          severity: warning
+          exclude:
+            - '**/*_test.go'
+
+        - name: exported
+          arguments:
+            - disableStutteringCheck
+            - checkPrivateReceivers
+            - checkPublicInterface
+            - sayRepetitiveInsteadOfStutters
+          severity: warning
+          exclude:
+            - ""
+
+        - name: function-length
+          arguments:
+            - 100 # max statements
+            - 0   # max lines (0 = unlimited)
+          severity: warning
+          exclude:
+            - '**/*_test.go'
+
+        - name: import-shadowing
+          severity: warning
+          exclude:
+            - '**/*_test.go'
+
+        - name: receiver-naming
+          exclude:
+            - '**/*_test.go'
+
+        - name: unhandled-error
+          # Writes to *strings.Builder / *bytes.Buffer cannot fail, and
+          # fmt.Fprintf/Fprintln to those writers inherits the same property
+          # — staticcheck QF1012 actively recommends this idiom over
+          # WriteString(fmt.Sprintf(...)).
+          arguments:
+            - fmt.Errorf
+            - fmt.Printf
+            - fmt.Println
+            - fmt.Fprintf
+            - fmt.Fprintln
+            - strings.Builder.*
+            - bytes.Buffer.*
+          severity: warning
+          exclude:
+            - ""
+
+        - name: var-naming
+          arguments:
+            - []
+            - []
+            - - skipPackageNameChecks: true
+          severity: warning
+
+    rowserrcheck:
+      packages:
+        - github.com/jmoiron/sqlx
+
+    staticcheck:
+      checks:
+        - all
+        - "-ST1003" # identifier-naming conventions; too noisy on existing API
+
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      # Suppress godot inside IDE hints / TODOs
+      - linters:
+          - godot
+        source: (noinspection|TODO)
+      # Suppress gocritic on IDE hints
+      - linters:
+          - gocritic
+        source: //noinspection
+      # Relax noisy checks inside test files
+      - linters:
+          - bodyclose
+          - dupl
+          - goconst
+          - gosec
+          - noctx
+          - wrapcheck
+        path: _test\.go
+      # Allow runtime.GC() in tests: required by leak-detection tests to
+      # trigger finalizers; the call is intentional, not a code smell.
+      - linters:
+          - revive
+        text: call-to-gc
+        path: _test\.go
+    paths: &excluded-paths
+      - vendor
+      - evaluations
+      - examples
+      - docs
+      - testdata
+      - tools
+      - third_party$
+      - builtin$
+      - examples$
+
+formatters:
+  enable:
+    - goimports
+  exclusions:
+    generated: lax
+    paths: *excluded-paths
+
+issues:
+  max-same-issues: 50

@@ -75,11 +75,11 @@ ramps `N` upward and **stops honestly** if the box saturates (defined in
 ## 4. Architecture — extend the IOPS rig
 
 The harness lives in the existing **separate module**
-`test/iops-investigation/` (`module github.com/arloliu/parti/test/iops-investigation`).
+`test/perf-measurement/` (`module github.com/arloliu/parti/test/perf-measurement`).
 We reuse, unchanged where possible:
 
 - Docker-compose cluster bring-up (`docker/`, `Makefile`), with
-  `IOPS_RIG_NATS_REPLICAS=5` for the RF=5 cluster.
+  `PERF_RIG_NATS_REPLICAS=5` for the RF=5 cluster.
 - `internal/aggregate/` capture: cgroup io/cpu, iostat, jsz, RPC
   aggregation, manifest.
 - `cmd/harness` orchestration, worker/manager wiring, partition seeding,
@@ -402,7 +402,7 @@ captured: cluster did not reach Stable in T s"), never silently omitted.
 ## 12. Deliverables & layout
 
 ```
-test/iops-investigation/
+test/perf-measurement/
   internal/load/            # open-loop producer (monotonic-epoch payloads)
   internal/latency/         # HDR record + merge + percentile gating + export
   internal/costmodel/       # multivariate fit (a + b·N + c·X) + predict

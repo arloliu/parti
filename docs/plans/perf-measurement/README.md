@@ -80,7 +80,7 @@ R=5 → R=3 turns disk IOPS from a per-node bottleneck into a non-issue.
 Predict cost/latency for a deployment (production config):
 
 ```
-cd test/iops-investigation
+cd test/perf-measurement
 cmd/estimator/estimator \
   --model ../../docs/plans/perf-measurement/model-production-mem-r3.json \
   --n 5000 --k 2 --storage file
@@ -106,7 +106,7 @@ bound.
 ---
 
 ## Rig
-Code: [`test/iops-investigation/`](../../../test/iops-investigation/) (separate
+Code: [`test/perf-measurement/`](../../../test/perf-measurement/) (separate
 Go module). Runners: `scripts/run-armb-matrix.sh` (production config),
 `scripts/run-load-matrix.sh` (full baseline matrix). Raw results land under
 `results/` (gitignored). Box: AMD Ryzen 9 9950X3D, NATS pinned to cores
