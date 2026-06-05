@@ -20,7 +20,12 @@ curve + cost model.
 | Message-delivery latency percentiles | ✅ measured |
 | Cost estimation at 2000 / 3000 / 5000 partitions | ✅ fitted model + estimator (validated to N=10k) |
 | Does one-consumer-per-partition scale? | ✅ **yes** — verified to **N=10,000** (lossless, flat ~1.4 ms P99) |
-| Metacontroller snapshot cost + `meta_compact` tuning | ✅ snapshot ~30 ms @ 10k (async); **knob inert**, don't tune ([04](04-findings-metacontroller.md)) |
+| Metacontroller snapshot cost + `meta_compact` tuning | ✅ snapshot ~30 ms @ 10k (async); **knob inert**, don't tune ([04](04-findings-metacontroller.md)); re-confirmed on NATS 2.14.2 ([05](05-findings-queue-floor.md)) |
+| Per-partition overhead vs the JetStream delivery floor | ✅ measured ([05](05-findings-queue-floor.md)) — latency indistinguishable from the floor; IOPS/RSS **flat in N** for the floor vs **linear in N** for the per-partition path (cost scales with consumer count, not partition count) |
+
+> **Version currency:** reports 02–04 ran on NATS **2.12.6**; report 05 runs on
+> **2.14.2** and re-measured dynamic N=5000 within noise of report 03 (145 vs 144
+> IOPS, ~4.1 vs ~4.0 GiB RSS) — the structural costs are version-insensitive.
 
 ---
 
@@ -33,6 +38,7 @@ curve + cost model.
 | 02 | [02-findings-baseline-file-r5.md](02-findings-baseline-file-r5.md) | **Baseline report** — the *expensive* default config (consumer state file-backed, R=5). Single cell, N=2000, 3 reps. |
 | 03 | [03-findings-production-mem-r3.md](03-findings-production-mem-r3.md) | **Production report** — the *recommended* config (memory consumer state, R=3). Full N-sweep, fitted cost model. |
 | 04 | [04-findings-metacontroller.md](04-findings-metacontroller.md) | **Metacontroller report** — snapshot cost + `meta_compact_size` sweep, extends scaling to N=10,000. Knob is inert; snapshot is a cheap async op on NATS ≥2.12. |
+| 05 | [05-findings-queue-floor.md](05-findings-queue-floor.md) | **Queue-floor report** — the delivery-floor reference (one shared consumer) the per-partition path is compared against; + `meta_compact` re-check on NATS 2.14.2. Establishes the baseline the collapse redesign targets. |
 | — | [model-production-mem-r3.json](model-production-mem-r3.json) | Fitted `a + b·N + c·X` coefficients for the production config (consumed by the estimator CLI). |
 
 **The two configs measured** (the A/B at the heart of the study):
