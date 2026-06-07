@@ -24,7 +24,7 @@ package fixedpartitions_test
 import (
 	"context"
 	"fmt"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -109,6 +109,7 @@ type vpProducer struct {
 	wg        sync.WaitGroup
 }
 
+//nolint:unparam // k is the partition count; constant across current tests by design.
 func startProducer(js jetstream.JetStream, k int, interval time.Duration) *vpProducer {
 	p := &vpProducer{stop: make(chan struct{})}
 	p.wg.Add(1)
@@ -266,7 +267,7 @@ func TestFixedPartitions_ClusterCrashRecovery(t *testing.T) {
 	// CRASH worker 1: kill its connection (no graceful relinquish). Survivors must
 	// detect via heartbeat TTL and rebind its slot durables from the cluster.
 	w[1].nc.Close()
-	t.Logf("Exp11/cluster-crash: killed worker[1] connection; waiting for TTL-driven reassignment")
+	t.Log("Exp11/cluster-crash: killed worker[1] connection; waiting for TTL-driven reassignment")
 	time.Sleep(10 * time.Second) // > HeartbeatTTL(5s) + reassignment + drain
 
 	// Survivors converge.
@@ -420,9 +421,7 @@ func TestFixedPartitions_ServerSidePartitionMapping(t *testing.T) {
 	published := make([]string, 0, 1024)
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		seq := 0
 		tk := time.NewTicker(8 * time.Millisecond)
 		defer tk.Stop()
@@ -440,7 +439,7 @@ func TestFixedPartitions_ServerSidePartitionMapping(t *testing.T) {
 				seq++
 			}
 		}
-	}()
+	})
 	time.Sleep(1 * time.Second)
 
 	m3 := newWorker() // JOIN
@@ -521,12 +520,12 @@ func newTimeLedger() *vpTimeLedger { return &vpTimeLedger{delivered: map[string]
 // delivery can be attributed to the worker that processed it.
 func (l *vpTimeLedger) handlerForWorker(worker string) consumer.MessageHandler {
 	return consumer.MessageHandlerFunc(func(_ context.Context, msg jetstream.Msg) error {
-		recv := time.Now().UnixNano()
+		recvNano := time.Now().UnixNano()
 		id, pubStr, _ := strings.Cut(string(msg.Data()), ":")
 		pubNano, _ := strconv.ParseInt(pubStr, 10, 64)
 		part, _ := strconv.Atoi(strings.TrimPrefix(msg.Subject(), "work."))
 		l.mu.Lock()
-		l.events = append(l.events, vpEvent{id: id, partition: part, worker: worker, pubNano: pubNano, recvNano: recv})
+		l.events = append(l.events, vpEvent{id: id, partition: part, worker: worker, pubNano: pubNano, recvNano: recvNano})
 		l.delivered[id]++
 		l.mu.Unlock()
 
@@ -664,11 +663,11 @@ func TestFixedPartitions_NoStopTheWorld(t *testing.T) {
 
 	prod := startTimedProducer(js, vpK, 20*time.Millisecond) // ~800 msg/s across 16 slots
 	time.Sleep(1500 * time.Millisecond)                      // warmup; exclude from baseline
-	tWarmupEnd := time.Now().UnixNano()
+	tWarmupEndNano := time.Now().UnixNano()
 
 	time.Sleep(2 * time.Second) // clean quiet baseline (steady 2-worker operation)
 
-	tJoin := time.Now().UnixNano()
+	tJoinNano := time.Now().UnixNano()
 	m3 := newWorker("w3") // JOIN 2->3: ConsistentHash moves ~1/3 of slots to w3
 	time.Sleep(3 * time.Second)
 	waitStable(m1)
@@ -678,7 +677,7 @@ func TestFixedPartitions_NoStopTheWorld(t *testing.T) {
 	time.Sleep(3 * time.Second)
 	waitStable(m1)
 	waitStable(m3)
-	tEnd := time.Now().UnixNano()
+	tEndNano := time.Now().UnixNano()
 
 	published := prod.stopAndWait()
 	t.Cleanup(func() { _ = m1.Stop(context.Background()); _ = m3.Stop(context.Background()) })
@@ -691,7 +690,7 @@ func TestFixedPartitions_NoStopTheWorld(t *testing.T) {
 	// 2) Analyze: classify slots, compute per-class latency distributions and the
 	// pause-sensitivity metrics. Extracted to keep this test under the cyclomatic
 	// budget; see analyzeNoStopTheWorld for the method.
-	s := analyzeNoStopTheWorld(ledger.snapshot(), tWarmupEnd, tJoin, tEnd)
+	s := analyzeNoStopTheWorld(ledger.snapshot(), tWarmupEndNano, tJoinNano, tEndNano)
 
 	t.Logf("Exp12/no-stop-the-world: slots retained=%d moved=%d (K=%d)", s.retained, s.moved, vpK)
 	t.Logf("  RETAINED latency ms: quiet p99=%.1f | churn p50=%.1f p99=%.1f max=%.1f (n_quiet=%d n_churn=%d)",
@@ -783,7 +782,7 @@ func classifyNoStwSlots(events []vpEvent) (moved, retained map[int]bool) {
 		for _, c := range m {
 			counts = append(counts, c)
 		}
-		sort.Sort(sort.Reverse(sort.IntSlice(counts)))
+		slices.SortFunc(counts, func(a, b int) int { return b - a })
 		if len(counts) >= 2 && counts[1] > overlapAllow {
 			moved[p] = true
 		} else {
@@ -860,8 +859,8 @@ func retainedDeadAir(events []vpEvent, moved map[int]bool, tJoin, tEnd int64) (d
 			pubTimes = append(pubTimes, e.pubNano)
 		}
 	}
-	sort.Slice(recvTimes, func(i, j int) bool { return recvTimes[i] < recvTimes[j] })
-	sort.Slice(pubTimes, func(i, j int) bool { return pubTimes[i] < pubTimes[j] })
+	slices.Sort(recvTimes)
+	slices.Sort(pubTimes)
 
 	return float64(maxGapNano(recvTimes)) / 1e6, float64(maxGapNano(pubTimes)) / 1e6
 }
@@ -928,9 +927,9 @@ func analyzeNoStopTheWorld(events []vpEvent, tWarmupEnd, tJoin, tEnd int64) noSt
 			}
 		}
 	}
-	sort.Slice(quietRetained, func(i, j int) bool { return quietRetained[i] < quietRetained[j] })
-	sort.Slice(churnRetained, func(i, j int) bool { return churnRetained[i] < churnRetained[j] })
-	sort.Slice(churnMoved, func(i, j int) bool { return churnMoved[i] < churnMoved[j] })
+	slices.Sort(quietRetained)
+	slices.Sort(churnRetained)
+	slices.Sort(churnMoved)
 
 	slow, epochsOver50, worstEpochMs := retainedPauseMetrics(events, moved, tJoin, tEnd)
 	deadAirMs, publishGapMs := retainedDeadAir(events, moved, tJoin, tEnd)
