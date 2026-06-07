@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v2.6.1] - 2026-06-07
+
+Maintenance release on top of v2.6.0. Two correctness fixes — a recovery-exit
+race that could strand a worker in `Degraded` with no record, and a misleading
+operator warning — plus a large documentation sync (scaling, IOPS, and perf
+findings) and internal consolidation of the degraded-state machinery. No API
+breaks; the only behavior change at defaults is the recovery-exit fix.
+
+### Fixed
+
+- **Exit `Degraded` only on a confirmed `Degraded`→`Stable` transition.**
+  `exitDegraded` cleared the degraded record after `transitionState(StateStable)`,
+  which returns true vacuously when already `Stable`. A recovery tick landing in
+  the enter window — record published by a concurrent `enterDegraded` but its
+  state transition not yet run — could clear that in-flight record, stranding the
+  worker in `Degraded` with a nil record where both recovery and alerting
+  early-return and it cannot self-heal until an unrelated degrade re-arms it. The
+  new `casToStableFromDegraded` clears the record only on a genuine `Degraded`→
+  `Stable` CAS, refusing the racy window so the in-flight enter completes and
+  recovers normally. Pinned by `manager_exit_confirmed_test.go` and the
+  enter/recover race stress test.
+- **Corrected the KV storage-mismatch startup warning.** `warnOnStorageMismatch`
+  claimed parti's defaults are `MemoryStorage` (they are `FileStorage`) and
+  pointed operators at `nats kv del <bucket>`, which deletes a key, not a bucket.
+  The comment and `Warn` message are now storage-direction-agnostic and use
+  `nats kv rm <bucket>` for bucket removal.
+
+### Documentation
+
+- **Operational guides synced with perf, IOPS, and scaling findings.** New
+  `docs/SCALING.md`; updates to `docs/CONSUMERS.md`, `docs/OPERATIONS.md`, and
+  `docs/CONFIGURATION.md` covering the consumer-replica/stream-replica match
+  rule, retention-policy matrix, and large-fleet scaling guidance.
+- **Partition-scaling feasibility study and guide.** A K-bounded
+  (subject-filtered) consumer assessment, a guide for combining NATS'
+  `partition()` subject transform with the existing `consumer.Dynamic`, and a
+  standalone POC under `docs/plans/partition-scaling/`. Conclusion:
+  `partition()` + `Dynamic` covers K≪N without shipping a new consumer type.
+
+### Internal
+
+- **Degraded-state consolidation.** Collapsed `degradedSince` +
+  `lastDegradedReason` into a single `atomic.Pointer[record]`, consolidated the
+  degrade-reason and KV-error handling paths, and shared watch-session,
+  KV-bucket, and state-transition helpers across the manager. Calculator helpers
+  shared and a dead restart-ratio path removed. Pure refactors apart from the
+  recovery-exit fix above.
+- **Perf-measurement rig.** New dynamic partition-consumer perf-measurement rig
+  with design, plan, and baseline/production/metacontroller/queue-floor findings
+  (`test/perf-measurement/`, renamed from `test/iops-investigation/`); its
+  embedded NATS server/client bumped to the latest release.
+- **Fixed-partition integration proofs.** Live-cluster tests proving
+  `consumer.Dynamic` over a `WorkQueuePolicy` stream and `partition()` + `Dynamic`
+  over a fixed partition count.
+- **Test stability.** The full-NATS-outage test now waits for the async
+  `OnDegraded` hook rather than reading the counter synchronously.
+
 ## [v2.6.0] - 2026-06-02
 
 Hardening release that deepens v2.5.0's self-healing and readies parti for
