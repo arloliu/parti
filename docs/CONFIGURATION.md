@@ -187,14 +187,16 @@ cfg := &parti.Config{
 | Bucket             | Purpose                   | Recommended TTL                | Default Storage |
 |--------------------|---------------------------|--------------------------------|-----------------|
 | `StableIDBucket`   | Worker ID claims          | Auto (WorkerIDTTL)             | File            |
-| `ElectionBucket`   | Leader lease              | Lease-based                    | Memory          |
-| `HeartbeatBucket`  | Worker health signals     | Auto (HeartbeatTTL)            | Memory          |
+| `ElectionBucket`   | Leader lease              | Lease-based                    | File            |
+| `HeartbeatBucket`  | Worker health signals     | Auto (HeartbeatTTL)            | File            |
 | `AssignmentBucket` | Partition assignments     | 0 (no expiration) or very long | File            |
 | `HandoffBucket`    | Two-phase handoff claims  | 2-5 minutes                    | File            |
 
-Heartbeat and election buckets use `MemoryStorage` to minimize PVC IOPS on file-backed JetStream clusters. Their data is intrinsically ephemeral — workers re-publish heartbeats every `HeartbeatInterval`, and a lost leader key simply triggers re-election. Stable-ID, assignment, and handoff buckets use `FileStorage` for durability: stable IDs must survive NATS restart to preserve worker identity, assignments must remain visible to followers joining during an outage, and handoff claims protect two-phase ownership transfers.
+All five coordination buckets use `FileStorage`. The election and heartbeat buckets were switched from `MemoryStorage` to `FileStorage` (in v2.5.0 and v2.6.0 respectively) because a single-node JetStream restart lost the in-memory stream and flapped the fleet `Degraded`↔`Stable`; persisting them survives the restart. The added write IOPS is a flat, partition-count-independent term — moving these coordination buckets to memory was measured to save only ~1–2% of cluster write IOPS (they are not the cost driver), so the durability win dominates. See the "Election Bucket Storage Migration" and "Heartbeat Bucket Storage Migration" sections in [`OPERATIONS.md`](OPERATIONS.md) for migrating existing clusters.
 
-If a bucket with a different storage type already exists (e.g., from a prior parti version or pre-provisioned by ops), parti opens it as-is and logs a `Warn` pointing at the manual migration path: `nats kv del <bucket>` during a maintenance window, then restart pods.
+> **Note:** this is the storage type for parti's *coordination* KV buckets. It is unrelated to per-consumer state storage (`WithConsumerMemoryStorage`), which is a separate, conditional IOPS lever covered in [`CONSUMERS.md`](CONSUMERS.md).
+
+If a bucket with a different storage type already exists (e.g., from a prior parti version or pre-provisioned by ops), parti opens it as-is and logs a `Warn` pointing at the manual migration path: remove the bucket with `nats kv rm <bucket>` during a maintenance window, then restart pods so parti recreates it as `FileStorage`.
 
 ### Multi-Application Clusters
 

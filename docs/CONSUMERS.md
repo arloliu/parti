@@ -19,12 +19,14 @@
    - [Static](#static)
    - [Dynamic](#dynamic)
    - [Broadcast](#broadcast)
-4. [Message Handler](#message-handler)
-5. [WIPHandler — Long-Running Processing](#wiphandler--long-running-processing)
-6. [Auto-Recovery](#auto-recovery)
-7. [Functional Options](#functional-options)
-8. [Migrating from Legacy Consumer APIs](#migrating-from-legacy-consumer-apis)
-9. [Legacy Consumer APIs](#legacy-consumer-apis)
+4. [Stream Retention Policy](#stream-retention-policy)
+5. [Message Handler](#message-handler)
+6. [WIPHandler — Long-Running Processing](#wiphandler--long-running-processing)
+7. [Auto-Recovery](#auto-recovery)
+8. [Functional Options](#functional-options)
+9. [Consumer Storage Tuning](#consumer-storage-tuning)
+10. [Migrating from Legacy Consumer APIs](#migrating-from-legacy-consumer-apis)
+11. [Legacy Consumer APIs](#legacy-consumer-apis)
 
 ---
 
@@ -269,6 +271,60 @@ if err := c.Start(ctx); err != nil {
 |--------------|--------------------------------------|
 | `Start(ctx)` | Begin consuming messages             |
 | `Stop(ctx)`  | Gracefully stop with context timeout |
+
+---
+
+## Stream Retention Policy
+
+The JetStream **retention policy** of the stream a consumer reads from is the
+single most consequential — and most error-prone — choice when wiring up a
+consumer. It controls *when a message is deleted*, and the wrong policy silently
+loses data. Pick it by answering two questions, then check the per-type table.
+
+**The two questions:**
+
+1. **Must messages survive after they are processed** — for replay, multiple
+   independent readers, or windows where no consumer covers the subject? →
+   **`LimitsPolicy`** (messages retained until age/size/count limits; acks never
+   delete).
+2. **Is this a dedicated, consume-once queue** with a single non-overlapping
+   consumer set, where restricted recovery is acceptable? → **`WorkQueuePolicy`**
+   (delivered once, deleted on ack; filters must be disjoint).
+
+`InterestPolicy` is a narrow third option: it retains a message only while a
+bound consumer still owes an ack, and **discards any message published when no
+consumer covers its subject**.
+
+**Per consumer type:**
+
+| Consumer | Recommended | Also valid (caveats) | Avoid / Forbidden |
+|----------|-------------|----------------------|-------------------|
+| `Queue`     | **`WorkQueuePolicy`** for a dedicated consume-once queue — one shared durable matches WorkQueue's delete-on-ack model and bounds storage automatically | **`LimitsPolicy`** when the stream is shared, you need replay/retention, or you need `RecoverFromNew` | `InterestPolicy` — messages published with no live consumer are dropped |
+| `Static`    | **`LimitsPolicy`** when retention/replay matters (e.g. event-sourced partitions); **`WorkQueuePolicy`** for fixed consume-once partitions (filters are non-overlapping by construction) | — | `InterestPolicy` unless every partition durable exists before publishing |
+| `Dynamic`   | **`LimitsPolicy`** — preserves all recovery strategies and replay, and tolerates the brief unassigned windows during handoff | **`WorkQueuePolicy`** is supported (proven lossless across graceful handoff *and* abrupt crash), but it limits recovery to `RecoverFromBeginning`/`RecoveryDisabled` and forgoes replay — pick it only for consume-once work | `InterestPolicy` — an unassigned/just-moved subject's messages can be discarded |
+| `Broadcast` | **`LimitsPolicy`** — every instance must receive every message; Limits retains independently of which instances are up | `InterestPolicy` *only* when instance identities are stable, all recipients are registered before publishing, churn is low (or `InactiveThreshold` is short), and dropping messages published while all instances are down is acceptable | **`WorkQueuePolicy`** — single delivery defeats fan-out (rejected) |
+
+**Three cross-cutting rules that bite regardless of type:**
+
+- **WorkQueue restricts recovery.** WorkQueue consumers may only use
+  `DeliverAllPolicy`, so `RecoverFromNew` and `RecoverFromLastProcessed` are
+  rejected — see [WorkQueuePolicy Restriction](#workqueuepolicy-restriction).
+  Only `RecoverFromBeginning`/`RecoveryDisabled` work (and on WorkQueue,
+  `RecoverFromBeginning` replays just the unacked backlog).
+- **Replicas cap depends on retention.** On any stream, consumer replicas may
+  not *exceed* the stream's. On `LimitsPolicy` (the default) any value
+  `1…stream.Replicas` is allowed — so `WithConsumerReplicas(1)` works on an RF=5
+  stream. On `InterestPolicy`/`WorkQueuePolicy`, a nonzero value must *equal* the
+  stream's replica count, so any mismatch (e.g. `WithConsumerReplicas(1)` or `3`
+  on an RF=5 stream) is rejected by NATS (`err_code=10134`). The single-replica
+  IOPS option in [Consumer Storage Tuning](#consumer-storage-tuning) is therefore
+  unavailable on Interest/WorkQueue; pair `WithConsumerMemoryStorage(true)` with
+  inherited replicas (the Balanced config) instead.
+- **Interest pins messages behind stopped consumers.** A consumer's durable is
+  not deleted on `Stop()` (it is garbage-collected only after
+  `InactiveThreshold`, default 24h). On `InterestPolicy`, that lingering durable
+  still holds interest, so a stopped/churned instance pins its unacked messages
+  until GC — the reason `Broadcast` defaults to `LimitsPolicy`, not Interest.
 
 ---
 
@@ -656,7 +712,10 @@ if err := cfg.Validate(); err != nil {
 
 ## Functional Options
 
-All consumers accept functional options for customization:
+All consumer constructors accept functional options. The tables below list the
+commonly-used options, not the complete set — see the
+[package reference](https://pkg.go.dev/github.com/arloliu/parti/v2/consumer) for
+every `With*` option.
 
 ```go
 c, _ := consumer.NewQueue(js, "stream", "consumer", "subject.>", handler,
@@ -668,7 +727,7 @@ c, _ := consumer.NewQueue(js, "stream", "consumer", "subject.>", handler,
 )
 ```
 
-**Common Options:**
+**Common Options (selected):**
 
 | Option                            | Description                                   |
 |-----------------------------------|-----------------------------------------------|
@@ -682,6 +741,8 @@ c, _ := consumer.NewQueue(js, "stream", "consumer", "subject.>", handler,
 | `WithManualAck(bool)`             | Disable auto-acknowledgement                  |
 | `WithInactiveThreshold(duration)` | Consumer cleanup threshold                    |
 | `WithRecoveryStrategy(strategy)`  | Auto-recovery on unexpected consumer deletion |
+| `WithConsumerMemoryStorage(bool)` | Store per-consumer state in memory (IOPS lever; **not** live-editable; see [Consumer Storage Tuning](#consumer-storage-tuning)) |
+| `WithConsumerReplicas(n)`         | Replica count for consumer state (live-editable; `0` inherits the stream's) |
 
 **Broadcast-Specific Options:**
 
@@ -695,6 +756,54 @@ c, _ := consumer.NewQueue(js, "stream", "consumer", "subject.>", handler,
 |--------------------------------------|----------------------------------------------|
 | `WithProcessingGate(cfg)`            | Enable processing gate for ownership control |
 | `WithDrainOnRemove(enabled, timeout)`| Drain messages when partitions are removed   |
+
+---
+
+## Consumer Storage Tuning
+
+> **Scope:** this section is about **per-consumer JetStream state** (each
+> consumer's own ack/cursor store), tuned with `WithConsumerMemoryStorage` and
+> `WithConsumerReplicas`. It is **unrelated** to parti's coordination KV buckets
+> (heartbeat/election/etc.), which always use `FileStorage` — see
+> [`CONFIGURATION.md`](CONFIGURATION.md). Do not move the coordination buckets to
+> memory.
+
+Each consumer persists its delivery state (ack floor, redelivery counts) to a
+small per-consumer file. At scale this is the **dominant** NATS write-IOPS
+cost — measured at **72–81% of cluster write IOPS** with one consumer per
+partition. Moving that state to memory is the single largest IOPS lever.
+
+**It is conditional — the file-backed default is correct for most deployments.**
+Only reach for memory storage when one of these is true: ≳10k partitions per
+NATS node, provisioned-IOPS billing (e.g. AWS io2/gp3 above baseline),
+latency-tail sensitivity, or a tightly-constrained dev/test cluster. Otherwise,
+do nothing.
+
+When you *do* need it, choose by how much redelivery the workload tolerates:
+
+| Config | Set | IOPS reduction | Redelivery exposure |
+|--------|-----|----------------|---------------------|
+| **Default** | (nothing) | baseline | None beyond JetStream's own |
+| **Balanced** | `WithConsumerMemoryStorage(true)` + replicas inherited (R≥3) | ~90% at N=1000, ~72% at N=3000 | Redelivery only on a **coordinated cluster-wide restart**; keeps consumer HA |
+| **Aggressive** | `WithConsumerMemoryStorage(true)` + `WithConsumerReplicas(1)` | ~99%; per-partition cost goes flat in N | Redelivery on **single-node failure** too — correct only for idempotent handlers |
+
+```go
+// Balanced: recommended once the decision above reaches "yes".
+c, _ := consumer.NewDynamic(js, "ORDERS", "processor", "orders.{{.PartitionID}}", handler,
+    consumer.WithConsumerMemoryStorage(true),  // not live-editable — set before first start
+    consumer.WithConsumerReplicas(3),           // live-editable; on a 3-replica stream
+)
+```
+
+Notes:
+
+- `WithConsumerMemoryStorage` is **not** live-editable — changing it requires
+  recreating the consumer. `WithConsumerReplicas` **is** live-editable.
+- On `InterestPolicy`/`WorkQueuePolicy` streams, consumer replicas must equal the
+  stream's replicas, so the Aggressive (R=1) row is unavailable there — use the
+  Balanced row. See [Stream Retention Policy](#stream-retention-policy).
+- For capacity numbers (RSS per partition, latency) see the "NATS-Side Cost"
+  section in [`OPERATIONS.md`](OPERATIONS.md).
 
 ---
 
