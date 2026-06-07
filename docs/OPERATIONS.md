@@ -28,7 +28,7 @@
 | Component     | Requirement                          |
 |---------------|--------------------------------------|
 | Go            | 1.25 or later                        |
-| NATS Server   | 2.10.0+ with JetStream enabled       |
+| NATS Server   | 2.10.0+ (2.12+ recommended at scale) |
 | Memory        | 50-100 MB per worker (typical)       |
 | Network       | Low-latency connection to NATS       |
 
@@ -68,6 +68,26 @@ cluster {
     ]
 }
 ```
+
+**Cluster size and replicas.** Run **at least 3 nodes** and use **R=3** for the
+application stream and parti's KV buckets — this is the HA posture validated by
+the scaling study (3-node cluster, RF=3 stream, R=3 consumers). A single node
+has no failover; 5 nodes (RF=5) only buys extra message-stream durability and is
+not required.
+
+**Metacontroller snapshots at large fleets (NATS ≥ 2.12).** Each parti partition
+is one JetStream durable, so a large fleet (≈10k+ consumers) drives the JetStream
+metacontroller's Raft snapshot. On **NATS ≥ 2.12 snapshots are asynchronous** —
+at 10k consumers a snapshot is a ~30 ms background operation, ~20–40× below the
+pre-async blocking behavior. Guidance:
+
+- **Stay on NATS ≥ 2.12** for any fleet past a few thousand partitions.
+- **Do not lower `meta_compact_size`** — it is gated by an internal floor and has
+  no effect at this scale (it cannot make snapshots cheaper).
+- **Do not set `JetStreamMetaCompactSync`** — it forces blocking snapshots,
+  reintroducing the cost async removed.
+
+There is effectively no metacontroller knob to turn at ≤10k consumers on ≥2.12.
 
 ### NATS Client Connection
 
@@ -246,7 +266,7 @@ version: '3.8'
 
 services:
   nats:
-    image: nats:2.10-alpine
+    image: nats:2.14-alpine  # 2.10 is the documented minimum; 2.12+ recommended at scale
     command: ["--jetstream", "--store_dir=/data"]
     volumes:
       - nats-data:/data
@@ -924,13 +944,40 @@ grep "parti error" /var/log/app.log
 | 128        | 16-64               | Large production                 |
 | 256+       | 32-128              | Consider cluster sharding        |
 
-### Resource Estimates
+> This table sizes the **worker** count (how many pods share the load); it is a
+> different axis from the **partition** count. With `consumer.Dynamic` (one
+> consumer per partition), parti has been validated to **10,000 partitions** on a
+> 3-node cluster — see "NATS-Side Cost" below. Partition count is bounded by
+> NATS-side RSS, not by parti.
+
+### Resource Estimates (per worker pod)
 
 | Workers | NATS Memory | KV Storage | Network (steady) |
 |---------|-------------|------------|------------------|
 | 10      | 50 MB       | 1 MB       | 10 KB/s          |
 | 50      | 100 MB      | 5 MB       | 50 KB/s          |
 | 100     | 200 MB      | 10 MB      | 100 KB/s         |
+
+### NATS-Side Cost (partition scaling)
+
+The table above estimates the **worker pod** footprint. The NATS **server-side**
+cost scales with the number of partitions (one JetStream durable each). The
+scaling study measured the recommended config (`consumer.Dynamic` with memory
+consumer state + R=3) and fit an affine model, validated to **N = 10,000**
+partitions:
+
+| Resource | Scaling | Notes |
+|----------|---------|-------|
+| Cluster RSS | ~**0.793 MiB per partition** (+ ~90 MiB baseline) | The binding constraint — size NATS memory by partition count |
+| Latency | flat **~1.3 ms P95/P99**, independent of N | No per-partition fetch tax vs the JetStream floor |
+| Write IOPS / CPU | sub-linear in N | Never the wall on modern NVMe/gp3 |
+
+Worked point: at **N = 5,000** (memory consumer state + R=3) the cluster sits at
+~4 GiB RSS, ~1.3 ms P99. **RSS is the first ceiling you hit**, not IOPS or CPU —
+provision NATS memory accordingly. For consumer-state storage tuning (the IOPS
+lever behind this config), see [`CONSUMERS.md`](CONSUMERS.md); for pushing
+partition count far beyond 10k with a bounded consumer count, see
+[`SCALING.md`](SCALING.md).
 
 ### Performance Tuning
 
