@@ -447,9 +447,10 @@ func reconcileStableIDBucketMaxAge(
 }
 
 // warnOnStorageMismatch logs a warning if the existing bucket's storage type
-// differs from the type parti would have created. This catches the silent
-// non-upgrade path where a pre-existing file-backed bucket continues to
-// absorb IOPS even after parti's defaults switched to memory storage.
+// differs from the type parti would have created. parti opens a pre-existing
+// bucket as-is ("pre-creation wins"), so this surfaces the divergence — for
+// example a bucket still on MemoryStorage after parti's defaults moved to
+// FileStorage — and points at the manual migration path.
 func (m *Manager) warnOnStorageMismatch(
 	ctx context.Context,
 	kv jetstream.KeyValue,
@@ -465,9 +466,10 @@ func (m *Manager) warnOnStorageMismatch(
 		return
 	}
 	m.logger.Warn(
-		"KV bucket storage type differs from parti's default — "+
-			"IOPS reduction from the memory-storage default is NOT active on this bucket. "+
-			"To migrate during a maintenance window: `nats kv del "+bucket+"` then restart pods.",
+		"KV bucket storage type differs from parti's default; parti is using the "+
+			"existing bucket as-is. To align it, remove the bucket during a "+
+			"maintenance window (`nats kv rm "+bucket+"`) and restart pods so parti "+
+			"recreates it with the expected storage type.",
 		"bucket", bucket,
 		"existing_storage", storageTypeName(got),
 		"parti_default_storage", storageTypeName(want),
