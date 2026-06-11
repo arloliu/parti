@@ -353,14 +353,14 @@ func TestPartitionProcessing(t *testing.T) {
 | **Partition**           | Logical division of work; has ID, optional weight, and metadata                                     |
 | **Partition Source**    | Provider of partition definitions (Static, NatsKV, custom)                                          |
 | **Partitioner**         | Application-level component mapping keys to partition IDs                                            |
-| **Prepare Phase**       | First phase of two-phase handoff; old owner stops processing                                        |
-| **Processing Gate**     | Component preventing message processing during handoff                                               |
+| **Prepare Phase**       | First phase of two-phase handoff; new owner durably claims the partition (KV CAS); old owner may keep processing until commit/stable |
+| **Processing Gate**     | Per-message admission control that NAKs deliveries to non-owners during handoff                      |
 | **Rebalancing**         | Redistributing partitions after worker or partition-source changes                                   |
 | **Recovery Grace**      | Period after degraded mode exit before emergency rebalancing is triggered                            |
 | **Scaling Window**      | Stabilization delay after worker joins/leaves established cluster (default: 10s)                   |
 | **Stable ID**           | Persistent worker identifier claimed from a pool; survives restarts within TTL                      |
 | **State**               | Current phase in worker lifecycle (Init, Stable, Scaling, Degraded, etc.)                           |
-| **Two-Phase Handoff**   | Prepare/Commit protocol ensuring zero overlap in partition processing                                |
+| **Two-Phase Handoff**   | KV-claim Prepare/Commit protocol ordering partition release; minimizes (does not eliminate) overlap |
 | **Virtual Nodes**       | Multiple hash ring positions per worker for better distribution                                      |
 | **Weight**              | Partition attribute influencing assignment distribution                                              |
 | **Worker**              | Instance running Parti Manager; processes assigned partitions                                        |

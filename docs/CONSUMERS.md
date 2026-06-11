@@ -644,13 +644,17 @@ strategies.
 
 **No-hook escalation route.** When the hook is omitted, or when the
 operator hook keeps returning an error, the F2 bounded-retry envelope
-eventually exhausts. The library then fires `OnPermanentFailure` with
-the cause wrapped in `parti.ErrStreamMissing`. The Parti `Manager`
-catches this via its built-in observer bridge: the worker enters
-degraded mode with reason `"stream-missing-recovery-exhausted"`, the
-configured `Hooks.OnError` fires with the wrapped error, and the
-readiness probe can rotate the pod. Branch on the typed sentinel
-inside `OnError`:
+eventually exhausts. The library fires the `OnPermanentFailure`
+dispatcher with the cause wrapped in `parti.ErrStreamMissing`. The
+Parti `Manager` observer is **also** notified (application callback
+first, then manager observer), so both app observability and
+platform self-healing fire regardless of whether an app callback is
+registered. The worker enters **terminal** degraded mode with reason
+`"stream-missing-recovery-exhausted"` — it stays `Degraded`
+permanently until restarted or rotated; stream recreation alone does
+not revive the dead partition-consumer loop. The configured
+`Hooks.OnError` fires with the wrapped error, and the readiness probe
+can rotate the pod. Branch on the typed sentinel inside `OnError`:
 
 ```go
 mgr, _ := parti.NewManager(&cfg, js, src, strategy,
@@ -667,10 +671,26 @@ mgr, _ := parti.NewManager(&cfg, js, src, strategy,
 )
 ```
 
+If your application owns degrade and rotation signaling itself and
+wants to suppress the manager's auto-degraded route, pass
+`consumer.WithSuppressManagerDegradeOnStreamMissing()` when
+constructing the `Dynamic` consumer.
+
 This route is distinct from the generic KV-error degraded-mode
 circuit — the named reason `"stream-missing-recovery-exhausted"`
 keeps the cross-feature contract that whole-bucket KV loss is the
 sole driver of `"KV error threshold exceeded"`.
+
+**Stream deletion / recovery behavior by consumer type.** The
+escalation tier above (bounded retries → `OnPermanentFailure` →
+terminal `Degraded`) is Dynamic-only. `Queue`, `Static`, and
+`Broadcast` do not own stream lifecycle: when the underlying stream
+is gone they log a warning and back off indefinitely, and they
+self-heal only if the stream returns AND a `RecoveryStrategy` is
+enabled — there is no exhaustion or degrade tier for them. When
+`RecoveryStrategy` is disabled, these consumers surface each iterator
+restart with a Warn log and the iterator-restart metric label
+`recovery_disabled` instead of cycling silently.
 
 ### Validation
 
@@ -752,10 +772,13 @@ c, _ := consumer.NewQueue(js, "stream", "consumer", "subject.>", handler,
 
 **Dynamic-Specific Options:**
 
-| Option                               | Description                                  |
-|--------------------------------------|----------------------------------------------|
-| `WithProcessingGate(cfg)`            | Enable processing gate for ownership control |
-| `WithDrainOnRemove(enabled, timeout)`| Drain messages when partitions are removed   |
+| Option                                         | Description                                                                 |
+|------------------------------------------------|-----------------------------------------------------------------------------|
+| `WithProcessingGate(cfg)`                      | Enable processing gate for ownership control                                |
+| `WithDrainOnRemove(enabled, timeout)`          | Drain messages when partitions are removed; bounded by `DrainOnRemoveTimeout` — if loops fail to stop within the bound, `Update` returns an error and the manager retries; tracking entries are cleared so retries converge; an in-flight handler invocation may still run to completion (best-effort, not a zero-overlap guarantee) |
+| `WithMaxConcurrentSubjects(n)`                 | Cap concurrent partitions; excess rejects the whole `Update` with `ErrMaxSubjectsExceeded` |
+| `WithOnPermanentFailure(fn)`                   | Application callback for permanent partition failure (fires before manager observer) |
+| `WithSuppressManagerDegradeOnStreamMissing()`  | Suppress the manager's auto-degraded route for stream-missing exhaustion    |
 
 ---
 
@@ -991,4 +1014,5 @@ All consumer types are thread-safe. Lifecycle methods (`Start`, `Stop`, `Update`
 **Runtime Errors:**
 - `context.DeadlineExceeded` - Stop timed out
 - `consumer.ErrWorkerIDMutation` - Dynamic consumer workerID changed unexpectedly
-- `consumer.ErrMaxSubjectsExceeded` - Partition count exceeds limit
+- `consumer.ErrMaxSubjectsExceeded` - Assignment's deduped subject count exceeds `MaxConcurrentSubjects`; the whole `Update` is rejected before any mutation; the manager retries with backoff and previous owners keep consuming
+- `consumer.ErrConsumerStopped` - `Start`/`Update` called after `Stop`/`Close`. Stop is terminal for `Static`, `Broadcast`, and `Dynamic`: construct a new consumer to resume consuming. Deregister the consumer (or stop the manager first) before stopping it, or manager-driven updates will retry loudly against the stopped consumer

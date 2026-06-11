@@ -37,9 +37,9 @@ Use it for stream processors, job queues, sharded caches, or any system where a 
 - **Stable Worker IDs**: Workers claim stable IDs (e.g., `worker-0`, `worker-1`) that persist across restarts, minimizing assignment churn during rolling updates.
 - **Leader-Based Assignment**: A single leader worker calculates assignments, ensuring consistency and preventing split-brain scenarios.
 - **Dynamic Partition Discovery**: Supports dynamic partition updates via NATS KV without restarting workers.
-- **Two-Phase Handoff**: Implements a Prepare/Commit protocol for partition reassignment, ensuring no partition is processed by two workers simultaneously.
+- **Two-Phase Handoff**: Orders partition release during reassignment via a worker-driven prepare/commit claim protocol so a partition is never left unowned; combined with the processing gate it minimizes overlapping processing (see `docs/LIFECYCLE.md` for the per-tier overlap contract).
 - **Degraded Mode**: Continues operation using cached assignments when NATS connectivity is lost, prioritizing availability over strict consistency during outages.
-- **Processing Gate**: Controls message processing flow based on assignment status, preventing processing of revoked partitions.
+- **Processing Gate**: Per-message admission control based on assignment status, NAKing deliveries for revoked partitions.
 - **Cache Affinity**: Preserves >80% partition locality during rebalancing using consistent hashing.
 - **Weighted Assignment**: Supports partition weights for uneven workload distribution.
 

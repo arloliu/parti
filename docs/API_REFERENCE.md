@@ -895,7 +895,7 @@ Known reasons and operator intent:
 | `startup-timeout` | startup apply/wait did not reach Stable in budget | Readiness rotation unless the runner recovers before the pod is replaced. |
 | `startup-background-panic` | a background startup goroutine panicked | Rotate the worker; inspect logs for the panic. Monitors are still started so the worker may self-recover. |
 | `assignment-watcher-exhausted` | assignment watcher retry envelope exhausted | Restart or rotate the worker; inspect the assignment bucket and NATS logs. |
-| `stream-missing-recovery-exhausted` | dynamic consumer stream missing and no app hook recovered it | Recover the stream or rotate workers according to application ownership. |
+| `stream-missing-recovery-exhausted` | **terminal** — dynamic consumer stream missing, recovery exhausted | The worker stays `Degraded` permanently until restarted or rotated; stream recreation alone does not revive the dead partition-consumer loop. Recreate the stream, then rotate the worker. |
 | `source-unavailable:<bucket>` | caller-owned source bucket unavailable | Caller/operator recovers the source bucket; Parti does not recreate it. |
 
 **Returns**:
@@ -1933,9 +1933,12 @@ c, _ := consumer.NewQueue(js, "stream", "consumer", "subject.>", handler,
 
 | Option                           | Consumer Types | Description                          |
 |----------------------------------|----------------|--------------------------------------|
-| `WithInstanceID(id)`                        | Broadcast      | Set unique instance identifier       |
-| `WithProcessingGate(cfg)`                   | Dynamic        | Enable processing gate               |
-| `WithDrainOnRemove(enabled, timeout)`       | Dynamic        | Drain messages on partition removal  |
+| `WithInstanceID(id)`                              | Broadcast      | Set unique instance identifier                                                                                                      |
+| `WithProcessingGate(cfg)`                         | Dynamic        | Enable processing gate for ownership control                                                                                        |
+| `WithDrainOnRemove(enabled, timeout)`             | Dynamic        | Drain messages on partition removal (bounded by `DrainOnRemoveTimeout`; `Update` returns an error if loops fail to stop in time)    |
+| `WithMaxConcurrentSubjects(n)`                    | Dynamic        | Cap concurrent partitions; `Update` rejects over-cap assignments with `ErrMaxSubjectsExceeded`                                      |
+| `WithOnPermanentFailure(fn)`                      | Dynamic        | Application callback fired once per partition consumer on recovery exhaustion; manager stream-missing observer also fires            |
+| `WithSuppressManagerDegradeOnStreamMissing()`     | Dynamic        | Opt out of the manager's auto-degraded route for stream-missing exhaustion                                                          |
 
 ---
 
@@ -2023,6 +2026,11 @@ var (
     ErrNotStarted     = errors.New("manager not started")
 )
 ```
+
+`types.ErrConsumerStopped` (re-exported as `consumer.ErrConsumerStopped`) is
+returned by consumer `Start`/`Update` after `Stop`/`Close` — Stop is terminal
+for the `Static`, `Broadcast`, and `Dynamic` consumers; construct a new
+instance to resume consuming.
 
 ### Operational Errors
 

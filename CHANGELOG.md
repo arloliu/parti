@@ -5,7 +5,138 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v2.7.0] - 2026-06-11
+
+Dynamic-consumer healing release. It closes a family of silent-stall paths
+where a worker reported `Stable` while its consumer was dead or stranded, runs
+a correctness sweep across all four consumer types, and fixes an assignment-retry
+coalescing bug that could leave partition ownership silently divergent. Three
+themes: **stream-missing healing** — a deleted stream or exhausted recovery now
+drives the manager to a terminal `Degraded` hold so readiness-driven rotation
+can act, instead of flapping back to `Stable` with a dead consumer;
+**consumer-wide correctness** — `Stop`/`Close` is now terminal, retry backoff
+grows as configured, `Queue` validates compatibility before creating durables,
+a key-dispatch idle-exit race is closed, and disabled-recovery stalls become
+visible; and **assignment-retry coalescing** — retries now coalesce by the full
+applied identity the apply gate trusts. Two new exported symbols
+(`consumer.ErrConsumerStopped`, `consumer.WithSuppressManagerDegradeOnStreamMissing`)
+make this a minor rather than a patch. One behavior change at defaults:
+`WithOnPermanentFailure` no longer suppresses the manager's stream-missing
+auto-degraded route.
+
+### Added
+
+- **`consumer.ErrConsumerStopped`** — sentinel returned by `Start`/`Update`
+  after a consumer has been stopped or closed. Re-exported from
+  `types.ErrConsumerStopped`. Match with `errors.Is`.
+- **`consumer.WithSuppressManagerDegradeOnStreamMissing()`** — opt-out option
+  that restores the pre-v2.7.0 behavior where registering
+  `WithOnPermanentFailure` suppressed the manager's stream-missing
+  auto-degraded route (see _Changed_ below).
+
+### Fixed
+
+- **Deleted stream now exhausts recovery instead of stalling silently.** With
+  `RecoveryStrategy` enabled and an active iterator, deleting the underlying
+  stream surfaces `ErrNoHeartbeat`, and the burst confirmation probe treated
+  the stream-scoped `ErrStreamNotFound` answer as "consumer still exists" —
+  classifying the permanent loss as transient-forever. The consumer ping-ponged
+  between heartbeat failures and backoff indefinitely, stream-missing
+  exhaustion never fired, and the worker reported `Stable` with a stalled
+  consumer. The probe now routes stream-not-found to the bounded stream-missing
+  detour, so exhaustion reaches `OnPermanentFailure` and the manager's terminal
+  `Degraded` hold within the configured `RecoveryRetry.MaxAttempts` budget.
+  (`Queue`, `Broadcast`, and internal partition consumers now log this case as
+  stream-missing instead of an unlabeled transient backoff.)
+- **Terminal `Degraded` hold on stream-missing exhaustion.** Manager now stays
+  `Degraded` permanently after a dynamic consumer's stream-missing recovery
+  exhausts, so readiness-driven rotation can occur; previously it returned to
+  `Stable` within seconds while dead partition consumers were still assigned and
+  silently not consuming.
+- **Assignment retries coalesce by full applied identity.** The apply-retry
+  stash and the commit coalesce/drain compared candidates by `Version` alone,
+  while the core apply gate orders by `(Version, LeaderRevision)` and the
+  applied-ack identity also spans the partition-set digest and source
+  revision. A same-version pair — produced by a lost commit CAS racing its own
+  pre-published alias — under two consecutive apply failures dropped the
+  commit-authority assignment from the stash: the retry applied the stale
+  alias digest and nothing in direct mode converged the worker until the next
+  rebalance, leaving silent partition-ownership divergence behind a `Stable`
+  status. Stash and coalesce comparisons now use the same full identity
+  ordering the apply gate trusts. The leader audit additionally logs a
+  warning for workers stuck behind in direct mode, where automatic repair is
+  deliberately unavailable.
+- **`Dynamic.Update` rejects over-cap assignments before any mutation.** Returns
+  `ErrMaxSubjectsExceeded` (as documented) when an assignment exceeds
+  `MaxConcurrentSubjects`, instead of silently skipping excess partitions — which
+  could strand a partition unowned after a committed handoff. The rejection error
+  names the stream and fires the
+  `parti_worker_consumer_guardrail_violations_total{kind="max_subjects"}` metric.
+- **`Dynamic.Update` surfaces remove-timeout failures.** Returns an error when
+  removed partition loops fail to stop within `DrainOnRemoveTimeout`, instead of
+  reporting success while a handler could still be processing; the manager retries
+  the apply and converges.
+- **`Stop`/`Close` is terminal for `Static`, `Broadcast`, and the Dynamic worker
+  consumer.** Restarting after stop previously half-worked (channels and loop
+  state were not rebuilt) and, for `Dynamic`, `Close` nils the gate resolver, so
+  a post-Close `Update` restarted pull loops WITHOUT the configured processing
+  gate — a silent safety downgrade. `Start`/`Update` after `Stop`/`Close` now
+  returns the new `ErrConsumerStopped` sentinel; construct a new consumer to
+  restart.
+- **Disabled-recovery iterator stalls are now visible.** With `RecoveryStrategy`
+  disabled (the default), persistent iterator failures in `Queue`, `Static`, and
+  `Broadcast` consumers — e.g. a durable deleted via `InactiveThreshold` expiry —
+  retried silently at Debug level forever. Each restart now logs a Warn and fires
+  the iterator-restart metric with reason `recovery_disabled`.
+- **Broadcast and Dynamic retry backoff actually grows.** The consume-loop
+  backoff re-slept a constant base delay, ignoring the configured `Multiplier`,
+  `Max`, and `Seed`; it now grows via decorrelated jitter as documented (matching
+  `Queue`).
+- **Key-worker idle-exit ordering race.** A per-key dispatch worker's idle exit
+  now decides under the dispatcher's write lock, closing a window where a
+  concurrently dispatched message could land on a worker that was exiting and
+  never be processed.
+- **Queue validates WorkQueue compatibility before creating the durable.**
+  `Queue.Start` previously created the durable consumer first and then failed
+  the WorkQueue/recovery compatibility check, orphaning a just-created durable
+  on the WorkQueuePolicy stream.
+- **Queue closed-iterator hot loop.** An iterator that reports closed while the
+  consumer is still running now takes the backoff path instead of respinning
+  iterator creation at full speed.
+- **All constructor validation failures wrap `ErrInvalidConfig`.**
+  `errors.Is(err, consumer.ErrInvalidConfig)` now matches every
+  construction-time validation failure across the four consumer constructors;
+  struct-tag (range/required) failures were previously returned unwrapped.
+
+### Changed
+
+- **`WithOnPermanentFailure` no longer suppresses the manager observer.**
+  Registering `WithOnPermanentFailure` no longer disables the manager's
+  auto-degraded route for stream-missing exhaustion: both the application callback
+  and the manager observer now fire (callback first). Use the new
+  `WithSuppressManagerDegradeOnStreamMissing()` option to restore the previous
+  opt-out behavior explicitly.
+- **Over-cap assignments surface as visible apply failures.** An assignment that
+  keeps a worker over `MaxConcurrentSubjects` indefinitely now surfaces as
+  repeating "handoff apply failed" logs with an un-acked assignment version
+  (leader-visible), rather than a silent gap — raise the cap or rebalance to
+  resolve.
+- **`FetchTimeout` below 1s now fails construction.** NATS pull consumers
+  enforce a 1s minimum request expiry; configs in `(0, 1s)` previously passed
+  validation and stalled at runtime. All consumer constructors now reject them
+  with `ErrInvalidConfig`.
+
+### Documentation
+
+- **Zero-overlap claims corrected to the per-tier overlap contract.** Two-phase
+  handoff orders the release of a partition (no unowned gap); it does not gate
+  consumption. The processing gate is per-message admission control and cannot
+  revoke an in-flight handler, so the irreducible window is one in-flight
+  invocation plus AckWait-expiry redelivery of that message via the shared
+  per-partition durable (mitigation: `consumer.NewWIPHandler`). The fictional
+  leader-driven prepare/commit ACK exchange in `docs/LIFECYCLE.md` is replaced
+  with the actual worker-driven KV CAS protocol, with a per-configuration-tier
+  guarantee table; delivery is at-least-once at every tier.
 
 ## [v2.6.1] - 2026-06-07
 
