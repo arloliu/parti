@@ -186,7 +186,26 @@ func (c *Controller) Classify(
 			return ActionBackoff, nil, nil // not enough failures yet
 		}
 		// Burst threshold reached — confirm via consumer.Info().
-		if !c.confirmConsumerGone(ctx, infoFn) {
+		gone, infoErr := c.probeConsumerGone(ctx, infoFn)
+		if !gone {
+			if natsutil.IsStreamNotFound(infoErr) {
+				// The consumer-scoped probe answered with the stream-scoped
+				// error: the WHOLE stream is gone, which is a permanent
+				// condition. Route it to the bounded stream-missing detour
+				// (operator hook, then OnPermanentFailure exhaustion) —
+				// falling through to backoff would classify it as
+				// transient-forever and the consumption loop would ping-pong
+				// between heartbeat failures and backoff indefinitely, with
+				// no exhaustion signal ever reaching the manager observer.
+				// Same wrap shape as recover()'s stream-missing escalation.
+				c.logger.Warn("heartbeat-burst Info probe surfaced stream missing",
+					"op", "consumer_recovery",
+					"error", infoErr,
+				)
+
+				return ActionStreamMissing, nil, fmt.Errorf("%w: %w", types.ErrStreamMissing, infoErr)
+			}
+
 			return ActionBackoff, nil, nil // consumer still exists, transient issue
 		}
 		newCons, recErr := c.recover(ctx, "consumer_not_found_after_burst", baseCfg, recreate)
@@ -540,17 +559,20 @@ func (c *Controller) recover(
 	return newCons, nil
 }
 
-// confirmConsumerGone calls consumer.Info() and returns true if the consumer is confirmed gone.
-func (c *Controller) confirmConsumerGone(ctx context.Context, infoFn InfoFunc) bool {
+// probeConsumerGone calls consumer.Info() and reports whether the consumer is
+// confirmed gone (consumer-not-found), along with the raw probe error so the
+// caller can distinguish the stream-scoped answer (stream-not-found — the
+// whole stream is gone, a permanent condition) from a transient probe failure.
+func (c *Controller) probeConsumerGone(ctx context.Context, infoFn InfoFunc) (bool, error) {
 	if infoFn == nil {
-		return false
+		return false, nil
 	}
 
 	c.consInfoMu.Lock()
 	_, err := infoFn(ctx)
 	c.consInfoMu.Unlock()
 
-	return natsutil.IsConsumerNotFound(err)
+	return natsutil.IsConsumerNotFound(err), err
 }
 
 // callInfo calls consumer.Info() with serialization.

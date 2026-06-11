@@ -503,6 +503,30 @@ func (m *Manager) attemptRecoveryFromDegraded() {
 	// design needed to close that window is no longer reachable and is gone.
 	reason := rec.reason
 
+	// Terminal hold — stream-missing recovery exhaustion means at least one
+	// partition-consumer loop in this process has exited permanently. The
+	// loop cannot restart in-process (the dead subject remains in the
+	// worker-consumer's subject map, so a re-apply computes an empty diff),
+	// and operator stream recreation cannot revive it either. No recovery
+	// signal exists that could stamp this reason healthy; hold the worker
+	// terminally Degraded for restart/rotation, matching the
+	// heartbeat-bucket backstop's terminal contract. Placed after the
+	// commitment guard so an unapplied refreshed assignment still re-arms
+	// scheduleApplyRetry above.
+	//
+	// The latch (streamMissingExhausted) widens this check beyond the reason
+	// string alone: if exhaustion fires while the worker is ALREADY Degraded
+	// for another reason, enterDegraded's CAS no-ops and the reason string
+	// never records the exhaustion. The latch survives that overlap, keeping
+	// the hold terminal regardless of which reason string is current. The
+	// reason-string branch is retained so white-box tests that arm the
+	// degradedRecord directly (without firing the observer) still pass.
+	if reason == DegradeReasonStreamMissingRecoveryExhausted || m.streamMissingExhausted.Load() {
+		m.logger.Warn("recovery: stream-missing recovery exhausted is terminal; staying Degraded for restart/rotation",
+			"degraded_for", time.Since(time.Unix(0, rec.since)).Round(time.Second))
+		return
+	}
+
 	// Family B — reason-scoped recover-on-wrong-signal gate. A kv-unavailable
 	// degrade is a connected-but-KV-unavailable op stall on the heartbeat /
 	// election / stableid buckets; the commitment guard above reads only the

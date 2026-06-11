@@ -1,6 +1,7 @@
 package parti
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -165,4 +166,79 @@ func TestAttemptRecovery_HeartbeatBucketReachable_Exits(t *testing.T) {
 
 	require.Equal(t, StateStable, m.State(),
 		"a reachable heartbeat bucket must let recovery exit to Stable")
+}
+
+// TestAttemptRecovery_StreamMissingExhausted_StaysDegraded pins the terminal
+// hold for the dynamic-consumer stream-missing route: once a partition
+// consumer's recovery envelope has exhausted, its loop has exited and cannot
+// restart in-process (the dead subject remains in the worker-consumer's
+// subject map, so a re-apply computes an empty diff), and operator stream
+// recreation cannot revive it either. Recovery must therefore never exit
+// this reason — rotation is the only recovery, matching the
+// heartbeat-bucket backstop's terminal contract. Without the gate, the
+// connection monitor exits back to Stable within ~one tick (the NATS
+// connection never dropped) and the worker reports Stable while assigned
+// partitions are silently not consumed.
+func TestAttemptRecovery_StreamMissingExhausted_StaysDegraded(t *testing.T) {
+	t.Parallel()
+	snap := Assignment{Version: 1, LeaderRevision: 5, Partitions: []Partition{{Keys: []string{"p0"}}}}
+	m, _ := armDegraded(t, &snap, snap)
+	plantAssignment(t, m, snap)
+	m.markDegraded(time.Now().UnixNano(), DegradeReasonStreamMissingRecoveryExhausted)
+
+	// Even with every recovery signal healthy (commitment guard satisfied by
+	// armDegraded, fresh heartbeat far in the future), the hold is terminal.
+	m.lastHeartbeatSuccessAt.Store(time.Now().UnixNano() + int64(time.Hour))
+
+	m.attemptRecoveryFromDegraded()
+
+	require.Equal(t, StateDegraded, m.State(),
+		"stream-missing-recovery-exhausted must hold the worker terminally Degraded for rotation")
+}
+
+// TestAttemptRecovery_StreamMissingHold_IsReasonScoped proves the new gate
+// is NOT accidentally global: a reason with no blocking gate (startup
+// timeout) still exits to Stable through the same pipeline. This is the
+// negative-space direction the boundary-test discipline requires.
+func TestAttemptRecovery_StreamMissingHold_IsReasonScoped(t *testing.T) {
+	t.Parallel()
+	snap := Assignment{Version: 1, LeaderRevision: 5, Partitions: []Partition{{Keys: []string{"p0"}}}}
+	m, _ := armDegraded(t, &snap, snap)
+	plantAssignment(t, m, snap)
+	m.markDegraded(time.Now().UnixNano(), DegradeReasonStartupTimeout)
+
+	m.attemptRecoveryFromDegraded()
+	m.wg.Wait()
+
+	require.Equal(t, StateStable, m.State(),
+		"a non-stream-missing reason with healthy signals must still exit; the terminal hold must be reason-scoped")
+}
+
+// TestAttemptRecovery_StreamMissingExhausted_LatchSurvivesReasonOverlap pins
+// the overlap defense: when stream-missing exhaustion fires while the worker
+// is ALREADY Degraded for another reason, enterDegraded's CAS no-ops and the
+// reason string never records the exhaustion. The atomic latch must keep the
+// recovery exit terminal anyway — otherwise the other reason's recovery
+// signal (here: a fresh post-degrade heartbeat satisfying the kv-unavailable
+// gate) would exit to Stable with a permanently dead partition loop.
+func TestAttemptRecovery_StreamMissingExhausted_LatchSurvivesReasonOverlap(t *testing.T) {
+	t.Parallel()
+	snap := Assignment{Version: 1, LeaderRevision: 5, Partitions: []Partition{{Keys: []string{"p0"}}}}
+	m, _ := armDegraded(t, &snap, snap)
+	plantAssignment(t, m, snap)
+	sinceNano := time.Now().UnixNano()
+	m.markDegraded(sinceNano, DegradeReasonKVUnavailable)
+
+	// Exhaustion fires while already Degraded: enterDegraded CAS no-ops, only
+	// the latch records it.
+	m.onStreamMissingError("ORDERS", errors.New("recovery exhausted"))
+
+	// The kv-unavailable gate's own exit signal is satisfied (fresh heartbeat
+	// after the degrade) — without the latch, recovery would exit to Stable.
+	m.lastHeartbeatSuccessAt.Store(sinceNano + int64(time.Minute))
+
+	m.attemptRecoveryFromDegraded()
+
+	require.Equal(t, StateDegraded, m.State(),
+		"the exhaustion latch must hold the worker Degraded even when the degrade reason belongs to another (recovered) failure")
 }
