@@ -103,14 +103,12 @@ func TestStreamMissingNoHook_RoutesPermanentFailureToManager(t *testing.T) {
 		// MaxAttempts=1 so the first stream-missing detour failure
 		// (handleStreamMissing returning a wrapped ErrStreamMissing
 		// because no hook is configured) immediately exhausts the
-		// envelope and fires OnPermanentFailure. The exhaustion-path
-		// classification of subsequent iter.Next failures has a
-		// known gap (iter.Next() → ErrNoHeartbeat after the first
-		// detour returns false from confirmConsumerGone when the
-		// underlying API surfaces ErrStreamNotFound rather than
-		// ErrConsumerNotFound); MaxAttempts=1 keeps this T4 focused
-		// on the manager-side wiring rather than the durable
-		// classification surface.
+		// envelope and fires OnPermanentFailure, keeping this T4
+		// focused on the manager-side wiring. The multi-attempt
+		// budget (post-deletion cycles routing through the
+		// heartbeat-burst Info probe) is pinned separately by
+		// TestStreamMissingNoHook_HeartbeatBurstPath_ExhaustsWithMultiAttemptBudget
+		// in stream_missing_burst_path_test.go.
 		consumer.WithRecoveryRetry(consumer.RecoveryRetryConfig{
 			MaxAttempts: 1,
 			BaseBackoff: 100 * time.Millisecond,
@@ -237,6 +235,20 @@ WaitForStreamMissing:
 			"degraded reason must never be the KV-threshold one for a stream-missing exhaustion (cross-feature contract); got %q in the observed sequence %v", r, degradedReasons)
 	}
 	degradedMu.Unlock()
+
+	// Terminal hold: the worker must STAY Degraded — recovery must not exit
+	// this reason. Pre-fix, the connection monitor (connection up the whole
+	// time) exited back to Stable once it had been up for one ExitThreshold,
+	// defeating the rotate-on-Degraded operator contract. The cluster uses
+	// the default ExitThreshold (5s) and the monitor ticks every 1s, so the
+	// exit empirically lands at ~6.2s after the Degraded entry. An 8s window
+	// comfortably exceeds one ExitThreshold plus one tick, so it catches the
+	// pre-fix flip while staying within the surrounding 60s context budget.
+	require.Never(t, func() bool {
+		return mgr.State() != types.StateDegraded
+	}, 8*time.Second, 100*time.Millisecond,
+		"stream-missing-recovery-exhausted must hold the worker terminally Degraded for rotation; "+
+			"an exit back to Stable leaves dead partition consumers reported as healthy")
 
 	// Post-exhaustion silence (spec T4 §"Post-exhaustion silence").
 	// Snapshot the call count right after the OnError fire, then

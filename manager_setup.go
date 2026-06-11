@@ -80,6 +80,12 @@ func (m *Manager) onStreamMissingError(streamName string, cause error) {
 		"stream", streamName,
 		"error", cause,
 	)
+	// Set the latch BEFORE enterDegraded so it is visible even when the CAS
+	// no-ops because the worker is ALREADY Degraded for another reason. In
+	// that case the degradedRecord reason string never records the exhaustion,
+	// but the latch persists and keeps the terminal hold active on the next
+	// attemptRecoveryFromDegraded tick.
+	m.streamMissingExhausted.Store(true)
 	m.enterDegraded(DegradeReasonStreamMissingRecoveryExhausted)
 }
 

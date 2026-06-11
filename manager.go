@@ -195,7 +195,15 @@ type Manager struct {
 	// hand-maintained store ordering between two atomics. enterDegraded's
 	// CompareAndSwap(nil, rec) is the sole-winner entry gate; exitDegraded clears
 	// it with Store(nil) after a successful state transition. See degradedRecord.
-	degraded               atomic.Pointer[degradedRecord]
+	degraded atomic.Pointer[degradedRecord]
+	// streamMissingExhausted latches "a partition-consumer loop in this
+	// process has permanently exited after stream-missing recovery
+	// exhaustion". Unlike the degradedRecord reason — which is lost when
+	// enterDegraded's CAS no-ops because the worker was ALREADY Degraded
+	// for another reason — this latch survives reason overlap, keeping the
+	// recovery-exit hold terminal. Never cleared in-process: the dead loop
+	// cannot restart; rotation is the only recovery.
+	streamMissingExhausted atomic.Bool
 	connMonitorOnce        sync.Once      // ensures single connection monitor goroutine
 	postStableMonitorsOnce sync.Once      // ensures startPostStableMonitors fires exactly once
 	startedAt              time.Time      // absolute wall-clock anchor for StartupTimeout budget; set in prepareStart
