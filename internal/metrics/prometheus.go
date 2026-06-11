@@ -133,7 +133,7 @@ func (p *PrometheusCollector) ensureRegistered() {
 			Namespace: p.namespace,
 			Subsystem: "worker_consumer",
 			Name:      "subject_threshold_warnings_total",
-			Help:      "Warnings emitted when subjects near the MaxSubjects threshold.",
+			Help:      "Updates rejected because the deduped subject count exceeded MaxConcurrentSubjects (fires once per rejected update, including retries).",
 		})
 
 		p.wcUpdateResults = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -458,7 +458,7 @@ func (p *PrometheusCollector) IncrementWorkerConsumerGuardrailViolation(kind str
 	p.wcGuardrailViolations.WithLabelValues(kind).Inc()
 }
 
-// IncrementWorkerConsumerSubjectThresholdWarning increments threshold warnings.
+// IncrementWorkerConsumerSubjectThresholdWarning increments rejected-update counts for over-cap subject assignments.
 func (p *PrometheusCollector) IncrementWorkerConsumerSubjectThresholdWarning() {
 	p.ensureRegistered()
 	p.wcSubjectThresholdWarnings.Inc()

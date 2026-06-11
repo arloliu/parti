@@ -6,14 +6,15 @@ import (
 	"github.com/arloliu/parti/v2/types"
 )
 
-// ProcessingGateConfig configures the optional exclusive processing gate.
+// ProcessingGateConfig configures the optional processing gate.
 //
-// When enabled, a Dynamic consumer uses a distributed lock (via KV) to ensure
-// that it is the *only* active processor for its assigned partitions. This
-// prevents split-brain processing during rebalances.
-//
-// The gate NAKs messages when the worker is not the owner or when the handoff
-// state is not in the allowed set.
+// When enabled, a Dynamic consumer checks KV-backed ownership claims before
+// each handler invocation (per-message admission control) and NAKs messages
+// when the worker is not the owner or when the handoff state is not in the
+// allowed set. This bounds, but does not eliminate, split-brain processing
+// during rebalances: a handler invocation that has already started cannot be
+// revoked. See docs/LIFECYCLE.md "Two-Phase Handoff" for the per-tier
+// overlap contract.
 type ProcessingGateConfig struct {
 	// Enabled toggles the gate.
 	// Default: false (gate disabled).

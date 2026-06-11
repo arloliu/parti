@@ -34,7 +34,8 @@ type CommonConfig struct {
 	//
 	// When true:
 	//  - The handler MUST explicitly call msg.Ack(), msg.Nak(), or msg.Term().
-	//  - Returning an error from the handler is still logged but does not trigger Action.
+	//  - A returned handler error is discarded (neither logged nor acted on);
+	//    surface failures from inside the handler itself.
 	ManualAck bool
 
 	// AckWait is the time allowed for processing a message before it is considered lost
@@ -66,6 +67,11 @@ type CommonConfig struct {
 	//
 	// If no messages are available within this timeout, the pull request expires.
 	// The consumer loop manages this automatically.
+	//
+	// Minimum: 1s. NATS rejects a PullExpiry below 1s at iterator-creation
+	// time; a sub-second value previously caused Start to return success and
+	// then fail every iterator creation forever — a permanently dead consumer
+	// with no terminal signal. Construction now fails fast instead.
 	//
 	// Default: 5s.
 	FetchTimeout time.Duration `default:"5s" validate:"gt=0"`
@@ -165,7 +171,24 @@ func (c *CommonConfig) Validate() error {
 		return err
 	}
 
-	return fuda.Validate(c)
+	if err := fuda.Validate(c); err != nil {
+		return err
+	}
+
+	return validateFetchTimeoutFloor(c.FetchTimeout)
+}
+
+// validateFetchTimeoutFloor enforces NATS's 1s PullExpiry minimum. Each
+// consumer config's Validate calls this directly (they run fuda on their own
+// struct rather than delegating to CommonConfig.Validate), so the floor lives
+// in one place. A sub-second value previously passed validation and produced
+// a consumer whose Start succeeded and then failed every iterator creation.
+func validateFetchTimeoutFloor(ft time.Duration) error {
+	if ft < time.Second {
+		return fmt.Errorf("%w: FetchTimeout must be at least 1s (NATS PullExpiry floor), got %v", ErrInvalidConfig, ft)
+	}
+
+	return nil
 }
 
 // CheckWorkQueueRecoveryCompat returns ErrInvalidConfig when the stream uses
@@ -178,6 +201,11 @@ func (c *CommonConfig) Validate() error {
 // so callers are not blocked by transient connectivity issues. This means
 // transient JetStream API failures during the pre-flight do not block consumer
 // updates; the runtime continues as if the check passed.
+//
+// For [Dynamic], the per-consumer outcome is cached: a pass recorded during a
+// transient fetch failure is not re-evaluated until a stream-recreate resets
+// the check, so a genuinely incompatible configuration may go undetected
+// until recovery first misbehaves.
 //
 // This function is exported so the provision SDK can reuse the exact same
 // implementation in its dynamic-consumer alignment check

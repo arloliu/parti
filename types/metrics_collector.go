@@ -332,7 +332,9 @@ type WorkerConsumerMetrics interface {
 	// IncrementWorkerConsumerGuardrailViolation increments violations (max_subjects, workerid_mutation).
 	IncrementWorkerConsumerGuardrailViolation(kind string)
 
-	// IncrementWorkerConsumerSubjectThresholdWarning increments threshold warning events.
+	// IncrementWorkerConsumerSubjectThresholdWarning increments updates rejected because the
+	// deduped subject count exceeded MaxConcurrentSubjects (fires once per rejected update,
+	// including retries).
 	IncrementWorkerConsumerSubjectThresholdWarning()
 
 	// RecordWorkerConsumerUpdate increments update results (success|failure|noop).

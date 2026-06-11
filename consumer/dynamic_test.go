@@ -2,6 +2,7 @@ package consumer_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -121,4 +122,70 @@ func TestDynamic_ConsumerOptions_AppliedToLiveConsumer(t *testing.T) {
 	}
 	require.NoError(t, lister.Err(), "ListConsumers iteration failed")
 	require.True(t, found, "no per-partition consumer was created under the dynopt_worker prefix")
+}
+
+// TestDynamicConfig_Validate_WrapsErrInvalidConfig verifies that every
+// validation failure in NewDynamic / DynamicConfig.Validate is reachable
+// via errors.Is(err, consumer.ErrInvalidConfig).
+func TestDynamicConfig_Validate_WrapsErrInvalidConfig(t *testing.T) {
+	handler := consumer.MessageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error { return nil })
+
+	tests := []struct {
+		name string
+		fn   func() error
+	}{
+		{
+			name: "nil js",
+			fn: func() error {
+				_, err := consumer.NewDynamic(nil, "S", "pfx", "s.{{partition}}", handler)
+
+				return err
+			},
+		},
+		{
+			name: "fuda required field (missing StreamName via Validate)",
+			fn: func() error {
+				cfg := consumer.DynamicConfig{ConsumerPrefix: "pfx", SubjectTemplate: "s.{{partition}}"}
+				_ = cfg.SetDefaults()
+
+				return cfg.Validate()
+			},
+		},
+		{
+			name: "FetchTimeout below 1s floor",
+			fn: func() error {
+				cfg := consumer.DynamicConfig{
+					StreamName:      "S",
+					ConsumerPrefix:  "pfx",
+					SubjectTemplate: "s.{{partition}}",
+					CommonConfig:    consumer.CommonConfig{FetchTimeout: 100 * time.Millisecond},
+				}
+				_ = cfg.SetDefaults()
+
+				return cfg.Validate()
+			},
+		},
+		{
+			name: "invalid consumer prefix",
+			fn: func() error {
+				cfg := consumer.DynamicConfig{
+					StreamName:      "S",
+					ConsumerPrefix:  "bad prefix!",
+					SubjectTemplate: "s.{{partition}}",
+				}
+				_ = cfg.SetDefaults()
+
+				return cfg.Validate()
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.fn()
+			require.Error(t, err)
+			require.True(t, errors.Is(err, consumer.ErrInvalidConfig),
+				"expected errors.Is(err, consumer.ErrInvalidConfig), got: %v", err)
+		})
+	}
 }

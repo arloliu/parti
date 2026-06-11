@@ -185,6 +185,66 @@ func TestPartitionConsumer_ProcessIterator_FiltersGracefulErrors(t *testing.T) {
 	}
 }
 
+// TestPartitionConsumerDelayWithBackoff_BackoffGrows verifies that repeated calls to
+// delayWithBackoffOrExit produce growing delays (the previous delay is threaded through,
+// not reset to 0 each call).
+//
+// Pre-fix: every call passed prev=0 into jitterBackoff, so the delay was always Base
+// regardless of how many times the helper was called.
+func TestPartitionConsumerDelayWithBackoff_BackoffGrows(t *testing.T) {
+	const (
+		base     = 1 * time.Millisecond
+		mult     = 2.0
+		maxDelay = 8 * time.Millisecond
+		seed     = int64(42)
+		calls    = 6
+	)
+
+	cfg := partitionConsumerConfig{
+		BatchSize:    1,
+		FetchTimeout: 100 * time.Millisecond,
+		Retry: RetryConfig{
+			Base:       base,
+			Multiplier: mult,
+			Max:        maxDelay,
+			Seed:       seed,
+		},
+	}
+
+	pc := newPartitionConsumer(
+		logging.NewNop(),
+		nil,
+		cfg,
+		partitionConsumerOpts{
+			streamName:  "stream",
+			durableName: "durable",
+			subject:     "subject",
+			partitionID: "pid",
+		},
+	)
+
+	ctx := context.Background()
+	delays := make([]time.Duration, 0, calls)
+	for range calls {
+		delayCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+		pc.delayWithBackoffOrExit(delayCtx, "test")
+		cancel()
+		delays = append(delays, pc.retryPrev)
+	}
+
+	require.Len(t, delays, calls)
+
+	// Every delay must be in [Base, Max].
+	for i, d := range delays {
+		require.GreaterOrEqual(t, d, base, "delay[%d] below Base", i)
+		require.LessOrEqual(t, d, maxDelay, "delay[%d] exceeds Max", i)
+	}
+
+	// Growth: last delay must exceed first (with a fixed seed this is deterministic).
+	require.Greater(t, delays[calls-1], delays[0],
+		"expected backoff to grow over %d calls; delays: %v", calls, delays)
+}
+
 // --- mock helpers ---
 
 // errorOnNextIter returns an error immediately on Next().

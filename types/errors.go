@@ -151,6 +151,15 @@ var (
 	ErrCommitCASFailed = errors.New("commit CAS failed; surrendering")
 )
 
+// Consumer errors - Errors returned by consumer lifecycle operations.
+var (
+	// ErrConsumerStopped is returned when an operation requires a running
+	// consumer but the consumer has been stopped or closed. Stop/Close is
+	// terminal for Static, Broadcast, and Dynamic worker consumers: create a
+	// new instance to consume again.
+	ErrConsumerStopped = errors.New("consumer is stopped")
+)
+
 // Common errors - Shared errors used across multiple components.
 var (
 	// ErrContextCanceled is returned when an operation is canceled by context.

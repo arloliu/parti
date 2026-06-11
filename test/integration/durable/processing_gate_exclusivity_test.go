@@ -85,7 +85,10 @@ func TestProcessingGate_Exclusivity(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = w2.Close(context.Background()) }()
 
-	// Assign both workers the same partition (they will each have their own durable)
+	// Assign both workers the same partition. They share the same per-partition
+	// durable (prefix+partitionID+hash, no worker ID); exclusivity comes from the
+	// processing gate NAK-delaying deliveries on the non-owner, not from separate
+	// durables.
 	part := types.Partition{Keys: []string{pid}}
 	require.NoError(t, w1.UpdateWorkerConsumer(ctx, "w1", []types.Partition{part}))
 	require.NoError(t, w2.UpdateWorkerConsumer(ctx, "w2", []types.Partition{part}))

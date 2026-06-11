@@ -2,6 +2,7 @@ package consumer
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -101,6 +102,83 @@ func TestQueueConfig_Validate_InvalidConsumerName(t *testing.T) {
 	require.True(t, strings.Contains(err.Error(), "invalid characters"))
 }
 
+// TestQueueConfig_Validate_WrapsErrInvalidConfig verifies that every validation
+// failure in QueueConfig.Validate is reachable via errors.Is(err, ErrInvalidConfig).
+func TestQueueConfig_Validate_WrapsErrInvalidConfig(t *testing.T) {
+	handler := MessageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error { return nil })
+
+	tests := []struct {
+		name string
+		fn   func() error
+	}{
+		{
+			name: "fuda required field (missing StreamName)",
+			fn: func() error {
+				_, err := NewQueue(nil, "", "c", "s.>", handler)
+
+				return err
+			},
+		},
+		{
+			name: "fuda required field (missing ConsumerName)",
+			fn: func() error {
+				_, err := NewQueue(nil, "S", "", "s.>", handler)
+
+				return err
+			},
+		},
+		{
+			name: "invalid consumer name",
+			fn: func() error {
+				cfg := QueueConfig{
+					StreamName:    "TEST",
+					ConsumerName:  "bad name!",
+					FilterSubject: "events.>",
+				}
+				_ = cfg.SetDefaults()
+
+				return cfg.Validate()
+			},
+		},
+		{
+			name: "invalid filter subject",
+			fn: func() error {
+				cfg := QueueConfig{
+					StreamName:    "TEST",
+					ConsumerName:  "ok",
+					FilterSubject: "events..>",
+				}
+				_ = cfg.SetDefaults()
+
+				return cfg.Validate()
+			},
+		},
+		{
+			name: "FetchTimeout below 1s floor",
+			fn: func() error {
+				cfg := QueueConfig{
+					StreamName:    "TEST",
+					ConsumerName:  "ok",
+					FilterSubject: "events.>",
+					CommonConfig:  CommonConfig{FetchTimeout: 100 * time.Millisecond},
+				}
+				_ = cfg.SetDefaults()
+
+				return cfg.Validate()
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.fn()
+			require.Error(t, err)
+			require.True(t, errors.Is(err, ErrInvalidConfig),
+				"expected errors.Is(err, ErrInvalidConfig), got: %v", err)
+		})
+	}
+}
+
 func TestQueueConfig_SetDefaults(t *testing.T) {
 	cfg := QueueConfig{
 		CommonConfig:  CommonConfig{},
@@ -168,7 +246,7 @@ func TestQueue_StartStop(t *testing.T) {
 	handler := MessageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error { return nil })
 
 	q, err := NewQueue(js, "QUEUE_TEST", "queue-workers", "queue.>", handler,
-		WithFetchTimeout(500*time.Millisecond),
+		WithFetchTimeout(time.Second),
 	)
 	require.NoError(t, err)
 
@@ -465,6 +543,116 @@ func TestQueue_RunLoop_FailedRecoveryUsesBackoff(t *testing.T) {
 	require.Less(t, iterFactoryCalls.Load(), int32(5), "failed recovery should back off instead of hot-looping")
 	require.NotEmpty(t, m.attemptReasons)
 	require.Equal(t, []string{"failure"}, m.results[:1])
+}
+
+// queueSignalMetrics extends queueRecoveryMetrics to record iterator-restart reasons.
+type queueSignalMetrics struct {
+	queueRecoveryMetrics
+	restartReasons []string
+}
+
+func (m *queueSignalMetrics) IncrementWorkerConsumerIteratorRestart(reason string) {
+	m.restartReasons = append(m.restartReasons, reason)
+}
+
+// TestQueue_RecoveryDisabled_IteratorErrorIsSignaled pins the operator signal for
+// the default configuration: with RecoveryDisabled (nil controller), a non-graceful
+// iterator error (e.g. the durable was deleted) must emit a Warn log and the
+// iterator-restart metric with reason "recovery_disabled". Pre-fix the only artifact
+// was a Debug log — at production log levels a deleted durable was a zero-signal
+// permanent stall.
+func TestQueue_RecoveryDisabled_IteratorErrorIsSignaled(t *testing.T) {
+	m := &queueSignalMetrics{}
+
+	q := &Queue{
+		config: QueueConfig{
+			CommonConfig: CommonConfig{
+				BatchSize:    1,
+				FetchTimeout: time.Second,
+			},
+			StreamName:   "Q_RECOVERY_DISABLED",
+			ConsumerName: "q-worker",
+			Retry: RetryConfig{
+				Base:       20 * time.Millisecond,
+				Backoff:    20 * time.Millisecond,
+				Multiplier: 1.0,
+				Max:        20 * time.Millisecond,
+			},
+		},
+		logger:   logging.NewNop(),
+		metrics:  m,
+		consumer: &stubConsumer{},
+		loopDone: make(chan struct{}),
+		iterFactory: func(_ jetstream.Consumer, _ int, _ time.Duration) (jetstream.MessagesContext, error) {
+			return &queueErrorIter{err: jetstream.ErrNoHeartbeat}, nil
+		},
+		consumerConfig: jetstream.ConsumerConfig{Durable: "q-worker"},
+		recovery:       nil, // RecoveryDisabled: NewController returns nil for Disabled strategy
+		retryRNG:       newRetryRNG(1),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go q.runLoop(ctx)
+
+	// One backoff cycle (20ms) is enough to observe the metric; wait two.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-q.loopDone
+
+	require.NotEmpty(t, m.restartReasons,
+		"expected IncrementWorkerConsumerIteratorRestart to be called on the nil-recovery path")
+	require.Contains(t, m.restartReasons, "recovery_disabled",
+		"expected reason=recovery_disabled on the nil-recovery path")
+}
+
+// TestQueue_ClosedIteratorWithLiveContext_BacksOff pins that a persistently
+// closing iterator (Next always returns ErrMsgIteratorClosed) with a live
+// context is bounded in factory call count over 200ms. Pre-fix processIterator
+// returned nil for ErrMsgIteratorClosed regardless of ctx state, causing
+// runLoop to reset backoff to 0 and recreate the iterator in a tight loop
+// (hundreds of calls in 200ms).
+func TestQueue_ClosedIteratorWithLiveContext_BacksOff(t *testing.T) {
+	var factoryCalls atomic.Int32
+
+	q := &Queue{
+		config: QueueConfig{
+			CommonConfig: CommonConfig{
+				BatchSize:    1,
+				FetchTimeout: time.Second,
+			},
+			StreamName:   "QUEUE",
+			ConsumerName: "queue-workers",
+			Retry: RetryConfig{
+				Base:       20 * time.Millisecond,
+				Backoff:    20 * time.Millisecond,
+				Multiplier: 1.0,
+				Max:        50 * time.Millisecond,
+			},
+		},
+		logger:   logging.NewNop(),
+		metrics:  &queueRecoveryMetrics{},
+		consumer: &stubConsumer{},
+		loopDone: make(chan struct{}),
+		iterFactory: func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error) {
+			factoryCalls.Add(1)
+			return &queueErrorIter{err: jetstream.ErrMsgIteratorClosed}, nil
+		},
+		consumerConfig: jetstream.ConsumerConfig{Durable: "queue-workers"},
+		recovery:       nil, // RecoveryDisabled
+		retryRNG:       newRetryRNG(1),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go q.runLoop(ctx)
+
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	<-q.loopDone
+
+	calls := factoryCalls.Load()
+	t.Logf("factory call count over 200ms: %d", calls)
+	require.Less(t, calls, int32(20),
+		"ErrMsgIteratorClosed with live context must back off; got %d factory calls in 200ms", calls)
 }
 
 // TestQueue_ConsumerOptions_AppliedToLiveConsumer verifies that

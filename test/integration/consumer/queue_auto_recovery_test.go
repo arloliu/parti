@@ -82,6 +82,49 @@ func TestQueue_AutoRecovery_WorkQueuePolicy_RecoverFromNew_RejectsAtStart(t *tes
 	require.ErrorIs(t, err, consumer.ErrInvalidConfig)
 }
 
+// TestQueue_Start_IncompatibleConfig_LeavesNoDurable pins startup hygiene:
+// the WorkQueue/recovery compatibility check must run BEFORE the durable is
+// created. Pre-fix, a failed Start left an exclusive durable on the
+// WorkQueuePolicy stream that blocked every other consumer for
+// InactiveThreshold (default 24h).
+func TestQueue_Start_IncompatibleConfig_LeavesNoDurable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration: skipping in short mode")
+	}
+
+	ctx := t.Context()
+	_, nc := partitesting.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	_, err = js.CreateStream(ctx, jetstream.StreamConfig{
+		Name:      "QWQ_NODUR",
+		Subjects:  []string{"qwq.nodur.>"},
+		Retention: jetstream.WorkQueuePolicy,
+		Storage:   jetstream.MemoryStorage,
+	})
+	require.NoError(t, err)
+
+	handler := consumer.MessageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error {
+		return nil
+	})
+
+	q, err := consumer.NewQueue(js, "QWQ_NODUR", "qwq-nodur", "qwq.nodur.>", handler,
+		consumer.WithRecoveryStrategy(consumer.RecoverFromNew),
+	)
+	require.NoError(t, err)
+
+	err = q.Start(ctx)
+	require.Error(t, err)
+	require.ErrorIs(t, err, consumer.ErrInvalidConfig)
+
+	// The durable must NOT have been created — a lingering exclusive durable
+	// on a WorkQueuePolicy stream blocks every other consumer for up to
+	// InactiveThreshold (default 24h), causing NATS err 10100.
+	_, consErr := js.Consumer(ctx, "QWQ_NODUR", "qwq-nodur")
+	require.Error(t, consErr, "durable must NOT exist after a failed Start (compat check must precede ensureConsumer)")
+}
+
 // TestQueue_AutoRecovery_RecoverFromNew_ExplicitDelete verifies that when the
 // durable consumer is explicitly deleted, the Queue consumer recovers using
 // RecoverFromNew and does NOT replay already-processed messages.

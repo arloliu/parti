@@ -18,6 +18,13 @@ import (
 	"github.com/arloliu/parti/v2/types"
 )
 
+// errIteratorClosedUnexpectedly is returned by processIterator when the iterator
+// reports ErrMsgIteratorClosed while the loop context is still alive (i.e., not a
+// graceful shutdown). The sentinel is unexported so callers inside runLoop handle
+// it via the normal backoff path rather than forwarding to the recovery classifier
+// (which would return ActionExit for ErrMsgIteratorClosed).
+var errIteratorClosedUnexpectedly = errors.New("iterator closed unexpectedly")
+
 // Queue is a load-balanced consumer where multiple instances share one durable.
 // Each message is delivered to exactly one instance (queue group semantics).
 //
@@ -102,7 +109,10 @@ type QueueConfig struct {
 	//
 	// NATS only permits [jetstream.DeliverAllPolicy] on WorkQueuePolicy streams.
 	// [RecoverFromNew] maps to [jetstream.DeliverNewPolicy] and is therefore incompatible:
-	// [Queue.Start] will return [ErrInvalidConfig] when both are combined.
+	// [Queue.Start] rejects the combination with [ErrInvalidConfig]. The pre-flight
+	// check is best-effort — transient failures to fetch stream info are ignored
+	// (see [CheckWorkQueueRecoveryCompat]) — so an incompatible combination can
+	// slip past Start and only surface when recovery first misbehaves.
 	// Use [RecoverFromBeginning] or [RecoveryDisabled] for WorkQueuePolicy streams.
 	RecoveryStrategy RecoveryStrategy
 }
@@ -152,14 +162,18 @@ func (c *QueueConfig) Validate() error {
 		return err
 	}
 	if err := fuda.Validate(c); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidConfig, err)
+	}
+
+	if err := validateFetchTimeoutFloor(c.FetchTimeout); err != nil {
 		return err
 	}
 
 	if !jsutil.IsValidConsumerName(c.ConsumerName) {
-		return fmt.Errorf("consumer name %q contains invalid characters (allowed: a-z, A-Z, 0-9, -, _)", c.ConsumerName)
+		return fmt.Errorf("%w: consumer name %q contains invalid characters (allowed: a-z, A-Z, 0-9, -, _)", ErrInvalidConfig, c.ConsumerName)
 	}
 	if err := validateSubjectTokens(c.FilterSubject, true); err != nil {
-		return fmt.Errorf("filter subject is invalid: %w", err)
+		return fmt.Errorf("%w: filter subject is invalid: %w", ErrInvalidConfig, err)
 	}
 	if c.RecoveryStrategy == RecoverFromLastProcessed {
 		return fmt.Errorf("%w: RecoverFromLastProcessed is not supported for Queue consumers"+
@@ -270,16 +284,16 @@ func (q *Queue) Start(ctx context.Context) error {
 		return errors.New("queue consumer already started")
 	}
 
+	if err := CheckWorkQueueRecoveryCompat(ctx, q.js, q.config.StreamName, q.config.RecoveryStrategy); err != nil {
+		return err
+	}
+
 	// Create or get existing consumer
 	cons, err := q.ensureConsumer(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to create consumer: %w", err)
 	}
 	q.consumer = cons
-
-	if err := CheckWorkQueueRecoveryCompat(ctx, q.js, q.config.StreamName, q.config.RecoveryStrategy); err != nil {
-		return err
-	}
 
 	// Start the pull loop
 	loopCtx, cancel := context.WithCancel(context.Background())
@@ -299,6 +313,11 @@ func (q *Queue) Start(ctx context.Context) error {
 }
 
 // Stop gracefully stops the consumer.
+//
+// If ctx expires before the pull loop exits, Stop returns the context error
+// and the consumer still counts as started: a subsequent [Queue.Start] fails,
+// and a second Stop call (which waits for the loop again) is required before
+// the consumer can be restarted.
 func (q *Queue) Stop(ctx context.Context) error {
 	q.mu.Lock()
 	if !q.loopStarted {
@@ -376,6 +395,13 @@ func (q *Queue) runLoop(ctx context.Context) {
 		q.mu.RUnlock()
 
 		if cons == nil {
+			// Defensive: Start always sets q.consumer before launching the loop,
+			// so this exit indicates internal state was cleared unexpectedly.
+			q.logger.Warn("queue consumer loop exiting: consumer reference is nil",
+				"stream", q.config.StreamName,
+				"consumer", q.config.ConsumerName,
+			)
+
 			return
 		}
 
@@ -393,6 +419,29 @@ func (q *Queue) runLoop(ctx context.Context) {
 		iterErr := q.processIterator(ctx, iter)
 		if iterErr == nil {
 			continue
+		}
+
+		// Iterator closed while loop context is alive (not a graceful shutdown).
+		// Back off and retry without forwarding to the recovery classifier, which
+		// would return ActionExit for ErrMsgIteratorClosed.
+		if errors.Is(iterErr, errIteratorClosedUnexpectedly) {
+			if q.delayWithBackoffOrExit(ctx, &backoff) {
+				return
+			}
+			continue
+		}
+
+		if q.recovery == nil {
+			// RecoveryDisabled (the default): the recovery controller is nil and
+			// classification short-circuits before any metric. A deleted durable
+			// causes a permanent stall with no operator signal at production log
+			// levels without this explicit path.
+			q.logger.Warn("iterator error with recovery disabled; consumer will retry but cannot recreate a deleted durable",
+				"error", iterErr,
+				"stream", q.config.StreamName,
+				"filter", q.config.FilterSubject,
+			)
+			q.metrics.IncrementWorkerConsumerIteratorRestart("recovery_disabled")
 		}
 
 		action, newCons, classifyErr := q.recovery.Classify(ctx, iterErr, q.consumerInfoFn(), consumerConfig, q.recreateFn())
@@ -466,9 +515,17 @@ func (q *Queue) processIterator(ctx context.Context, iter jetstream.MessagesCont
 		msg, err := iter.Next()
 		if err != nil {
 			if errors.Is(err, jetstream.ErrMsgIteratorClosed) || errors.Is(err, context.Canceled) {
-				return nil // graceful shutdown
+				if ctx.Err() != nil {
+					return nil // graceful shutdown: loop context cancelled
+				}
+				// Iterator closed while the loop context is still alive — the
+				// underlying pull consumer may have been server-side closed.
+				// Return the sentinel so runLoop takes the backoff path instead
+				// of spinning (a nil return resets backoff to 0).
+				return errIteratorClosedUnexpectedly
 			}
 			q.logger.Debug("iterator error", "error", err)
+
 			return err // caller classifies for recovery or backoff
 		}
 

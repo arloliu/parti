@@ -7,7 +7,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/arloliu/parti/v2/partitest"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 )
@@ -216,4 +218,55 @@ func TestDynamic_CompatRearm_ConcurrentStress_NoRace(t *testing.T) {
 
 	// We don't assert a particular outcome — any (cached err) or nil
 	// is acceptable. The point is -race not triggering.
+}
+
+// TestDynamic_UpdateAfterStop_SentinelPrecedence verifies that calling Update
+// or UpdateWorkerConsumer on a stopped Dynamic returns ErrConsumerStopped
+// rather than ErrInvalidConfig, even when the compat check is injected to
+// return an ErrInvalidConfig-wrapped error. The terminal-stopped sentinel must
+// take precedence over the compat preflight.
+func TestDynamic_UpdateAfterStop_SentinelPrecedence(t *testing.T) {
+	_, nc := partitest.StartEmbeddedNATS(t)
+
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	handler := MessageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error { return nil })
+
+	d, err := NewDynamic(
+		js,
+		"DYNSENTINEL_STREAM",
+		"dynsentinel_worker",
+		"dynsentinel.{{.PartitionID}}",
+		handler,
+	)
+	require.NoError(t, err)
+
+	// Inject a compat check that always returns ErrInvalidConfig.
+	failErr := fmt.Errorf("%w: injected WorkQueuePolicy mismatch", ErrInvalidConfig)
+	swapCompatCheckFn(t, func(_ context.Context, _ jetstream.JetStream, _ string, _ RecoveryStrategy) error {
+		return failErr
+	})
+
+	// Stop before ever calling Update — marks the inner closed flag.
+	require.NoError(t, d.Stop(ctx))
+
+	// Update must return ErrConsumerStopped, NOT ErrInvalidConfig.
+	err = d.Update(ctx, "worker-0", nil)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrConsumerStopped),
+		"Update: expected ErrConsumerStopped, got: %v", err)
+	require.False(t, errors.Is(err, ErrInvalidConfig),
+		"Update: ErrConsumerStopped must take precedence over ErrInvalidConfig, got: %v", err)
+
+	// UpdateWorkerConsumer must return ErrConsumerStopped as well.
+	err = d.UpdateWorkerConsumer(ctx, "worker-0", nil)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrConsumerStopped),
+		"UpdateWorkerConsumer: expected ErrConsumerStopped, got: %v", err)
+	require.False(t, errors.Is(err, ErrInvalidConfig),
+		"UpdateWorkerConsumer: ErrConsumerStopped must take precedence over ErrInvalidConfig, got: %v", err)
 }

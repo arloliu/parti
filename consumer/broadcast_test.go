@@ -2,6 +2,7 @@ package consumer
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,72 @@ import (
 
 	"github.com/arloliu/parti/v2/partitest"
 )
+
+// TestBroadcastConfig_Validate_WrapsErrInvalidConfig verifies that every
+// validation failure in NewBroadcast / BroadcastConfig.Validate is reachable
+// via errors.Is(err, ErrInvalidConfig).
+func TestBroadcastConfig_Validate_WrapsErrInvalidConfig(t *testing.T) {
+	handler := MessageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error { return nil })
+
+	tests := []struct {
+		name string
+		fn   func() error
+	}{
+		{
+			name: "nil js",
+			fn: func() error {
+				_, err := NewBroadcast(nil, "S", "pfx", "s.>", handler)
+
+				return err
+			},
+		},
+		{
+			name: "fuda required field (missing StreamName)",
+			fn: func() error {
+				cfg := BroadcastConfig{ConsumerPrefix: "pfx", FilterSubject: "s.>"}
+				_ = cfg.SetDefaults()
+
+				return cfg.Validate()
+			},
+		},
+		{
+			name: "FetchTimeout below 1s floor",
+			fn: func() error {
+				cfg := BroadcastConfig{
+					StreamName:     "S",
+					ConsumerPrefix: "pfx",
+					FilterSubject:  "s.>",
+					CommonConfig:   CommonConfig{FetchTimeout: 100 * time.Millisecond},
+				}
+				_ = cfg.SetDefaults()
+
+				return cfg.Validate()
+			},
+		},
+		{
+			name: "invalid consumer prefix",
+			fn: func() error {
+				cfg := BroadcastConfig{
+					StreamName:     "S",
+					ConsumerPrefix: "bad prefix!",
+					FilterSubject:  "s.>",
+				}
+				_ = cfg.SetDefaults()
+
+				return cfg.Validate()
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.fn()
+			require.Error(t, err)
+			require.True(t, errors.Is(err, ErrInvalidConfig),
+				"expected errors.Is(err, ErrInvalidConfig), got: %v", err)
+		})
+	}
+}
 
 // TestBroadcast_ConsumerOptions_AppliedToLiveConsumer verifies that
 // WithConsumerMemoryStorage and WithConsumerReplicas reach the live

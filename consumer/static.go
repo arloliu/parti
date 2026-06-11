@@ -207,7 +207,7 @@ func NewStatic(
 
 	inner, err := ipartition.NewJSConsumer(js, partitionCfg, handler.Handle)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
 	}
 
 	return &Static{
@@ -224,15 +224,19 @@ func NewStatic(
 // a pull loop. Messages are delivered to the handler configured at creation.
 //
 // Start may only be called once. Calling Start on an already-started consumer
-// returns an error.
+// returns an error. After [Static.Stop] is called, Start returns
+// [ErrConsumerStopped]; create a new instance to consume again.
 //
 // Parameters:
 //   - ctx: Context for lifecycle control. Cancellation stops the consumer.
 //
 // Returns:
-//   - error: Non-nil if the consumer is already started or if JetStream
-//     consumer creation fails.
+//   - error: Non-nil if the consumer is already started, [ErrConsumerStopped]
+//     if the consumer has been stopped, or a JetStream consumer creation error.
 func (s *Static) Start(ctx context.Context) error {
+	if s.inner.Stopped() {
+		return fmt.Errorf("static consumer: %w", ErrConsumerStopped)
+	}
 	if err := CheckWorkQueueRecoveryCompat(ctx, s.js, s.streamName, s.recoveryStrategy); err != nil {
 		return err
 	}
@@ -244,6 +248,13 @@ func (s *Static) Start(ctx context.Context) error {
 // Stop cancels the internal pull loop and waits for pending message processing
 // to complete (up to the context deadline). The underlying JetStream consumer
 // is NOT deleted; it will be garbage-collected by the server after InactiveThreshold.
+//
+// Stop is terminal: after Stop returns, any subsequent call to [Static.Start]
+// returns [ErrConsumerStopped]. Create a new instance to consume again.
+//
+// If the consumer is stopped while still registered with a running manager, the
+// manager will retry the failed update indefinitely (by design). Stop the manager
+// first, or deregister this consumer before calling Stop.
 //
 // Stop is idempotent; calling it multiple times is safe.
 //
@@ -288,16 +299,20 @@ func (c *StaticConfig) Validate() error {
 		return err
 	}
 	if err := fuda.Validate(c); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidConfig, err)
+	}
+
+	if err := validateFetchTimeoutFloor(c.FetchTimeout); err != nil {
 		return err
 	}
 
 	if !jsutil.IsValidConsumerName(c.ConsumerName) {
-		return fmt.Errorf("consumer name %q contains invalid characters (allowed: a-z, A-Z, 0-9, -, _)", c.ConsumerName)
+		return fmt.Errorf("%w: consumer name %q contains invalid characters (allowed: a-z, A-Z, 0-9, -, _)", ErrInvalidConfig, c.ConsumerName)
 	}
 
 	// Cross-field validation: partition must be within range
 	if c.Partition >= c.NumPartitions {
-		return fmt.Errorf("partition index %d out of range [0, %d)", c.Partition, c.NumPartitions)
+		return fmt.Errorf("%w: partition index %d out of range [0, %d)", ErrInvalidConfig, c.Partition, c.NumPartitions)
 	}
 
 	return nil

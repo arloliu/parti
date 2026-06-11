@@ -93,79 +93,81 @@ func TestNewDynamic_OnPermanentFailure_ThreadedToDynamicConfig(t *testing.T) {
 // threaded through.
 type fakeJSPF struct{ jetstream.JetStream }
 
-// TestNewDynamic_WithOnPermanentFailure_Constructs verifies the option
-// composes with the existing NewDynamic constructor surface: validation
-// must accept WithOnPermanentFailure, and NewDynamic must proceed past
-// cfg.Validate into the durable layer (where the embedded nil interface
-// triggers a panic on the first JS method call).
-//
-// The test discriminates three outcomes explicitly:
-//   - NewDynamic returns an error (validation rejected the option) → FAIL.
-//   - NewDynamic returns successfully (impossible with the stub JS) → FAIL.
-//   - NewDynamic panics inside the durable layer (validation passed,
-//     option threaded through, fake JS reached) → PASS.
-//
-// (v3 P2 fix: the prior version of this test used a deferred recover()
-// that swallowed every outcome including validation rejection, making
-// it a vacuous smoke test.)
-// TestDynamic_onPermanentFailure_UserCallbackWinsOverManagerObserver
-// pins the dispatch precedence contract documented on
-// [Dynamic.onPermanentFailure]: when an application has registered
-// its own OnPermanentFailure via [WithOnPermanentFailure], the
-// manager-installed observer must NOT also fire — even for
-// stream-missing exhaustion. This is the row in the dispatch matrix
-// that is most likely to bite operators if a regression accidentally
-// chained the dispatch (both fire), because the cross-feature
-// contract enforcement (manager.enterDegraded with the named reason)
-// would silently double-fire alongside the application's own
-// degraded-routing logic.
-//
-// Tested by constructing a Dynamic directly (bypassing NewDynamic so
-// no JetStream context is required), pre-populating both the
-// userOnPermanentFailure slot and the managerOnStreamMissing slot,
-// then invoking the private dispatcher with a wrapped
-// types.ErrStreamMissing. Assert: user runs, manager does not.
-func TestDynamic_onPermanentFailure_UserCallbackWinsOverManagerObserver(t *testing.T) {
+// TestDynamic_onPermanentFailure_UserCallbackAndManagerObserverBothFire
+// pins the dual-dispatch contract: when an application has registered its
+// own OnPermanentFailure via WithOnPermanentFailure, the manager-installed
+// observer ALSO fires for stream-missing exhaustion (user callback first,
+// then manager observer), so platform self-healing (Degraded -> rotation)
+// is not silently coupled to an app-level observability hook. Applications
+// that deliberately manage rotation themselves opt out explicitly via
+// WithSuppressManagerDegradeOnStreamMissing.
+func TestDynamic_onPermanentFailure_UserCallbackAndManagerObserverBothFire(t *testing.T) {
 	var (
-		userCalls      atomic.Int32
-		userArgSubject atomic.Pointer[string]
-		userArgErr     atomic.Pointer[error]
-		managerCalls   atomic.Int32
-		managerArgErr  atomic.Pointer[error]
-		managerArgName atomic.Pointer[string]
+		userCalls    atomic.Int32
+		managerCalls atomic.Int32
+		order        []string // single-goroutine test; no sync needed
 	)
 
 	d := &Dynamic{
 		streamName: "TEST_STREAM",
-		userOnPermanentFailure: func(subject string, err error) {
+		userOnPermanentFailure: func(_ string, _ error) {
 			userCalls.Add(1)
-			s := subject
-			userArgSubject.Store(&s)
-			e := err
-			userArgErr.Store(&e)
+			order = append(order, "user")
 		},
 	}
-	// Manager observer slot via the public method that NewDynamic-less
-	// callers use; this is the same path Manager.Start drives.
-	d.SetOnStreamMissingError(func(streamName string, err error) {
+	d.SetOnStreamMissingError(func(_ string, err error) {
 		managerCalls.Add(1)
-		n := streamName
-		managerArgName.Store(&n)
-		e := err
-		managerArgErr.Store(&e)
+		order = append(order, "manager")
+		require.ErrorIs(t, err, types.ErrStreamMissing,
+			"manager observer must receive the wrapped types.ErrStreamMissing chain")
+	})
+
+	wrapped := fmt.Errorf("stream %q: %w", "TEST_STREAM", types.ErrStreamMissing)
+	d.onPermanentFailure("test.subject.p1", wrapped)
+
+	require.Equal(t, []string{"user", "manager"}, order,
+		"documented order: application callback first, then manager observer")
+	require.Equal(t, int32(1), userCalls.Load(),
+		"user callback must fire exactly once")
+	require.Equal(t, int32(1), managerCalls.Load(),
+		"manager observer must ALSO fire for stream-missing exhaustion when a user callback is registered")
+
+	// Generic (non-stream-missing) exhaustion still reaches ONLY the user
+	// callback — the manager observer remains scoped to stream-missing.
+	d.onPermanentFailure("test.subject.p1", errors.New("generic exhaustion"))
+	require.Equal(t, int32(2), userCalls.Load())
+	require.Equal(t, int32(1), managerCalls.Load(),
+		"manager observer must NOT fire for non-stream-missing exhaustion")
+}
+
+// TestDynamic_onPermanentFailure_SuppressOptionDisablesManagerObserver pins
+// the explicit opt-out: with suppressManagerDegrade set, the manager
+// observer never fires (stream-missing or otherwise) while the user
+// callback still does.
+func TestDynamic_onPermanentFailure_SuppressOptionDisablesManagerObserver(t *testing.T) {
+	var (
+		userCalls    atomic.Int32
+		managerCalls atomic.Int32
+	)
+
+	d := &Dynamic{
+		streamName:             "TEST_STREAM",
+		suppressManagerDegrade: true,
+		userOnPermanentFailure: func(_ string, _ error) {
+			userCalls.Add(1)
+		},
+	}
+	d.SetOnStreamMissingError(func(_ string, _ error) {
+		managerCalls.Add(1)
 	})
 
 	wrapped := fmt.Errorf("stream %q: %w", "TEST_STREAM", types.ErrStreamMissing)
 	d.onPermanentFailure("test.subject.p1", wrapped)
 
 	require.Equal(t, int32(1), userCalls.Load(),
-		"user callback must fire exactly once when registered via WithOnPermanentFailure")
+		"user callback must still fire when suppression is enabled")
 	require.Equal(t, int32(0), managerCalls.Load(),
-		"manager observer must NOT fire when a user callback is registered — application callback wins per the documented dispatch precedence")
-	require.Equal(t, "test.subject.p1", *userArgSubject.Load(),
-		"user callback must receive the partition subject from the durable layer")
-	require.ErrorIs(t, *userArgErr.Load(), types.ErrStreamMissing,
-		"user callback must receive the wrapped types.ErrStreamMissing chain so apps can branch on the sentinel")
+		"manager observer must NOT fire when the application explicitly suppressed the degrade route")
 }
 
 // TestDynamic_onPermanentFailure_ManagerObserverOnlyOnStreamMissing
@@ -243,6 +245,21 @@ func TestDynamic_SetOnStreamMissingError_NilClearsAfterFire(t *testing.T) {
 			"a regression that left the slot populated would re-enter the (potentially stale) closure")
 }
 
+// TestNewDynamic_WithOnPermanentFailure_Constructs verifies the option
+// composes with the existing NewDynamic constructor surface: validation
+// must accept WithOnPermanentFailure, and NewDynamic must proceed past
+// cfg.Validate into the durable layer (where the embedded nil interface
+// triggers a panic on the first JS method call).
+//
+// The test discriminates three outcomes explicitly:
+//   - NewDynamic returns an error (validation rejected the option) → FAIL.
+//   - NewDynamic returns successfully (impossible with the stub JS) → FAIL.
+//   - NewDynamic panics inside the durable layer (validation passed,
+//     option threaded through, fake JS reached) → PASS.
+//
+// (v3 P2 fix: the prior version of this test used a deferred recover()
+// that swallowed every outcome including validation rejection, making
+// it a vacuous smoke test.)
 func TestNewDynamic_WithOnPermanentFailure_Constructs(t *testing.T) {
 	handler := MessageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error { return nil })
 

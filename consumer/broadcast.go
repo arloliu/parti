@@ -72,8 +72,12 @@ type BroadcastConfig struct {
 	// This ensures that each instance gets a unique durable name, achieving fan-out.
 	ConsumerPrefix string `validate:"required"`
 
-	// Retry configures the backoff behavior for control-plane operations
-	// (e.g., initial connection, creating the consumer).
+	// Retry configures the backoff behavior for the consume loop.
+	//
+	// On each iterator failure the loop sleeps for a jittered delay that grows via
+	// decorrelated jitter from Base toward Max using the Multiplier factor. Seed
+	// makes the sequence deterministic (useful in tests); zero uses the package-level
+	// PRNG. The delay resets to zero after every successful iteration cycle.
 	Retry RetryConfig
 
 	// IteratorFactory optionally overrides the internal iterator creation logic.
@@ -196,11 +200,15 @@ func NewBroadcast(
 // Start may only be called once. Calling Start on an already-started consumer
 // is a no-op.
 //
+// Stop is terminal: after [Broadcast.Stop] is called, Start returns
+// [ErrConsumerStopped]. Create a new instance to consume again.
+//
 // Parameters:
 //   - ctx: Context for the start operation. Used for JetStream API calls.
 //
 // Returns:
-//   - error: Non-nil if JetStream consumer creation fails.
+//   - error: Non-nil if JetStream consumer creation fails, or [ErrConsumerStopped]
+//     if the consumer has been stopped.
 func (b *Broadcast) Start(ctx context.Context) error {
 	// BroadcastConsumer uses UpdateWorkerConsumer to start; we wrap it as Start
 	// for a more intuitive API. The workerID and partitions are ignored internally.
@@ -225,6 +233,14 @@ func (b *Broadcast) UpdateWorkerConsumer(ctx context.Context, workerID string, p
 // to complete (up to the context deadline). The underlying JetStream consumer
 // is NOT deleted; it will be garbage-collected by the server after InactiveThreshold.
 //
+// Stop is terminal: after Stop returns, any subsequent call to [Broadcast.Start] or
+// [Broadcast.UpdateWorkerConsumer] returns [ErrConsumerStopped]. Create a new
+// instance to consume again.
+//
+// If the consumer is stopped while still registered with a running manager, the
+// manager will retry the failed update indefinitely (by design). Stop the manager
+// first, or deregister this consumer before calling Stop.
+//
 // Stop is idempotent; calling it multiple times is safe.
 //
 // Parameters:
@@ -248,11 +264,15 @@ func (c *BroadcastConfig) Validate() error {
 		return err
 	}
 	if err := fuda.Validate(c); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidConfig, err)
+	}
+
+	if err := validateFetchTimeoutFloor(c.FetchTimeout); err != nil {
 		return err
 	}
 
 	if !jsutil.IsValidConsumerName(c.ConsumerPrefix) {
-		return fmt.Errorf("consumer prefix %q contains invalid characters (allowed: a-z, A-Z, 0-9, -, _)", c.ConsumerPrefix)
+		return fmt.Errorf("%w: consumer prefix %q contains invalid characters (allowed: a-z, A-Z, 0-9, -, _)", ErrInvalidConfig, c.ConsumerPrefix)
 	}
 
 	return nil
