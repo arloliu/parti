@@ -1009,7 +1009,7 @@ func (m *Manager) handleCommitValueOnce(commit *types.AssignmentCommit) *types.A
 	if !m.pendingApplyInFlight.CompareAndSwap(false, true) {
 		for {
 			prev := m.stashedCommit.Load()
-			if prev != nil && prev.Version >= commit.Version {
+			if prev != nil && !commitSupersedesForStash(commit, prev) {
 				return nil
 			}
 			candidate := *commit
@@ -1047,11 +1047,40 @@ func (m *Manager) handleCommitValueOnce(commit *types.AssignmentCommit) *types.A
 	// deserves a fresh attempt rather than being orphaned.
 	m.pendingApplyInFlight.Store(false)
 
-	if pending := m.stashedCommit.Swap(nil); pending != nil && pending.Version > newAssignment.Version {
+	if pending := m.stashedCommit.Swap(nil); pending != nil && commitSupersedesAppliedForDrain(pending, newAssignment) {
 		return pending
 	}
 
 	return nil
+}
+
+// commitSupersedesAppliedForDrain reports whether a stashed pending commit
+// should be drained for a fresh apply after newAssignment (built from the
+// just-applied commit) was handed to applyAssignment. It applies the same
+// ordering definition as assignmentSupersedesForStash across the comparable
+// commit-vs-assignment identity coordinates: a strictly newer
+// (Version, LeaderRevision) pending commit drains; at equal coordinates it
+// drains only when the source-revision identity differs. Comparing by Version
+// alone here would orphan a same-version/higher-LR commit that arrived during
+// the failed apply.
+//
+// Note: the partition-set digest is intentionally NOT compared here. The
+// pending value is a whole-batch commit (BatchDigest spans every worker),
+// while applied is this worker's per-worker subset (its digest covers only the
+// worker's partitions) — the two digests are not the same quantity, so a
+// digest comparison would spuriously drain the same commit every time. The
+// commit's per-worker digest divergence is already resolved upstream by
+// commitSupersedesForStash on the commit-vs-commit stash, and a re-delivered
+// same-(V,LR) commit is harmlessly handled by case (a) on the next pass.
+func commitSupersedesAppliedForDrain(pending *types.AssignmentCommit, applied Assignment) bool {
+	if pending.Version != applied.Version {
+		return pending.Version > applied.Version
+	}
+	if pending.LeaderRevision != applied.LeaderRevision {
+		return pending.LeaderRevision > applied.LeaderRevision
+	}
+	return pending.SourceRevisionKnown != applied.SourceRevisionKnown ||
+		pending.SourceRevision != applied.SourceRevision
 }
 
 // buildAssignmentFromCommit constructs the Assignment this worker must
@@ -1194,6 +1223,83 @@ func isApplyResultStale(candidate, cur Assignment) bool {
 		return candidate.Version < cur.Version
 	}
 	return candidate.LeaderRevision < cur.LeaderRevision
+}
+
+// assignmentSupersedesForStash reports whether candidate should replace cur in
+// a retry/coalesce stash. The ordering mirrors the applied-ack identity the
+// core apply gate trusts (isApplyResultStale / currentAssignmentApplied) —
+// (Version, LeaderRevision) lex, then the full applied identity (partition-set
+// digest and source-revision known/value):
+//
+//   - strictly newer (Version, LeaderRevision) lex order replaces;
+//   - strictly older is dropped;
+//   - equal (Version, LeaderRevision) with a DIFFERENT full identity
+//     (PartitionSetDigest, or source-revision known/value) replaces — last
+//     arrival wins during the failure window only (bounded: once any
+//     same-version assignment applies, the watcher gates stop feeding the
+//     stash);
+//   - equal full identity keeps cur (idempotent duplicate).
+//
+// Rationale: a same-version pair with different digests is a real CAS-race
+// product (a legacy alias pre-published at the proposed version before the
+// commit CAS, or a CAS-lost batch re-commit). Comparing by Version alone — as
+// the stash guards did pre-fix — drops the commit-authority target, so the
+// retry applies the stale alias digest and nothing in direct mode ever
+// converges the worker (commit redelivery is version-gated; the leader audit's
+// repair is two-phase-gated). Ordering the stash by the same identity the apply
+// gate already trusts closes that lost update.
+func assignmentSupersedesForStash(candidate, cur Assignment) bool {
+	if candidate.Version != cur.Version {
+		return candidate.Version > cur.Version
+	}
+	if candidate.LeaderRevision != cur.LeaderRevision {
+		return candidate.LeaderRevision > cur.LeaderRevision
+	}
+	// Equal (Version, LeaderRevision): replace only when the full applied
+	// identity actually differs, otherwise keep cur (idempotent duplicate).
+	return !sameAppliedIdentity(candidate, cur)
+}
+
+// sameAppliedIdentity reports whether two assignments at the same
+// (Version, LeaderRevision) carry the same full applied identity — equal
+// partition-set digest and equal source-revision known/value. It is the
+// equal-coordinate tail of the applied-ack identity used by
+// currentAssignmentApplied.
+//
+// Unlike currentAssignmentApplied — which is deliberately asymmetric on
+// source-revision (a source-unknown current assignment always matches any
+// candidate, so degraded refreshes don't stall on a stale SourceRevisionKnown
+// bit) — this function is symmetric: both sides must agree on
+// SourceRevisionKnown and SourceRevision. The symmetric form is safe here
+// because the only equal-(Version, LeaderRevision) source-downgrade candidate
+// (a source-unknown alias vs a source-known commit) is dropped by
+// selectAuthority before any stash call is reached.
+func sameAppliedIdentity(a, b Assignment) bool {
+	return types.PartitionSetDigest(a.Partitions) == types.PartitionSetDigest(b.Partitions) &&
+		a.SourceRevisionKnown == b.SourceRevisionKnown &&
+		a.SourceRevision == b.SourceRevision
+}
+
+// commitSupersedesForStash reports whether candidate should replace cur in the
+// in-flight commit coalesce stash. It applies the same ordering definition as
+// assignmentSupersedesForStash, expressed over the commit's identity coordinates
+// — (Version, LeaderRevision) lex, then the commit's BatchDigest and
+// source-revision known/value. BatchDigest is the batch-level partition
+// identity the publisher writes alongside the commit (it matches the source
+// partition set's digest at publish time); using it keeps ONE conceptual
+// ordering definition across the Assignment and AssignmentCommit stashes.
+func commitSupersedesForStash(candidate, cur *types.AssignmentCommit) bool {
+	if candidate.Version != cur.Version {
+		return candidate.Version > cur.Version
+	}
+	if candidate.LeaderRevision != cur.LeaderRevision {
+		return candidate.LeaderRevision > cur.LeaderRevision
+	}
+	// Equal (Version, LeaderRevision): replace only when the full identity
+	// differs, otherwise keep cur (idempotent duplicate).
+	return candidate.BatchDigest != cur.BatchDigest ||
+		candidate.SourceRevisionKnown != cur.SourceRevisionKnown ||
+		candidate.SourceRevision != cur.SourceRevision
 }
 
 // committedAssignmentOrEmpty returns the last successfully applied+acked
@@ -1523,10 +1629,14 @@ func (m *Manager) invokeAssignmentChangedHooks(_ /* workerID */ string, oldAssig
 // The retry initial backoff is 1s, doubling up to 30s with ±20% jitter.
 // On retry success the goroutine self-terminates.
 func (m *Manager) scheduleApplyRetry(newAssignment Assignment) {
-	// Coalesce: keep the highest-Version pending.
+	// Coalesce by full applied identity (assignmentSupersedesForStash): keep
+	// cur unless newAssignment is strictly newer in (Version, LeaderRevision)
+	// or differs at equal coordinates on the full applied identity. Comparing
+	// by Version alone here would drop a same-version/higher-LR commit behind a
+	// stashed legacy alias and silently lose the commit-authority digest.
 	for {
 		cur := m.stashedApplyRetry.Load()
-		if cur != nil && cur.Version >= newAssignment.Version {
+		if cur != nil && !assignmentSupersedesForStash(newAssignment, *cur) {
 			break
 		}
 		candidate := newAssignment

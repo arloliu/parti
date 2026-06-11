@@ -87,7 +87,7 @@ func (c *Calculator) auditApplied(ctx context.Context) {
 		return
 	}
 
-	c.maybeEscalateAudit(ctx, behind, fullyApplied, hbs)
+	c.maybeEscalateAudit(ctx, commit, behind, fullyApplied, hbs)
 }
 
 // classifyAuditWorkers partitions commit.Workers into three disjoint sets:
@@ -162,9 +162,43 @@ func (c *Calculator) classifyAuditWorkers(commit *types.AssignmentCommit, hbs ma
 // target gap exists).
 func (c *Calculator) maybeEscalateAudit(
 	ctx context.Context,
+	commit *types.AssignmentCommit,
 	behind, fullyApplied map[string]struct{},
 	hbs map[string]types.Heartbeat,
 ) {
+	// Direct-mode branch: log before capability filtering so the Warn reaches
+	// its target audience — homogeneous direct-mode fleets that never set
+	// CapTwoPhaseHandoff or CapProcessingGate and would otherwise be filtered
+	// out of behindReassignable before the Warn could fire.
+	if !c.EnableTwoPhaseHandoff {
+		c.Metrics.RecordAuditEscalationSkipped("direct_mode", "")
+		// Direct-mode fleets deliberately exclude audit_repair republish
+		// escalation, so a worker stuck behind on digest or leader revision
+		// would otherwise be visible only through the worker-behind metric.
+		// Warn once per audit tick per such worker (the loop runs once per
+		// tick) so the condition surfaces in logs; automatic repair requires
+		// two-phase handoff mode and worker-side capabilities.
+		// Sort for deterministic log ordering.
+		behindWorkers := make([]string, 0, len(behind))
+		for w := range behind {
+			behindWorkers = append(behindWorkers, w)
+		}
+		slices.Sort(behindWorkers)
+		for _, w := range behindWorkers {
+			hb := hbs[w]
+			c.Logger.Warn("audit: worker behind in direct mode; automatic repair requires two-phase handoff",
+				"worker", w,
+				"expected_version", commit.Version,
+				"expected_leader_revision", commit.LeaderRevision,
+				"acked_version", hb.AppliedVersion,
+				"acked_leader_revision", hb.LeaderRevision,
+				"acked_digest", hb.AppliedDigest,
+			)
+		}
+
+		return
+	}
+
 	// Filter behind workers whose caps allow safe reassignment.
 	behindReassignable := make([]string, 0, len(behind))
 	for w := range behind {
@@ -176,9 +210,9 @@ func (c *Calculator) maybeEscalateAudit(
 	}
 	if len(behindReassignable) == 0 {
 		// Nothing escalatable — cap_missing_behind metric(s) already covered
-		// the per-worker case. Skipping the targets/direct-mode signals
-		// avoids emitting noisy "no targets" / "direct mode" events when
-		// there was nothing to escalate to begin with.
+		// the per-worker case. Skipping the targets signal avoids emitting
+		// noisy "no targets" events when there was nothing to escalate to
+		// begin with.
 		return
 	}
 
@@ -191,11 +225,6 @@ func (c *Calculator) maybeEscalateAudit(
 	}
 	if len(targets) == 0 {
 		c.Metrics.RecordAuditEscalationSkipped("cap_missing_targets", "")
-		return
-	}
-
-	if !c.EnableTwoPhaseHandoff {
-		c.Metrics.RecordAuditEscalationSkipped("direct_mode", "")
 		return
 	}
 
