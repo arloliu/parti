@@ -87,7 +87,10 @@ All six items below landed on the follow-up branch:
   `OnPermanentFailure` dispatcher, so a `Manager.Start` call after
   `NewDynamic` reaches the durable layer. Application-supplied
   `WithOnPermanentFailure` callbacks still win over the manager
-  observer per the documented contract.
+  observer per the documented contract. [Superseded 2026-06: both
+  now fire (application callback first, then manager observer);
+  use `WithSuppressManagerDegradeOnStreamMissing` to restore the
+  previous opt-out behavior explicitly — see consumer healing fixes.]
 - `manager_degraded.go:recordKVError`: short-circuits on
   `errors.Is(err, types.ErrStreamMissing)` so stream-missing does
   not double-count against the KV error threshold (cross-feature

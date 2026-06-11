@@ -146,7 +146,7 @@ recovery, rotation, or caller-owned recovery.
 | `bucket-recreated:<bucket>` | ambiguous Parti-owned data loss | Restart or rotate workers; inspect JetStream storage before trusting the recreated bucket. |
 | `startup-timeout` | startup apply/wait did not reach Stable in budget | Readiness rotation unless the runner recovers before the pod is replaced. |
 | `assignment-watcher-exhausted` | assignment watcher retry envelope exhausted | Restart or rotate the worker; inspect the assignment bucket and NATS logs. |
-| `stream-missing-recovery-exhausted` | dynamic consumer stream missing and no app hook recovered it | Recover the stream or rotate workers according to application ownership. |
+| `stream-missing-recovery-exhausted` | **terminal** — dynamic consumer stream missing, recovery exhausted | The worker stays `Degraded` permanently until restarted or rotated; the dead partition-consumer loop cannot restart in-process and stream recreation alone does not revive it. Recreate the stream, then rotate the worker. |
 | `source-unavailable:<bucket>` | caller-owned source bucket unavailable | Caller/operator recovers the source bucket; Parti does not recreate it. |
 
 **Recovery bound — worker-ID lease (`WorkerIDTTL`).** M5 recover-to-Stable across

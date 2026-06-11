@@ -216,45 +216,36 @@ cfg := &parti.Config{
 
 ## Two-Phase Handoff
 
-When `EnableTwoPhaseHandoff` is true, the manager uses a Prepare/Commit protocol for partition reassignment to ensure zero overlap in processing.
+When `EnableTwoPhaseHandoff` is true, workers coordinate partition reassignment through KV-backed ownership claims so that the old owner releases a partition only after the new owner has durably claimed it. This orders the **release** side of a handoff (no unowned gap) and minimizes processing overlap — it does not by itself gate message consumption (see the per-tier table below).
 
 ### The Protocol
 
+There is no leader→worker message exchange. Each worker independently drives its own side of the handoff against a shared KV bucket of per-partition claims, using CAS (revision-checked) writes:
+
 ```
-                        LEADER                           WORKERS
-                          │                                 │
-   1. Calculate new       │                                 │
-      assignment          │                                 │
-                          │    ┌───────────────────────┐    │
-                          │────│ Prepare: "P1 → W2"    │───▶│
-                          │    └───────────────────────┘    │
-                          │                                 │ W1: Stop processing P1
-                          │                                 │ W2: (wait)
-                          │    ┌───────────────────────┐    │
-                          │◀───│ Prepare ACK           │────│
-                          │    └───────────────────────┘    │
-                          │                                 │
-   2. All ACKs received   │                                 │
-                          │    ┌───────────────────────┐    │
-                          │────│ Commit: "P1 → W2"     │───▶│
-                          │    └───────────────────────┘    │
-                          │                                 │ W1: (released)
-                          │                                 │ W2: Start processing P1
-                          │    ┌───────────────────────┐    │
-                          │◀───│ Commit ACK            │────│
-                          │    └───────────────────────┘    │
-                          │                                 │
-   3. Finalize stable     │                                 │
-                          ▼                                 ▼
+   NEW OWNER (W2, gaining P1)            OLD OWNER (W1, losing P1)
+        │                                     │
+   1. Prepare: CAS-write claim                │
+      {P1: owner=W2, state=prepare}           │
+        │                                1. Removal guard: read P1's claim;
+   2. Apply: update consumer,               keep consuming P1 until the claim
+      start consuming P1's subject          shows a DIFFERENT owner in
+        │                                   commit or stable state
+   3. Commit: CAS claim → commit            │
+   4. Stabilize: CAS claim → stable     2. Claim shows W2 commit/stable →
+        │                                   remove P1's subject locally
+        ▼                                     ▼
 ```
+
+A background sweeper reconciles stale or interrupted claims toward `stable` on `SweepInterval`, so a worker crashing mid-handoff does not strand a claim.
 
 ### Handoff States
 
-| State     | Description                            |
-|-----------|----------------------------------------|
-| `Stable`  | Partition ownership is finalized       |
-| `Prepare` | Old owner stopping, new owner waiting  |
-| `Commit`  | New owner starting, old owner released |
+| State     | Description                                                        |
+|-----------|--------------------------------------------------------------------|
+| `Stable`  | Partition ownership is finalized                                   |
+| `Prepare` | New owner has claimed the partition; old owner may still be consuming |
+| `Commit`  | New owner is consuming; old owner may now remove the subject       |
 
 ### Configuration
 
@@ -271,18 +262,29 @@ cfg := &parti.Config{
 }
 ```
 
-### Benefits
+### What Each Tier Guarantees
 
-- **Consistency**: Guarantees that a partition is never processed by two workers simultaneously
-- **Safety**: Prevents race conditions during rebalancing
-- **Crash Recovery**: Stale claims are swept and resumed by new leaders
+Per-partition durables are **shared by name** across workers (`<prefix>_<partitionID>_<hash>` — no worker ID), so delivery is at-least-once at every tier and overlap is bounded, never zero:
+
+| Configuration | What it adds |
+|---------------|--------------|
+| No two-phase (default) | Assignments switch directly; old and new owner may briefly consume concurrently during the switch. |
+| `EnableTwoPhaseHandoff` only | Orders the release: the old owner keeps a partition until the new owner's claim reaches commit/stable, so no unowned gap. Claims are written but **never consulted on the consume path** — the manager logs a warning when the consumer reports no processing gate. Does not reduce overlap by itself. |
+| + Processing gate (`ProcessingGate`) | Per-message, pre-handler admission control: the non-owner NAKs deliveries instead of invoking the handler. Bounds overlap to already-in-flight handler invocations; it cannot revoke a handler that has started. |
+| + Pull gating (`PullGatingEnabled`) | Checks ownership before issuing new pull requests, suppressing new iterator episodes on a revoked partition. Narrows, but does not close, the window. |
+
+### The Irreducible Window
+
+At the strongest tier one overlap window remains: a handler invocation already in flight on the old owner, plus AckWait-expiry redelivery of that **same message** through the shared per-partition durable to the new owner — whose gate correctly admits it. Mitigation: wrap long-running handlers with `consumer.NewWIPHandler`, which sends periodic in-progress signals so AckWait does not expire mid-handler.
+
+The gate's ownership answer comes from a cached resolver. If the KV claim watcher stalls, a stale "I am the owner, state stable" answer can be served for up to `ReconcileInterval` (default 30s) before the periodic reconcile corrects it — a bounded, self-correcting window.
 
 ### When to Enable
 
-Enable two-phase handoff when:
-- Processing duplicates is unacceptable
+Enable two-phase handoff (with a processing gate) when:
+- Cross-worker duplicate processing must be minimized — it cannot be eliminated, so handlers should remain idempotent
 - Partitions have stateful resources (connections, caches)
-- Strict ordering guarantees are required
+- Ordering disruption during rebalancing must be kept short
 
 Keep disabled (default) when:
 - Brief duplicate processing is acceptable
@@ -356,6 +358,14 @@ When NATS connectivity is restored for `ExitThreshold`:
 2. **Recovery Grace Period** starts (default: 15s)
 3. During grace period, leader won't trigger emergency rebalance
 4. Resumes normal election and assignment participation
+
+**Terminal degraded reasons.** Some degraded entries cannot self-heal and the
+worker stays `Degraded` permanently regardless of connectivity recovery.
+`stream-missing-recovery-exhausted` is terminal: the dead partition-consumer
+loop cannot restart in-process, so stream recreation alone does not exit
+`Degraded`. The expected resolution is worker rotation (recreate the stream,
+then rotate the pod). See the [Degraded Reason Taxonomy](OPERATIONS.md#degraded-reason-taxonomy) for
+per-reason operator actions.
 
 ### Configuration
 
