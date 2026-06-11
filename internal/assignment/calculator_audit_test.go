@@ -1,8 +1,10 @@
 package assignment
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -502,6 +504,117 @@ func TestCalculatorAudit_DirectMode_SkipsEscalation(t *testing.T) {
 		}
 	}
 	require.Equal(t, 1, hasDirect, "direct_mode must be emitted once when EnableTwoPhaseHandoff=false")
+}
+
+// TestCalculatorAudit_DirectMode_WarnsBehindWorker proves the direct-mode skip
+// also emits a per-worker Warn so a behind worker that cannot be auto-repaired
+// is visible in logs, not only in the worker-behind metric.
+func TestCalculatorAudit_DirectMode_WarnsBehindWorker(t *testing.T) {
+	t.Parallel()
+	digestA, digestB := uint64(0xAA), uint64(0xBB)
+	commit := &types.AssignmentCommit{
+		Version:        10,
+		LeaderRevision: 20,
+		PublishedAt:    time.Now().Add(-time.Hour),
+		Workers:        []string{"worker-A", "worker-B"},
+		Payloads: map[string]types.AssignmentPayloadRef{
+			"worker-A": auditPayloadRef("worker-A", digestA),
+			"worker-B": auditPayloadRef("worker-B", digestB),
+		},
+	}
+	hbs := map[string]types.Heartbeat{
+		"worker-A": {
+			SchemaVersion:  1,
+			Capabilities:   requiredAuditCaps,
+			LeaderRevision: 19, // behind on leader revision
+			AppliedVersion: 9,  // behind on version
+			AppliedDigest:  digestA,
+			Timestamp:      time.Now(),
+		},
+		"worker-B": fullCapsAck(20, 10, 0, false, digestB),
+	}
+	f := newAuditFixture(t, commit, hbs, false)
+
+	var buf bytes.Buffer
+	handler := slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})
+	f.calc.Logger = logging.NewSlog(slog.New(handler))
+
+	f.calc.auditApplied(context.Background())
+
+	out := buf.String()
+	require.Contains(t, out, "audit: worker behind in direct mode")
+	require.Contains(t, out, `"worker":"worker-A"`)
+	require.Contains(t, out, `"expected_version":10`)
+	require.Contains(t, out, `"expected_leader_revision":20`)
+	require.Contains(t, out, `"acked_version":9`)
+	require.Contains(t, out, `"acked_leader_revision":19`)
+	// worker-B is fully applied; it must NOT appear in a behind Warn.
+	require.NotContains(t, out, `"worker":"worker-B"`)
+}
+
+// TestCalculatorAudit_DirectMode_WarnsBehindWorker_NoCaps proves the Warn fires
+// for a behind worker that carries NO capabilities — a homogeneous direct-mode
+// fleet that never sets CapTwoPhaseHandoff or CapProcessingGate. This is the
+// target audience: such workers are filtered out of behindReassignable by the
+// requiredAuditCaps gate and were therefore unreachable by the Warn before the
+// fix moved it before the filters.
+func TestCalculatorAudit_DirectMode_WarnsBehindWorker_NoCaps(t *testing.T) {
+	t.Parallel()
+	digestA, digestB := uint64(0xAA), uint64(0xBB)
+	commit := &types.AssignmentCommit{
+		Version:        10,
+		LeaderRevision: 20,
+		PublishedAt:    time.Now().Add(-time.Hour),
+		Workers:        []string{"worker-A", "worker-B"},
+		Payloads: map[string]types.AssignmentPayloadRef{
+			"worker-A": auditPayloadRef("worker-A", digestA),
+			"worker-B": auditPayloadRef("worker-B", digestB),
+		},
+	}
+	hbs := map[string]types.Heartbeat{
+		// worker-A is behind and carries only CapAckV1 — a direct-mode worker
+		// that never set CapTwoPhaseHandoff or CapProcessingGate. It is
+		// classified as "behind" (CapAckV1 is set, SchemaVersion>0) but is
+		// filtered out of behindReassignable by the requiredAuditCaps gate
+		// before the Warn could fire in the pre-fix code path.
+		"worker-A": {
+			SchemaVersion:  1,
+			Capabilities:   types.CapAckV1,
+			LeaderRevision: 19,
+			AppliedVersion: 9,
+			AppliedDigest:  digestA,
+			Timestamp:      time.Now(),
+		},
+		// worker-B is fully applied (also only CapAckV1 — pure direct-mode fleet).
+		"worker-B": {
+			SchemaVersion:  1,
+			Capabilities:   types.CapAckV1,
+			LeaderRevision: 20,
+			AppliedVersion: 10,
+			AppliedDigest:  digestB,
+			Timestamp:      time.Now(),
+		},
+	}
+	// EnableTwoPhaseHandoff=false — direct-mode calculator.
+	f := newAuditFixture(t, commit, hbs, false)
+
+	var buf bytes.Buffer
+	handler := slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})
+	f.calc.Logger = logging.NewSlog(slog.New(handler))
+
+	f.calc.auditApplied(context.Background())
+
+	out := buf.String()
+	// The Warn must fire for worker-A even though it carries no caps.
+	require.Contains(t, out, "audit: worker behind in direct mode",
+		"Warn must fire for a no-caps behind worker in a direct-mode fleet")
+	require.Contains(t, out, `"worker":"worker-A"`)
+	require.Contains(t, out, `"expected_version":10`)
+	require.Contains(t, out, `"expected_leader_revision":20`)
+	require.Contains(t, out, `"acked_version":9`)
+	require.Contains(t, out, `"acked_leader_revision":19`)
+	// worker-B is fully applied; it must NOT appear in a behind Warn.
+	require.NotContains(t, out, `"worker":"worker-B"`)
 }
 
 func TestCalculatorAudit_BeforeGrace_NoMetricsForBehind(t *testing.T) {
