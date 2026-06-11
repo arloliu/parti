@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	rand2 "math/rand/v2"
 	"os"
 	"strings"
 	"sync"
@@ -69,12 +70,17 @@ type BroadcastConsumer struct {
 	loopCancel  context.CancelFunc
 	loopDone    chan struct{}
 	loopStarted bool
+	closed      bool // set by Close; guards terminal state; same mutex as loopStarted
 
 	// Iterator factory
 	iterFactory func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error)
 
 	// Recovery
 	recovery *recovery.Controller
+
+	// Retry backoff state — guarded by: only accessed from the consume loop goroutine.
+	rng       *rand2.Rand   // seeded once from config.Retry.Seed; nil uses package PRNG
+	retryPrev time.Duration // previous jitter delay; threaded through to grow backoff
 }
 
 // NewBroadcastConsumer creates a new broadcast fan-out consumer.
@@ -120,6 +126,7 @@ func NewBroadcastConsumer(js jetstream.JetStream, cfg BroadcastConsumerConfig, f
 		consumerIDSource: consumerIDSource,
 		iterFactory:      defaultIterFactory,
 		loopDone:         make(chan struct{}),
+		rng:              newRetryRNG(cfg.Retry.Seed),
 		recovery: recovery.NewController(recovery.ControllerConfig{
 			Strategy:     cfg.RecoveryStrategy,
 			FetchTimeout: cfg.FetchTimeout,
@@ -141,13 +148,21 @@ func NewBroadcastConsumer(js jetstream.JetStream, cfg BroadcastConsumerConfig, f
 //
 // The partitions argument is IGNORED as this consumer receives all messages matching the wildcard.
 // Partition updates take effect strictly by ensuring the consumer is active.
+//
+// Returns [types.ErrConsumerStopped] when the consumer has been closed via [Close].
+// Stop is terminal: create a new instance to consume again.
 func (bc *BroadcastConsumer) UpdateWorkerConsumer(ctx context.Context, workerID string, partitions []types.Partition) error {
 	bc.updateMu.Lock()
 	defer bc.updateMu.Unlock()
 
 	bc.mu.Lock()
+	closed := bc.closed
 	started := bc.loopStarted
 	bc.mu.Unlock()
+
+	if closed {
+		return fmt.Errorf("broadcast consumer: %w", types.ErrConsumerStopped)
+	}
 
 	// First call: create consumer and start loop
 	if !started {
@@ -168,6 +183,15 @@ func (bc *BroadcastConsumer) UpdateWorkerConsumer(ctx context.Context, workerID 
 }
 
 // Close stops the consumer loop. Consumer is left for server GC via InactiveThreshold.
+//
+// Close is terminal. After Close returns, any subsequent call to [UpdateWorkerConsumer]
+// returns [types.ErrConsumerStopped]. Create a new instance to consume again.
+//
+// If the consumer is stopped while registered with a running manager, the manager
+// will retry the failed update indefinitely (by design). Stop the manager first, or
+// deregister this consumer before calling Close.
+//
+// Close is idempotent; calling it multiple times is safe.
 func (bc *BroadcastConsumer) Close(ctx context.Context) error {
 	bc.updateMu.Lock()
 	defer bc.updateMu.Unlock()
@@ -177,6 +201,7 @@ func (bc *BroadcastConsumer) Close(ctx context.Context) error {
 		bc.loopCancel()
 	}
 	started := bc.loopStarted
+	bc.closed = true
 	bc.mu.Unlock()
 
 	if !started {
@@ -202,6 +227,11 @@ func (bc *BroadcastConsumer) startConsumerLoop(ctx context.Context) error {
 		attempts = 3
 	)
 
+	// No explicit inter-attempt delay between collision retries: each attempt goes
+	// through bc.ensureConsumer → jsutil.EnsureConsumer which already applies a
+	// ~50–100ms jittered back-off for transient NATS errors (3 attempts, max 200ms).
+	// Collision retries only regenerate the consumer ID; the pacing from
+	// EnsureConsumer's internal retry is sufficient.
 	for range attempts {
 		durableName := bc.durableName()
 		cons, consCfg, err = bc.ensureConsumer(ctx, durableName)
@@ -321,12 +351,30 @@ func (bc *BroadcastConsumer) runLoop(ctx context.Context) {
 
 		iterErr := bc.processIterator(ctx, iter)
 		if iterErr == nil {
+			// Healthy iteration completed — reset backoff so the next failure
+			// episode starts from Base rather than inheriting a grown window.
+			bc.retryPrev = 0
 			continue
 		}
 
 		bc.consumerMu.RLock()
 		consumerConfig := bc.consumerConfig
 		bc.consumerMu.RUnlock()
+
+		if bc.recovery == nil {
+			// RecoveryDisabled (the default): the recovery controller is nil and
+			// classification short-circuits before any metric. A deleted durable
+			// causes a permanent stall with no operator signal at production log
+			// levels without this explicit path.
+			bc.logger.Warn("iterator error with recovery disabled; consumer will retry but cannot recreate a deleted durable",
+				"error", iterErr,
+				"stream", bc.config.StreamName,
+				"filter", bc.config.WildcardFilter,
+			)
+			if bc.config.Metrics != nil {
+				bc.config.Metrics.IncrementWorkerConsumerIteratorRestart("recovery_disabled")
+			}
+		}
 
 		action, newCons, classifyErr := bc.recovery.Classify(ctx, iterErr, bc.consumerInfoFn(), consumerConfig, bc.recreateFn())
 		switch action {
@@ -341,6 +389,9 @@ func (bc *BroadcastConsumer) runLoop(ctx context.Context) {
 			// advances, so it will not regress. Called here as a best-effort update
 			// in case the consumer was recreated over an existing durable.
 			bc.recovery.SeedCheckpoint(ctx, bc.consumerInfoFn())
+			// Successful recovery — reset backoff so the next failure episode
+			// starts from Base rather than the grown window from this episode.
+			bc.retryPrev = 0
 
 			continue
 		case recovery.ActionStreamMissing:
@@ -410,9 +461,14 @@ func (bc *BroadcastConsumer) processIterator(ctx context.Context, iter jetstream
 	}
 }
 
-// delayOrExit applies backoff delay or returns true if context is cancelled.
+// delayOrExit applies jittered exponential backoff delay or returns true if context is cancelled.
+// The previous delay (bc.retryPrev) is threaded through so the window grows toward Max on
+// consecutive failures; bc.retryPrev is updated in-place. Reset bc.retryPrev to 0 at every
+// successful iteration point (ActionContinue path in runLoop) so a recovered consumer starts
+// fresh. Guarded by: only called from the consume loop goroutine.
 func (bc *BroadcastConsumer) delayOrExit(ctx context.Context) bool {
-	delay := jitterBackoff(0, bc.config.Retry.Base, bc.config.Retry.Multiplier, bc.config.Retry.Max, nil)
+	delay := jitterBackoff(bc.retryPrev, bc.config.Retry.Base, bc.config.Retry.Multiplier, bc.config.Retry.Max, bc.rng)
+	bc.retryPrev = delay
 	bc.logger.Debug("backoff", "delay_ms", delay.Milliseconds())
 
 	select {

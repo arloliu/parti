@@ -126,7 +126,13 @@ type BroadcastConsumerConfig struct {
 	// Default: RecoveryDisabled (no auto-recovery).
 	RecoveryStrategy RecoveryStrategy
 
-	// Retry configures backoff behavior for control-plane operations.
+	// Retry configures backoff behavior for the consume loop.
+	//
+	// On each iterator failure (transient error, stream missing, or ActionBackoff from the
+	// recovery controller) the loop sleeps for a jittered delay that grows via decorrelated
+	// jitter from Base toward Max using the Multiplier factor. Seed makes the sequence
+	// deterministic (useful in tests); zero uses the package-level PRNG.
+	// The delay is reset to zero after every successful iteration cycle.
 	Retry RetryConfig
 
 	// IteratorFactory optionally overrides the iterator creation logic for testing or

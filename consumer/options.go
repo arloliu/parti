@@ -186,17 +186,18 @@ type options struct {
 	keyExtractor     func(msg jetstream.Msg) string
 
 	// Dynamic specific
-	processingGate              *ProcessingGateConfig
-	resolver                    ResolverConfig
-	pullGatingEnabled           bool
-	drainOnRemove               bool
-	drainOnRemoveTimeout        time.Duration
-	maxConcurrentSubjects       int
-	allowWorkerIDChange         bool
-	partitionRefreshMinInterval time.Duration
-	streamMissingHook           types.StreamMissingHook
-	onPermanentFailure          func(subject string, err error)
-	recoveryRetry               RecoveryRetryConfig
+	processingGate                        *ProcessingGateConfig
+	resolver                              ResolverConfig
+	pullGatingEnabled                     bool
+	drainOnRemove                         bool
+	drainOnRemoveTimeout                  time.Duration
+	maxConcurrentSubjects                 int
+	allowWorkerIDChange                   bool
+	partitionRefreshMinInterval           time.Duration
+	streamMissingHook                     types.StreamMissingHook
+	onPermanentFailure                    func(subject string, err error)
+	suppressManagerDegradeOnStreamMissing bool
+	recoveryRetry                         RecoveryRetryConfig
 }
 
 // defaultOptions returns sensible defaults.
@@ -488,28 +489,19 @@ func WithStreamMissingHook(hook types.StreamMissingHook) DynamicOption {
 //
 // # Interaction with the Parti manager's auto-degraded route
 //
-// IMPORTANT: registering this callback disables the Parti manager's
-// auto-degraded route for stream-missing exhaustion. When a [Dynamic]
-// is wired into a [parti.Manager] (directly or via a
-// [parti.CompositeConsumerUpdater]), the manager installs an observer
-// that — for stream-missing exhaustion only — calls Hooks.OnError with
-// the wrapped error and transitions to Degraded mode with reason
-// "stream-missing-recovery-exhausted" so the readiness probe rotates
-// the pod.
+// Registering this callback does NOT disable the Parti manager's
+// auto-degraded route. When a [Dynamic] is wired into a [parti.Manager]
+// (directly or via a [parti.CompositeConsumerUpdater]), the manager
+// installs an observer that — for stream-missing exhaustion only — calls
+// [parti.Hooks.OnError] with the wrapped error and then transitions to
+// Degraded mode with reason "stream-missing-recovery-exhausted" so the
+// readiness probe rotates the pod. Both this callback and the manager
+// observer fire (application callback first) for stream-missing exhaustion.
 //
-// That manager-side observer fires ONLY when no application callback
-// is registered here. If WithOnPermanentFailure is set, the dispatcher
-// hands every permanent failure to the application and STOPS — the
-// manager observer never sees the stream-missing event. Applications
-// that want both per-subject observability AND the manager's
-// auto-degraded behavior must either:
-//
-//   - Forgo WithOnPermanentFailure and rely on
-//     [parti.Hooks.OnError] (which receives the wrapped error from the
-//     manager observer route), or
-//   - Within the supplied callback, branch on
-//     errors.Is(err, [parti.ErrStreamMissing]) and forward the event
-//     to their own degraded-mode signaling path.
+// Applications that deliberately own degrade/rotation signaling themselves
+// (e.g. they forward stream-missing events to their own readiness wiring
+// inside this callback) can suppress the manager observer explicitly via
+// [WithSuppressManagerDegradeOnStreamMissing].
 //
 // Applies only to [Dynamic]. Optional; if unset, exhaustion is logged at
 // WARN with metric `iterator_restart{reason="recovery_exhausted"}` or
@@ -519,6 +511,27 @@ func WithStreamMissingHook(hook types.StreamMissingHook) DynamicOption {
 func WithOnPermanentFailure(fn func(subject string, err error)) DynamicOption {
 	return dynamicOpt(func(o *options) {
 		o.onPermanentFailure = fn
+	})
+}
+
+// WithSuppressManagerDegradeOnStreamMissing disables the Parti manager's
+// auto-degraded route for stream-missing recovery exhaustion on this
+// Dynamic consumer.
+//
+// By default, when a [Dynamic] is wired into a [parti.Manager], stream-missing
+// exhaustion notifies the manager observer (calling [parti.Hooks.OnError] with
+// the wrapped error and entering Degraded with reason
+// "stream-missing-recovery-exhausted" so the readiness probe rotates the
+// pod) IN ADDITION to any application callback registered via
+// [WithOnPermanentFailure]. Suppress this only when the application
+// deliberately owns degrade/rotation signaling itself — e.g. it forwards
+// stream-missing events to its own readiness wiring inside its
+// OnPermanentFailure callback.
+//
+// Applies only to [Dynamic].
+func WithSuppressManagerDegradeOnStreamMissing() DynamicOption {
+	return dynamicOpt(func(o *options) {
+		o.suppressManagerDegradeOnStreamMissing = true
 	})
 }
 
@@ -794,8 +807,11 @@ func WithPullGating(enabled bool) DynamicOption {
 
 // WithDrainOnRemove configures drain behavior on subject removal.
 //
-// When enabled, revoked partitions will finish processing buffered messages
-// before shutting down. The timeout caps the drain duration.
+// When enabled, removed partition loops drain buffered messages before
+// shutting down. Draining is bounded by DrainOnRemoveTimeout; if the loops
+// fail to stop within that bound, [Dynamic.Update] returns an error and the
+// manager retries the apply. An already-in-flight handler invocation may still
+// run to completion (best-effort, not a zero-overlap guarantee).
 //
 // Parameters:
 //   - enabled: Whether to enable graceful draining

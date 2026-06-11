@@ -3,12 +3,14 @@ package ipartition
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/arloliu/parti/v2/internal/partutil"
 	"github.com/arloliu/parti/v2/internal/recovery"
 	"github.com/arloliu/parti/v2/jsutil"
+	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -52,9 +54,10 @@ type JSConsumer struct {
 	// Recovery controller (nil when recovery is disabled)
 	rc *recovery.Controller
 
-	mu     sync.Mutex
-	cancel context.CancelFunc
-	done   chan struct{}
+	mu      sync.Mutex
+	cancel  context.CancelFunc
+	done    chan struct{}
+	stopped bool // set by Stop; terminal — Start returns ErrConsumerStopped after this
 }
 
 // NewJSConsumer creates a JetStream consumer for a specific partition.
@@ -152,14 +155,20 @@ func NewJSConsumer(
 
 // Start begins consuming messages in a background goroutine.
 //
+// Start may only be called once. After [Stop] is called, Start returns
+// [types.ErrConsumerStopped]; create a new instance to consume again.
+//
 // Parameters:
 //   - ctx: Context for lifecycle control
 //
 // Returns:
-//   - error: Startup error
+//   - error: Startup error, or [types.ErrConsumerStopped] if already stopped.
 func (c *JSConsumer) Start(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.stopped {
+		return fmt.Errorf("js consumer: %w", types.ErrConsumerStopped)
+	}
 	if c.cancel != nil {
 		return errors.New("consumer already started")
 	}
@@ -183,6 +192,15 @@ func (c *JSConsumer) Start(ctx context.Context) error {
 
 // Stop gracefully stops the consumer and drains pending messages.
 //
+// Stop is terminal. After Stop returns, any subsequent call to [Start] returns
+// [types.ErrConsumerStopped]. Create a new instance to consume again.
+//
+// If the consumer is stopped while registered with a running manager, the manager
+// will retry the failed update indefinitely (by design). Stop the manager first, or
+// deregister this consumer before calling Stop.
+//
+// Stop is idempotent; calling it multiple times is safe.
+//
 // Parameters:
 //   - ctx: Context with shutdown deadline
 //
@@ -194,6 +212,7 @@ func (c *JSConsumer) Stop(ctx context.Context) error {
 	done := c.done
 	dispatcher := c.keyDispatcher
 	c.cancel = nil
+	c.stopped = true
 	c.mu.Unlock()
 
 	if cancel == nil {
@@ -215,6 +234,16 @@ func (c *JSConsumer) Stop(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// Stopped reports whether this consumer has been stopped.
+//
+// Used by the public Static wrapper to give ErrConsumerStopped precedence
+// over the WorkQueue compatibility preflight.
+func (c *JSConsumer) Stopped() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.stopped
 }
 
 // Partition returns the partition index this consumer handles.
@@ -295,6 +324,18 @@ func (c *JSConsumer) run(ctx context.Context) {
 		c.consumerMu.RLock()
 		consumerConfig := c.consumerConfig
 		c.consumerMu.RUnlock()
+
+		if c.rc == nil {
+			// RecoveryDisabled (the default): the recovery controller is nil and
+			// classification short-circuits before any metric. A deleted durable
+			// causes a permanent stall with no operator signal at production log
+			// levels without this explicit path.
+			c.config.Logger.Warn("iterator error with recovery disabled; consumer will retry but cannot recreate a deleted durable",
+				"error", iterErr,
+				"subject", c.subject,
+			)
+			c.config.Metrics.IncrementWorkerConsumerIteratorRestart("recovery_disabled")
+		}
 
 		action, newCons, classifyErr := c.rc.Classify(ctx, iterErr, c.consumerInfoFn(), consumerConfig, c.recreateFn())
 		switch action {

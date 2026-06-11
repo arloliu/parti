@@ -184,15 +184,16 @@ type WorkerConsumerConfig struct {
 	// Keep false (default) for simple synchronous handlers to ensure safety.
 	ManualAck bool
 
-	// ProcessingGate configures optional exclusive processing enforcement.
+	// ProcessingGate configures optional per-message admission control.
 	// When enabled, WorkerConsumer automatically creates and manages a claim-based
 	// ownership resolver backed by the handoff KV bucket. The resolver lifecycle
 	// (start/stop) is handled internally - no manual management needed.
 	//
-	// Recommendation: Enable this for stateful workloads or when strict partition
-	// exclusivity is required. Without this, ownership transitions may be "loose",
-	// resulting in brief periods where a partition is processed by a worker that
-	// is no longer the assigned owner (though duplicates are rare).
+	// Recommendation: Enable this for stateful workloads or when cross-owner
+	// processing must be minimized (it cannot be eliminated: an in-flight
+	// handler invocation cannot be revoked). Without this, ownership
+	// transitions may be "loose", resulting in brief periods where a partition
+	// is processed by a worker that is no longer the assigned owner.
 	ProcessingGate *ProcessingGateConfig `validate:"omitempty"`
 
 	// Resolver configures the ownership resolver when ProcessingGate is enabled.
@@ -211,8 +212,11 @@ type WorkerConsumerConfig struct {
 	// Default: false (immediate cancellation as before).
 	DrainOnRemove bool
 
-	// DrainOnRemoveTimeout caps the drain wait per subject when DrainOnRemove is enabled.
-	// Default: 10s when zero.
+	// DrainOnRemoveTimeout caps the drain wait per subject when DrainOnRemove is
+	// enabled, and also bounds the wait for subject loops to stop after cancel.
+	// If loops have not stopped within this bound, UpdateWorkerConsumer returns
+	// an error so the caller retries; an in-flight handler may still run to
+	// completion. Default: 10s when zero.
 	DrainOnRemoveTimeout time.Duration `default:"10s" validate:"gte=0"`
 
 	// AckWait is the time allowed for processing before redelivery.
@@ -255,7 +259,8 @@ type WorkerConsumerConfig struct {
 	ConsumerReplicas int
 
 	// MaxConcurrentSubjects caps the total number of per-subject consumers/loops.
-	// When exceeded, additional subjects are skipped with a warning and metric increment.
+	// When the deduped subject count from an update exceeds this cap, the whole
+	// update is rejected with ErrMaxSubjectsExceeded before any mutation. 0 = unlimited.
 	MaxConcurrentSubjects int `validate:"gte=0"`
 
 	// AckPolicy controls JetStream ack policy. Defaults to AckExplicitPolicy.

@@ -156,3 +156,17 @@ func TestBroadcastConfig_SetDefaults_PreservesExistingValues(t *testing.T) {
 	require.Equal(t, -1, cfg.MaxDeliver)
 	require.Equal(t, 100*time.Millisecond, cfg.Retry.Backoff)
 }
+
+// TestCommonConfig_FetchTimeout_FloorIsOneSecond pins the validation floor:
+// nats.go rejects PullExpiry below 1s at iterator-creation time, so a
+// sub-second FetchTimeout produced a consumer whose Start succeeded and then
+// failed every iterator creation forever — a permanently dead consumer with
+// a success return. Construction must reject it instead.
+func TestCommonConfig_FetchTimeout_FloorIsOneSecond(t *testing.T) {
+	cfg := CommonConfig{FetchTimeout: 500 * time.Millisecond}
+	err := cfg.Validate()
+	require.Error(t, err, "FetchTimeout below the 1s NATS PullExpiry floor must fail validation")
+
+	cfg = CommonConfig{FetchTimeout: time.Second}
+	require.NoError(t, cfg.Validate(), "FetchTimeout == 1s is the boundary and must pass")
+}

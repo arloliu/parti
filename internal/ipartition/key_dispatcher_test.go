@@ -2,6 +2,7 @@ package ipartition
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,12 +20,13 @@ import (
 // mockMsg implements jetstream.Msg for testing.
 type mockMsg struct {
 	subject string
+	data    []byte
 	acked   atomic.Bool
 	naked   atomic.Bool
 }
 
 func (m *mockMsg) Subject() string                           { return m.subject }
-func (m *mockMsg) Data() []byte                              { return nil }
+func (m *mockMsg) Data() []byte                              { return m.data }
 func (m *mockMsg) Headers() nats.Header                      { return nil }
 func (m *mockMsg) Reply() string                             { return "" }
 func (m *mockMsg) Metadata() (*jetstream.MsgMetadata, error) { return nil, nil } //nolint:nilnil // mock
@@ -378,4 +380,68 @@ func indexByte(s string, b byte) int {
 		}
 	}
 	return -1
+}
+
+// TestKeyDispatcher_IdleExitDoesNotStrandMessages hammers the idle-exit
+// window: a razor-thin idle timeout with paced single-key dispatches makes
+// the worker's exit decision race Dispatch's send. Every message Dispatch
+// accepted (returned true) must be processed exactly once and in dispatch
+// order — pre-fix, a send committing between the worker's len-check and its
+// close left the message stranded in a dead worker's channel (unprocessed
+// here; redelivered only after AckWait in production, breaking per-key
+// ordering).
+func TestKeyDispatcher_IdleExitDoesNotStrandMessages(t *testing.T) {
+	logger := logging.NewNop()
+
+	var mu sync.Mutex
+	var seqOrder []int
+
+	handler := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+		seq, err := strconv.Atoi(string(msg.Data()))
+		if err != nil {
+			t.Errorf("bad seq payload %q: %v", msg.Data(), err)
+
+			return nil
+		}
+		mu.Lock()
+		seqOrder = append(seqOrder, seq)
+		mu.Unlock()
+
+		return nil
+	})
+
+	// 1ms idle timeout + buffer >= 4 so the worker idles between dispatches.
+	kd := newKeyDispatcher(logger, handler, testKeyExtractor, 8, 1*time.Millisecond, false, nil, nil)
+	defer func() {
+		_ = kd.Close(t.Context())
+	}()
+
+	ctx := t.Context()
+
+	const n = 2000
+	for i := range n {
+		msg := &mockMsg{subject: "events.0.same-key", data: []byte(strconv.Itoa(i))}
+		ok := kd.Dispatch(ctx, msg)
+		require.True(t, ok, "dispatch %d should be accepted", i)
+
+		// Jitter the pacing around the 1ms idle boundary so dispatches straddle
+		// the worker's idle-exit decision: alternate 0/1/2ms.
+		time.Sleep(time.Duration(i%3) * time.Millisecond)
+	}
+
+	// Settle: every accepted message must drain before we assert.
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(seqOrder) == n
+	}, 5*time.Second, 2*time.Millisecond, "all dispatched messages should be processed")
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	require.Len(t, seqOrder, n, "no message should be stranded")
+	for i := range n {
+		require.Equalf(t, i, seqOrder[i],
+			"sequence inversion/gap at index %d: got %d", i, seqOrder[i])
+	}
 }

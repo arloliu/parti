@@ -10,6 +10,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
+	"github.com/arloliu/parti/v2/internal/logging"
 	partitesting "github.com/arloliu/parti/v2/partitest"
 	"github.com/arloliu/parti/v2/types"
 )
@@ -593,4 +594,191 @@ func TestBroadcastConsumer_RecoverySnapshot_CarriesConsumerOptions(t *testing.T)
 	bcDefault.consumerMu.RUnlock()
 	require.False(t, storedDefault.MemoryStorage)
 	require.Equal(t, 0, storedDefault.Replicas)
+}
+
+// broadcastSignalMetrics extends captureEscalationMetrics to also record
+// IncrementWorkerConsumerIteratorRestart calls.
+type broadcastSignalMetrics struct {
+	captureEscalationMetrics
+	restartReasons []string
+}
+
+func (m *broadcastSignalMetrics) IncrementWorkerConsumerIteratorRestart(reason string) {
+	m.restartReasons = append(m.restartReasons, reason)
+}
+
+// TestBroadcastConsumer_RecoveryDisabled_IteratorErrorIsSignaled pins the operator
+// signal for the default configuration: with RecoveryDisabled (nil controller), a
+// non-graceful iterator error (e.g. the durable was deleted) must emit the
+// iterator-restart metric with reason "recovery_disabled". Pre-fix the only artifact
+// was a Debug log — at production log levels a deleted durable was a zero-signal
+// permanent stall.
+func TestBroadcastConsumer_RecoveryDisabled_IteratorErrorIsSignaled(t *testing.T) {
+	m := &broadcastSignalMetrics{}
+
+	bc := &BroadcastConsumer{
+		config: BroadcastConsumerConfig{
+			StreamName:     "BC_RECOVERY_DISABLED",
+			ConsumerPrefix: "bc",
+			WildcardFilter: "bc.>",
+			BatchSize:      1,
+			FetchTimeout:   time.Second,
+			Metrics:        m,
+			Retry: RetryConfig{
+				Base:       20 * time.Millisecond,
+				Backoff:    20 * time.Millisecond,
+				Multiplier: 1.0,
+				Max:        20 * time.Millisecond,
+			},
+		},
+		logger:   logging.NewNop(),
+		handler:  messageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error { return nil }),
+		loopDone: make(chan struct{}),
+		iterFactory: func(_ jetstream.Consumer, _ int, _ time.Duration) (jetstream.MessagesContext, error) {
+			return &errorOnNextIter{err: jetstream.ErrNoHeartbeat}, nil
+		},
+		recovery: nil, // RecoveryDisabled: NewController returns nil for Disabled strategy
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go bc.runLoop(ctx)
+
+	// One backoff cycle (20ms) is enough to observe the metric; wait two.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-bc.loopDone
+
+	require.NotEmpty(t, m.restartReasons,
+		"expected IncrementWorkerConsumerIteratorRestart to be called on the nil-recovery path")
+	require.Contains(t, m.restartReasons, "recovery_disabled",
+		"expected reason=recovery_disabled on the nil-recovery path")
+}
+
+// TestBroadcastConsumer_UpdateAfterClose_ReturnsErrConsumerStopped pins the
+// terminal-Stop contract: Close cancels the pull loop permanently
+// (loopStarted was never reset; loopDone cannot be reused), so a subsequent
+// UpdateWorkerConsumer/Start must FAIL with the sentinel instead of logging
+// "active" and returning nil — which let a manager-driven apply report
+// success with a dead fan-out loop and the worker Stable.
+//
+// Pre-fix: UpdateWorkerConsumer after Close saw loopStarted=true, skipped
+// startConsumerLoop, logged "active", and returned nil — a silent lie.
+// TestBroadcastDelayOrExit_BackoffGrows verifies that repeated calls to delayOrExit
+// produce growing delays (the previous delay is threaded through, not reset to 0 each call).
+//
+// Pre-fix: every call passed prev=0 into jitterBackoff, so the delay was always Base
+// regardless of how many times the helper was called.
+func TestBroadcastDelayOrExit_BackoffGrows(t *testing.T) {
+	const (
+		base     = 1 * time.Millisecond
+		mult     = 2.0
+		maxDelay = 8 * time.Millisecond
+		seed     = int64(42)
+		// Number of invocations — enough that the cap is reached with Seed=42.
+		calls = 6
+	)
+
+	bc := &BroadcastConsumer{
+		config: BroadcastConsumerConfig{
+			Retry: RetryConfig{
+				Base:       base,
+				Multiplier: mult,
+				Max:        maxDelay,
+				Seed:       seed,
+			},
+		},
+		logger:   logging.NewNop(),
+		loopDone: make(chan struct{}),
+	}
+	// Initialise the RNG exactly as NewBroadcastConsumer does.
+	bc.rng = newRetryRNG(bc.config.Retry.Seed)
+
+	ctx := context.Background()
+	delays := make([]time.Duration, 0, calls)
+	for range calls {
+		// We capture the delay value directly rather than sleeping.
+		// delayOrExit does sleep, so we cancel the context immediately after
+		// capturing the sleep value by using a cancelable ctx that fires after
+		// a generous deadline — the test runs with Base=1ms so actual wall time
+		// is negligible.
+		delayCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+		bc.delayOrExit(delayCtx) //nolint:contextcheck // intentional: we want the sleep to complete
+		cancel()
+		delays = append(delays, bc.retryPrev)
+	}
+
+	require.Len(t, delays, calls)
+
+	// Every delay must be in [Base, Max].
+	for i, d := range delays {
+		require.GreaterOrEqual(t, d, base, "delay[%d] below Base", i)
+		require.LessOrEqual(t, d, maxDelay, "delay[%d] exceeds Max", i)
+	}
+
+	// Growth: last delay must exceed first (with a fixed seed this is deterministic).
+	require.Greater(t, delays[calls-1], delays[0],
+		"expected backoff to grow over %d calls; delays: %v", calls, delays)
+}
+
+func TestBroadcastConsumer_UpdateAfterClose_ReturnsErrConsumerStopped(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	t.Cleanup(cancel)
+
+	_, nc := partitesting.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	_, err = js.CreateStream(ctx, jetstream.StreamConfig{
+		Name:      "BCTERM",
+		Subjects:  []string{"bcterm.>"},
+		Retention: jetstream.LimitsPolicy,
+		Storage:   jetstream.MemoryStorage,
+	})
+	require.NoError(t, err)
+
+	cfg := BroadcastConsumerConfig{
+		StreamName:     "BCTERM",
+		ConsumerPrefix: "bcterm",
+		ConsumerID:     "term-worker",
+		WildcardFilter: "bcterm.>",
+	}
+	require.NoError(t, cfg.SetDefaults())
+
+	handler := messageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error { return nil })
+	bc, err := NewBroadcastConsumer(js, cfg, handler)
+	require.NoError(t, err)
+
+	// Start the consumer
+	require.NoError(t, bc.UpdateWorkerConsumer(ctx, "term-worker", nil))
+
+	// Close the consumer (terminal)
+	closeCtx, closeCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer closeCancel()
+	require.NoError(t, bc.Close(closeCtx))
+
+	// A second Close must remain idempotent (same nil result as pre-fix)
+	require.NoError(t, bc.Close(closeCtx), "second Close must be idempotent")
+
+	// UpdateWorkerConsumer after Close must return ErrConsumerStopped, not nil
+	err = bc.UpdateWorkerConsumer(ctx, "term-worker", nil)
+	require.ErrorIs(t, err, types.ErrConsumerStopped,
+		"UpdateWorkerConsumer after Close must return ErrConsumerStopped, got: %v", err)
+
+	// Pin the never-started variant: New→Close→Update must also return
+	// ErrConsumerStopped even if UpdateWorkerConsumer was never called first.
+	// Use direct construction so no NATS call is needed.
+	t.Run("never-started", func(t *testing.T) {
+		bc2 := &BroadcastConsumer{
+			logger:   logging.NewNop(),
+			loopDone: make(chan struct{}),
+		}
+		require.NoError(t, bc2.Close(context.Background()), "Close on never-started must be nil")
+		err := bc2.UpdateWorkerConsumer(context.Background(), "", nil)
+		require.ErrorIs(t, err, types.ErrConsumerStopped,
+			"UpdateWorkerConsumer after Close on never-started must return ErrConsumerStopped")
+	})
 }

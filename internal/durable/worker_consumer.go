@@ -29,9 +29,22 @@ import (
 //   - All other public methods are safe for concurrent use
 //
 // Blocking Behavior:
-//   - UpdateWorkerConsumer may block up to DrainOnRemoveTimeout (default 10s) when
-//     removing subjects with DrainOnRemove enabled
+//   - UpdateWorkerConsumer may block up to ~2× DrainOnRemoveTimeout (default 10s)
+//     when removing subjects with DrainOnRemove enabled: one budget for draining
+//     buffered messages, then a separate equal wait for the pull loops to stop.
+//     If the loops have not stopped within the second bound, UpdateWorkerConsumer
+//     returns an error; map entries are still cleared so the caller (the manager)
+//     can retry and converge. An in-flight handler invocation may still run to
+//     completion — this is best-effort, not a zero-overlap guarantee.
 //   - Close may block up to the context deadline waiting for active pull loops to stop
+//
+// Lifecycle (Close semantics):
+//   - Close is terminal: after Close returns, UpdateWorkerConsumer returns
+//     [types.ErrConsumerStopped]. The gate resolver is permanently torn down
+//     by Close (it is not re-initialized on a subsequent call), so a post-Close
+//     update would resurrect loops without the configured processing gate — a
+//     silent safety downgrade. Create a new WorkerConsumer to consume again.
+//   - Close is idempotent; repeated calls return nil.
 type WorkerConsumer struct {
 	conn    *nats.Conn
 	js      jetstream.JetStream
@@ -46,6 +59,8 @@ type WorkerConsumer struct {
 
 	mu       sync.RWMutex
 	updateMu sync.Mutex // Serializes UpdateWorkerConsumer calls
+
+	closed bool // set by Close; terminal — UpdateWorkerConsumer returns ErrConsumerStopped after this
 
 	workerID string
 
@@ -132,6 +147,10 @@ func (wc *WorkerConsumer) UpdateWorkerConsumer(ctx context.Context, workerID str
 	wc.updateMu.Lock()
 	defer wc.updateMu.Unlock()
 
+	if wc.closed {
+		return fmt.Errorf("worker consumer: %w", types.ErrConsumerStopped)
+	}
+
 	if err := wc.validateUpdateParams(workerID); err != nil {
 		return err
 	}
@@ -139,6 +158,22 @@ func (wc *WorkerConsumer) UpdateWorkerConsumer(ctx context.Context, workerID str
 	subjects, err := wc.buildSubjects(partitions)
 	if err != nil {
 		return err
+	}
+
+	// Enforce the subject cap BEFORE any mutation (workerID store, removals,
+	// adds). Failing the whole update keeps the manager's apply pipeline
+	// honest: the apply fails pre-commit and retries with backoff, the
+	// two-phase removal guard keeps the previous owner consuming, and the
+	// un-acked heartbeat makes the over-capped worker visible to the leader.
+	// A partial apply (skipping excess subjects) must never report success —
+	// ownership of a skipped partition would commit with no loop started.
+	if maxSubjects := wc.config.MaxConcurrentSubjects; maxSubjects > 0 && len(subjects) > maxSubjects {
+		if wc.config.Metrics != nil {
+			wc.config.Metrics.IncrementWorkerConsumerSubjectThresholdWarning()
+			wc.config.Metrics.IncrementWorkerConsumerGuardrailViolation("max_subjects")
+		}
+		return fmt.Errorf("stream %s: %d subjects over cap %d: %w",
+			wc.config.StreamName, len(subjects), maxSubjects, ErrMaxSubjectsExceeded)
 	}
 
 	// Set workerID and snapshot existing subjects under lock
@@ -174,10 +209,19 @@ func (wc *WorkerConsumer) UpdateWorkerConsumer(ctx context.Context, workerID str
 }
 
 // Close cancels all subject loops. Consumers are left intact for server GC.
+//
+// Close is terminal. After Close returns, any subsequent call to [UpdateWorkerConsumer]
+// returns [types.ErrConsumerStopped]. Create a new [WorkerConsumer] to consume again.
+//
+// Close is idempotent; calling it multiple times is safe.
 func (wc *WorkerConsumer) Close(ctx context.Context) error {
 	// Serialize updates to prevent race conditions during shutdown
 	wc.updateMu.Lock()
 	defer wc.updateMu.Unlock()
+
+	// Mark closed before stopping loops so concurrent callers observe the
+	// terminal flag immediately. Idempotent: repeated Close returns nil.
+	wc.closed = true
 
 	wc.stopGateResolver()
 
@@ -336,11 +380,18 @@ func (wc *WorkerConsumer) removeSubjectLoops(ctx context.Context, toRemove []str
 		// caller's context canceled; stop waiting
 		err = ctx.Err()
 	case <-time.After(waitTimeout):
-		// give up waiting on this loop but continue cleanup for others
+		// Surface the timeout so the caller's apply fails pre-commit and is
+		// retried with backoff. This delays the handoff commit by at least
+		// one retry cycle and makes the stall observable; it does NOT
+		// guarantee the old handler has finished — Stop only cancels the
+		// loop context, and an in-flight handler invocation runs to
+		// completion. Entries are still deleted below: a retained-but-
+		// stopped entry would make a later re-add a silent no-op.
 		wc.logger.Warn("timeout waiting for subject loops to stop",
 			"count", len(loops),
 			"timeout", waitTimeout,
 		)
+		err = fmt.Errorf("timed out after %v waiting for %d subject loops to stop", waitTimeout, len(loops))
 	}
 
 	// Delete keys under lock regardless of wait outcome to prevent zombie entries
@@ -354,24 +405,6 @@ func (wc *WorkerConsumer) removeSubjectLoops(ctx context.Context, toRemove []str
 }
 
 func (wc *WorkerConsumer) addSubjectLoop(ctx context.Context, workerID string, subject string) error {
-	if wc.config.MaxConcurrentSubjects > 0 {
-		wc.mu.RLock()
-		current := len(wc.subjects)
-		wc.mu.RUnlock()
-
-		if current >= wc.config.MaxConcurrentSubjects {
-			wc.logger.Warn("per-subject consumer cap reached; skipping subject",
-				"subject", subject,
-				"cap", wc.config.MaxConcurrentSubjects,
-			)
-			if wc.config.Metrics != nil {
-				wc.config.Metrics.IncrementWorkerConsumerSubjectThresholdWarning()
-			}
-
-			return nil
-		}
-	}
-
 	durable := wc.perSubjectDurableName(wc.config.ConsumerPrefix, subject)
 	cons, err := wc.ensurePerSubjectConsumer(ctx, durable, subject)
 	if err != nil {
@@ -624,6 +657,16 @@ func (wc *WorkerConsumer) Capabilities() uint32 {
 		bits |= types.CapProcessingGate
 	}
 	return bits
+}
+
+// Closed reports whether this consumer has been closed.
+//
+// Used by the public Dynamic wrapper to give ErrConsumerStopped precedence
+// over the WorkQueue compatibility preflight.
+func (wc *WorkerConsumer) Closed() bool {
+	wc.updateMu.Lock()
+	defer wc.updateMu.Unlock()
+	return wc.closed
 }
 
 // extractPartitionID returns the partition id parsed from subject using the configured

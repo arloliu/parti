@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	rand "math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -110,6 +111,10 @@ type partitionConsumer struct {
 
 	// Recovery
 	recovery *recovery.Controller
+
+	// Retry backoff state — guarded by: only accessed from the consume loop goroutine.
+	rng       *rand.Rand    // seeded once from config.Retry.Seed; nil uses package PRNG
+	retryPrev time.Duration // previous jitter delay; threaded through to grow backoff
 }
 
 // partitionConsumerOpts contains the identity and dependency options for a partition consumer.
@@ -157,6 +162,7 @@ func newPartitionConsumer(
 		iterFactory:          opts.iterFactory,
 		checkPullSuppression: opts.checkPullSuppression,
 		done:                 make(chan struct{}),
+		rng:                  newRetryRNG(config.Retry.Seed),
 		recovery: recovery.NewController(recovery.ControllerConfig{
 			Strategy:     config.RecoveryStrategy,
 			FetchTimeout: config.FetchTimeout,
@@ -229,6 +235,11 @@ func (pc *partitionConsumer) Run(ctx context.Context, handler messageHandler) {
 		}
 		if iterErr != nil && pc.handleIteratorFailure(ctx, iterErr) {
 			return
+		}
+		// Healthy iteration completed (no iterErr) — reset backoff so the next
+		// failure episode starts from Base rather than the grown window.
+		if iterErr == nil {
+			pc.retryPrev = 0
 		}
 		// loop continues to recreate iterator on next iteration
 	}
@@ -393,6 +404,9 @@ func (pc *partitionConsumer) handleIteratorFailure(ctx context.Context, iterErr 
 		// advances, so it will not regress. Called here as a best-effort update
 		// in case the consumer was recreated over an existing durable.
 		pc.recovery.SeedCheckpoint(ctx, pc.consumerInfoFn())
+		// Successful recovery — reset backoff so the next failure episode
+		// starts from Base rather than the grown window from this episode.
+		pc.retryPrev = 0
 
 		return false
 	case recovery.ActionBackoff:
@@ -661,8 +675,14 @@ func (pc *partitionConsumer) ensureConsumer(ctx context.Context) (jetstream.Cons
 }
 
 // delayWithBackoffOrExit applies jittered exponential backoff according to config.
+// The previous delay (pc.retryPrev) is threaded through so the window grows toward Max on
+// consecutive failures; pc.retryPrev is updated in-place. Reset pc.retryPrev to 0 at every
+// successful iteration point (ActionContinue in handleIteratorFailure, successful
+// processIterator call in Run) so a recovered consumer starts fresh from Base.
+// Guarded by: only called from the consume loop goroutine.
 func (pc *partitionConsumer) delayWithBackoffOrExit(ctx context.Context, purpose string) bool { //nolint:unparam // purpose is used for logging/metrics; all sites currently pass "iterate" but may diverge.
-	delay := jitterBackoff(0, pc.config.Retry.Base, pc.config.Retry.Multiplier, pc.config.Retry.Max, nil)
+	delay := jitterBackoff(pc.retryPrev, pc.config.Retry.Base, pc.config.Retry.Multiplier, pc.config.Retry.Max, pc.rng)
+	pc.retryPrev = delay
 	pc.logger.Debug("backoff", "purpose", purpose, "delay_ms", delay.Milliseconds())
 	emitControlRetry(pc.config.Metrics, purpose)
 	emitRetryBackoff(pc.config.Metrics, purpose, delay.Seconds())

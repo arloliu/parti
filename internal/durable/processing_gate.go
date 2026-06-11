@@ -71,7 +71,8 @@ func (c *ProcessingGateConfig) applyDefaults() error {
 	return nil
 }
 
-// processingGate wraps a messageHandler and enforces exclusive processing based on ownership.
+// processingGate wraps a messageHandler and gates each invocation on ownership
+// (per-message admission control; an invocation that has started is not revoked).
 // Reads are O(1), relying on a resolver backed by a high-performance cache.
 type processingGate struct {
 	workerID   string

@@ -126,25 +126,40 @@ func (kd *keyDispatcher) Dispatch(ctx context.Context, msg jetstream.Msg) bool {
 	key := kd.keyExtractor(msg)
 
 	for {
-		// Fast path: check if worker exists
+		// Fast path: look up the worker AND attempt a non-blocking send in the
+		// SAME critical section. Holding the read lock across the send commit
+		// serializes it against the worker's idle-exit decision (which takes
+		// the write lock to re-check len(msgCh) and remove itself). A send can
+		// therefore never commit into a channel the worker is about to abandon.
 		kd.mu.RLock()
 		worker, exists := kd.workers[key]
+		if exists {
+			select {
+			case worker.msgCh <- keyMessage{ctx: ctx, msg: msg}:
+				kd.mu.RUnlock()
+				return true
+			default:
+				// Buffer full — fall through to the backpressure wait below.
+			}
+		}
 		kd.mu.RUnlock()
 
 		if !exists {
-			worker = kd.getOrCreateWorker(key)
-			if worker == nil {
+			if kd.getOrCreateWorker(key) == nil {
 				// Dispatcher is closed
 				return false
 			}
+			// Retry the locked fast path against the fresh worker.
+			continue
 		}
 
-		// Send message to worker (blocks if channel is full - backpressure)
+		// Backpressure: buffer full. Wait for drain progress, worker close, or
+		// dispatcher shutdown, then RETRY THE LOCKED FAST PATH — never commit a
+		// send outside the lock (an unlocked blocking send is the exact race
+		// this fix removes).
 		select {
-		case worker.msgCh <- keyMessage{ctx: ctx, msg: msg}:
-			return true
 		case <-worker.closeCh:
-			// Worker is closing, wait for cleanup and retry
+			// Worker is closing, wait for cleanup and retry.
 			select {
 			case <-worker.done:
 			case <-kd.ctx.Done():
@@ -152,6 +167,7 @@ func (kd *keyDispatcher) Dispatch(ctx context.Context, msg jetstream.Msg) bool {
 			}
 		case <-kd.ctx.Done():
 			return false
+		case <-time.After(time.Millisecond):
 		}
 	}
 }
@@ -193,7 +209,7 @@ func (kd *keyDispatcher) getOrCreateWorker(key string) *keyWorker {
 // runWorker is the main loop for a key worker goroutine.
 func (kd *keyDispatcher) runWorker(worker *keyWorker) {
 	defer func() {
-		kd.removeWorker(worker.key)
+		kd.removeWorker(worker)
 		close(worker.done)
 		kd.wg.Done()
 		kd.logger.Debug("key worker stopped", "key", worker.key)
@@ -223,11 +239,20 @@ func (kd *keyDispatcher) runWorker(worker *keyWorker) {
 			kd.processMessage(km.ctx, km.msg)
 
 		case <-timer.C:
-			// Idle timeout - check if channel is empty before exiting
+			// Idle timeout - decide whether to exit under the write lock so the
+			// decision is mutually exclusive with Dispatch's send (which holds
+			// the read lock across its non-blocking send).
+			kd.mu.Lock()
 			if len(worker.msgCh) == 0 {
+				// No send can commit concurrently (sends hold the read lock) and
+				// no future sender can find this worker (removed under the same
+				// lock) — the stranded-message window is closed.
+				delete(kd.workers, worker.key)
+				kd.mu.Unlock()
 				close(worker.closeCh)
 				return
 			}
+			kd.mu.Unlock()
 			// Channel has messages, reset timer and continue
 			timer.Reset(kd.idleTimeout)
 
@@ -273,11 +298,20 @@ func (kd *keyDispatcher) drainWorker(worker *keyWorker) {
 	}
 }
 
-// removeWorker removes a worker from the map.
-func (kd *keyDispatcher) removeWorker(key string) {
+// removeWorker removes a worker from the map, but ONLY if the map still holds
+// this exact worker pointer.
+//
+// The idle-exit path already removes the worker from the map under the write
+// lock before this deferred cleanup runs. If a successor worker for the same
+// key was created in the meantime (Dispatch → getOrCreateWorker), an
+// unconditional delete(key) here would clobber that live successor. The
+// pointer check makes the delete a no-op in that case.
+func (kd *keyDispatcher) removeWorker(worker *keyWorker) {
 	kd.mu.Lock()
 	defer kd.mu.Unlock()
-	delete(kd.workers, key)
+	if cur, ok := kd.workers[worker.key]; ok && cur == worker {
+		delete(kd.workers, worker.key)
+	}
 }
 
 // Close gracefully shuts down the dispatcher.

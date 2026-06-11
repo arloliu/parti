@@ -62,11 +62,17 @@ type Dynamic struct {
 	workQueueMu sync.Mutex
 
 	// userOnPermanentFailure is the application-supplied callback
-	// captured from WithOnPermanentFailure. When non-nil it wins over
-	// the manager-installed observer at fire time, preserving the
-	// existing OnPermanentFailure contract (see [WithOnPermanentFailure]).
+	// captured from WithOnPermanentFailure. When non-nil it fires
+	// first in the dispatcher, before the manager-installed observer
+	// is consulted (see [WithOnPermanentFailure]).
 	// Nil if the application did not supply one.
 	userOnPermanentFailure func(subject string, err error)
+
+	// suppressManagerDegrade, when true, prevents the dispatcher from
+	// notifying the manager-installed stream-missing observer. Set via
+	// WithSuppressManagerDegradeOnStreamMissing for applications that
+	// deliberately own rotation/degrade signaling themselves.
+	suppressManagerDegrade bool
 
 	// managerOnStreamMissing holds the closure registered via
 	// SetOnStreamMissingError. The atomic.Pointer indirection lets
@@ -115,11 +121,17 @@ type DynamicConfig struct {
 	// This ensures unique, stable durability for each partition assignment.
 	ConsumerPrefix string `validate:"required"`
 
-	// ProcessingGate configures optional exclusive processing enforcement.
+	// ProcessingGate configures optional per-message admission control.
 	//
-	// When enabled, the WorkerConsumer uses a distributed lock (via KV) to ensure
-	// that it is the *only* active processor for its assigned partitions.
-	// This prevents split-brain processing during rebalances.
+	// When enabled, the consumer checks KV-backed ownership claims before each
+	// handler invocation and NAKs deliveries for partitions it does not own.
+	// This bounds — but does not eliminate — cross-worker overlap during
+	// rebalances: an already-in-flight handler invocation cannot be revoked,
+	// and AckWait-expiry redelivery through the shared per-partition durable
+	// can hand the same message to the new owner while the old owner's handler
+	// is still running. Wrap long-running handlers with [NewWIPHandler] to
+	// prevent that expiry. See docs/LIFECYCLE.md "Two-Phase Handoff" for the
+	// per-tier overlap contract.
 	ProcessingGate *ProcessingGateConfig
 
 	// Resolver configures the ownership resolver used when ProcessingGate is enabled.
@@ -136,20 +148,29 @@ type DynamicConfig struct {
 
 	// DrainOnRemove enables graceful draining when a partition assignment is revoked.
 	//
-	// When true, the consumer will stop pulling new messages but finish processing
-	// buffered messages before shutting down the partition consumer.
+	// When true, removal first polls the partition's durable until the server
+	// reports no pending acknowledgements — the pull loop keeps running during
+	// this wait — and only then stops the loop. Both the drain wait and the
+	// loop-stop wait are bounded by DrainOnRemoveTimeout.
 	DrainOnRemove bool
 
-	// DrainOnRemoveTimeout caps the time spent draining a revoked partition.
+	// DrainOnRemoveTimeout caps the time spent draining a revoked partition
+	// and bounds the wait for its pull loop to stop.
 	//
-	// If draining takes longer than this timeout, the consumer is forcibly closed.
-	// Default: 10s.
+	// The wait is best-effort: if loops have not stopped within this bound,
+	// [Dynamic.Update] returns an error (the manager retries the apply with
+	// backoff) while an already-in-flight handler invocation may still run
+	// to completion. Default: 10s.
 	DrainOnRemoveTimeout time.Duration `default:"10s" validate:"gte=0"`
 
 	// MaxConcurrentSubjects limits the number of partitions (subjects) processed concurrently.
 	//
-	// If the manager assigns more partitions than this limit, excess partitions
-	// will be ignored (and logged/warned).
+	// If an assignment's deduped subject count exceeds this limit,
+	// [Dynamic.Update] rejects the whole update with [ErrMaxSubjectsExceeded]
+	// before making any changes; the manager retries the apply with backoff
+	// and the previous owners keep consuming. Size this above the worst-case
+	// per-worker partition count (e.g. after scale-down) or leave it 0
+	// (unlimited).
 	MaxConcurrentSubjects int `validate:"gte=0"`
 
 	// AllowWorkerIDChange controls whether the worker's identity can change during runtime.
@@ -157,8 +178,12 @@ type DynamicConfig struct {
 	// Default: false (immutable once set). Changing WorkerID usually requires a restart.
 	AllowWorkerIDChange bool
 
-	// Retry configures the backoff behavior for control-plane operations
-	// (e.g., initial connection, creating consumers).
+	// Retry configures the backoff behavior for the consume loop.
+	//
+	// On each iterator failure the loop sleeps for a jittered delay that grows via
+	// decorrelated jitter from Base toward Max using the Multiplier factor. Seed
+	// makes the sequence deterministic (useful in tests); zero uses the package-level
+	// PRNG. The delay resets to zero after every successful iteration cycle.
 	Retry RetryConfig
 
 	// IteratorEscalationWindow defines the sliding time window used to aggregate
@@ -240,11 +265,20 @@ type DynamicConfig struct {
 	// exhaustion drove the failure, so applications can route those
 	// distinctly from generic envelope exhaustion.
 	//
-	// Setting this disables the Parti manager's auto-degraded route for
-	// stream-missing exhaustion (the manager-installed observer is only
-	// consulted when this field is nil). See [WithOnPermanentFailure]
-	// for the option form and the full trade-off discussion.
+	// Registering this callback does NOT disable the Parti manager's
+	// auto-degraded route: for stream-missing exhaustion the manager
+	// observer is notified after this callback returns. Use
+	// [DynamicConfig.SuppressManagerDegradeOnStreamMissing] (option form:
+	// [WithSuppressManagerDegradeOnStreamMissing]) to opt out explicitly.
+	// See [WithOnPermanentFailure] for the full contract.
 	OnPermanentFailure func(subject string, err error)
+
+	// SuppressManagerDegradeOnStreamMissing disables the Parti manager's
+	// auto-degraded route for stream-missing recovery exhaustion. By default
+	// the manager observer is notified even when OnPermanentFailure is set
+	// (both fire; application callback first). Set this only when the
+	// application deliberately owns degrade/rotation signaling itself.
+	SuppressManagerDegradeOnStreamMissing bool
 
 	// RecoveryRetry tunes the bounded-retry envelope wrapped around
 	// the iterator-creation path and the stream-missing Site B
@@ -334,25 +368,26 @@ func NewDynamic(
 			ConsumerMemoryStorage: o.consumerMemoryStorage,
 			ConsumerReplicas:      o.consumerReplicas,
 		},
-		StreamName:                  streamName,
-		ConsumerPrefix:              consumerPrefix,
-		SubjectTemplate:             subjectTemplate,
-		ProcessingGate:              o.processingGate,
-		Resolver:                    o.resolver,
-		PullGatingEnabled:           o.pullGatingEnabled,
-		DrainOnRemove:               o.drainOnRemove,
-		DrainOnRemoveTimeout:        o.drainOnRemoveTimeout,
-		MaxConcurrentSubjects:       o.maxConcurrentSubjects,
-		AllowWorkerIDChange:         o.allowWorkerIDChange,
-		Retry:                       o.retry,
-		IteratorEscalationWindow:    o.iteratorEscalationWindow,
-		IteratorEscalationThreshold: o.iteratorEscalationThreshold,
-		PartitionRefreshMinInterval: o.partitionRefreshMinInterval,
-		IteratorFactory:             o.iteratorFactory,
-		RecoveryStrategy:            o.recoveryStrategy,
-		StreamMissingHook:           o.streamMissingHook,
-		OnPermanentFailure:          o.onPermanentFailure,
-		RecoveryRetry:               o.recoveryRetry,
+		StreamName:                            streamName,
+		ConsumerPrefix:                        consumerPrefix,
+		SubjectTemplate:                       subjectTemplate,
+		ProcessingGate:                        o.processingGate,
+		Resolver:                              o.resolver,
+		PullGatingEnabled:                     o.pullGatingEnabled,
+		DrainOnRemove:                         o.drainOnRemove,
+		DrainOnRemoveTimeout:                  o.drainOnRemoveTimeout,
+		MaxConcurrentSubjects:                 o.maxConcurrentSubjects,
+		AllowWorkerIDChange:                   o.allowWorkerIDChange,
+		Retry:                                 o.retry,
+		IteratorEscalationWindow:              o.iteratorEscalationWindow,
+		IteratorEscalationThreshold:           o.iteratorEscalationThreshold,
+		PartitionRefreshMinInterval:           o.partitionRefreshMinInterval,
+		IteratorFactory:                       o.iteratorFactory,
+		RecoveryStrategy:                      o.recoveryStrategy,
+		StreamMissingHook:                     o.streamMissingHook,
+		OnPermanentFailure:                    o.onPermanentFailure,
+		SuppressManagerDegradeOnStreamMissing: o.suppressManagerDegradeOnStreamMissing,
+		RecoveryRetry:                         o.recoveryRetry,
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -369,6 +404,7 @@ func NewDynamic(
 		streamName:             streamName,
 		recoveryStrategy:       o.recoveryStrategy,
 		userOnPermanentFailure: cfg.OnPermanentFailure,
+		suppressManagerDegrade: cfg.SuppressManagerDegradeOnStreamMissing,
 	}
 
 	// Build worker consumer config from unified DynamicConfig.
@@ -433,19 +469,23 @@ func NewDynamic(
 // the partition consumer's goroutine when iterator-creation envelope
 // or Site B detour exhaustion fires.
 //
-// Dispatch precedence:
-//  1. An application-supplied OnPermanentFailure callback (captured
-//     from WithOnPermanentFailure) wins — applications opt out of the
-//     manager observer route by registering their own callback.
-//  2. Otherwise a manager-installed observer (set via
-//     SetOnStreamMissingError) receives only stream-missing
-//     exhaustion. Generic exhaustion is left to the durable layer's
-//     existing WARN log + metric (see
-//     internal/durable/partition_consumer.go OnPermanent), which is the
-//     operator-visible signal for non-stream-missing failures.
+// Dispatch rules:
+//  1. An application-supplied OnPermanentFailure callback (captured from
+//     WithOnPermanentFailure) fires first when registered.
+//  2. The manager-installed observer (set via SetOnStreamMissingError) is
+//     then ALSO notified for stream-missing exhaustion, so platform
+//     self-healing (enterDegraded -> rotation) does not silently turn off
+//     when an application adds its own observability callback. Applications
+//     that own degrade signaling themselves opt out explicitly via
+//     WithSuppressManagerDegradeOnStreamMissing.
+//  3. Generic (non-stream-missing) exhaustion never reaches the manager
+//     observer; the durable layer's WARN log + metric remain the
+//     operator-visible signal for those.
 func (d *Dynamic) onPermanentFailure(subject string, err error) {
 	if d.userOnPermanentFailure != nil {
 		d.userOnPermanentFailure(subject, err)
+	}
+	if d.suppressManagerDegrade {
 		return
 	}
 	if fn := d.managerOnStreamMissing.Load(); fn != nil && errors.Is(err, types.ErrStreamMissing) {
@@ -463,9 +503,11 @@ func (d *Dynamic) onPermanentFailure(subject string, err error) {
 // types.ErrStreamMissing error chain. Calling with fn == nil clears
 // any previously-installed observer.
 //
-// Application-supplied callbacks registered via
-// [WithOnPermanentFailure] take precedence over the manager observer
-// (see [Dynamic.onPermanentFailure] for the dispatch rules).
+// Application-supplied callbacks registered via [WithOnPermanentFailure]
+// do not suppress this observer: both fire for stream-missing exhaustion
+// (application callback first, then this observer), unless the application
+// explicitly opts out via [WithSuppressManagerDegradeOnStreamMissing].
+// See [Dynamic.onPermanentFailure] for the full dispatch rules.
 //
 // Safe for concurrent use; calls before, during, or after NewDynamic
 // are equivalent — the durable layer reads the slot at fire time.
@@ -503,7 +545,14 @@ func (d *Dynamic) SetOnStreamMissingError(fn func(streamName string, err error))
 //     AllowWorkerIDChange is false.
 //   - [ErrMaxSubjectsExceeded]: Returned when partition count
 //     exceeds MaxConcurrentSubjects.
+//   - Non-sentinel error: Returned when one or more removed partition loops
+//     fail to stop within DrainOnRemoveTimeout; the stop wait is bounded by
+//     that timeout even when DrainOnRemove is false. Tracking entries are
+//     cleared so the manager's retry converges.
 func (d *Dynamic) Update(ctx context.Context, workerID string, partitions []types.Partition) error {
+	if d.inner.Closed() {
+		return fmt.Errorf("dynamic consumer: %w", ErrConsumerStopped)
+	}
 	if err := d.ensureCompatChecked(ctx); err != nil {
 		return err
 	}
@@ -521,6 +570,9 @@ func (d *Dynamic) UpdateWorkerConsumer(ctx context.Context, workerID string, par
 	// bypassed the check entirely, so a stale Dynamic registered with
 	// the manager could silently accept an incompatible
 	// WorkQueuePolicy/recovery combination on a recreated stream.
+	if d.inner.Closed() {
+		return fmt.Errorf("dynamic consumer: %w", ErrConsumerStopped)
+	}
 	if err := d.ensureCompatChecked(ctx); err != nil {
 		return err
 	}
@@ -573,8 +625,6 @@ func (d *Dynamic) Capabilities() uint32 {
 	return d.inner.Capabilities()
 }
 
-// Close stops all partition consumers.
-//
 // Stop gracefully stops all partition consumers.
 //
 // Stop cancels all internal pull loops and waits for pending message processing
@@ -584,6 +634,11 @@ func (d *Dynamic) Capabilities() uint32 {
 //
 // If DrainOnRemove is enabled, Stop will first drain pending messages
 // (up to DrainOnRemoveTimeout) before stopping.
+//
+// Stop is terminal: subsequent manager updates (via [Dynamic.Update] or
+// [Dynamic.UpdateWorkerConsumer]) will fail with [ErrConsumerStopped]. Create a
+// new [Dynamic] to consume again. To avoid a loud retry loop in the manager,
+// stop the manager first or deregister this consumer before calling Stop.
 //
 // Stop is idempotent; calling it multiple times is safe.
 //
@@ -616,11 +671,15 @@ func (c *DynamicConfig) Validate() error {
 		return err
 	}
 	if err := fuda.Validate(c); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidConfig, err)
+	}
+
+	if err := validateFetchTimeoutFloor(c.FetchTimeout); err != nil {
 		return err
 	}
 
 	if !jsutil.IsValidConsumerName(c.ConsumerPrefix) {
-		return fmt.Errorf("consumer prefix %q contains invalid characters (allowed: a-z, A-Z, 0-9, -, _)", c.ConsumerPrefix)
+		return fmt.Errorf("%w: consumer prefix %q contains invalid characters (allowed: a-z, A-Z, 0-9, -, _)", ErrInvalidConfig, c.ConsumerPrefix)
 	}
 
 	return validateStreamMissingHookStrategy(c.StreamMissingHook != nil, c.RecoveryStrategy)

@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"github.com/arloliu/parti/v2/internal/durable"
+	"github.com/arloliu/parti/v2/types"
 )
 
 // ErrInvalidConfig is returned by constructors ([NewQueue], [NewStatic], [NewDynamic],
@@ -30,4 +31,11 @@ var (
 	// ErrMaxSubjectsExceeded is returned by [Dynamic.Update] when the
 	// partition count exceeds MaxConcurrentSubjects.
 	ErrMaxSubjectsExceeded = durable.ErrMaxSubjectsExceeded
+
+	// ErrConsumerStopped is returned by [Static.Start], [Broadcast.Start],
+	// [Broadcast.UpdateWorkerConsumer], [Dynamic.Update], and
+	// [Dynamic.UpdateWorkerConsumer] when the consumer has already been stopped
+	// or closed. Stop is terminal for Static, Broadcast, and Dynamic consumers:
+	// create a new instance to consume again.
+	ErrConsumerStopped = types.ErrConsumerStopped
 )
