@@ -815,7 +815,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 	if err := m.election.ReleaseLeadership(releaseCtx); err != nil &&
 		!errors.Is(err, election.ErrNotLeader) {
 		m.logError("failed to release leadership on stop", "error", err)
-		shutdownErr = fmt.Errorf("leadership release failed: %w", err)
+		shutdownErr = errors.Join(shutdownErr, fmt.Errorf("leadership release failed: %w", err))
 	}
 	releaseCancel()
 
@@ -832,23 +832,19 @@ func (m *Manager) Stop(ctx context.Context) error {
 	// Step 1.6: Stop partition source
 	if err := m.source.Stop(ctx); err != nil {
 		m.logError("failed to stop partition source", "error", err)
-		shutdownErr = fmt.Errorf("partition source stop failed: %w", err)
+		shutdownErr = errors.Join(shutdownErr, fmt.Errorf("partition source stop failed: %w", err))
 	}
 
 	// Step 2: Stop heartbeat publisher (ignore ErrNotStarted)
 	if err := m.heartbeat.Stop(); err != nil && !errors.Is(err, heartbeat.ErrNotStarted) {
 		m.logError("failed to stop heartbeat", "error", err)
-		if shutdownErr == nil {
-			shutdownErr = fmt.Errorf("heartbeat stop failed: %w", err)
-		}
+		shutdownErr = errors.Join(shutdownErr, fmt.Errorf("heartbeat stop failed: %w", err))
 	}
 
 	// Step 3: Release stable worker ID (ignore ErrNotClaimed)
 	if err := m.idClaimer.Release(ctx); err != nil && !errors.Is(err, stableid.ErrNotClaimed) {
 		m.logError("failed to release worker ID", "error", err)
-		if shutdownErr == nil {
-			shutdownErr = fmt.Errorf("worker ID release failed: %w", err)
-		}
+		shutdownErr = errors.Join(shutdownErr, fmt.Errorf("worker ID release failed: %w", err))
 	}
 
 	// Step 4: Wait for all background goroutines with timeout
@@ -865,10 +861,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 		return shutdownErr
 	case <-ctx.Done():
 		m.logger.Warn("manager stop timed out")
-		if shutdownErr == nil {
-			shutdownErr = ctx.Err()
-		}
-		return shutdownErr
+		return errors.Join(shutdownErr, ctx.Err())
 	}
 }
 

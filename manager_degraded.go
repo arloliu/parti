@@ -161,7 +161,10 @@ func (m *Manager) recordKVError(err error) {
 	// entries to accumulate.
 	m.kvErrorWindow = append(m.kvErrorWindow, kvErrorEvent{at: now, transient: decision.transient})
 
-	// Remove errors outside the window
+	// Remove errors outside the window. This scan assumes kvErrorWindow is
+	// ascending by .at — an invariant maintained solely because the window is
+	// only ever appended to (above) and head-trimmed (below). Do not insert or
+	// reorder entries, or the first-in-window scan breaks silently.
 	windowStart := now.Add(-m.cfg.DegradedBehavior.KVErrorWindow)
 	validIdx := 0
 	for i, e := range m.kvErrorWindow {
