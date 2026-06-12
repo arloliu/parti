@@ -5,6 +5,28 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Orphaned handoff claims are now reaped by the leader's sweep.** Since the
+  handoff bucket deliberately carries no `MaxAge` (stable ownership claims
+  must never age out from under the pull-gating resolver), claims for
+  partitions permanently removed from the partition source accumulated
+  forever — a slow leak walked by every resolver warm and every sweep. The
+  two-phase coordinator's claim sweep now deletes a stable, no-pending-owner
+  claim once its partition has been continuously absent from BOTH the
+  leader's source view and the latest committed assignment for a 10-minute
+  grace period — a partition the live commit still references is never an
+  orphan, so an owner consuming through a stalled rebalance window is never
+  cut off. The delete is revision-checked (compare-and-delete), so a
+  concurrently re-added partition's claim transition always wins over the
+  reaper. Followers never reap (a config-skewed follower, e.g. an old static
+  partition list mid-rolling-upgrade, must not be an authority on which
+  partitions exist), and any stretch where the leader cannot verify the
+  set — leadership loss, source or commit read failure — restarts the grace
+  clock.
+
 ## [v2.7.1] - 2026-06-12
 
 Patch release. One shutdown-diagnostics fix; no API or default-behavior

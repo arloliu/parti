@@ -34,8 +34,8 @@ func (m *mockClaimStore) PutIfEpoch(ctx context.Context, key string, epoch int64
 	return ver, args.Error(1)
 }
 
-func (m *mockClaimStore) Delete(ctx context.Context, key string) error {
-	args := m.Called(ctx, key)
+func (m *mockClaimStore) Delete(ctx context.Context, key string, revision uint64) error {
+	args := m.Called(ctx, key, revision)
 	return args.Error(0)
 }
 

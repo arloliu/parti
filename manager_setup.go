@@ -218,6 +218,10 @@ func (m *Manager) setupHandoff(startupCtx context.Context, js jetstream.JetStrea
 		DelayBeforeStable: m.cfg.Handoff.DelayBeforeStable,
 		PhaseConcurrency:  m.cfg.Handoff.PhaseConcurrency,
 		Logger:            m.logger,
+		// Orphan-claim reaping: leader-vouched live set + a generous grace.
+		// See livePartitionSet and orphanClaimGrace (manager_handoff.go).
+		LivePartitions: m.livePartitionSet,
+		OrphanGrace:    orphanClaimGrace,
 	}, true)
 
 	// Hygiene + resumable detection

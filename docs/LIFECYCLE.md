@@ -237,7 +237,7 @@ There is no leader→worker message exchange. Each worker independently drives i
         ▼                                     ▼
 ```
 
-A background sweeper reconciles stale or interrupted claims toward `stable` on `SweepInterval`, so a worker crashing mid-handoff does not strand a claim.
+A background sweeper reconciles stale or interrupted claims toward `stable` on `SweepInterval`, so a worker crashing mid-handoff does not strand a claim. On the leader, the same sweep also reaps orphaned claims — stable claims whose partition has been removed from the partition source — after the partition has been continuously absent from BOTH the leader's source view and the latest committed assignment for a 10-minute grace period (a partition the live commit still references is never an orphan, even if the source already dropped it). The delete is revision-checked, so a partition re-added concurrently always wins over the reaper; followers never reap (their source view could be config-skewed during a rolling upgrade), and any stretch where the leader cannot verify the set restarts the grace clock.
 
 ### Handoff States
 
