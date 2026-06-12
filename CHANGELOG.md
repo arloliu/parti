@@ -5,6 +5,22 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.7.1] - 2026-06-12
+
+Patch release. One shutdown-diagnostics fix; no API or default-behavior
+changes on the healthy path.
+
+### Fixed
+
+- **`Manager.Stop` now reports every failing shutdown component.** Stop
+  collected component errors with first-non-nil-wins semantics — and the
+  partition-source step unconditionally overwrote an earlier
+  leadership-release error — so a shutdown in which multiple components
+  failed surfaced only one root cause. All five error sites (leadership
+  release, partition source, heartbeat, worker-ID release, stop-timeout)
+  now accumulate via `errors.Join`, keeping every cause inspectable with
+  `errors.Is`. A healthy stop still returns `nil`.
+
 ## [v2.7.0] - 2026-06-11
 
 Dynamic-consumer healing release. It closes a family of silent-stall paths
