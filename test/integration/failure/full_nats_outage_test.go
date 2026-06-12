@@ -2,6 +2,7 @@ package failure_test
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -30,15 +31,41 @@ func TestFullNATSOutage_UnlimitedReconnects_RecoversFleet(t *testing.T) {
 	rfBuildStream(t, ctx, realJS)
 	src := source.NewStatic([]types.Partition{{Keys: []string{"p0"}}})
 
+	// During a full outage, multiple legitimate paths race to enter
+	// Degraded: the connection monitor (DegradeReasonNATSConnectionDown)
+	// vs the KV-error circuit fed by failing heartbeat/election/renew ops
+	// (DegradeReasonKVErrorThreshold, or DegradeReasonKVUnavailable for
+	// timeout-classified ops). OnDegraded fires exactly once per Degraded
+	// entry, so asserting one specific winner is a timing flake under CI
+	// load — the simulation oracles already accept either production path
+	// (test/simulation/internal/coordinator/oracles.go). Count any
+	// connectivity-driven reason; record all reasons for diagnostics.
+	connectivityReasons := map[string]bool{
+		parti.DegradeReasonNATSConnectionDown: true,
+		parti.DegradeReasonKVErrorThreshold:   true,
+		parti.DegradeReasonKVUnavailable:      true,
+	}
 	var degradedCalls atomic.Int64
+	var reasonMu sync.Mutex
+	var reasons []string
 	stack := rfBuildWorkerStackCfg(t, ctx, realJS, src, 0, fastOutageConfig, func(h *parti.Hooks) {
 		h.OnDegraded = func(_ context.Context, reason string) error {
-			if reason == "NATS connection down" {
+			reasonMu.Lock()
+			reasons = append(reasons, reason)
+			reasonMu.Unlock()
+			if connectivityReasons[reason] {
 				degradedCalls.Add(1)
 			}
 			return nil
 		}
 	})
+	defer func() {
+		if t.Failed() {
+			reasonMu.Lock()
+			t.Logf("OnDegraded reasons observed: %v", reasons)
+			reasonMu.Unlock()
+		}
+	}()
 	require.NoError(t, <-stack.mgr.WaitState(parti.StateStable, 30*time.Second))
 
 	rfPublish(t, ctx, realJS, "p0", "before-outage")
@@ -50,7 +77,8 @@ func TestFullNATSOutage_UnlimitedReconnects_RecoversFleet(t *testing.T) {
 		5*time.Second, 50*time.Millisecond, "client did not observe NATS outage")
 	require.NoError(t, <-stack.mgr.WaitState(parti.StateDegraded, 10*time.Second))
 	require.Eventually(t, func() bool { return degradedCalls.Load() > 0 },
-		5*time.Second, 20*time.Millisecond, "OnDegraded must report NATS connection down")
+		5*time.Second, 20*time.Millisecond,
+		"OnDegraded must report a connectivity-driven reason during the outage")
 	require.Len(t, stack.mgr.CurrentAssignment().Partitions, 1,
 		"manager must retain cached assignment while NATS is down")
 
