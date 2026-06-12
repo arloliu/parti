@@ -215,7 +215,16 @@ func TestManager_DegradedHook(t *testing.T) {
 	require.NotNil(t, val)
 	reason, ok := val.(string)
 	require.True(t, ok, "expected string reason")
-	require.Contains(t, reason, "NATS connection down")
+	// During a full outage the connection monitor races the KV-error
+	// circuit (failing heartbeat/election ops) to enter Degraded, and
+	// OnDegraded fires exactly once per entry — pinning one specific
+	// winner is a timing flake under CI load. Any connectivity-driven
+	// reason proves the hook contract this test is about.
+	require.Contains(t, []string{
+		parti.DegradeReasonNATSConnectionDown,
+		parti.DegradeReasonKVErrorThreshold,
+		parti.DegradeReasonKVUnavailable,
+	}, reason, "OnDegraded must report a connectivity-driven reason")
 }
 
 // orderingUpdater tracks the order in which UpdateWorkerConsumer is called
