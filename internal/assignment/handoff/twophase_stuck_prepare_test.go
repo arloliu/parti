@@ -453,6 +453,10 @@ func (s *casConflictOnceStore) ListKeys(ctx context.Context) ([]string, error) {
 	return s.inner.ListKeys(ctx)
 }
 
+func (s *casConflictOnceStore) Delete(ctx context.Context, partitionID string, revision uint64) error {
+	return s.inner.Delete(ctx, partitionID, revision)
+}
+
 // TestTwoPhase_StaleHandoffResetMetric_NoOvercountOnCASRetry guards the
 // post-impl-review finding that
 // when preparePhase resets a stuck handoff and the underlying CAS conflicts

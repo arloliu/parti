@@ -121,6 +121,23 @@ type Config struct {
 	// negative is the "use default 20" sentinel set by the parti-side
 	// HandoffConfig contract; New() normalizes the value in place.
 	PhaseConcurrency int
+	// LivePartitions optionally supplies the authoritative current partition
+	// set, keyed by Partition.SubjectKey() (the same identity claims are keyed
+	// by). ok=false means the caller cannot vouch for the set right now — not
+	// the leader, or the source is unavailable — and the sweep skips orphan
+	// reaping entirely for that pass, including absence-clock bookkeeping.
+	//
+	// The supplier MUST be authoritative when it answers ok=true: the manager
+	// wires it leader-only, so a config-skewed follower (e.g. an old Static
+	// partition list mid-rolling-upgrade) can never reap claims for partitions
+	// it does not know about. A nil supplier disables reaping.
+	LivePartitions func(ctx context.Context) (map[string]struct{}, bool)
+	// OrphanGrace is how long a stable claim must be continuously observed
+	// absent from the vouched LivePartitions set before the sweep deletes it.
+	// The grace turns transient source churn (remove-then-readd) into a
+	// no-op; the revision-CAS delete additionally guarantees any concurrent
+	// claim transition wins over the reaper. <= 0 disables orphan reaping.
+	OrphanGrace time.Duration
 }
 
 // New returns a Coordinator implementation.
@@ -159,7 +176,10 @@ func New(cfg Config, enableTwoPhase bool) Coordinator {
 		cfg.TTL = 1 * time.Minute
 	}
 	if enableTwoPhase {
-		return &twoPhaseCoordinator{cfg: cfg}
+		return &twoPhaseCoordinator{
+			cfg:               cfg,
+			orphanAbsentSince: make(map[string]time.Time),
+		}
 	}
 
 	return &direct{cfg: cfg}

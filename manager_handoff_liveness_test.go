@@ -87,6 +87,19 @@ func (s *casClaimStore) ListKeys(_ context.Context) ([]string, error) {
 	return out, nil
 }
 
+func (s *casClaimStore) Delete(_ context.Context, partitionID string, revision uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, ok := s.rev[partitionID]
+	if !ok || cur != revision {
+		return errors.New("revision mismatch")
+	}
+	delete(s.data, partitionID)
+	delete(s.rev, partitionID)
+
+	return nil
+}
+
 // TestGuardHandoffRemoval_GainingWorkerDeath_Liveness pins the safety/liveness
 // boundary documented in Task 4 of the G4 fix plan
 // (docs/plans/auto-healing-gap-closure/02-g4-handoff-rebalance-fix-plan.md).

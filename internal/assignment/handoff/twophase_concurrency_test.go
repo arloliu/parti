@@ -50,6 +50,10 @@ func (o *observingClaimStore) ListKeys(ctx context.Context) ([]string, error) {
 	return o.inner.ListKeys(ctx)
 }
 
+func (o *observingClaimStore) Delete(ctx context.Context, partitionID string, revision uint64) error {
+	return o.inner.Delete(ctx, partitionID, revision)
+}
+
 // compile-time assertion
 var _ ClaimStore = (*observingClaimStore)(nil)
 

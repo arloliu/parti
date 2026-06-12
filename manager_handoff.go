@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -43,6 +44,63 @@ type HandoffClaim struct {
 	LastUpdated   time.Time         `json:"last_updated"`
 	TTLSeconds    int64             `json:"ttl_seconds"`
 	ConflictCount int64             `json:"conflict_count,omitempty"`
+}
+
+// orphanClaimGrace is how long a stable handoff claim must be continuously
+// observed absent from the leader's vouched partition set (source ∪ latest
+// committed assignment — see livePartitionSet) before the coordinator's
+// sweep reaps it. Claims for partitions permanently removed from the source
+// otherwise accumulate forever (the handoff bucket deliberately carries no
+// MaxAge — see reconcileHandoffBucketMaxAge). The grace is deliberately
+// generous: orphan bloat is a slow leak, so the only hard requirement is
+// that transient source churn (remove-then-readd within minutes) never
+// qualifies. The revision-CAS delete in the sweep independently guarantees
+// any concurrent claim transition wins over the reaper.
+const orphanClaimGrace = 10 * time.Minute
+
+// livePartitionSet supplies the two-phase coordinator's orphan-reap pass
+// with the authoritative current partition set, keyed by SubjectKey (the
+// claim key). It vouches (ok=true) only when this worker is the leader: a
+// follower — whose source could be config-skewed during a rolling upgrade —
+// never vouches, and the reap pass is skipped.
+//
+// The vouched set is the UNION of the leader's source view and the latest
+// committed assignment's partition set. The source alone is not authority
+// enough: after a partition is removed from the source there is a window —
+// unbounded if the follow-up rebalance publish stalls — in which the live
+// commit still references the partition and its owner is still consuming
+// it through the processing gate. Reaping the claim in that window would
+// make the gate NAK the legitimate owner (unknown_ownership) until some
+// later apply recreates the claim. A partition referenced by EITHER view
+// is therefore never an orphan.
+func (m *Manager) livePartitionSet(ctx context.Context) (map[string]struct{}, bool) {
+	if !m.isLeader.Load() {
+		return nil, false
+	}
+	parts, err := m.source.List(ctx)
+	if err != nil {
+		return nil, false
+	}
+	commit, _, err := m.readCommitEntry(ctx)
+	if err != nil {
+		return nil, false
+	}
+	var commitSet map[string]struct{}
+	if commit != nil {
+		// Cached by (version, _commit revision); the payload fan-out only
+		// re-runs when the commit actually changes.
+		commitSet, err = m.currentCommitPartitionSet(ctx, commit.Version)
+		if err != nil {
+			return nil, false
+		}
+	}
+	set := make(map[string]struct{}, len(parts)+len(commitSet))
+	for _, p := range parts {
+		set[p.SubjectKey()] = struct{}{}
+	}
+	maps.Copy(set, commitSet)
+
+	return set, true
 }
 
 // runInitialHandoffResumeIfPending kicks the resume pass when the manager

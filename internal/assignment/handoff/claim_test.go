@@ -66,8 +66,30 @@ func (m *memStore) ListKeys(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
+func (m *memStore) Delete(_ context.Context, partitionID string, revision uint64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cur, ok := m.rev[partitionID]
+	if !ok {
+		return errRevisionMismatch
+	}
+	// Mirror jetstream.LastRevision semantics: delete only at the exact
+	// revision the caller read; any concurrent transition wins.
+	if cur != revision {
+		return errRevisionMismatch
+	}
+	delete(m.data, partitionID)
+	delete(m.rev, partitionID)
+
+	return nil
+}
+
 // ErrEpochMismatch is a sentinel for test store CAS failures.
 var ErrEpochMismatch = errors.New("epoch mismatch")
+
+// errRevisionMismatch is the test-store analogue of the LastRevision
+// compare-and-delete failure NATS returns for a stale-revision Delete.
+var errRevisionMismatch = errors.New("revision mismatch")
 
 func TestSweeper_ResetsExpiredNonStableToStable(t *testing.T) {
 	t.Parallel()

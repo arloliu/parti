@@ -55,6 +55,21 @@ type ClaimStore interface {
 	// The returned partition IDs correspond to the keys in the KV store
 	// under the claims prefix.
 	ListKeys(ctx context.Context) ([]string, error)
+
+	// Delete removes a partition's claim, but only if the claim is still at
+	// the given revision (compare-and-delete). A revision mismatch — the
+	// claim was transitioned or re-created since the caller read it — must
+	// fail the delete and return an error, so a concurrent legitimate
+	// writer always wins over a deleter working from a stale read.
+	//
+	// Parameters:
+	//   - ctx: Context for cancellation.
+	//   - partitionID: The ID of the partition whose claim to delete.
+	//   - revision: The KV revision the caller read the claim at.
+	//
+	// Returns:
+	//   - error: Any error encountered, including revision mismatches.
+	Delete(ctx context.Context, partitionID string, revision uint64) error
 }
 
 // natsClaimStore implements ClaimStore using a jetstream.KeyValue bucket.
@@ -123,6 +138,16 @@ func (s *natsClaimStore) PutIfEpoch(ctx context.Context, partitionID string, exp
 
 func (s *natsClaimStore) ListKeys(ctx context.Context) ([]string, error) {
 	return kvutil.ListKeys(ctx, s.kv, s.claimsPref, true)
+}
+
+func (s *natsClaimStore) Delete(ctx context.Context, partitionID string, revision uint64) error {
+	// LastRevision makes this a compare-and-delete: NATS rejects the delete
+	// (ErrKeyExists wrap) when the key has moved past the given revision.
+	if err := s.kv.Delete(ctx, s.key(partitionID), jetstream.LastRevision(revision)); err != nil {
+		return fmt.Errorf("kv delete: %w", err)
+	}
+
+	return nil
 }
 
 // Now returns time.Now() and allows override in tests.

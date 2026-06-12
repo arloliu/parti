@@ -87,6 +87,8 @@ func (f *fakeClaimStore) ListKeys(_ context.Context) ([]string, error) {
 	return nil, nil
 }
 
+func (f *fakeClaimStore) Delete(context.Context, string, uint64) error { return nil }
+
 func part(key string) types.Partition {
 	return types.Partition{Keys: []string{key}}
 }

@@ -56,6 +56,8 @@ func (f *flakyStore) PutIfEpoch(ctx context.Context, partitionID string, expecte
 
 func (f *flakyStore) ListKeys(ctx context.Context) ([]string, error) { return nil, nil }
 
+func (f *flakyStore) Delete(context.Context, string, uint64) error { return nil }
+
 // consumerUpdaterFunc is a test helper to satisfy ConsumerUpdater.
 type consumerUpdaterFunc func(ctx context.Context, workerID string, partitions []types.Partition) error
 

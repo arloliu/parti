@@ -19,10 +19,27 @@ import (
 //
 // All latency / retries are internal; Apply should return quickly.
 type twoPhaseCoordinator struct {
-	cfg       Config
+	cfg Config
+	// sweepMu makes the sweep single-flight: maybeSweepClaims holds it
+	// across the WHOLE sweep body (TryLock; a pass that loses simply
+	// skips — the sweep is opportunistic and the winner is already doing
+	// the work). Serializing bodies is what makes orphanAbsentSince
+	// single-writer, and it closes the interleaving where an unvouched
+	// pass's clock-clear lands between a concurrent vouched pass's reap
+	// decision and its delete — reaping on a clock the clear should have
+	// invalidated. lastSweep is guarded by it too.
 	sweepMu   sync.Mutex
 	lastSweep time.Time
 	started   atomic.Bool
+
+	// orphanAbsentSince records, per claim key, when the sweep first observed
+	// the partition absent from a vouched LivePartitions set. Entries clear
+	// when the partition reappears, when the claim is reaped, when the claim
+	// key stops being listed, or wholesale on an unvouched pass. Guarded by
+	// sweepMu (single-flight sweep = single writer). In-memory only: a
+	// restart or leadership change restarts the grace clock, which is the
+	// conservative direction.
+	orphanAbsentSince map[string]time.Time
 }
 
 // Start launches a background goroutine that sweeps stale claims at SweepInterval.
@@ -452,22 +469,24 @@ func (t *twoPhaseCoordinator) stabilizePhase(ctx context.Context, workerID strin
 //  2. Any expired non-stable claim (e.g. a stuck prepare) is reset back to stable,
 //     clearing any pending owner (the original stale-claim safety net).
 //
-// Runs at most once per configured sweep interval. If SweepInterval <= 0, runs every time.
+// Runs at most once per configured sweep interval. If SweepInterval <= 0, runs
+// every time — but never concurrently: sweep bodies are single-flight (see the
+// sweepMu field doc), and a pass arriving while another sweep is mid-body is
+// skipped rather than blocked, so Apply never waits on another sweep's KV I/O.
 func (t *twoPhaseCoordinator) maybeSweepClaims(ctx context.Context) {
 	if t.cfg.Store == nil {
 		return
 	}
-	now := t.cfg.Now()
+	if !t.sweepMu.TryLock() {
+		return // another sweep is mid-body; this opportunistic pass skips
+	}
+	defer t.sweepMu.Unlock()
 
-	// Check sweep interval with lock
-	t.sweepMu.Lock()
+	now := t.cfg.Now()
 	if t.cfg.SweepInterval > 0 && !t.lastSweep.IsZero() && now.Sub(t.lastSweep) < t.cfg.SweepInterval {
-		t.sweepMu.Unlock()
 		return
 	}
-	// Update last sweep time and release lock immediately to avoid blocking Apply
 	t.lastSweep = now
-	t.sweepMu.Unlock()
 
 	keys, err := t.cfg.Store.ListKeys(ctx)
 	if err != nil || len(keys) == 0 {
@@ -476,6 +495,23 @@ func (t *twoPhaseCoordinator) maybeSweepClaims(ctx context.Context) {
 	if t.cfg.Metrics != nil {
 		t.cfg.Metrics.SetClaimStoreSize(len(keys))
 	}
+
+	// Resolve the live partition set once per pass for orphan reaping.
+	// liveOK=false (supplier not vouching: not the leader, source down)
+	// skips all reap decisions for the pass AND resets every absence clock:
+	// time spent unvouched is time this worker could not verify continuous
+	// absence, so it must not count toward OrphanGrace — otherwise a clock
+	// started before a long follower stint would reap instantly on the
+	// first vouched pass after it.
+	var live map[string]struct{}
+	liveOK := false
+	if t.cfg.OrphanGrace > 0 && t.cfg.LivePartitions != nil {
+		live, liveOK = t.cfg.LivePartitions(ctx)
+		if !liveOK {
+			clear(t.orphanAbsentSince)
+		}
+	}
+
 	for _, pid := range keys {
 		cur, rev, err := t.cfg.Store.Get(ctx, pid)
 		if err != nil || rev == 0 {
@@ -483,16 +519,106 @@ func (t *twoPhaseCoordinator) maybeSweepClaims(ctx context.Context) {
 		}
 		// Cheap pre-filter: skip a CAS write attempt when this claim needs no
 		// reconcile (the common case for already-stable claims).
-		if sweepReconcile(&cur, now) == nil {
+		if sweepReconcile(&cur, now) != nil {
+			if err := t.updateClaim(ctx, pid, func(cur *Claim) (*Claim, error) {
+				// Re-decide on the fresh read inside the CAS loop.
+				return sweepReconcile(cur, now), nil
+			}); err == nil {
+				if t.cfg.Metrics != nil {
+					t.cfg.Metrics.IncClaimStoreStale()
+				}
+			}
+			// A just-reconciled claim is in flux; it is not reap-eligible
+			// this pass. The next pass re-evaluates it from a fresh read.
 			continue
 		}
-		if err := t.updateClaim(ctx, pid, func(cur *Claim) (*Claim, error) {
-			// Re-decide on the fresh read inside the CAS loop.
-			return sweepReconcile(cur, now), nil
-		}); err == nil {
-			if t.cfg.Metrics != nil {
-				t.cfg.Metrics.IncClaimStoreStale()
-			}
+
+		if liveOK {
+			t.maybeReapOrphan(ctx, pid, cur, rev, live, now)
+		}
+	}
+
+	if liveOK {
+		t.pruneOrphanCandidates(keys)
+	}
+}
+
+// maybeReapOrphan applies the orphan-reap decision for one claim against a
+// vouched live partition set:
+//
+//   - in the set → clear any absence clock, keep;
+//   - not stable, or a pending owner recorded → keep (in-flight handoffs are
+//     the existing sweep arms' job, never the reaper's);
+//   - first vouched absence → start the clock, keep;
+//   - absent for >= OrphanGrace → compare-and-delete at the revision this
+//     pass read. A lost CAS means the claim transitioned concurrently (e.g.
+//     the partition was re-added and prepared) — the reaper yields and the
+//     next pass re-evaluates from a fresh read.
+func (t *twoPhaseCoordinator) maybeReapOrphan(
+	ctx context.Context,
+	pid string,
+	cur Claim,
+	rev uint64,
+	live map[string]struct{},
+	now time.Time,
+) {
+	// Runs under sweepMu (single-flight sweep) — the sole writer of
+	// orphanAbsentSince, so no further locking is needed here.
+	if _, ok := live[pid]; ok {
+		delete(t.orphanAbsentSince, pid)
+
+		return
+	}
+	// Only terminal, settled claims are reap candidates.
+	if cur.State != ClaimStateStable || cur.PendingOwner != "" {
+		return
+	}
+	since, seen := t.orphanAbsentSince[pid]
+	if !seen {
+		t.orphanAbsentSince[pid] = now
+
+		return
+	}
+	if now.Sub(since) < t.cfg.OrphanGrace {
+		return
+	}
+
+	if err := t.cfg.Store.Delete(ctx, pid, rev); err != nil {
+		// Revision conflict or transient KV failure: keep the claim and the
+		// clock; a genuine orphan is re-attempted next pass, a re-added
+		// partition clears via the in-set branch above.
+		if t.cfg.Logger != nil {
+			t.cfg.Logger.Debug("orphan claim reap skipped",
+				"partition_id", pid, "error", err)
+		}
+
+		return
+	}
+	delete(t.orphanAbsentSince, pid)
+	if t.cfg.Logger != nil {
+		t.cfg.Logger.Info("reaped orphan claim",
+			"partition_id", pid,
+			"owner", cur.Owner,
+			"absent_for", now.Sub(since).String(),
+		)
+	}
+}
+
+// pruneOrphanCandidates drops absence-clock entries for claim keys that are
+// no longer listed in the bucket (reaped by another instance, or deleted by
+// other means), so the bookkeeping map cannot grow past the claim count.
+// Runs under sweepMu (single-flight sweep).
+func (t *twoPhaseCoordinator) pruneOrphanCandidates(listed []string) {
+	if len(t.orphanAbsentSince) == 0 {
+		return
+	}
+	listedSet := make(map[string]struct{}, len(listed))
+	for _, k := range listed {
+		listedSet[k] = struct{}{}
+	}
+	for pid := range t.orphanAbsentSince {
+		if _, ok := listedSet[pid]; !ok {
+			delete(t.orphanAbsentSince, pid)
 		}
 	}
 }
