@@ -5,15 +5,22 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v2.7.1] - 2026-06-12
 
-### Added
+Patch release with two fixes: complete shutdown diagnostics, and a garbage
+collector for orphaned two-phase handoff claims. No exported API changes.
+One behavior change at defaults: the leader's claim sweep now deletes
+claims for partitions that have been removed from the partition source
+(after a conservative 10-minute verified-absence grace); previously such
+claims accumulated forever.
 
-- **Orphaned handoff claims are now reaped by the leader's sweep.** Since the
-  handoff bucket deliberately carries no `MaxAge` (stable ownership claims
-  must never age out from under the pull-gating resolver), claims for
-  partitions permanently removed from the partition source accumulated
-  forever — a slow leak walked by every resolver warm and every sweep. The
+### Fixed
+
+- **Orphaned handoff claims no longer accumulate forever.** The handoff
+  bucket deliberately carries no `MaxAge` (stable ownership claims must
+  never age out from under the pull-gating resolver), so claims for
+  partitions permanently removed from the partition source leaked
+  unboundedly — walked by every resolver warm and every claim sweep. The
   two-phase coordinator's claim sweep now deletes a stable, no-pending-owner
   claim once its partition has been continuously absent from BOTH the
   leader's source view and the latest committed assignment for a 10-minute
@@ -26,14 +33,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   partitions exist), and any stretch where the leader cannot verify the
   set — leadership loss, source or commit read failure — restarts the grace
   clock.
-
-## [v2.7.1] - 2026-06-12
-
-Patch release. One shutdown-diagnostics fix; no API or default-behavior
-changes on the healthy path.
-
-### Fixed
-
 - **`Manager.Stop` now reports every failing shutdown component.** Stop
   collected component errors with first-non-nil-wins semantics — and the
   partition-source step unconditionally overwrote an earlier
