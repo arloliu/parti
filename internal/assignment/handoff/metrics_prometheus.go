@@ -26,6 +26,8 @@ import (
 //   - claim_store_size
 //   - claim_store_stale_total
 //   - claim_stale_handoff_reset_total
+//   - claim_write_throttled_total
+//   - claim_write_throttle_wait_seconds
 //
 // These cover end-to-end outcomes, latency, and basic KV conflict/health.
 type PrometheusRecorder struct {
@@ -41,6 +43,8 @@ type PrometheusRecorder struct {
 	claimStoreSize         prometheus.Gauge
 	claimStoreStale        prometheus.Counter
 	claimStaleHandoffReset prometheus.Counter
+	claimWriteThrottled    prometheus.Counter
+	claimWriteThrottleWait prometheus.Histogram
 }
 
 // NewPrometheusRecorder creates a new recorder.
@@ -100,6 +104,19 @@ func (p *PrometheusRecorder) ensure() {
 			Name:      "claim_stale_handoff_reset_total",
 			Help:      "Total number of stuck-prepare claims reset to stable on re-acquire by the existing owner.",
 		})
+		p.claimWriteThrottled = prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: p.namespace,
+			Subsystem: "handoff",
+			Name:      "claim_write_throttled_total",
+			Help:      "Total claim-write attempts that were delayed by the claim-write rate limiter.",
+		})
+		p.claimWriteThrottleWait = prometheus.NewHistogram(prometheus.HistogramOpts{
+			Namespace: p.namespace,
+			Subsystem: "handoff",
+			Name:      "claim_write_throttle_wait_seconds",
+			Help:      "Duration in seconds that claim-write attempts waited due to rate limiting.",
+			Buckets:   []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5},
+		})
 
 		p.reg.MustRegister(
 			p.handoffTotal,
@@ -109,6 +126,8 @@ func (p *PrometheusRecorder) ensure() {
 			p.claimStoreSize,
 			p.claimStoreStale,
 			p.claimStaleHandoffReset,
+			p.claimWriteThrottled,
+			p.claimWriteThrottleWait,
 		)
 	})
 }
@@ -146,4 +165,20 @@ func (p *PrometheusRecorder) IncClaimStoreStale() {
 func (p *PrometheusRecorder) IncClaimStaleHandoffReset() {
 	p.ensure()
 	p.claimStaleHandoffReset.Inc()
+}
+
+// IncClaimWriteThrottled increments the claim-write throttle counter. It
+// satisfies the optional claim-write throttle sidecar the Manager type-asserts
+// for when building the claim-write rate limiter; only positive-delay waits are
+// recorded.
+func (p *PrometheusRecorder) IncClaimWriteThrottled() {
+	p.ensure()
+	p.claimWriteThrottled.Inc()
+}
+
+// ObserveClaimWriteThrottleWait records a claim-write throttle wait duration in
+// seconds. Companion to IncClaimWriteThrottled.
+func (p *PrometheusRecorder) ObserveClaimWriteThrottleWait(seconds float64) {
+	p.ensure()
+	p.claimWriteThrottleWait.Observe(seconds)
 }

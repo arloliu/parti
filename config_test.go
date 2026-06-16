@@ -85,6 +85,45 @@ func TestValidateWithWarnings_StartupTimeout(t *testing.T) {
 	})
 }
 
+// TestValidateWithWarnings_ClaimWriteRateWithoutTwoPhase asserts that a
+// claim-write rate limit configured without two-phase handoff (where it has no
+// effect, since claim-writes only occur under two-phase handoff) emits a
+// warning, and stays silent when two-phase handoff is enabled or the rate is 0.
+func TestValidateWithWarnings_ClaimWriteRateWithoutTwoPhase(t *testing.T) {
+	const warnPrefix = "Handoff.ClaimWritePerSec is set but EnableTwoPhaseHandoff is false"
+
+	t.Run("warns when rate set but two-phase off", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.EnableTwoPhaseHandoff = false
+		cfg.Handoff.ClaimWritePerSec = 100
+		cfg.Handoff.ClaimWriteBurst = 32
+		log := &warnCapture{}
+		cfg.ValidateWithWarnings(log)
+		require.True(t, log.contains(warnPrefix),
+			"expected inert claim-write-rate warning, got %v", log.warns)
+	})
+
+	t.Run("no warning when two-phase on", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.EnableTwoPhaseHandoff = true
+		cfg.Handoff.ClaimWritePerSec = 100
+		cfg.Handoff.ClaimWriteBurst = 32
+		log := &warnCapture{}
+		cfg.ValidateWithWarnings(log)
+		require.False(t, log.contains(warnPrefix),
+			"did not expect warning when two-phase handoff is enabled, got %v", log.warns)
+	})
+
+	t.Run("no warning when rate is zero", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.EnableTwoPhaseHandoff = false
+		log := &warnCapture{}
+		cfg.ValidateWithWarnings(log)
+		require.False(t, log.contains(warnPrefix),
+			"default (no claim-write rate) must not warn, got %v", log.warns)
+	})
+}
+
 // TestValidateWithWarnings_EmergencyGracePeriodHysteresis asserts that
 // ValidateWithWarnings emits a warning when EmergencyGracePeriod consumes more
 // than half of HeartbeatTTL — leaving too little hysteresis budget for GC

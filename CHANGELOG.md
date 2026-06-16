@@ -5,6 +5,52 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Two opt-in rate-limit controls that bound the per-worker RPC rate Parti drives
+against the NATS cluster, plus the seam one of them is built on. Both default
+**OFF**, so upgrading is a behavioral no-op; enable them only after measuring
+your cluster's safe rate. They address two distinct flood vectors seen at large
+fleet scale: a **consumer-create storm** — a `Dynamic` worker whose partition
+set grows to tens of thousands, or a mass recovery, issuing back-to-back
+`CreateOrUpdateConsumer` RPCs — and a **claim-write storm** — two-phase handoff's
+`PutIfEpoch` calls bursting during a large-fleet restart or rapid rebalance.
+Either can drive the cluster to hang or OOM under load.
+
+### Added
+
+- **`consumer.WithConsumerCreateRate(perSec, burst)`** — opt-in per-worker
+  token-bucket that paces every physical `CreateOrUpdateConsumer` attempt
+  (including retries) across the initial-assignment add loop and the
+  per-partition recovery/recreation paths, from one shared budget. To share one
+  budget across multiple `Dynamic` consumers, build a
+  **`consumer.ConsumerCreateLimiter`** with **`consumer.NewConsumerCreateLimiter(perSec, burst)`**
+  and pass it to **`consumer.WithConsumerCreateLimiter(l)`** (the public limiter
+  interface and constructor keep this usable from outside the module — the option
+  no longer requires naming an internal type). See `docs/CONSUMERS.md` and
+  `docs/OPERATIONS.md` for sizing and the handoff-overlap / `StartupTimeout`
+  interactions.
+- **`jsutil.EnsureConsumerWithOptions(...)`** with **`jsutil.WithBeforeAttempt(fn)`**
+  (and the `jsutil.EnsureConsumerOption` type) — a per-attempt hook seam on the
+  retrying consumer-ensure helper, invoked before every physical RPC attempt
+  including retries. The existing `jsutil.EnsureConsumer` signature is preserved
+  and now delegates to it.
+- **`parti.HandoffConfig.ClaimWritePerSec` / `ClaimWriteBurst`** — opt-in
+  per-worker token-bucket that paces every physical handoff claim-write
+  (`PutIfEpoch`), including CAS retries, across the two-phase coordinator's
+  prepare/commit/stabilize/reap phases and the startup hygiene/resume loops,
+  from one shared budget. Requires `EnableTwoPhaseHandoff`. It complements
+  `PhaseConcurrency` (which caps how many claim-writes are in flight; this caps
+  their throughput). `ClaimWriteBurst` must be `>= 1` when the rate is `> 0`
+  (rejected at `Config.Validate` otherwise). See `docs/OPERATIONS.md`
+  §Claim-Write Rate Limiting and `docs/CONFIGURATION.md`.
+- **Throttle metrics** (Prometheus sidecar; emitted only when the relevant
+  collector is wired, and only on positive-delay waits — burst-absorbed RPCs are
+  not counted): `parti_worker_consumer_create_throttled_total` /
+  `parti_worker_consumer_create_throttle_wait_seconds` for consumer-create, and
+  `parti_handoff_claim_write_throttled_total` /
+  `parti_handoff_claim_write_throttle_wait_seconds` for claim-write.
+
 ## [v2.7.1] - 2026-06-12
 
 Patch release with two fixes: complete shutdown diagnostics, and a garbage

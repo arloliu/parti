@@ -24,9 +24,9 @@ no-op behavior — upgrading the library is observably identical to current
 | `2efad05` | `Config.AssignmentWatcherDebounce` (`time.Duration`) + `ManagerMetrics.RecordApplyAttempt(workerID, version)` | `0` (off) for the debounce | Idle-window timer in `runAssignmentWatchSession` coalesces watcher events. Cap at 1s. Prometheus counter `parti_manager_apply_attempts_total{worker_id}` (single label, version discarded for bounded cardinality). Opt-in `TestApplyCoalescing_UnderReElectionBurst` diagnostic for operator window sizing. |
 | follow-up | `Config.AssignmentWatcherDebounce` also covers `assignment._commit` watcher updates | `0` (off) | Rapid commit bursts are staged for one idle window; identical-assignment bursts collapse to one apply, while same-or-higher commits that change this worker's partition set early-flush pending to preserve two-phase handoff. Stale lower-version commits are dropped. |
 
-## Related: consumer-create rate limiting
+## Related: consumer-create and claim-write rate limiting
 
-A fourth, independent opt-in control bounds the per-worker `CreateOrUpdateConsumer` RPC rate during large partition assignments and mass recovery events. See [`docs/plans/consumer-create-rate-limit/00-plan.md`](../consumer-create-rate-limit/00-plan.md) and [`consumer.WithConsumerCreateRate`](../../../consumer/options.go).
+Two further independent opt-in controls bound per-worker RPC rates against the NATS cluster. `consumer.WithConsumerCreateRate` paces `CreateOrUpdateConsumer` RPCs during large partition assignments and mass recovery; `parti.HandoffConfig.ClaimWritePerSec` / `ClaimWriteBurst` pace handoff claim-writes (`PutIfEpoch`) across the startup hygiene/resume loops and the two-phase coordinator. See [`docs/plans/consumer-create-rate-limit/00-plan.md`](../consumer-create-rate-limit/00-plan.md), its [claim-write fast-follow](../consumer-create-rate-limit/10-claim-write-ratelimit-plan.md), and [`consumer.WithConsumerCreateRate`](../../../consumer/options.go).
 
 ## Files in this directory
 

@@ -1048,6 +1048,40 @@ The rate limiter is opt-in. To enable on an existing deployment:
 4. Consider increasing `StartupTimeout` for large cold starts.
 5. Roll out gradually (canary / blue-green); monitor `parti_worker_consumer_create_throttled_total` and `parti_worker_consumer_create_throttle_wait_seconds` (Prometheus sidecar metrics) to confirm the limiter is active and the delay distribution is within target.
 
-### Claim-write residual (out of scope)
+### Claim-write rate limiting (related control)
 
-The consumer-create limiter does not gate **claim-write** RPCs (`PutIfEpoch` calls in the two-phase coordinator and the startup handoff hygiene loops). Those are a separate, related flood vector documented in [`docs/plans/consumer-create-rate-limit/10-claim-write-ratelimit-plan.md`](plans/consumer-create-rate-limit/10-claim-write-ratelimit-plan.md).
+The consumer-create limiter does not gate **claim-write** RPCs (`PutIfEpoch` calls in the two-phase coordinator and the startup handoff hygiene/resume loops). Those are a separate, related flood vector with their own opt-in control — see [Claim-Write Rate Limiting](#claim-write-rate-limiting) below.
+
+## Claim-Write Rate Limiting
+
+**Default:** opt-in, default OFF. Requires `EnableTwoPhaseHandoff`. Existing deployments upgrading to this version see no behaviour change.
+
+Two-phase handoff writes per-partition ownership claims to a KV bucket via `PutIfEpoch`. Two scenarios can turn that into a write storm: a **large-fleet restart**, where each worker's startup hygiene/resume loops walk every claim key sequentially with no bound, and a **rapid rebalance**, where the coordinator's prepare/commit/stabilize phases issue a per-partition CAS for the whole moved set. `HandoffConfig.ClaimWritePerSec` / `ClaimWriteBurst` install a per-worker token-bucket that paces **every physical `PutIfEpoch` attempt — including CAS retries** — across all of those sites from a single shared budget.
+
+This is distinct from `PhaseConcurrency`, which caps how many claim writes are *in flight* at once. `PhaseConcurrency` bounds simultaneity; `ClaimWritePerSec` bounds throughput. The two compose: a burst is absorbed up to `ClaimWriteBurst`, then sustained writes are released at `ClaimWritePerSec`.
+
+### Sizing
+
+```
+rate ≈ cluster-kv-write-budget / max-workers
+burst ≈ PhaseConcurrency        # absorb one rebalance wave without throttling
+```
+
+```go
+cfg.Handoff.ClaimWritePerSec = 100 // 100 claim-writes/s steady
+cfg.Handoff.ClaimWriteBurst  = 20  // matches the default PhaseConcurrency
+```
+
+`ClaimWriteBurst` must be ≥ 1 whenever `ClaimWritePerSec > 0` (rejected at `Config.Validate` otherwise); it is ignored when the rate is 0.
+
+### OperationTimeout and Start-latency interaction
+
+The **startup hygiene** pass runs under `OperationTimeout` **on the synchronous `Manager.Start` path** (before `Start` returns). With a low `ClaimWritePerSec` and many pre-existing stale claims, hygiene can pace its reset writes up to the `OperationTimeout` deadline, extending how long `Start` blocks before returning by that much (it then stops early — the remaining stale claims are reset on a later startup or by the coordinator's periodic sweep, so this is safe but means a very low rate will not finish hygiene in one pass, and `Start` itself can be slower). Size `OperationTimeout` with headroom, or set `ClaimWriteBurst` at least as large as the expected stale-claim count so a one-time cold sweep is absorbed without throttling. The **background resume** pass and the **two-phase coordinator** are not `OperationTimeout`-bounded and run off the synchronous `Start` path; a paced coordinator write unwinds promptly on shutdown because `Wait` honours context cancellation.
+
+### Migration note
+
+The limiter is opt-in. To enable on an existing deployment:
+
+1. Measure your cluster's safe aggregate KV-write rate under load and divide by `max-workers`.
+2. Set `cfg.Handoff.ClaimWritePerSec` and `cfg.Handoff.ClaimWriteBurst` (start with `burst ≈ PhaseConcurrency`).
+3. Roll out gradually (canary / blue-green); monitor `parti_handoff_claim_write_throttled_total` and `parti_handoff_claim_write_throttle_wait_seconds` (Prometheus sidecar metrics, emitted when a `handoff.PrometheusRecorder` is wired via `WithHandoffMetricsRecorder`) to confirm the limiter is active and the delay distribution is within target.

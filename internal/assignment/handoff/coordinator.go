@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/arloliu/parti/v2/internal/ratelimit"
 	"github.com/arloliu/parti/v2/types"
 )
 
@@ -121,6 +122,17 @@ type Config struct {
 	// negative is the "use default 20" sentinel set by the parti-side
 	// HandoffConfig contract; New() normalizes the value in place.
 	PhaseConcurrency int
+	// ClaimWriteLimiter optionally gates every physical claim-write
+	// (PutIfEpoch) attempt in updateClaim — including CAS retries — across the
+	// prepare/commit/stabilize/reap phases. nil (the default) is unlimited.
+	// The manager threads the same per-worker limiter it uses for the startup
+	// hygiene/resume loops, so all of a worker's claim-writes share one rate
+	// budget. PhaseConcurrency caps simultaneity; this caps throughput.
+	//
+	// Contract: Wait(ctx) is invoked inside the phase errgroup goroutines. The
+	// coordinator holds no manager-side locks across the call, but it MUST
+	// honour ctx cancellation so a shutdown/timeout unwinds the apply promptly.
+	ClaimWriteLimiter ratelimit.Limiter
 	// LivePartitions optionally supplies the authoritative current partition
 	// set, keyed by Partition.SubjectKey() (the same identity claims are keyed
 	// by). ok=false means the caller cannot vouch for the set right now — not

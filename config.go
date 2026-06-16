@@ -125,6 +125,34 @@ type HandoffConfig struct {
 	// default of 20. Note: 0 means "use default", not "no parallelism"; set 1
 	// for strictly serial execution.
 	PhaseConcurrency int `yaml:"phaseConcurrency" default:"0" validate:"gte=0,lte=256"`
+
+	// ClaimWritePerSec optionally enables a per-worker token-bucket rate limit
+	// on every physical handoff claim-write (the KV PutIfEpoch the coordinator
+	// and startup loops issue), measured in writes/second. It paces the
+	// otherwise-unbounded startup hygiene/resume loops (which walk every claim
+	// key sequentially) and the two-phase coordinator's per-partition CAS
+	// writes — including CAS retries — so a large-fleet restart or rapid
+	// rebalance cannot drive a back-to-back KV write burst that stresses the
+	// NATS cluster. PhaseConcurrency bounds simultaneity; this bounds rate.
+	//
+	// Opt-in: 0 (the default) disables rate limiting and leaves behaviour
+	// unchanged. A single budget is shared across all claim-write sites for
+	// this worker. Must be >= 0.
+	//
+	// Note: the startup hygiene pass runs under OperationTimeout on the
+	// synchronous Manager.Start path, so a low rate combined with many
+	// pre-existing stale claims can extend Start's blocking return latency up
+	// to OperationTimeout before the best-effort pass stops early; the
+	// background resume pass and the coordinator are not OperationTimeout-bounded
+	// and run off the Start path. Sizing guidance lives in docs/OPERATIONS.md.
+	ClaimWritePerSec float64 `yaml:"claimWritePerSec" default:"0" validate:"gte=0"`
+
+	// ClaimWriteBurst is the token-bucket burst size for ClaimWritePerSec. It
+	// must be >= 1 when ClaimWritePerSec > 0 (rejected at Validate otherwise);
+	// it is ignored when ClaimWritePerSec == 0. Recommended starting point:
+	// burst ≈ PhaseConcurrency so a single rebalance wave is absorbed without
+	// throttling and only sustained bursts are paced.
+	ClaimWriteBurst int `yaml:"claimWriteBurst" default:"0" validate:"gte=0"`
 }
 
 // AlertLevel represents the severity level of degraded mode alerts.
@@ -669,6 +697,16 @@ func (cfg *Config) Validate() error {
 		}
 	}
 
+	// Claim-write rate limit: burst must be a usable bucket size when a positive
+	// rate is configured. This is a pure intra-field invariant, validated
+	// regardless of EnableTwoPhaseHandoff so the same (perSec, burst) pair is
+	// accepted or rejected consistently — even though the limiter is only built
+	// when two-phase handoff is enabled. (perSec < 0 is caught by the gte=0
+	// struct tag.) Mirrors the consumer-create rate-limit contract.
+	if cfg.Handoff.ClaimWritePerSec > 0 && cfg.Handoff.ClaimWriteBurst < 1 {
+		return errors.New("Handoff.ClaimWriteBurst must be >= 1 when Handoff.ClaimWritePerSec > 0")
+	}
+
 	// Rule 11: ApplyStartJitter range
 	if cfg.ApplyStartJitter < 0 {
 		return errors.New("ApplyStartJitter must be >= 0")
@@ -768,6 +806,19 @@ func (cfg *Config) ValidateWithWarnings(logger Logger) {
 			"election_timeout", cfg.ElectionTimeout,
 			"recommended_minimum", minStartup,
 			"note", "workers starting during the leader's cold-start stabilization window may time out before they receive their first assignment",
+		)
+	}
+
+	// Warn when a claim-write rate limit is configured but two-phase handoff is
+	// off. Claim-writes only occur under two-phase handoff (the coordinator and
+	// the startup hygiene/resume loops), so the limiter is never built and the
+	// setting has no effect — surface it rather than silently ignoring an
+	// explicitly-set safety control.
+	if !cfg.EnableTwoPhaseHandoff && cfg.Handoff.ClaimWritePerSec > 0 {
+		logger.Warn(
+			"Handoff.ClaimWritePerSec is set but EnableTwoPhaseHandoff is false; claim-write rate limiting has no effect",
+			"claim_write_per_sec", cfg.Handoff.ClaimWritePerSec,
+			"note", "claim-writes only occur under two-phase handoff; enable EnableTwoPhaseHandoff or unset ClaimWritePerSec",
 		)
 	}
 }
