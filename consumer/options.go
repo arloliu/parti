@@ -871,17 +871,18 @@ func WithPartitionRefreshMinInterval(d time.Duration) DynamicOption {
 // gating were per-logical-create only.
 //
 // Validation: perSec must be >= 0; perSec == 0 leaves the limiter disabled
-// (no rate limiting). burst must be >= 1 when perSec > 0. Negative perSec
-// is rejected. Use [WithConsumerCreateLimiter] to supply a custom or shared
-// limiter instead.
+// (no rate limiting); burst must be >= 1 when perSec > 0. Invalid values are
+// rejected at [NewDynamic], which returns an error wrapping [ErrInvalidConfig]
+// when perSec < 0, or when perSec > 0 with burst < 1. Use
+// [WithConsumerCreateLimiter] to supply a custom or shared limiter instead.
 //
 // Sizing guidance: rate ≈ cluster-create-budget / max-workers.
 // Recommended starting values (validate by load test): rate ≈ 100/s, burst ≈ 256.
 //
 // # Interaction with handoff and readiness
 //
-// A paced apply holds applyStoreMu for its duration, serialising subsequent
-// applies and blocking Close. With the processing gate OFF, enabling pacing
+// A paced apply holds the Dynamic apply lock for its duration, serialising
+// subsequent applies and blocking Close. With the processing gate OFF, enabling pacing
 // lengthens the period during which old and new owners are both active
 // (processing-overlap window); co-enable the processing gate / pull-gating to
 // suppress that overlap. A large cold start (e.g. 20 000 partitions at 100/s ≈
@@ -896,24 +897,29 @@ func WithConsumerCreateRate(perSec float64, burst int) DynamicOption {
 	})
 }
 
-// WithConsumerCreateLimiter injects a custom or shared [ratelimit.Limiter]
+// WithConsumerCreateLimiter injects a custom or shared [ConsumerCreateLimiter]
 // that gates every physical CreateOrUpdateConsumer attempt. Use this when
 // multiple [Dynamic] consumers in the same process should share one rate budget
-// across all their consumer creates.
+// across all their consumer creates; build the shared limiter with
+// [NewConsumerCreateLimiter]. For a single consumer prefer [WithConsumerCreateRate].
 //
 // Precedence rules (any option order):
 //   - A non-nil injected limiter wins over [WithConsumerCreateRate].
 //   - Passing nil is a no-op: it does NOT clear a configured rate limiter.
 //
-// # Lock-order contract (D5)
+// An injected or shared limiter bypasses the per-consumer throttle metrics that
+// [WithConsumerCreateRate] wires up (a shared budget has no single owning
+// consumer to attribute throttle events to).
 //
-// The injected limiter's Wait(ctx) is invoked while internal locks
-// (applyStoreMu, updateMu) may be held. It MUST honour context cancellation
-// and MUST NOT call back into Manager, Dynamic, or any operation that acquires
-// those locks.
+// # Lock-order contract
+//
+// The injected limiter's Wait(ctx) is invoked while the Dynamic apply/update
+// locks may be held. It MUST honour context cancellation and MUST NOT call back
+// into Manager, Dynamic, or any operation that acquires those locks. See
+// [ConsumerCreateLimiter].
 //
 // Applies only to [Dynamic].
-func WithConsumerCreateLimiter(l ratelimit.Limiter) DynamicOption {
+func WithConsumerCreateLimiter(l ConsumerCreateLimiter) DynamicOption {
 	return dynamicOpt(func(o *options) {
 		if l != nil {
 			o.consumerCreateLimiter = l

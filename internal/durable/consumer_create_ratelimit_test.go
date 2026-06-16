@@ -204,6 +204,28 @@ func (l *onNthCancelLimiter) Wait(ctx context.Context) error {
 	return nil
 }
 
+// --- Test: recreateFn aborts before the RPC when the gate returns an error ---
+
+func TestConsumerCreateRateLimit_RecreateFn_CtxCancelAborts(t *testing.T) {
+	fakeJS := newRateLimitJS(nil) // would succeed, but the gate must abort first
+	limiter := newFakeLimiter()
+	limiter.SetError(context.Canceled)
+
+	pc := &partitionConsumer{
+		streamName: "test-stream",
+		js:         fakeJS,
+		config: partitionConsumerConfig{
+			ConsumerCreateLimiter: limiter,
+		},
+	}
+
+	recreate := pc.recreateFn()
+	_, err := recreate(t.Context(), jetstream.ConsumerConfig{Durable: "test-durable"})
+	require.ErrorIs(t, err, context.Canceled, "gate ctx error must propagate from recreateFn")
+	assert.Equal(t, 0, fakeJS.RPCCalls(), "no RPC must be issued when the gate aborts")
+	assert.Equal(t, 1, limiter.Calls())
+}
+
 // --- Test: nil limiter → unlimited → ensureConsumer behavior unchanged ---
 
 func TestConsumerCreateRateLimit_NilLimiter_EnsureConsumerUnchanged(t *testing.T) {

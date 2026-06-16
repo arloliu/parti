@@ -13,6 +13,30 @@ import (
 	"golang.org/x/time/rate"
 )
 
+// TestWaitHonoursAlreadyCancelledCtxWithFreeToken pins that Wait does NOT grant
+// a token to an already-cancelled context even when the burst makes one
+// immediately available. Before the up-front ctx check, the delay<=0 fast path
+// returned nil and let the caller proceed into an already-doomed RPC.
+func TestWaitHonoursAlreadyCancelledCtxWithFreeToken(t *testing.T) {
+	l := ratelimit.New(100, 10, nil) // burst 10: a token is immediately available
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before the very first Wait, while burst tokens remain
+
+	require.ErrorIs(t, l.Wait(ctx), context.Canceled,
+		"Wait must honour an already-cancelled ctx even when a burst token is free")
+}
+
+// TestWaitUnsatisfiableReservation pins the burst-too-small guard: a limiter
+// built with burst 0 (only reachable by direct misuse of the primitive, since
+// public constructors reject it) returns ErrUnsatisfiable instead of sleeping
+// for a near-infinite Delay.
+func TestWaitUnsatisfiableReservation(t *testing.T) {
+	l := ratelimit.New(100, 0, nil) // burst 0: a 1-token reservation can never be satisfied
+
+	require.ErrorIs(t, l.Wait(context.Background()), ratelimit.ErrUnsatisfiable)
+}
+
 // TestNilLimiterNeverBlocks verifies that a nil Limiter never blocks.
 func TestNilLimiterNeverBlocks(t *testing.T) {
 	ctx := t.Context()

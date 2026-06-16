@@ -43,13 +43,14 @@ type ensureConsumerOptions struct {
 	beforeAttempt func(ctx context.Context) error
 }
 
-// WithBeforeAttempt installs a hook invoked before every physical
-// CreateOrUpdateConsumer attempt, including retries. A non-nil error from the
-// hook aborts the retry loop and is returned to the caller.
+// WithBeforeAttempt installs a hook invoked synchronously before every physical
+// CreateOrUpdateConsumer attempt, including retries — the seam used to enforce a
+// rate limit on consumer creates. A non-nil error from the hook aborts the retry
+// loop and is returned to the caller.
 //
-// This is the per-attempt gating seam used to enforce a rate limit on consumer
-// creates. The hook must honour context cancellation; it must not call back
-// into any component that holds applyStoreMu or updateMu.
+// The hook must honour context cancellation, avoid long or blocking work, and
+// must not call back into any operation that may itself be waiting on this same
+// create/update path. A nil hook is a no-op.
 func WithBeforeAttempt(fn func(ctx context.Context) error) EnsureConsumerOption {
 	return func(o *ensureConsumerOptions) {
 		o.beforeAttempt = fn

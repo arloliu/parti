@@ -8,10 +8,17 @@ package ratelimit
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"golang.org/x/time/rate"
 )
+
+// ErrUnsatisfiable is returned by [TokenBucketLimiter.Wait] when the underlying
+// token-bucket reservation can never be satisfied (a burst smaller than a single
+// token). Public constructors reject such configs, so this only surfaces on
+// direct misuse of the primitive; it prevents a near-infinite Wait.
+var ErrUnsatisfiable = errors.New("ratelimit: reservation cannot be satisfied (burst too small)")
 
 // Limiter is the interface callers use to gate RPC attempts.
 //
@@ -59,9 +66,25 @@ func New(perSec float64, burst int, observer ThrottleObserver) *TokenBucketLimit
 // Wait blocks until the limiter grants a token or ctx is cancelled.
 // A positive delay triggers an optional metrics callback.
 func (l *TokenBucketLimiter) Wait(ctx context.Context) error {
+	// Honor cancellation up front: a caller whose context is already cancelled
+	// must not be granted a token, even when one is immediately available.
+	// Without this, the burst-absorbed fast path below would return nil and let
+	// the caller proceed into an already-doomed RPC.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	// Use Reserve to detect whether this attempt will actually wait,
 	// so we can emit metrics only on real throttling (not burst-absorbed).
 	r := l.rl.Reserve()
+	if !r.OK() {
+		// The reservation can never be satisfied (e.g. burst smaller than a
+		// single token), which would otherwise yield an unbounded Delay and a
+		// near-infinite sleep. Public constructors validate burst >= 1, so this
+		// only guards against direct misuse of the primitive.
+		r.Cancel()
+		return ErrUnsatisfiable
+	}
 	delay := r.Delay()
 
 	if delay <= 0 {

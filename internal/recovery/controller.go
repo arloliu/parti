@@ -401,7 +401,14 @@ func (c *Controller) RebuildAfterStreamRecreated(
 
 	newCons, err := recreate(ctx, cfg)
 	if err != nil {
-		// All errors during post-hook recovery wrap types.ErrStreamMissing
+		// A cancelled/expired context (e.g. shutdown or deadline during a paced
+		// recreate) is not a stream-missing condition; return it unwrapped so it
+		// is not misclassified as a permanent stream loss that trips the manager
+		// observer / degraded route. Matches the ctx-guard discipline in recover().
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		// All other errors during post-hook recovery wrap types.ErrStreamMissing
 		// so the manager observer route is consistent regardless of the
 		// underlying cause (still-missing-stream, incompatible-restored-
 		// consumer-config, etc.).
