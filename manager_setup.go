@@ -203,6 +203,10 @@ func (m *Manager) setupHandoff(startupCtx context.Context, js jetstream.JetStrea
 
 	store := handoff.NewNATSClaimStore(handoffKV, "claims/")
 	m.handoffStore = store
+	// Build the per-worker claim-write limiter once and share it across the
+	// coordinator (site 1) and the startup hygiene/resume loops (sites 2-3) so
+	// every claim-write draws on one rate budget. nil when not configured.
+	m.claimWriteLimiter = m.buildClaimWriteLimiter()
 	m.handoffCoordinator = handoff.New(handoff.Config{
 		ConsumerUpdater:   m.consumerUpdater,
 		Metrics:           m.handoffMetrics,
@@ -217,6 +221,7 @@ func (m *Manager) setupHandoff(startupCtx context.Context, js jetstream.JetStrea
 		DelayAfterPrepare: m.cfg.Handoff.DelayAfterPrepare,
 		DelayBeforeStable: m.cfg.Handoff.DelayBeforeStable,
 		PhaseConcurrency:  m.cfg.Handoff.PhaseConcurrency,
+		ClaimWriteLimiter: m.claimWriteLimiter,
 		Logger:            m.logger,
 		// Orphan-claim reaping: leader-vouched live set + a generous grace.
 		// See livePartitionSet and orphanClaimGrace (manager_handoff.go).

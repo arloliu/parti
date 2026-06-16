@@ -1,8 +1,12 @@
-# Claim-Write Rate Limit — Fast-Follow Stub
+# Claim-Write Rate Limit — Fast-Follow
 
-> **Status:** Deferred (D4). Consumer-create rate limiting landed first
-> (`consumer.WithConsumerCreateRate`). This document stubs the next vector for
-> a measurement-driven follow-on.
+> **Status:** Shipped. Consumer-create rate limiting landed first
+> (`consumer.WithConsumerCreateRate`); claim-write rate limiting followed as
+> `parti.HandoffConfig.ClaimWritePerSec` / `ClaimWriteBurst` (opt-in, default
+> off). One per-worker token-bucket gates every physical `PutIfEpoch` across all
+> three verified sites from a single shared budget. Operator guidance lives in
+> [`docs/OPERATIONS.md` §Claim-Write Rate Limiting](../../OPERATIONS.md#claim-write-rate-limiting).
+> The sections below are retained as the design/enumeration record.
 
 ---
 
@@ -22,16 +26,23 @@ stresses the NATS cluster independently of the consumer-create rate.
    are already **concurrency-bounded** by `HandoffConfig.PhaseConcurrency`
    (default 20, opt-in via `Config.EnableTwoPhaseHandoff`).
 
-2. **`manager_handoff.go:172` `handoffStartupHygiene`** — `store.PutIfEpoch`
-   directly, sequential loop over all keys (`:152-179`), startup-only, **not**
-   `PhaseConcurrency`-bounded. Unbounded on large fleets.
+2. **`manager_handoff.go:handoffStartupHygiene`** (repo root, package `parti`)
+   — `store.PutIfEpoch` directly, sequential loop over all keys, startup-only,
+   **not** `PhaseConcurrency`-bounded. Unbounded on large fleets.
 
-3. **`manager_handoff.go:226` `runHandoffResume`** — `store.PutIfEpoch`
-   directly, sequential loop over all keys (`:213-229`), startup-only, **not**
-   `PhaseConcurrency`-bounded. Unbounded on large fleets.
+3. **`manager_handoff.go:runHandoffResume`** (repo root, package `parti`) —
+   `store.PutIfEpoch` directly, sequential loop over all keys, startup-only,
+   **not** `PhaseConcurrency`-bounded. Unbounded on large fleets.
 
 Sites 2 and 3 are the primary concern: startup loops that are currently
 unbounded and fire sequentially over all KV keys.
+
+> **As shipped:** all three sites are gated by one per-worker
+> `ratelimit.Limiter`, built in `manager_setup.go` from
+> `HandoffConfig.ClaimWrite{PerSec,Burst}` and threaded into
+> `handoff.Config.ClaimWriteLimiter` (site 1) and `m.claimWriteLimiter`
+> (sites 2–3). The earlier path note `manager_handoff.go:172/:226` was relative
+> to `internal/assignment/handoff/`; the file is actually at the repo root.
 
 ## Deferred rationale
 

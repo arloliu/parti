@@ -15,6 +15,7 @@ import (
 	"github.com/arloliu/parti/v2/internal/hooks"
 	"github.com/arloliu/parti/v2/internal/logging"
 	"github.com/arloliu/parti/v2/internal/metrics"
+	"github.com/arloliu/parti/v2/internal/ratelimit"
 	"github.com/arloliu/parti/v2/internal/recovery"
 	"github.com/arloliu/parti/v2/internal/stableid"
 	"github.com/arloliu/parti/v2/kvutil"
@@ -75,6 +76,14 @@ type Manager struct {
 	// nil when two-phase handoff is disabled. The removal guard reads it to
 	// decide whether a transfer has committed elsewhere.
 	handoffStore handoff.ClaimStore
+
+	// claimWriteLimiter paces every physical handoff claim-write (PutIfEpoch)
+	// across the startup hygiene/resume loops and the two-phase coordinator's
+	// updateClaim. nil (the default) is unlimited. Built once in setupHandoff
+	// from cfg.Handoff.ClaimWrite{PerSec,Burst} and shared with the coordinator
+	// via handoff.Config.ClaimWriteLimiter, so all of a worker's claim-writes
+	// draw on one rate budget. See buildClaimWriteLimiter.
+	claimWriteLimiter ratelimit.Limiter
 
 	// commitBatchCache memoizes the partition set of the current "_commit"
 	// entry, keyed by (commit version, _commit KV revision), so the removal

@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/arloliu/parti/v2/internal/ratelimit"
 	"github.com/arloliu/parti/v2/types"
 	"golang.org/x/sync/errgroup"
 )
@@ -182,7 +183,15 @@ func (t *twoPhaseCoordinator) updateClaim(ctx context.Context, pid string, trans
 			return nil // No update needed
 		}
 
-		// 3. Attempt CAS
+		// 3. Attempt CAS. Pace the physical write first if a claim-write limiter
+		// is configured: this gates every PutIfEpoch attempt, including CAS
+		// retries (the loop re-enters here), so a contention storm is paced at
+		// the same rate as a first-try write. A nil limiter is unlimited (no
+		// wait). ctx cancellation (shutdown/timeout during a paced wait) aborts
+		// the loop so the apply fails pre-commit and the manager retries.
+		if err := ratelimit.Wait(ctx, t.cfg.ClaimWriteLimiter); err != nil {
+			return err
+		}
 		var casErr error
 		if rev == 0 {
 			_, casErr = t.cfg.Store.PutIfEpoch(ctx, pid, 0, *next)

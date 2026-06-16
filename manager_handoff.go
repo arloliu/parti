@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/arloliu/parti/v2/internal/assignment/handoff"
+	"github.com/arloliu/parti/v2/internal/ratelimit"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -168,6 +169,18 @@ func (m *Manager) handoffStartupHygiene(ctx context.Context, store handoff.Claim
 		next.PendingOwner = ""
 		next.LastUpdated = now
 
+		// Pace the physical write if a claim-write limiter is configured. ctx
+		// cancellation (this pass runs under OperationTimeout) stops the
+		// best-effort sweep early — the remaining stale claims are reset on a
+		// later startup or by the coordinator's periodic sweep. Conservatively
+		// flag resumable: the truncated scan may not have reached a later
+		// non-expired prepare/commit claim, so let the bounded, idempotent
+		// resume pass run rather than risk skipping it.
+		if err := ratelimit.Wait(ctx, m.claimWriteLimiter); err != nil {
+			resumable = true
+			break
+		}
+
 		// Best-effort CAS; ignore failures.
 		_, _ = store.PutIfEpoch(ctx, pid, cur.Epoch, next)
 		resets++
@@ -202,12 +215,31 @@ func (m *Manager) runHandoffResume(ctx context.Context) {
 	}
 	store := handoff.NewNATSClaimStore(kv, "claims/")
 
-	keys, err := store.ListKeys(ctx)
-	if err != nil || len(keys) == 0 {
-		return
+	wid := m.WorkerID()
+	finalized, completed := m.finalizeResumeClaims(ctx, store, wid)
+	if finalized > 0 {
+		m.logger.Info("handoff_resume_finalize", "worker_id", wid, "finalized", finalized)
 	}
 
-	wid := m.WorkerID()
+	// Clear the flag only when the pass ran to completion. A paced Wait
+	// cancelled mid-pass leaves it set so a later pass can finish finalizing.
+	if completed {
+		m.pendingHandoffResume.Store(false)
+	}
+}
+
+// finalizeResumeClaims is the testable core of runHandoffResume: it finalizes
+// commit->stable transitions for the claims this worker (wid) owns, pacing every
+// physical PutIfEpoch by the claim-write limiter. It returns the number
+// finalized and whether the pass ran to completion — completed is false when the
+// store cannot be enumerated or a paced Wait is cancelled, signalling the caller
+// to leave pendingHandoffResume set for a later retry.
+func (m *Manager) finalizeResumeClaims(ctx context.Context, store handoff.ClaimStore, wid string) (int, bool) {
+	keys, err := store.ListKeys(ctx)
+	if err != nil || len(keys) == 0 {
+		return 0, false
+	}
+
 	now := time.Now().UTC()
 	finalized := 0
 	for _, pid := range keys {
@@ -221,18 +253,20 @@ func (m *Manager) runHandoffResume(ctx context.Context) {
 		if cur.State != handoff.ClaimStateCommit {
 			continue
 		}
+		// Pace the physical write if a claim-write limiter is configured. ctx
+		// cancellation (shutdown) stops the resume pass.
+		if err := ratelimit.Wait(ctx, m.claimWriteLimiter); err != nil {
+			return finalized, false
+		}
+
 		// Finalize commit -> stable (epoch++ handled by NextStable)
 		next := cur.NextStable(now)
 		if _, err := store.PutIfEpoch(ctx, pid, cur.Epoch, next); err == nil {
 			finalized++
 		}
 	}
-	if finalized > 0 {
-		m.logger.Info("handoff_resume_finalize", "worker_id", wid, "finalized", finalized)
-	}
 
-	// Clear flag to avoid repeated runs
-	m.pendingHandoffResume.Store(false)
+	return finalized, true
 }
 
 // InspectHandoffClaims returns all current handoff claims from the configured
