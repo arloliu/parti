@@ -10,6 +10,7 @@ import (
 
 	"github.com/arloliu/fuda"
 	"github.com/arloliu/parti/v2/internal/durable"
+	"github.com/arloliu/parti/v2/internal/ratelimit"
 	"github.com/arloliu/parti/v2/internal/recovery"
 	"github.com/arloliu/parti/v2/jsutil"
 	"github.com/arloliu/parti/v2/types"
@@ -350,6 +351,14 @@ func NewDynamic(
 		opt.apply(&o)
 	}
 
+	// Validate and resolve the consumer-create rate limiter.
+	// Precedence: a non-nil injected limiter wins over the rate option.
+	// WithConsumerCreateLimiter(nil) is a no-op (does not clear a rate).
+	resolvedLimiter, err := resolveConsumerCreateLimiter(o)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
+	}
+
 	// Build configuration
 	cfg := DynamicConfig{
 		CommonConfig: CommonConfig{
@@ -443,8 +452,9 @@ func NewDynamic(
 		// d.managerOnStreamMissing (installed later via
 		// SetOnStreamMissingError) at fire time, so a Manager.Start call
 		// occurring AFTER NewDynamic still reaches the durable layer.
-		OnPermanentFailure: d.onPermanentFailure,
-		OnStreamRecreated:  d.resetCompatCheck,
+		OnPermanentFailure:    d.onPermanentFailure,
+		OnStreamRecreated:     d.resetCompatCheck,
+		ConsumerCreateLimiter: resolvedLimiter,
 		Retry: durable.RetryConfig{
 			Backoff:    cfg.Retry.Backoff,
 			Max:        cfg.Retry.Max,
@@ -715,4 +725,65 @@ func toSubscriptionResolverConfig(cfg ResolverConfig) durable.ResolverConfig {
 		BatchMaxItems:       cfg.BatchMaxItems,
 		ReconcileInterval:   cfg.ReconcileInterval,
 	}
+}
+
+// resolveConsumerCreateLimiter validates rate-limit options and returns the
+// effective limiter, or nil when none is configured.
+//
+// Precedence (any option order): a non-nil injected limiter wins over a rate.
+// WithConsumerCreateLimiter(nil) is a no-op and never clears a configured rate.
+func resolveConsumerCreateLimiter(o options) (ratelimit.Limiter, error) {
+	// A non-nil injected limiter always wins.
+	if o.consumerCreateLimiter != nil {
+		return o.consumerCreateLimiter, nil
+	}
+
+	// No rate configured: return unlimited (nil) without error.
+	if o.consumerCreatePerSec == 0 {
+		return ratelimit.Limiter(nil), nil //nolint:nilnil // nil limiter is the intended "unlimited" sentinel
+	}
+
+	// Validate the rate option.
+	if o.consumerCreatePerSec < 0 {
+		return nil, fmt.Errorf("WithConsumerCreateRate: perSec must be >= 0, got %v", o.consumerCreatePerSec)
+	}
+	if o.consumerCreateBurst < 1 {
+		return nil, fmt.Errorf("WithConsumerCreateRate: burst must be >= 1 when perSec > 0, got %d", o.consumerCreateBurst)
+	}
+
+	// Build a throttle observer adapter if the configured metrics implements
+	// the optional sidecar. The adapter bridges ratelimit.ThrottleObserver
+	// to durable.ConsumerCreateThrottleObserver via a type assertion at
+	// limiter construction time (not at emit time, so no repeated assertion).
+	var obs ratelimit.ThrottleObserver
+	if o.metrics != nil {
+		if throttleObs, ok := o.metrics.(consumerCreateThrottleObserver); ok {
+			obs = throttleObserverAdapter{throttleObs}
+		}
+	}
+
+	return ratelimit.New(o.consumerCreatePerSec, o.consumerCreateBurst, obs), nil
+}
+
+// consumerCreateThrottleObserver mirrors durable.ConsumerCreateThrottleObserver
+// in the consumer package to avoid importing internal/durable from options.go
+// (which does import it, but avoids a non-trivial dependency exposure).
+// Both interfaces are defined identically; only the package differs.
+type consumerCreateThrottleObserver interface {
+	IncrementConsumerCreateThrottled()
+	ObserveConsumerCreateThrottleWait(seconds float64)
+}
+
+// throttleObserverAdapter bridges consumerCreateThrottleObserver to
+// ratelimit.ThrottleObserver.
+type throttleObserverAdapter struct {
+	obs consumerCreateThrottleObserver
+}
+
+func (a throttleObserverAdapter) IncrementThrottled() {
+	a.obs.IncrementConsumerCreateThrottled()
+}
+
+func (a throttleObserverAdapter) ObserveWait(seconds float64) {
+	a.obs.ObserveConsumerCreateThrottleWait(seconds)
 }

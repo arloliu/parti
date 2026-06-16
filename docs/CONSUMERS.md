@@ -779,6 +779,70 @@ c, _ := consumer.NewQueue(js, "stream", "consumer", "subject.>", handler,
 | `WithMaxConcurrentSubjects(n)`                 | Cap concurrent partitions; excess rejects the whole `Update` with `ErrMaxSubjectsExceeded` |
 | `WithOnPermanentFailure(fn)`                   | Application callback for permanent partition failure (fires before manager observer) |
 | `WithSuppressManagerDegradeOnStreamMissing()`  | Suppress the manager's auto-degraded route for stream-missing exhaustion    |
+| `WithConsumerCreateRate(perSec, burst)`        | Enable per-attempt token-bucket rate limiting on consumer-create RPCs (opt-in, default off) — see [Consumer-Create Rate Limiting](#consumer-create-rate-limiting) |
+| `WithConsumerCreateLimiter(l)`                 | Inject a custom or shared `ratelimit.Limiter`; non-nil value wins over `WithConsumerCreateRate`; nil is a no-op |
+
+---
+
+## Consumer-Create Rate Limiting
+
+**Default:** disabled (nil limiter). Behavior is byte-for-byte unchanged until this option is explicitly configured.
+
+Large dynamic-partition assignments (e.g. a fresh source growing to 20 000 partitions) or mass consumer-recovery events can flood the NATS cluster with `CreateOrUpdateConsumer` RPCs. `WithConsumerCreateRate` installs a per-worker token-bucket that gates **every physical RPC attempt** — including retry attempts — across the initial-assignment add loop and the per-partition recovery/recreation paths.
+
+### Usage
+
+```go
+c, err := consumer.NewDynamic(
+    js, "my-stream", "prefix", "orders.{{.PartitionID}}",
+    handler,
+    consumer.WithConsumerCreateRate(100, 256), // 100 creates/s, burst 256
+)
+```
+
+Or inject a shared limiter to pool the budget across multiple `Dynamic` consumers:
+
+```go
+limiter := ratelimit.New(100, 256, nil)
+c1, _ := consumer.NewDynamic(js, "stream-a", ..., consumer.WithConsumerCreateLimiter(limiter))
+c2, _ := consumer.NewDynamic(js, "stream-b", ..., consumer.WithConsumerCreateLimiter(limiter))
+```
+
+### Per-attempt gating
+
+The rate gate fires before **each physical `CreateOrUpdateConsumer` call**, including retries inside `EnsureConsumerWithOptions` and `partitionConsumer.ensureConsumer`. This prevents the 3× retry amplification that would occur if gating were per-logical-create only (exactly when the cluster is already stressed).
+
+### Handoff and readiness interactions
+
+A paced apply holds `applyStoreMu` for its full duration, serialising subsequent applies and blocking `Close`. Additionally:
+
+- **Processing overlap (gate-off):** Two-phase handoff alone does NOT prevent processing overlap (see [`LIFECYCLE.md`](LIFECYCLE.md) §Two-Phase Handoff). With the processing gate **OFF** (the default), enabling create-rate limiting lengthens the window during which the old and new owners are both active. Co-enable the processing gate / pull-gating (`WithProcessingGate`, `WithPullGating`) to suppress pulls for not-yet-committed partitions.
+
+- **Startup watchdog:** `StartupTimeout` (default 60 s) fires `enterDegraded("startup-timeout")` if the worker is still in `StateWaitingAssignment` at the deadline. A paced large cold start (e.g. 200 s at 100/s for 20 000 partitions) will trip this. The watchdog is state-guarded and does **not** abort the apply — it only affects readiness probe rotation. Size `StartupTimeout ≥ ColdStartWindow + ElectionTimeout + estimated paced-apply duration + headroom`, or accept an intentional one-shot startup-degraded rotation.
+
+- **Cancellation / no-partial-commit:** A `Wait` error (e.g. context cancel on shutdown) propagates up, causing the apply to fail pre-commit. `CreateOrUpdateConsumer` is idempotent and `UpdateWorkerConsumer` re-derives `toAdd` from current state on retry, so partial progress is safe and resumable.
+
+### Sizing
+
+```
+recommended rate ≈ cluster-create-budget / max-workers
+recommended burst ≈ 256 (absorbs small reassignments instantly; validate by load test)
+```
+
+Starting values (validate against your cluster): `rate ≈ 100/s, burst ≈ 256`.
+
+### Throttle metrics (optional sidecar)
+
+If your `types.WorkerConsumerMetrics` implementation also satisfies `durable.ConsumerCreateThrottleObserver`, throttle events are automatically emitted:
+
+```go
+type ConsumerCreateThrottleObserver interface {
+    IncrementConsumerCreateThrottled()
+    ObserveConsumerCreateThrottleWait(seconds float64)
+}
+```
+
+Existing metrics implementations that do not define these methods are unaffected — the type-assert simply fails silently.
 
 ---
 

@@ -8,6 +8,7 @@ import (
 	"github.com/arloliu/fuda"
 	"github.com/arloliu/parti/v2/internal/logging"
 	"github.com/arloliu/parti/v2/internal/metrics"
+	"github.com/arloliu/parti/v2/internal/ratelimit"
 	"github.com/arloliu/parti/v2/internal/recovery"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/go-playground/validator/v10"
@@ -174,6 +175,17 @@ type WorkerConsumerConfig struct {
 	// Metrics is the metrics collector for worker consumer operations.
 	// If nil, no metrics are emitted from the worker consumer helper.
 	Metrics types.WorkerConsumerMetrics
+
+	// ConsumerCreateLimiter optionally gates every physical CreateOrUpdateConsumer
+	// RPC attempt — including retry attempts — across the initial-assignment add
+	// loop and the per-partition recovery/recreation paths. When nil (the default),
+	// no rate limiting is applied and behaviour is unchanged.
+	//
+	// Contract (D5): Limiter.Wait(ctx) is invoked while applyStoreMu and
+	// updateMu may be held. It MUST honour ctx cancellation and MUST NOT
+	// call back into Manager, Dynamic, or any operation that acquires
+	// those locks.
+	ConsumerCreateLimiter ratelimit.Limiter
 
 	// ManualAck, when true, disables the helper's automatic Ack/Nak behavior.
 	// Handlers are responsible for calling msg.Ack/Nak/Term and optionally

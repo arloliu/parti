@@ -35,6 +35,8 @@ type PrometheusCollector struct {
 	wcRecreationAttempts       *prometheus.CounterVec
 	wcRecreations              *prometheus.CounterVec
 	wcRecreationDuration       prometheus.Histogram
+	wcCreateThrottled          prometheus.Counter
+	wcCreateThrottleWait       prometheus.Histogram
 
 	// Manager metrics
 	mStateTransitions   *prometheus.CounterVec
@@ -200,6 +202,19 @@ func (p *PrometheusCollector) ensureRegistered() {
 			Help:      "Total duration in seconds of consumer recreation sequences.",
 			Buckets:   []float64{0.1, 0.25, 0.5, 1, 2, 5, 10},
 		})
+		p.wcCreateThrottled = prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: p.namespace,
+			Subsystem: "worker_consumer",
+			Name:      "create_throttled_total",
+			Help:      "Total consumer-create attempts that were delayed by the rate limiter.",
+		})
+		p.wcCreateThrottleWait = prometheus.NewHistogram(prometheus.HistogramOpts{
+			Namespace: p.namespace,
+			Subsystem: "worker_consumer",
+			Name:      "create_throttle_wait_seconds",
+			Help:      "Duration in seconds that consumer-create attempts waited due to rate limiting.",
+			Buckets:   []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5},
+		})
 
 		p.reg.MustRegister(p.wcRetryCounter)
 		p.reg.MustRegister(p.wcBackoffHistogram)
@@ -216,6 +231,8 @@ func (p *PrometheusCollector) ensureRegistered() {
 		p.reg.MustRegister(p.wcRecreationAttempts)
 		p.reg.MustRegister(p.wcRecreations)
 		p.reg.MustRegister(p.wcRecreationDuration)
+		p.reg.MustRegister(p.wcCreateThrottled)
+		p.reg.MustRegister(p.wcCreateThrottleWait)
 
 		// Manager metrics
 		p.mStateTransitions = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -520,6 +537,20 @@ func (p *PrometheusCollector) RecordWorkerConsumerRecreation(result string, reas
 func (p *PrometheusCollector) ObserveWorkerConsumerRecreationDuration(seconds float64) {
 	p.ensureRegistered()
 	p.wcRecreationDuration.Observe(seconds)
+}
+
+// ConsumerCreateThrottleObserver implementation (optional sidecar, D7).
+
+// IncrementConsumerCreateThrottled increments the consumer-create throttle counter.
+func (p *PrometheusCollector) IncrementConsumerCreateThrottled() {
+	p.ensureRegistered()
+	p.wcCreateThrottled.Inc()
+}
+
+// ObserveConsumerCreateThrottleWait records the throttle wait duration.
+func (p *PrometheusCollector) ObserveConsumerCreateThrottleWait(seconds float64) {
+	p.ensureRegistered()
+	p.wcCreateThrottleWait.Observe(seconds)
 }
 
 // ManagerMetrics implementation

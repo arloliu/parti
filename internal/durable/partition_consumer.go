@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/arloliu/parti/v2/internal/natsutil"
+	"github.com/arloliu/parti/v2/internal/ratelimit"
 	"github.com/arloliu/parti/v2/internal/recovery"
 	"github.com/arloliu/parti/v2/internal/retry"
 	"github.com/arloliu/parti/v2/types"
@@ -55,6 +56,10 @@ type partitionConsumerConfig struct {
 
 	// Metrics
 	Metrics types.WorkerConsumerMetrics
+
+	// ConsumerCreateLimiter optionally gates every physical CreateOrUpdateConsumer
+	// attempt (including retries) in ensureConsumer and recreateFn. Nil = unlimited.
+	ConsumerCreateLimiter ratelimit.Limiter
 }
 
 // partitionConsumer manages the consumption loop for a single partition (subject).
@@ -640,6 +645,8 @@ func (pc *partitionConsumer) maybeEscalateIteratorFailures(ctx context.Context) 
 }
 
 // ensureConsumer creates or updates the durable consumer.
+// When a limiter is configured, it gates every physical RPC attempt (including
+// retries) before calling CreateOrUpdateConsumer.
 func (pc *partitionConsumer) ensureConsumer(ctx context.Context) (jetstream.Consumer, error) {
 	var lastErr error
 	const maxAttempts = 3
@@ -647,6 +654,12 @@ func (pc *partitionConsumer) ensureConsumer(ctx context.Context) (jetstream.Cons
 	for i := range maxAttempts {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
+		}
+
+		// Per-attempt rate gate: called before every physical RPC attempt,
+		// including retries, so one token per attempt (not per logical create).
+		if err := ratelimit.Wait(ctx, pc.config.ConsumerCreateLimiter); err != nil {
+			return nil, err
 		}
 
 		cons, err := pc.js.CreateOrUpdateConsumer(ctx, pc.streamName, pc.consumerConfig)
@@ -712,8 +725,13 @@ func (pc *partitionConsumer) consumerInfoFn() recovery.InfoFunc {
 }
 
 // recreateFn returns a RecreateFunc that creates or updates the consumer on the stream.
+// When a limiter is configured, the single RPC attempt is gated before calling
+// CreateOrUpdateConsumer so recreation events are paced like initial-create events.
 func (pc *partitionConsumer) recreateFn() recovery.RecreateFunc {
 	return func(ctx context.Context, cfg jetstream.ConsumerConfig) (jetstream.Consumer, error) {
+		if err := ratelimit.Wait(ctx, pc.config.ConsumerCreateLimiter); err != nil {
+			return nil, err
+		}
 		return pc.js.CreateOrUpdateConsumer(ctx, pc.streamName, cfg)
 	}
 }

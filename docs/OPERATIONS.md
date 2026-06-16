@@ -1002,3 +1002,52 @@ cfg := &parti.Config{
 ```
 
 See [Configuration Guide](CONFIGURATION.md) for all options.
+
+
+---
+
+## Consumer-Create Rate Limiting
+
+**Default:** opt-in, default OFF. Existing deployments upgrading to this version see no behaviour change.
+
+A large dynamic-partition assignment or a mass consumer-recovery event can cause a "consumer-create storm" — a worker issuing hundreds or thousands of `CreateOrUpdateConsumer` RPCs in rapid succession. `WithConsumerCreateRate(perSec, burst)` installs a per-worker token-bucket that gates every physical RPC attempt (including retries) across the initial-assignment add loop and the per-partition recovery/recreation paths.
+
+### Sizing
+
+```
+rate ≈ cluster-create-budget / max-workers
+```
+
+The NATS cluster's safe aggregate consumer-create rate depends on its replica count, storage type, and stream count. Measure under load and divide by `max-workers` (your worst-case pod count after scale-down). Starting values for most deployments:
+
+```go
+consumer.WithConsumerCreateRate(100, 256)  // 100 creates/s, burst 256
+```
+
+### Gate-dependency for handoff overlap
+
+Two-phase handoff alone does **not** prevent processing overlap (see [`LIFECYCLE.md`](LIFECYCLE.md) §Two-Phase Handoff and `CONSUMERS.md` §Consumer-Create Rate Limiting). When the processing gate is **OFF** (the default), enabling create-rate limiting **lengthens the period during which old and new owners are both active** to the full paced-apply duration. Co-enable the processing gate / pull-gating to suppress pulls for not-yet-committed partitions if overlap must be minimised.
+
+### StartupTimeout interaction
+
+A paced large cold start may exceed `StartupTimeout` (default 60 s). The startup watchdog transitions the worker to `Degraded` (reason: `startup-timeout`) for probe rotation but does **not** abort the apply (which continues to completion). Size accordingly:
+
+```
+StartupTimeout ≥ ColdStartWindow + ElectionTimeout + ceil(partitionCount / rate) + headroom
+```
+
+Example: 20 000 partitions at 100/s ≈ 200 s apply duration; set `StartupTimeout` to 5–10 min.
+
+### Migration note
+
+The rate limiter is opt-in. To enable on an existing deployment:
+
+1. Measure your cluster's safe consumer-create rate under load.
+2. Add `WithConsumerCreateRate(rate, burst)` to your `NewDynamic` call.
+3. If you are running two-phase handoff without the processing gate, co-enable `WithProcessingGate` to prevent lengthened overlap.
+4. Consider increasing `StartupTimeout` for large cold starts.
+5. Roll out gradually (canary / blue-green); monitor `parti_worker_consumer_create_throttled_total` and `parti_worker_consumer_create_throttle_wait_seconds` (Prometheus sidecar metrics) to confirm the limiter is active and the delay distribution is within target.
+
+### Claim-write residual (out of scope)
+
+The consumer-create limiter does not gate **claim-write** RPCs (`PutIfEpoch` calls in the two-phase coordinator and the startup handoff hygiene loops). Those are a separate, related flood vector documented in [`docs/plans/consumer-create-rate-limit/10-claim-write-ratelimit-plan.md`](plans/consumer-create-rate-limit/10-claim-write-ratelimit-plan.md).

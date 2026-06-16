@@ -6,6 +6,7 @@ import (
 	"github.com/arloliu/parti/v2/internal/durable"
 	"github.com/arloliu/parti/v2/internal/logging"
 	"github.com/arloliu/parti/v2/internal/metrics"
+	"github.com/arloliu/parti/v2/internal/ratelimit"
 	"github.com/arloliu/parti/v2/internal/recovery"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
@@ -184,6 +185,14 @@ type options struct {
 	keyChannelBuffer int
 	keyIdleTimeout   time.Duration
 	keyExtractor     func(msg jetstream.Msg) string
+
+	// Dynamic specific — consumer-create rate limiting (opt-in, default nil/unlimited).
+	// consumerCreateLimiter is the resolved limiter to thread into WorkerConsumerConfig.
+	// consumerCreatePerSec and consumerCreateBurst are raw inputs from WithConsumerCreateRate.
+	// A non-nil injected limiter (from WithConsumerCreateLimiter) wins over the rate option.
+	consumerCreateLimiter ratelimit.Limiter
+	consumerCreatePerSec  float64
+	consumerCreateBurst   int
 
 	// Dynamic specific
 	processingGate                        *ProcessingGateConfig
@@ -847,5 +856,68 @@ func WithPartitionRefreshMinInterval(d time.Duration) DynamicOption {
 		if d > 0 {
 			o.partitionRefreshMinInterval = d
 		}
+	})
+}
+
+// WithConsumerCreateRate enables a per-attempt token-bucket rate limit on
+// consumer-create RPCs (initial assignment add + recovery recreation), at the
+// given steady rate (events/second) with the given burst size.
+//
+// This is opt-in. When not configured (the default), behaviour is unchanged.
+//
+// The rate applies to every physical CreateOrUpdateConsumer attempt, including
+// retries, so transient-error storms are paced at the same rate as normal
+// creates — preventing up to 3× overshoot that would otherwise occur if
+// gating were per-logical-create only.
+//
+// Validation: perSec must be >= 0; perSec == 0 leaves the limiter disabled
+// (no rate limiting). burst must be >= 1 when perSec > 0. Negative perSec
+// is rejected. Use [WithConsumerCreateLimiter] to supply a custom or shared
+// limiter instead.
+//
+// Sizing guidance: rate ≈ cluster-create-budget / max-workers.
+// Recommended starting values (validate by load test): rate ≈ 100/s, burst ≈ 256.
+//
+// # Interaction with handoff and readiness
+//
+// A paced apply holds applyStoreMu for its duration, serialising subsequent
+// applies and blocking Close. With the processing gate OFF, enabling pacing
+// lengthens the period during which old and new owners are both active
+// (processing-overlap window); co-enable the processing gate / pull-gating to
+// suppress that overlap. A large cold start (e.g. 20 000 partitions at 100/s ≈
+// 200s) may trip StartupTimeout (default 60s) — size it accordingly or accept
+// a one-shot startup-degraded rotation.
+//
+// Applies only to [Dynamic].
+func WithConsumerCreateRate(perSec float64, burst int) DynamicOption {
+	return dynamicOpt(func(o *options) {
+		o.consumerCreatePerSec = perSec
+		o.consumerCreateBurst = burst
+	})
+}
+
+// WithConsumerCreateLimiter injects a custom or shared [ratelimit.Limiter]
+// that gates every physical CreateOrUpdateConsumer attempt. Use this when
+// multiple [Dynamic] consumers in the same process should share one rate budget
+// across all their consumer creates.
+//
+// Precedence rules (any option order):
+//   - A non-nil injected limiter wins over [WithConsumerCreateRate].
+//   - Passing nil is a no-op: it does NOT clear a configured rate limiter.
+//
+// # Lock-order contract (D5)
+//
+// The injected limiter's Wait(ctx) is invoked while internal locks
+// (applyStoreMu, updateMu) may be held. It MUST honour context cancellation
+// and MUST NOT call back into Manager, Dynamic, or any operation that acquires
+// those locks.
+//
+// Applies only to [Dynamic].
+func WithConsumerCreateLimiter(l ratelimit.Limiter) DynamicOption {
+	return dynamicOpt(func(o *options) {
+		if l != nil {
+			o.consumerCreateLimiter = l
+		}
+		// nil is a no-op (spec: does not clear a configured rate).
 	})
 }
