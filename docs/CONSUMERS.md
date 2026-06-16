@@ -780,13 +780,13 @@ c, _ := consumer.NewQueue(js, "stream", "consumer", "subject.>", handler,
 | `WithOnPermanentFailure(fn)`                   | Application callback for permanent partition failure (fires before manager observer) |
 | `WithSuppressManagerDegradeOnStreamMissing()`  | Suppress the manager's auto-degraded route for stream-missing exhaustion    |
 | `WithConsumerCreateRate(perSec, burst)`        | Enable per-attempt token-bucket rate limiting on consumer-create RPCs (opt-in, default off) — see [Consumer-Create Rate Limiting](#consumer-create-rate-limiting) |
-| `WithConsumerCreateLimiter(l)`                 | Inject a custom or shared `ratelimit.Limiter`; non-nil value wins over `WithConsumerCreateRate`; nil is a no-op |
+| `WithConsumerCreateLimiter(l)`                 | Inject a custom or shared `consumer.ConsumerCreateLimiter` (build one with `consumer.NewConsumerCreateLimiter`); non-nil value wins over `WithConsumerCreateRate`; nil is a no-op |
 
 ---
 
 ## Consumer-Create Rate Limiting
 
-**Default:** disabled (nil limiter). Behavior is byte-for-byte unchanged until this option is explicitly configured.
+**Default:** disabled (nil limiter). Behavior is unchanged until this option is explicitly configured — with no limiter the gate is a nil-safe no-op on the create paths. (The `golang.org/x/time/rate` dependency becomes direct, and the Prometheus throttle series are registered at zero, but no create path is paced.)
 
 Large dynamic-partition assignments (e.g. a fresh source growing to 20 000 partitions) or mass consumer-recovery events can flood the NATS cluster with `CreateOrUpdateConsumer` RPCs. `WithConsumerCreateRate` installs a per-worker token-bucket that gates **every physical RPC attempt** — including retry attempts — across the initial-assignment add loop and the per-partition recovery/recreation paths.
 
@@ -800,13 +800,19 @@ c, err := consumer.NewDynamic(
 )
 ```
 
-Or inject a shared limiter to pool the budget across multiple `Dynamic` consumers:
+Or inject a shared limiter to pool the budget across multiple `Dynamic` consumers
+in the same process:
 
 ```go
-limiter := ratelimit.New(100, 256, nil)
+limiter, err := consumer.NewConsumerCreateLimiter(100, 256) // 100 creates/s, burst 256
+if err != nil { /* perSec must be > 0, burst >= 1 */ }
 c1, _ := consumer.NewDynamic(js, "stream-a", ..., consumer.WithConsumerCreateLimiter(limiter))
 c2, _ := consumer.NewDynamic(js, "stream-b", ..., consumer.WithConsumerCreateLimiter(limiter))
 ```
+
+`ConsumerCreateLimiter` is a one-method interface (`Wait(ctx) error`), so you can
+also supply your own implementation. A shared/injected limiter does not emit the
+per-consumer throttle metrics that `WithConsumerCreateRate` wires up.
 
 ### Per-attempt gating
 
