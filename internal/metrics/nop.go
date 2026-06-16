@@ -331,3 +331,15 @@ func (n *NopMetrics) ObserveWorkerConsumerRecreationDuration(_ /* seconds */ flo
 func (n *NopMetrics) IncrementWorkerConsumerPullSuppressed(_ /* reason */ string) {
 	// No-op
 }
+
+// ConsumerCreateThrottleObserver implementation (optional sidecar, D7).
+
+// IncrementConsumerCreateThrottled discards the consumer-create throttle counter.
+func (n *NopMetrics) IncrementConsumerCreateThrottled() {
+	// No-op
+}
+
+// ObserveConsumerCreateThrottleWait discards the throttle wait observation.
+func (n *NopMetrics) ObserveConsumerCreateThrottleWait(_ /* seconds */ float64) {
+	// No-op
+}

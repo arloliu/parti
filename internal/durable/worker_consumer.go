@@ -14,6 +14,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/arloliu/parti/v2/internal/dynamicbuild"
+	"github.com/arloliu/parti/v2/internal/ratelimit"
 	"github.com/arloliu/parti/v2/jsutil"
 	"github.com/arloliu/parti/v2/kvutil"
 	"github.com/arloliu/parti/v2/types"
@@ -76,6 +77,9 @@ type WorkerConsumer struct {
 	// iterator factory
 	iterFactory func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error)
 
+	// limiter gates every physical CreateOrUpdateConsumer attempt; nil = unlimited.
+	limiter ratelimit.Limiter
+
 	// reverse subject template components for partitionID extraction (prefix/suffix around {{.PartitionID}})
 	partitionPrefix string
 	partitionSuffix string
@@ -124,6 +128,7 @@ func NewWorkerConsumer(js jetstream.JetStream, cfg WorkerConsumerConfig, fn func
 		subjectTemplate: tmpl,
 		partitionPrefix: prefix,
 		partitionSuffix: suffix,
+		limiter:         cfg.ConsumerCreateLimiter,
 	}
 
 	// allow injection for tests
@@ -445,6 +450,7 @@ func (wc *WorkerConsumer) addSubjectLoop(ctx context.Context, workerID string, s
 		StreamMissingHook:           wc.config.StreamMissingHook,
 		OnStreamRecreated:           wc.config.OnStreamRecreated,
 		Metrics:                     wc.config.Metrics,
+		ConsumerCreateLimiter:       wc.limiter,
 	}
 
 	consumerConfig := dynamicbuild.ConsumerConfig(durable, subject, wc.defaults())
@@ -481,9 +487,19 @@ func (wc *WorkerConsumer) addSubjectLoop(ctx context.Context, workerID string, s
 
 // ensurePerSubjectConsumer creates or updates a per-subject durable with FilterSubject.
 // It employs a short retry strategy to handle transient NATS errors.
+// When a limiter is configured, it gates every physical RPC attempt via EnsureConsumerWithOptions.
 func (wc *WorkerConsumer) ensurePerSubjectConsumer(ctx context.Context, durable string, subject string) (jetstream.Consumer, error) {
 	cfg := dynamicbuild.ConsumerConfig(durable, subject, wc.defaults())
-	return jsutil.EnsureConsumer(ctx, wc.js, wc.config.StreamName, cfg)
+	if wc.limiter == nil {
+		return jsutil.EnsureConsumer(ctx, wc.js, wc.config.StreamName, cfg)
+	}
+	return jsutil.EnsureConsumerWithOptions(
+		ctx,
+		wc.js,
+		wc.config.StreamName,
+		cfg,
+		jsutil.WithBeforeAttempt(wc.limiter.Wait),
+	)
 }
 
 // defaults captures the runtime tunables that feed dynamicbuild.ConsumerConfig.
@@ -657,6 +673,13 @@ func (wc *WorkerConsumer) Capabilities() uint32 {
 		bits |= types.CapProcessingGate
 	}
 	return bits
+}
+
+// ConsumerCreateLimiter returns the configured rate limiter, or nil when none
+// has been configured. Used by tests and by consumer.Dynamic to inspect the
+// resolved limiter after option processing.
+func (wc *WorkerConsumer) ConsumerCreateLimiter() ratelimit.Limiter {
+	return wc.limiter
 }
 
 // Closed reports whether this consumer has been closed.
