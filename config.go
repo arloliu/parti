@@ -153,6 +153,15 @@ type HandoffConfig struct {
 	// burst ≈ PhaseConcurrency so a single rebalance wave is absorbed without
 	// throttling and only sustained bursts are paced.
 	ClaimWriteBurst int `yaml:"claimWriteBurst" default:"0" validate:"gte=0"`
+
+	// ClaimWriteClusterRate, when > 0, makes claim-write rate limiting
+	// fleet-size-aware: each worker enforces
+	// min(ClaimWritePerSec, ClaimWriteClusterRate/N), where N is the observed
+	// committed worker count. It bounds the STEADY-STATE cluster-wide
+	// claim-write rate to ClaimWriteClusterRate instead of N*ClaimWritePerSec.
+	// Requires ClaimWritePerSec > 0 (the per-worker ceiling and burst source)
+	// and EnableTwoPhaseHandoff. Default 0 = static per-worker rate only.
+	ClaimWriteClusterRate float64 `yaml:"claimWriteClusterRate" default:"0" validate:"gte=0"`
 }
 
 // AlertLevel represents the severity level of degraded mode alerts.
@@ -706,6 +715,9 @@ func (cfg *Config) Validate() error {
 	if cfg.Handoff.ClaimWritePerSec > 0 && cfg.Handoff.ClaimWriteBurst < 1 {
 		return errors.New("Handoff.ClaimWriteBurst must be >= 1 when Handoff.ClaimWritePerSec > 0")
 	}
+	if cfg.Handoff.ClaimWriteClusterRate > 0 && cfg.Handoff.ClaimWritePerSec <= 0 {
+		return errors.New("Handoff.ClaimWriteClusterRate > 0 requires Handoff.ClaimWritePerSec > 0 (the per-worker ceiling and burst source)")
+	}
 
 	// Rule 11: ApplyStartJitter range
 	if cfg.ApplyStartJitter < 0 {
@@ -819,6 +831,13 @@ func (cfg *Config) ValidateWithWarnings(logger Logger) {
 			"Handoff.ClaimWritePerSec is set but EnableTwoPhaseHandoff is false; claim-write rate limiting has no effect",
 			"claim_write_per_sec", cfg.Handoff.ClaimWritePerSec,
 			"note", "claim-writes only occur under two-phase handoff; enable EnableTwoPhaseHandoff or unset ClaimWritePerSec",
+		)
+	}
+	if !cfg.EnableTwoPhaseHandoff && cfg.Handoff.ClaimWriteClusterRate > 0 {
+		logger.Warn(
+			"Handoff.ClaimWriteClusterRate is set but EnableTwoPhaseHandoff is false; cluster-rate claim-write limiting has no effect",
+			"claim_write_cluster_rate", cfg.Handoff.ClaimWriteClusterRate,
+			"note", "claim-writes only occur under two-phase handoff; enable EnableTwoPhaseHandoff or unset ClaimWriteClusterRate",
 		)
 	}
 }

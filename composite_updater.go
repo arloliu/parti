@@ -20,14 +20,18 @@ import (
 //   - Calls all updaters even if some fail
 //   - Returns a combined error with all failures
 type CompositeConsumerUpdater struct {
-	// mu guards updaters and currentObserver. Held only long enough to
-	// snapshot the slice (or update the observer); fan-out callbacks
-	// to children run unlocked so a slow child cannot serialize the
-	// rest and so re-entrant Add/SetOnStreamMissingError calls from a
-	// child never self-deadlock.
+	// mu guards updaters, currentObserver, and lastFleetN. Held only
+	// long enough to snapshot the slice (or update the observer/count);
+	// fan-out callbacks to children run unlocked so a slow child cannot
+	// serialize the rest and so re-entrant Add/SetOnStreamMissingError
+	// calls from a child never self-deadlock.
 	mu              sync.Mutex
 	updaters        []WorkerConsumerUpdater
 	currentObserver func(streamName string, err error)
+	// lastFleetN is the most recent worker-count observed via ObserveWorkerCount,
+	// replayed to children added later (mirrors the stream-missing replay). 0 =
+	// none observed yet.
+	lastFleetN int
 }
 
 // NewCompositeConsumerUpdater creates a composite from multiple updaters.
@@ -93,22 +97,53 @@ func (c *CompositeConsumerUpdater) UpdateWorkerConsumer(ctx context.Context, wor
 // Add appends additional updaters to the composite.
 // This is useful for dynamically registering consumers after creation.
 //
-// When a stream-missing observer has already been installed via
-// SetOnStreamMissingError, any newly-appended updater that implements
-// recovery.StreamMissingObserver inherits the callback so a later
-// registration does not silently miss it.
+// Newly-added children inherit any state the composite has already received:
+// an installed stream-missing observer (via SetOnStreamMissingError) and the
+// last observed fleet worker-count (via ObserveWorkerCount), so a late
+// registration does not silently miss either. Inherited-state forwarding runs
+// outside c.mu so a slow child cannot serialize peers or deadlock a re-entrant
+// Add.
 func (c *CompositeConsumerUpdater) Add(updaters ...WorkerConsumerUpdater) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	var added []WorkerConsumerUpdater
 	for _, u := range updaters {
 		if u == nil {
 			continue
 		}
 		c.updaters = append(c.updaters, u)
-		if c.currentObserver != nil {
+		added = append(added, u)
+	}
+	observer := c.currentObserver
+	fleetN := c.lastFleetN
+	c.mu.Unlock()
+
+	for _, u := range added {
+		if observer != nil {
 			if obs, ok := u.(recovery.StreamMissingObserver); ok {
-				obs.SetOnStreamMissingError(c.currentObserver)
+				obs.SetOnStreamMissingError(observer)
 			}
+		}
+		if fleetN > 0 {
+			if fo, ok := u.(FleetSizeObserver); ok {
+				fo.ObserveWorkerCount(fleetN)
+			}
+		}
+	}
+}
+
+// ObserveWorkerCount implements [FleetSizeObserver] by caching the worker-count
+// and forwarding it to every child that implements FleetSizeObserver. The cache
+// is replayed to children added later via Add.
+func (c *CompositeConsumerUpdater) ObserveWorkerCount(n int) {
+	c.mu.Lock()
+	c.lastFleetN = n
+	snapshot := make([]WorkerConsumerUpdater, len(c.updaters))
+	copy(snapshot, c.updaters)
+	c.mu.Unlock()
+
+	for _, u := range snapshot {
+		if fo, ok := u.(FleetSizeObserver); ok {
+			fo.ObserveWorkerCount(n)
 		}
 	}
 }
@@ -187,3 +222,7 @@ var _ CapabilityReporter = (*CompositeConsumerUpdater)(nil)
 // prepareStart forwards through this seam to each observer-capable
 // child.
 var _ recovery.StreamMissingObserver = (*CompositeConsumerUpdater)(nil)
+
+// Compile-time assertion: CompositeConsumerUpdater satisfies FleetSizeObserver so
+// the Manager's type-assertion picks it up.
+var _ FleetSizeObserver = (*CompositeConsumerUpdater)(nil)
