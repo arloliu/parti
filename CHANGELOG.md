@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v2.8.0] - 2026-06-17
+
 Two opt-in rate-limit controls that bound the per-worker RPC rate Parti drives
 against the NATS cluster, plus the seam one of them is built on. Both default
 **OFF**, so upgrading is a behavioral no-op; enable them only after measuring
