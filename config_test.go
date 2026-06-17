@@ -124,6 +124,66 @@ func TestValidateWithWarnings_ClaimWriteRateWithoutTwoPhase(t *testing.T) {
 	})
 }
 
+// TestValidate_ClaimWriteClusterRate_RequiresPerWorker asserts that a
+// ClaimWriteClusterRate set without a ClaimWritePerSec ceiling is rejected by
+// the cross-field validation (the ceiling is also the burst source).
+func TestValidate_ClaimWriteClusterRate_RequiresPerWorker(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.EnableTwoPhaseHandoff = true
+	cfg.Handoff.ClaimWriteClusterRate = 1000 // set
+	cfg.Handoff.ClaimWritePerSec = 0         // but no per-worker ceiling
+	cfg.Handoff.ClaimWriteBurst = 10
+	err := cfg.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "ClaimWriteClusterRate")
+}
+
+func TestValidate_ClaimWriteClusterRate_NegativeRejected(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.EnableTwoPhaseHandoff = true
+	cfg.Handoff.ClaimWriteClusterRate = -1
+	err := cfg.Validate()
+	require.Error(t, err)
+}
+
+func TestValidate_ClaimWriteClusterRate_ValidWithPerWorker(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.EnableTwoPhaseHandoff = true
+	cfg.Handoff.ClaimWritePerSec = 200
+	cfg.Handoff.ClaimWriteBurst = 50
+	cfg.Handoff.ClaimWriteClusterRate = 1000
+	require.NoError(t, cfg.Validate())
+}
+
+// TestValidateWithWarnings_ClaimWriteClusterRateWithoutTwoPhase asserts that
+// ClaimWriteClusterRate set without EnableTwoPhaseHandoff emits an inert-config
+// warning, and stays silent when two-phase handoff is enabled.
+func TestValidateWithWarnings_ClaimWriteClusterRateWithoutTwoPhase(t *testing.T) {
+	const warnPrefix = "Handoff.ClaimWriteClusterRate is set but EnableTwoPhaseHandoff is false"
+
+	t.Run("warns when cluster rate set but two-phase off", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.EnableTwoPhaseHandoff = false
+		cfg.Handoff.ClaimWritePerSec = 200
+		cfg.Handoff.ClaimWriteBurst = 50
+		cfg.Handoff.ClaimWriteClusterRate = 1000
+		log := &warnCapture{}
+		cfg.ValidateWithWarnings(log)
+		require.True(t, log.contains(warnPrefix), "got %v", log.warns)
+	})
+
+	t.Run("no warning when two-phase on", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.EnableTwoPhaseHandoff = true
+		cfg.Handoff.ClaimWritePerSec = 200
+		cfg.Handoff.ClaimWriteBurst = 50
+		cfg.Handoff.ClaimWriteClusterRate = 1000
+		log := &warnCapture{}
+		cfg.ValidateWithWarnings(log)
+		require.False(t, log.contains(warnPrefix), "got %v", log.warns)
+	})
+}
+
 // TestValidateWithWarnings_EmergencyGracePeriodHysteresis asserts that
 // ValidateWithWarnings emits a warning when EmergencyGracePeriod consumes more
 // than half of HeartbeatTTL — leaving too little hysteresis budget for GC
