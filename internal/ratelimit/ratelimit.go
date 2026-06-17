@@ -34,6 +34,20 @@ type Limiter interface {
 	Wait(ctx context.Context) error
 }
 
+// RateSetter is an optional capability implemented by limiters whose
+// steady-state rate can be retuned at runtime (the built-in
+// [TokenBucketLimiter]). Adaptive, fleet-size-aware callers type-assert a
+// [Limiter] to RateSetter; a limiter that does not implement it (e.g. a
+// user-injected custom limiter) keeps its constructed rate.
+//
+// Kept separate from [Limiter] deliberately: widening Limiter would force every
+// implementation (including injected, Wait-only ones) to add SetRate.
+type RateSetter interface {
+	// SetRate changes the steady-state rate (events/second), leaving burst
+	// unchanged. Safe to call concurrently with Wait.
+	SetRate(perSec float64)
+}
+
 // TokenBucketLimiter wraps [rate.Limiter] and implements [Limiter].
 // It optionally emits throttle metrics via [ThrottleObserver].
 type TokenBucketLimiter struct {
@@ -42,6 +56,7 @@ type TokenBucketLimiter struct {
 }
 
 var _ Limiter = (*TokenBucketLimiter)(nil)
+var _ RateSetter = (*TokenBucketLimiter)(nil)
 
 // ThrottleObserver is an optional metrics hook for throttle events.
 // It is separate from the sidecar defined in internal/durable so that the
@@ -113,6 +128,38 @@ func (l *TokenBucketLimiter) Wait(ctx context.Context) error {
 	case <-t.C:
 		return nil
 	}
+}
+
+// SetRate changes the steady-state rate to perSec events/second, leaving the
+// burst unchanged. It is safe to call concurrently with Wait: the underlying
+// rate.Limiter guards its limit with an internal mutex. A rate decrease does
+// not retroactively cancel reservations already granted by an in-flight Wait
+// (golang.org/x/time/rate semantics); the effect is a brief, self-correcting
+// transient.
+func (l *TokenBucketLimiter) SetRate(perSec float64) {
+	l.rl.SetLimit(rate.Limit(perSec))
+}
+
+// Limit returns the current steady-state rate (events/second).
+func (l *TokenBucketLimiter) Limit() float64 {
+	return float64(l.rl.Limit())
+}
+
+// EffectiveRate returns the fleet-size-aware per-worker rate
+// min(perWorkerMax, clusterRate/n): the cluster-wide target divided across n
+// workers, capped by the per-worker ceiling. n is clamped to >= 1. A
+// perWorkerMax <= 0 means "no ceiling". This is the single definition shared by
+// the manager (claim-write) and the consumer (consumer-create) adaptive paths.
+func EffectiveRate(perWorkerMax, clusterRate float64, n int) float64 {
+	if n < 1 {
+		n = 1
+	}
+	r := clusterRate / float64(n)
+	if perWorkerMax > 0 && perWorkerMax < r {
+		return perWorkerMax
+	}
+
+	return r
 }
 
 // Wait is a nil-safe helper: if l is nil it returns nil immediately without
