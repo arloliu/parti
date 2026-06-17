@@ -791,6 +791,34 @@ c, _ := consumer.NewQueue(js, "stream", "consumer", "subject.>", handler,
 
 Large dynamic-partition assignments (e.g. a fresh source growing to 20 000 partitions) or mass consumer-recovery events can flood the NATS cluster with `CreateOrUpdateConsumer` RPCs. `WithConsumerCreateRate` installs a per-worker token-bucket that gates **every physical RPC attempt** — including retry attempts — across the initial-assignment add loop and the per-partition recovery/recreation paths.
 
+### Token-bucket model
+
+The rate limiter uses a standard **token-bucket**: the bucket holds up to
+`burst` tokens and refills at `perSec` tokens per second. Each
+`CreateOrUpdateConsumer` RPC consumes one token; if the bucket is empty the
+call blocks until a token is available.
+
+**`perSec`** — steady-state throughput: the number of creates per second the
+worker sustains in the long run.
+
+**`burst`** — bucket capacity: how many creates can fire *immediately* before
+the rate limit bites, and how many can accumulate during idle periods. Workers
+don't create consumers at a smooth rate — they create them in waves (initial
+assignment, recovery after a stream deletion). Burst headroom absorbs those
+waves without stalling the first batch.
+
+**Concrete example** — `WithConsumerCreateRate(100, 256)` on a worker with
+20 000 partitions:
+
+| Phase | What happens |
+|---|---|
+| Creates 1–256 | Fire immediately — bucket starts full |
+| Creates 257–20 000 | Paced at 100/s → ~197 s to drain |
+| Idle for 2.56 s | Bucket refills to 256 |
+
+A worker with 500 partitions burns through the burst in one shot and completes
+in under one second.
+
 ### Usage
 
 ```go
