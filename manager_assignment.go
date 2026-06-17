@@ -13,6 +13,7 @@ import (
 	"github.com/arloliu/parti/v2/internal/assignment/handoff"
 	"github.com/arloliu/parti/v2/internal/heartbeat"
 	"github.com/arloliu/parti/v2/internal/natsutil"
+	"github.com/arloliu/parti/v2/internal/ratelimit"
 	"github.com/arloliu/parti/v2/internal/retry"
 	"github.com/arloliu/parti/v2/kvutil"
 	"github.com/arloliu/parti/v2/types"
@@ -856,6 +857,7 @@ func (m *Manager) runCommitWatchSession(
 	return m.runWatchSession(ctx, watcher, reconcileTickC, "commit", watchSessionHandlers{
 		onUpdate: func(entry jetstream.KeyValueEntry) {
 			if commit, ok := m.decodeCommitEntry(entry); ok {
+				m.observeFleetSize(commit)
 				db.stage(commit)
 			}
 		},
@@ -869,6 +871,7 @@ func (m *Manager) runCommitWatchSession(
 			if gerr != nil || current == nil {
 				return
 			}
+			m.observeFleetSize(current)
 			db.stage(current)
 		},
 	})
@@ -939,6 +942,76 @@ func commitContainsWorker(c *types.AssignmentCommit, workerID string) bool {
 		return false
 	}
 	return slices.Contains(c.Workers, workerID)
+}
+
+// observeFleetSize records the cluster worker-count from a committed assignment
+// and live-retunes the fleet-size-aware rate limiters. It runs at the
+// pre-debounce commit-decode point so it sees every commit the watcher
+// delivers — including those the apply debounce suppresses when this worker's
+// own slice is unchanged.
+func (m *Manager) observeFleetSize(commit *types.AssignmentCommit) {
+	if commit == nil {
+		return
+	}
+	m.observeFleetSizeN(commit.Version, commit.LeaderRevision, len(commit.Workers))
+}
+
+// observeFleetSizeN records (version, leaderRevision, n) and retunes the
+// fleet-size-aware limiters. It is doubly fenced so a stale or out-of-order
+// commit can never regress N:
+//
+//   - Stale-leader fence (mirrors handleCommitValueOnce case (b)): a commit
+//     whose LeaderRevision is below the highest applied one is rejected, so a
+//     split-brain former leader's higher-Version/lower-LeaderRevision commit
+//     — which the apply path drops — cannot retune to a worker-count this
+//     worker never applies.
+//   - Supersession fence: only a (version, leaderRevision) pair that strictly
+//     supersedes the last observed one retunes, so an in-leadership reorder
+//     (e.g. a reconcile snapshot racing a newer watcher event) is ignored.
+//
+// Guarded by fleetMu; the retune and push are non-blocking and non-reentrant
+// by contract, so holding fleetMu across them is safe. n is clamped to >= 1.
+func (m *Manager) observeFleetSizeN(version int64, leaderRev uint64, n int) {
+	if n < 1 {
+		n = 1
+	}
+
+	m.fleetMu.Lock()
+	defer m.fleetMu.Unlock()
+
+	// Stale-leader fence: mirror handleCommitValueOnce case (b)
+	// (manager_assignment.go). A split-brain former leader can write a
+	// higher-Version commit with a lower (stale) LeaderRevision; the apply path
+	// rejects it via lastSeenLeaderRevision, so observing its worker-count would
+	// regress N to a value this worker never applies. leaderRev==0 (e.g. a
+	// legacy alias) is treated as "unknown" and not rejected.
+	if leaderRev != 0 && leaderRev < m.lastSeenLeaderRevision.Load() {
+		return
+	}
+
+	if version < m.lastFleetVersion ||
+		(version == m.lastFleetVersion && leaderRev <= m.lastFleetLeaderRev) {
+		return
+	}
+	m.lastFleetVersion = version
+	m.lastFleetLeaderRev = leaderRev
+
+	if n == m.lastObservedN {
+		return
+	}
+	m.lastObservedN = n
+
+	// Claim-write (manager-local): retune the shared limiter in place.
+	if m.cfg.Handoff.ClaimWriteClusterRate > 0 {
+		if rs, ok := m.claimWriteLimiter.(ratelimit.RateSetter); ok {
+			rs.SetRate(ratelimit.EffectiveRate(m.cfg.Handoff.ClaimWritePerSec, m.cfg.Handoff.ClaimWriteClusterRate, n))
+		}
+	}
+
+	// Consumer-create: push N; the consumer owns its rate policy.
+	if m.fleetSizeObserver != nil {
+		m.fleetSizeObserver.ObserveWorkerCount(n)
+	}
 }
 
 // handleCommitValue implements §3.6 case 1 (commit-path state machine).

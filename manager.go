@@ -68,6 +68,19 @@ type Manager struct {
 	// the interface. Avoids a per-Apply type assertion.
 	capReporter CapabilityReporter
 
+	// fleetSizeObserver is the consumer updater cast to FleetSizeObserver at
+	// construction (nil when the updater does not implement it). Used to push
+	// the observed worker-count N for adaptive consumer-create rate limiting.
+	fleetSizeObserver FleetSizeObserver
+
+	// fleetMu guards the last-observed commit identity and worker-count so the
+	// freshness fence and the recorded N never split. Held across the limiter
+	// retune + the FleetSizeObserver push (both non-blocking, non-reentrant).
+	fleetMu            sync.Mutex
+	lastFleetVersion   int64
+	lastFleetLeaderRev uint64
+	lastObservedN      int
+
 	// Handoff coordinator (feature-flagged); abstracts assignment application.
 	handoffCoordinator handoff.Coordinator
 	handoffMetrics     HandoffMetricsRecorder
@@ -435,17 +448,18 @@ func NewManager(cfg *Config, js jetstream.JetStream, source PartitionSource, str
 	// This ensures that these fields are never nil, simplifying lifecycle management
 	// and avoiding nil pointer checks in operational methods.
 	m := &Manager{
-		cfg:             *cfg,
-		js:              js,
-		source:          source,
-		strategy:        strategy,
-		electionAgent:   options.electionAgent,
-		hooks:           hooksInstance,
-		metrics:         metricsCollector,
-		logger:          logger,
-		consumerUpdater: options.consumerUpdater,
-		capReporter:     asCapabilityReporter(options.consumerUpdater),
-		kvErrorWindow:   make([]kvErrorEvent, 0, cfg.DegradedBehavior.KVErrorThreshold),
+		cfg:               *cfg,
+		js:                js,
+		source:            source,
+		strategy:          strategy,
+		electionAgent:     options.electionAgent,
+		hooks:             hooksInstance,
+		metrics:           metricsCollector,
+		logger:            logger,
+		consumerUpdater:   options.consumerUpdater,
+		capReporter:       asCapabilityReporter(options.consumerUpdater),
+		fleetSizeObserver: asFleetSizeObserver(options.consumerUpdater),
+		kvErrorWindow:     make([]kvErrorEvent, 0, cfg.DegradedBehavior.KVErrorThreshold),
 		// Initialize internal components with Nop implementations
 		idClaimer:  stableid.NewNop(),
 		election:   election.NewNopElection(),
@@ -691,6 +705,7 @@ func (m *Manager) applyInitialAssignment(ctx context.Context, assignmentKV jetst
 		// but routing via applyAssignmentWithPrev directly afterwards.
 		newAsg, ok := m.buildAssignmentFromCommit(commit, m.WorkerID())
 		if ok {
+			m.observeFleetSize(commit) // retune before the first consumer-create storm
 			// Commit-path success: run the apply with explicit empty previous
 			// FIRST. Only advance lastObservedCommit after the apply returns
 			// nil — on failure, the commit must not be surfaced to the
@@ -755,6 +770,12 @@ func (m *Manager) applyInitialAssignment(ctx context.Context, assignmentKV jetst
 		m.markStartupAssignmentApplied()
 
 		return nil
+	}
+	// A legacy alias may carry TotalWorkers==0 (the field is omitempty and the
+	// publisher may not have set it). Skip rather than let observeFleetSizeN's
+	// n<1 clamp record a bogus N=1, which would under-divide the cluster rate.
+	if initial.TotalWorkers > 0 {
+		m.observeFleetSizeN(initial.Version, initial.LeaderRevision, initial.TotalWorkers)
 	}
 	if err := m.applyAssignmentWithPrev(Assignment{}, initial); err != nil {
 		return err
@@ -981,6 +1002,14 @@ const reportableCapBits = types.CapProcessingGate
 func asCapabilityReporter(u WorkerConsumerUpdater) CapabilityReporter {
 	cr, _ := u.(CapabilityReporter)
 	return cr
+}
+
+// asFleetSizeObserver returns u as a FleetSizeObserver when it implements the
+// interface; otherwise nil. Called once at construction so the commit-watch
+// hot path does not repeat the type assertion. Mirrors asCapabilityReporter.
+func asFleetSizeObserver(u WorkerConsumerUpdater) FleetSizeObserver {
+	fo, _ := u.(FleetSizeObserver)
+	return fo
 }
 
 // reportConsumerCapabilities samples the cached CapabilityReporter (if any)
