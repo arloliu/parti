@@ -857,11 +857,20 @@ func TestApplyAssignment_LSRAdvancesBeforeSnapshotStore(t *testing.T) {
 			Partitions:     []Partition{{Keys: []string{"beta"}}},
 		}
 
-		// Launch a tight-loop reader BEFORE applyAssignment. The reader
-		// records (Version, LSR) tuples as fast as it can; with the
-		// LSR-before-Store fix it should never observe Version == newAsgn.Version
-		// with LSR < newAsgn.LeaderRevision. The OLD order had a tiny
-		// Store→LSR window that this loop could occasionally catch.
+		// Launch a tight-loop reader BEFORE applyAssignment. To verify the
+		// "new snapshot implies an already-advanced LSR" invariant, the reader
+		// MUST read the snapshot FIRST and the LSR SECOND. Production advances
+		// LSR before it stores the snapshot (updateLastSeenLeaderRevision then
+		// m.assignment.Store), so once the reader observes the new snapshot, a
+		// subsequent LSR read is guaranteed to see the advanced LSR.
+		//
+		// Reading LSR first would be WRONG and is what made this test flaky: the
+		// reader could latch the OLD LSR, then production could advance LSR and
+		// store the snapshot, and the later snapshot read would yield a spurious
+		// (new snapshot, old LSR) tuple even though production ordered its two
+		// stores correctly. With snapshot-then-LSR, the only way to sample
+		// (new snapshot, old LSR) is if production stored the snapshot BEFORE
+		// advancing LSR — the actual regression this test guards.
 		var (
 			readerStop atomic.Bool
 			readerWG   sync.WaitGroup
@@ -871,8 +880,8 @@ func TestApplyAssignment_LSRAdvancesBeforeSnapshotStore(t *testing.T) {
 		readerWG.Go(func() {
 			close(ready)
 			for !readerStop.Load() {
-				lsr := m.lastSeenLeaderRevision.Load()
 				cur := m.CurrentAssignment()
+				lsr := m.lastSeenLeaderRevision.Load()
 				if cur.Version == newAsgn.Version && lsr < newAsgn.LeaderRevision {
 					badObs.Add(1)
 				}
