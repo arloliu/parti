@@ -82,6 +82,14 @@ type Dynamic struct {
 	// value); the dispatcher reads the pointer at fire time so a late
 	// Store is honored. nil pointer means "no manager observer wired".
 	managerOnStreamMissing atomic.Pointer[func(streamName string, err error)]
+
+	// Adaptive consumer-create rate (fleet-size-aware). createRateSetter is the
+	// built-in limiter cast to RateSetter, non-nil only when WithConsumerCreateRate
+	// AND WithConsumerCreateClusterRate are set. createPerSec is the per-worker
+	// ceiling; createClusterRate is the cluster target.
+	createRateSetter  ratelimit.RateSetter
+	createPerSec      float64
+	createClusterRate float64
 }
 
 // compatCheckResult is the immutable outcome of one WorkQueue
@@ -471,6 +479,14 @@ func NewDynamic(
 	}
 	d.inner = inner
 
+	if o.consumerCreateClusterRate > 0 {
+		if rs, ok := resolvedLimiter.(ratelimit.RateSetter); ok {
+			d.createRateSetter = rs
+			d.createPerSec = o.consumerCreatePerSec
+			d.createClusterRate = o.consumerCreateClusterRate
+		}
+	}
+
 	return d, nil
 }
 
@@ -635,6 +651,26 @@ func (d *Dynamic) Capabilities() uint32 {
 	return d.inner.Capabilities()
 }
 
+// ObserveWorkerCount implements the Parti manager's fleet-size-observer optional
+// interface. The Manager calls it with the current committed cluster worker-count
+// N so the Dynamic consumer can retune its consumer-create limiter to
+// min(perWorkerCeiling, clusterRate/N).
+//
+// It is a no-op unless both WithConsumerCreateRate and WithConsumerCreateClusterRate
+// were configured (createRateSetter is nil otherwise, e.g. an injected limiter).
+// Non-blocking and non-reentrant per the observer contract:
+// it only calls SetRate on the built-in limiter.
+func (d *Dynamic) ObserveWorkerCount(n int) {
+	if d.createRateSetter == nil {
+		return
+	}
+	d.createRateSetter.SetRate(ratelimit.EffectiveRate(d.createPerSec, d.createClusterRate, n))
+}
+
+// Compile-time assertion: *Dynamic satisfies the fleet-size-observer interface
+// expected by the Parti Manager's optional type-assertion.
+var _ interface{ ObserveWorkerCount(int) } = (*Dynamic)(nil)
+
 // Stop gracefully stops all partition consumers.
 //
 // Stop cancels all internal pull loops and waits for pending message processing
@@ -733,13 +769,26 @@ func toSubscriptionResolverConfig(cfg ResolverConfig) durable.ResolverConfig {
 // Precedence (any option order): a non-nil injected limiter wins over a rate.
 // WithConsumerCreateLimiter(nil) is a no-op and never clears a configured rate.
 func resolveConsumerCreateLimiter(o options) (ratelimit.Limiter, error) {
-	// A non-nil injected limiter always wins.
+	// Validate the cluster-rate overlay up front — independent of which limiter
+	// wins — so a negative value is rejected on every path.
+	if o.consumerCreateClusterRate < 0 {
+		return nil, fmt.Errorf("WithConsumerCreateClusterRate: clusterPerSec must be >= 0, got %v", o.consumerCreateClusterRate)
+	}
+
+	// A non-nil injected limiter always wins; it is not adaptively retuned.
 	if o.consumerCreateLimiter != nil {
+		if o.consumerCreateClusterRate > 0 {
+			return nil, errors.New("WithConsumerCreateClusterRate cannot be combined with an injected WithConsumerCreateLimiter (an injected limiter is not adaptively retuned)")
+		}
 		return o.consumerCreateLimiter, nil
 	}
 
-	// No rate configured: return unlimited (nil) without error.
+	// No per-worker rate configured. A cluster rate alone is invalid (it needs
+	// the per-worker ceiling and burst); otherwise return unlimited (nil).
 	if o.consumerCreatePerSec == 0 {
+		if o.consumerCreateClusterRate > 0 {
+			return nil, errors.New("WithConsumerCreateClusterRate requires WithConsumerCreateRate (the per-worker ceiling and burst source)")
+		}
 		return ratelimit.Limiter(nil), nil //nolint:nilnil // nil limiter is the intended "unlimited" sentinel
 	}
 

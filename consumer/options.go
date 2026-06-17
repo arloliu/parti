@@ -190,9 +190,11 @@ type options struct {
 	// consumerCreateLimiter is the resolved limiter to thread into WorkerConsumerConfig.
 	// consumerCreatePerSec and consumerCreateBurst are raw inputs from WithConsumerCreateRate.
 	// A non-nil injected limiter (from WithConsumerCreateLimiter) wins over the rate option.
-	consumerCreateLimiter ratelimit.Limiter
-	consumerCreatePerSec  float64
-	consumerCreateBurst   int
+	// consumerCreateClusterRate is the aggregate overlay from WithConsumerCreateClusterRate.
+	consumerCreateLimiter     ratelimit.Limiter
+	consumerCreatePerSec      float64
+	consumerCreateBurst       int
+	consumerCreateClusterRate float64
 
 	// Dynamic specific
 	processingGate                        *ProcessingGateConfig
@@ -894,6 +896,29 @@ func WithConsumerCreateRate(perSec float64, burst int) DynamicOption {
 	return dynamicOpt(func(o *options) {
 		o.consumerCreatePerSec = perSec
 		o.consumerCreateBurst = burst
+	})
+}
+
+// WithConsumerCreateClusterRate makes consumer-create rate limiting
+// fleet-size-aware. Given a cluster-wide target (events/second), each worker
+// enforces min(perWorkerCeiling, clusterPerSec/N), where perWorkerCeiling is
+// the rate from [WithConsumerCreateRate] and N is the cluster worker-count the
+// Parti Manager observes and pushes to this consumer.
+//
+// This bounds the STEADY-STATE cluster-wide create rate to clusterPerSec
+// instead of N*perWorkerCeiling. The per-worker ceiling still caps any single
+// worker during fleet-size transitions.
+//
+// Requires [WithConsumerCreateRate] (which supplies burst and the ceiling) and
+// the built-in limiter; it is rejected at [NewDynamic] when used alone or with
+// an injected [WithConsumerCreateLimiter] (an injected, possibly shared limiter
+// is not adaptively retuned). clusterPerSec must be >= 0; 0 disables the
+// overlay (static per-worker behaviour).
+//
+// Applies only to [Dynamic].
+func WithConsumerCreateClusterRate(clusterPerSec float64) DynamicOption {
+	return dynamicOpt(func(o *options) {
+		o.consumerCreateClusterRate = clusterPerSec
 	})
 }
 
