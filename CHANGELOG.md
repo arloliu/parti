@@ -15,7 +15,11 @@ fleet scale: a **consumer-create storm** — a `Dynamic` worker whose partition
 set grows to tens of thousands, or a mass recovery, issuing back-to-back
 `CreateOrUpdateConsumer` RPCs — and a **claim-write storm** — two-phase handoff's
 `PutIfEpoch` calls bursting during a large-fleet restart or rapid rebalance.
-Either can drive the cluster to hang or OOM under load.
+Either can drive the cluster to hang or OOM under load. Each per-worker limit
+now has an optional **fleet-size-aware (adaptive)** variant that bounds the
+cluster-wide aggregate (the `N × perWorkerRate` problem) to a configured target
+via `min(perWorkerCeiling, clusterRate / N)` — still default OFF, each knob
+independent.
 
 ### Added
 
@@ -44,6 +48,30 @@ Either can drive the cluster to hang or OOM under load.
   their throughput). `ClaimWriteBurst` must be `>= 1` when the rate is `> 0`
   (rejected at `Config.Validate` otherwise). See `docs/OPERATIONS.md`
   §Claim-Write Rate Limiting and `docs/CONFIGURATION.md`.
+- **`consumer.WithConsumerCreateClusterRate(clusterPerSec float64)`** — opt-in
+  fleet-size-aware overlay on `WithConsumerCreateRate`. Effective per-worker
+  rate = `min(perSec, clusterPerSec / N)`, where `N` is the committed
+  worker-count the manager observes live. Bounds the steady-state cluster-wide
+  aggregate to `clusterPerSec`; the per-worker ceiling (`perSec`) caps the
+  transient overshoot while workers converge on a new N. **Requires**
+  `WithConsumerCreateRate` (which supplies the per-worker ceiling and burst);
+  rejected at `NewDynamic` if used alone or with an injected
+  `WithConsumerCreateLimiter` (an injected/shared limiter is not adaptively
+  retuned). `clusterPerSec` must be ≥ 0; 0 = static per-worker behaviour (the
+  default). Caveats: the aggregate **burst** is `Σ burst` across workers, not
+  bounded by `clusterPerSec` — keep burst small if aggregate burst matters.
+  Retuning is eventually-consistent; observation lag ≈ assignment-watcher
+  reconcile floor (~30 s). See `docs/CONSUMERS.md` §Consumer-Create Rate
+  Limiting.
+- **`parti.HandoffConfig.ClaimWriteClusterRate float64`** — opt-in fleet-size-aware
+  overlay on `ClaimWritePerSec`. Effective per-worker rate = `min(ClaimWritePerSec,
+  ClaimWriteClusterRate / N)`. Bounds the steady-state cluster-wide aggregate;
+  `ClaimWritePerSec` caps transient overshoot. **Requires** `ClaimWritePerSec > 0`
+  and `EnableTwoPhaseHandoff`; `Config.Validate` errors if `ClaimWriteClusterRate > 0`
+  with `ClaimWritePerSec <= 0`; `ValidateWithWarnings` emits an inert WARN if
+  `ClaimWriteClusterRate > 0` with two-phase handoff OFF. Default 0 = static
+  per-worker behaviour. Same aggregate-burst and retuning-lag caveats apply. See
+  `docs/OPERATIONS.md` §Claim-Write Rate Limiting and `docs/CONFIGURATION.md`.
 - **Throttle metrics** (Prometheus sidecar; emitted only when the relevant
   collector is wired, and only on positive-delay waits — burst-absorbed RPCs are
   not counted): `parti_worker_consumer_create_throttled_total` /

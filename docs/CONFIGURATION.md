@@ -231,8 +231,9 @@ cfg := &parti.Config{
         DelayAfterPrepare: 0,                   // Testing only
         DelayBeforeStable: 0,                   // Testing only
         PhaseConcurrency:  0,                   // 0 = default 20 in-flight per phase
-        ClaimWritePerSec:  0,                   // 0 = claim-write rate limiting off
-        ClaimWriteBurst:   0,                   // burst; must be >=1 when PerSec > 0
+        ClaimWritePerSec:       0,              // 0 = claim-write rate limiting off
+        ClaimWriteBurst:        0,              // burst; must be >=1 when PerSec > 0
+        ClaimWriteClusterRate:  0,              // 0 = static per-worker (adaptive overlay off)
     },
 }
 ```
@@ -249,8 +250,9 @@ cfg := &parti.Config{
 | `DelayAfterPrepare` | `0`      | Artificial delay after prepare (testing)   |
 | `DelayBeforeStable` | `0`      | Artificial delay before stable (testing)   |
 | `PhaseConcurrency`  | `20`     | Max in-flight per-partition KV ops per phase (simultaneity cap) |
-| `ClaimWritePerSec`  | `0` (off)| Per-worker token-bucket rate cap on physical claim-writes (throughput cap); opt-in. See [OPERATIONS.md §Claim-Write Rate Limiting](OPERATIONS.md#claim-write-rate-limiting) |
-| `ClaimWriteBurst`   | `0`      | Token-bucket burst for `ClaimWritePerSec`; must be ≥ 1 when the rate is > 0 |
+| `ClaimWritePerSec`         | `0` (off)| Per-worker token-bucket rate cap on physical claim-writes (throughput cap); opt-in. See [OPERATIONS.md §Claim-Write Rate Limiting](OPERATIONS.md#claim-write-rate-limiting) |
+| `ClaimWriteBurst`          | `0`      | Token-bucket burst for `ClaimWritePerSec`; must be ≥ 1 when the rate is > 0 |
+| `ClaimWriteClusterRate`    | `0` (off)| Fleet-size-aware overlay: effective rate = `min(ClaimWritePerSec, ClaimWriteClusterRate/N)`; requires `ClaimWritePerSec > 0` and `EnableTwoPhaseHandoff`. See [OPERATIONS.md §Claim-Write Rate Limiting](OPERATIONS.md#claim-write-rate-limiting) |
 
 See [Lifecycle Guide](LIFECYCLE.md#two-phase-handoff) for details on the handoff protocol.
 

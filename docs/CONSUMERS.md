@@ -780,6 +780,7 @@ c, _ := consumer.NewQueue(js, "stream", "consumer", "subject.>", handler,
 | `WithOnPermanentFailure(fn)`                   | Application callback for permanent partition failure (fires before manager observer) |
 | `WithSuppressManagerDegradeOnStreamMissing()`  | Suppress the manager's auto-degraded route for stream-missing exhaustion    |
 | `WithConsumerCreateRate(perSec, burst)`        | Enable per-attempt token-bucket rate limiting on consumer-create RPCs (opt-in, default off) — see [Consumer-Create Rate Limiting](#consumer-create-rate-limiting) |
+| `WithConsumerCreateClusterRate(clusterPerSec)` | Fleet-size-aware overlay on `WithConsumerCreateRate`; bounds the cluster-wide aggregate to `clusterPerSec` via `min(perSec, clusterPerSec/N)` — requires `WithConsumerCreateRate`, incompatible with `WithConsumerCreateLimiter`, default 0 (off) |
 | `WithConsumerCreateLimiter(l)`                 | Inject a custom or shared `consumer.ConsumerCreateLimiter` (build one with `consumer.NewConsumerCreateLimiter`); non-nil value wins over `WithConsumerCreateRate`; nil is a no-op |
 
 ---
@@ -836,6 +837,63 @@ recommended burst ≈ 256 (absorbs small reassignments instantly; validate by lo
 ```
 
 Starting values (validate against your cluster): `rate ≈ 100/s, burst ≈ 256`.
+
+### Fleet-size-aware (adaptive) rate: WithConsumerCreateClusterRate
+
+**Default:** 0 (disabled). Requires `WithConsumerCreateRate`. Incompatible with `WithConsumerCreateLimiter`.
+
+`WithConsumerCreateClusterRate(clusterPerSec)` adds a fleet-size-aware overlay
+on top of `WithConsumerCreateRate`. Each worker enforces an effective rate of:
+
+```
+effective rate = min(perSec, clusterPerSec / N)
+```
+
+where `N` is the committed worker-count the manager observes live (updated each
+time the committed assignment changes). This bounds the **steady-state** cluster-wide
+aggregate to `clusterPerSec` instead of letting it grow as `N × perSec`.
+
+```go
+c, err := consumer.NewDynamic(
+    js, "my-stream", "prefix", "orders.{{.PartitionID}}",
+    handler,
+    consumer.WithConsumerCreateRate(100, 256),        // per-worker ceiling + burst
+    consumer.WithConsumerCreateClusterRate(500),       // cluster-wide target: 500/s
+)
+```
+
+**Requirements and restrictions:**
+
+- `WithConsumerCreateRate` must also be set — it supplies the per-worker ceiling
+  (`perSec`) and burst. `WithConsumerCreateClusterRate` is rejected at `NewDynamic`
+  if used alone.
+- Incompatible with `WithConsumerCreateLimiter`: an injected/shared limiter is a
+  fixed-rate object that cannot be adaptively retuned, so the combination is rejected
+  at `NewDynamic`.
+- `clusterPerSec` must be ≥ 0; setting it to 0 disables the adaptive overlay and
+  reverts to static per-worker behaviour.
+
+**Sizing guidance:**
+
+```
+clusterPerSec ≈ cluster-wide create budget (measure under load)
+perSec        ≈ safe per-worker ceiling (transient overshoot cap)
+burst         ≈ 256 (absorb small reassignments; keep small if aggregate burst matters)
+```
+
+**Caveats:**
+
+- **Steady-state guarantee, not instantaneous.** The effective rate converges once
+  all workers in the fleet have observed the same committed N. During a scale-out
+  or scale-in transition, workers briefly disagree on N; `perSec` (the per-worker
+  ceiling) bounds the per-worker transient overshoot until convergence.
+- **Aggregate burst is `Σ burst` across workers, not bounded by `clusterPerSec`.**
+  A burst of 256 on 20 workers means the cluster can absorb 5 120 creates instantly
+  before the rate kicks in. Keep `burst` small if aggregate burst matters to your
+  cluster.
+- **Observation lag.** Worker-count updates are eventually-consistent; the worst-case
+  lag is the assignment-watcher reconcile floor (approximately 30 s). Retuning is
+  not instantaneous.
 
 ### Throttle metrics (optional sidecar)
 
