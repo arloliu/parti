@@ -1060,6 +1060,49 @@ Two-phase handoff writes per-partition ownership claims to a KV bucket via `PutI
 
 This is distinct from `PhaseConcurrency`, which caps how many claim writes are *in flight* at once. `PhaseConcurrency` bounds simultaneity; `ClaimWritePerSec` bounds throughput. The two compose: a burst is absorbed up to `ClaimWriteBurst`, then sustained writes are released at `ClaimWritePerSec`.
 
+### Fleet-size-aware (adaptive) rate: ClaimWriteClusterRate
+
+**Default:** 0 (disabled). Requires `ClaimWritePerSec > 0` and `EnableTwoPhaseHandoff`.
+
+`HandoffConfig.ClaimWriteClusterRate` adds a fleet-size-aware overlay on top of
+`ClaimWritePerSec`. Each worker enforces an effective rate of:
+
+```
+effective rate = min(ClaimWritePerSec, ClaimWriteClusterRate / N)
+```
+
+where `N` is the committed worker-count the manager observes live. This bounds the
+**steady-state** cluster-wide aggregate to `ClaimWriteClusterRate` instead of the
+uncontrolled `N × ClaimWritePerSec`.
+
+```go
+cfg.Handoff.ClaimWritePerSec       = 100  // per-worker ceiling
+cfg.Handoff.ClaimWriteBurst        = 20   // matches default PhaseConcurrency
+cfg.Handoff.ClaimWriteClusterRate  = 500  // cluster-wide target: 500/s
+```
+
+**Requirements and validation:**
+
+- `ClaimWritePerSec > 0` must be set — it supplies the per-worker ceiling and is the
+  source for burst. `Config.Validate` returns an error if `ClaimWriteClusterRate > 0`
+  with `ClaimWritePerSec <= 0`.
+- Requires `EnableTwoPhaseHandoff`. `ValidateWithWarnings` emits an inert WARN if
+  `ClaimWriteClusterRate > 0` with two-phase handoff OFF; behaviour is unchanged
+  (the cluster-rate field is silently ignored by the coordinator, which is not
+  constructed when two-phase is off).
+- `ClaimWriteClusterRate` must be ≥ 0; 0 = static per-worker behaviour (the default).
+
+**Caveats:**
+
+- **Steady-state guarantee, not instantaneous.** The effective rate converges once all
+  workers have observed the same committed N. During fleet transitions, `ClaimWritePerSec`
+  (the per-worker ceiling) bounds the per-worker transient overshoot.
+- **Aggregate burst is `Σ ClaimWriteBurst` across workers, not bounded by
+  `ClaimWriteClusterRate`.** Keep `ClaimWriteBurst` small (≈ `PhaseConcurrency`) if
+  aggregate burst matters.
+- **Observation lag.** Worker-count updates are eventually-consistent; worst-case lag is
+  approximately the assignment-watcher reconcile floor (~30 s).
+
 ### Sizing
 
 ```
