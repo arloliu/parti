@@ -1,52 +1,12 @@
 package parti
 
 import (
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
-
-// warnCapture is a minimal Logger that records Warn-level messages only.
-// Other levels are dropped. Safe for concurrent use in case ValidateWithWarnings
-// ever calls the logger from a goroutine.
-type warnCapture struct {
-	mu    sync.Mutex
-	warns []string
-}
-
-func (w *warnCapture) Debug(string, ...any) {}
-func (w *warnCapture) Info(string, ...any)  {}
-func (w *warnCapture) Warn(msg string, _ ...any) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.warns = append(w.warns, msg)
-}
-func (w *warnCapture) Error(string, ...any) {}
-func (w *warnCapture) Fatal(string, ...any) {}
-
-func (w *warnCapture) contains(substr string) bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	for _, m := range w.warns {
-		if len(m) >= len(substr) && containsSubstring(m, substr) {
-			return true
-		}
-	}
-
-	return false
-}
-
-func containsSubstring(haystack, needle string) bool {
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		if haystack[i:i+len(needle)] == needle {
-			return true
-		}
-	}
-	return false
-}
 
 // TestValidateWithWarnings_StartupTimeout asserts that ValidateWithWarnings
 // emits a warning when StartupTimeout is smaller than the safe minimum
@@ -59,7 +19,7 @@ func TestValidateWithWarnings_StartupTimeout(t *testing.T) {
 	t.Run("warns when startup timeout is too small", func(t *testing.T) {
 		cfg := DefaultConfig()
 		cfg.StartupTimeout = cfg.ColdStartWindow // exactly equal — below safe minimum
-		log := &warnCapture{}
+		log := &warnSpy{}
 		cfg.ValidateWithWarnings(log)
 		require.True(t, log.contains(warnPrefix),
 			"expected startup-timeout warning, got %v", log.warns)
@@ -68,7 +28,7 @@ func TestValidateWithWarnings_StartupTimeout(t *testing.T) {
 	t.Run("no warning at or above safe minimum", func(t *testing.T) {
 		cfg := DefaultConfig()
 		cfg.StartupTimeout = cfg.ColdStartWindow + cfg.ElectionTimeout + 5*time.Second
-		log := &warnCapture{}
+		log := &warnSpy{}
 		cfg.ValidateWithWarnings(log)
 		require.False(t, log.contains(warnPrefix),
 			"did not expect startup-timeout warning, got %v", log.warns)
@@ -78,7 +38,7 @@ func TestValidateWithWarnings_StartupTimeout(t *testing.T) {
 		// Defaults provide StartupTimeout >= ColdStartWindow + ElectionTimeout + 5s
 		// headroom, so the warning must stay silent for an unmodified config.
 		cfg := DefaultConfig()
-		log := &warnCapture{}
+		log := &warnSpy{}
 		cfg.ValidateWithWarnings(log)
 		require.False(t, log.contains(warnPrefix),
 			"defaults should not emit the warning — StartupTimeout must cover cold-start stabilization")
@@ -97,7 +57,7 @@ func TestValidateWithWarnings_ClaimWriteRateWithoutTwoPhase(t *testing.T) {
 		cfg.EnableTwoPhaseHandoff = false
 		cfg.Handoff.ClaimWritePerSec = 100
 		cfg.Handoff.ClaimWriteBurst = 32
-		log := &warnCapture{}
+		log := &warnSpy{}
 		cfg.ValidateWithWarnings(log)
 		require.True(t, log.contains(warnPrefix),
 			"expected inert claim-write-rate warning, got %v", log.warns)
@@ -108,7 +68,7 @@ func TestValidateWithWarnings_ClaimWriteRateWithoutTwoPhase(t *testing.T) {
 		cfg.EnableTwoPhaseHandoff = true
 		cfg.Handoff.ClaimWritePerSec = 100
 		cfg.Handoff.ClaimWriteBurst = 32
-		log := &warnCapture{}
+		log := &warnSpy{}
 		cfg.ValidateWithWarnings(log)
 		require.False(t, log.contains(warnPrefix),
 			"did not expect warning when two-phase handoff is enabled, got %v", log.warns)
@@ -117,42 +77,70 @@ func TestValidateWithWarnings_ClaimWriteRateWithoutTwoPhase(t *testing.T) {
 	t.Run("no warning when rate is zero", func(t *testing.T) {
 		cfg := DefaultConfig()
 		cfg.EnableTwoPhaseHandoff = false
-		log := &warnCapture{}
+		log := &warnSpy{}
 		cfg.ValidateWithWarnings(log)
 		require.False(t, log.contains(warnPrefix),
 			"default (no claim-write rate) must not warn, got %v", log.warns)
 	})
 }
 
-// TestValidate_ClaimWriteClusterRate_RequiresPerWorker asserts that a
-// ClaimWriteClusterRate set without a ClaimWritePerSec ceiling is rejected by
-// the cross-field validation (the ceiling is also the burst source).
-func TestValidate_ClaimWriteClusterRate_RequiresPerWorker(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.EnableTwoPhaseHandoff = true
-	cfg.Handoff.ClaimWriteClusterRate = 1000 // set
-	cfg.Handoff.ClaimWritePerSec = 0         // but no per-worker ceiling
-	cfg.Handoff.ClaimWriteBurst = 10
-	err := cfg.Validate()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "ClaimWriteClusterRate")
-}
+// TestValidate_ClaimWriteClusterRate exercises the cross-field Validate() rules
+// for Handoff.ClaimWriteClusterRate under two-phase handoff: a cluster rate
+// requires a ClaimWritePerSec ceiling (which is also the burst source), a
+// negative cluster rate is rejected, and a valid combination is accepted.
+func TestValidate_ClaimWriteClusterRate(t *testing.T) {
+	tests := []struct {
+		name      string
+		mutate    func(*Config)
+		wantErr   bool
+		errSubstr string
+	}{
+		{
+			// Cluster rate set without a ClaimWritePerSec ceiling is rejected
+			// by the cross-field validation (the ceiling is also the burst source).
+			name: "requires per-worker ceiling",
+			mutate: func(cfg *Config) {
+				cfg.Handoff.ClaimWriteClusterRate = 1000 // set
+				cfg.Handoff.ClaimWritePerSec = 0         // but no per-worker ceiling
+				cfg.Handoff.ClaimWriteBurst = 10
+			},
+			wantErr:   true,
+			errSubstr: "ClaimWriteClusterRate",
+		},
+		{
+			name: "negative rejected",
+			mutate: func(cfg *Config) {
+				cfg.Handoff.ClaimWriteClusterRate = -1
+			},
+			wantErr: true,
+		},
+		{
+			name: "valid with per-worker ceiling",
+			mutate: func(cfg *Config) {
+				cfg.Handoff.ClaimWritePerSec = 200
+				cfg.Handoff.ClaimWriteBurst = 50
+				cfg.Handoff.ClaimWriteClusterRate = 1000
+			},
+			wantErr: false,
+		},
+	}
 
-func TestValidate_ClaimWriteClusterRate_NegativeRejected(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.EnableTwoPhaseHandoff = true
-	cfg.Handoff.ClaimWriteClusterRate = -1
-	err := cfg.Validate()
-	require.Error(t, err)
-}
-
-func TestValidate_ClaimWriteClusterRate_ValidWithPerWorker(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.EnableTwoPhaseHandoff = true
-	cfg.Handoff.ClaimWritePerSec = 200
-	cfg.Handoff.ClaimWriteBurst = 50
-	cfg.Handoff.ClaimWriteClusterRate = 1000
-	require.NoError(t, cfg.Validate())
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.EnableTwoPhaseHandoff = true
+			tc.mutate(&cfg)
+			err := cfg.Validate()
+			if tc.wantErr {
+				require.Error(t, err)
+				if tc.errSubstr != "" {
+					require.Contains(t, err.Error(), tc.errSubstr)
+				}
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }
 
 // TestValidateWithWarnings_ClaimWriteClusterRateWithoutTwoPhase asserts that
@@ -167,7 +155,7 @@ func TestValidateWithWarnings_ClaimWriteClusterRateWithoutTwoPhase(t *testing.T)
 		cfg.Handoff.ClaimWritePerSec = 200
 		cfg.Handoff.ClaimWriteBurst = 50
 		cfg.Handoff.ClaimWriteClusterRate = 1000
-		log := &warnCapture{}
+		log := &warnSpy{}
 		cfg.ValidateWithWarnings(log)
 		require.True(t, log.contains(warnPrefix), "got %v", log.warns)
 	})
@@ -178,7 +166,7 @@ func TestValidateWithWarnings_ClaimWriteClusterRateWithoutTwoPhase(t *testing.T)
 		cfg.Handoff.ClaimWritePerSec = 200
 		cfg.Handoff.ClaimWriteBurst = 50
 		cfg.Handoff.ClaimWriteClusterRate = 1000
-		log := &warnCapture{}
+		log := &warnSpy{}
 		cfg.ValidateWithWarnings(log)
 		require.False(t, log.contains(warnPrefix), "got %v", log.warns)
 	})
@@ -195,7 +183,7 @@ func TestValidateWithWarnings_EmergencyGracePeriodHysteresis(t *testing.T) {
 		cfg := DefaultConfig()
 		cfg.HeartbeatTTL = 10 * time.Second
 		cfg.EmergencyGracePeriod = 7 * time.Second
-		log := &warnCapture{}
+		log := &warnSpy{}
 		cfg.ValidateWithWarnings(log)
 		require.True(t, log.contains(warnPrefix),
 			"expected hysteresis warning, got %v", log.warns)
@@ -205,7 +193,7 @@ func TestValidateWithWarnings_EmergencyGracePeriodHysteresis(t *testing.T) {
 		cfg := DefaultConfig()
 		cfg.HeartbeatTTL = 10 * time.Second
 		cfg.EmergencyGracePeriod = 5 * time.Second
-		log := &warnCapture{}
+		log := &warnSpy{}
 		cfg.ValidateWithWarnings(log)
 		require.False(t, log.contains(warnPrefix),
 			"did not expect hysteresis warning at the boundary, got %v", log.warns)
@@ -213,7 +201,7 @@ func TestValidateWithWarnings_EmergencyGracePeriodHysteresis(t *testing.T) {
 
 	t.Run("no warning at defaults", func(t *testing.T) {
 		cfg := DefaultConfig()
-		log := &warnCapture{}
+		log := &warnSpy{}
 		cfg.ValidateWithWarnings(log)
 		require.False(t, log.contains(warnPrefix),
 			"defaults must not emit the hysteresis warning — recommended ratio is roughly 1:5 (grace:TTL)")
@@ -869,4 +857,23 @@ func TestConfig_AssignmentWatcherDebounce_Validation(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDegradeReason_LiteralValues pins every degrade reason to its exact string
+// value. The recovery gates and most tests reference the named consts, so a
+// rename of a const's VALUE would otherwise drift silently across prod and tests
+// together (they would all move in lockstep). This is the one place that
+// hard-codes the literals an operator's OnDegraded handler matches on, so changing
+// a value — the operator-facing contract — fails here loudly.
+func TestDegradeReason_LiteralValues(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, "kv-unavailable", DegradeReasonKVUnavailable)
+	require.Equal(t, "heartbeat-enumeration-stall", DegradeReasonEnumerationStall)
+	require.Equal(t, "assignment-watcher-exhausted", DegradeReasonAssignmentWatcherExhausted)
+	require.Equal(t, "KV error threshold exceeded", DegradeReasonKVErrorThreshold)
+	require.Equal(t, "NATS connection down", DegradeReasonNATSConnectionDown)
+	require.Equal(t, "stream-missing-recovery-exhausted", DegradeReasonStreamMissingRecoveryExhausted)
+	require.Equal(t, "startup-timeout", DegradeReasonStartupTimeout)
+	require.Equal(t, "startup-background-panic", DegradeReasonStartupBackgroundPanic)
+	require.Equal(t, "bucket-recreated:parti-heartbeat", degradeReasonBucketRecreated("parti-heartbeat"))
 }
