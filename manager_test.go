@@ -2,6 +2,8 @@ package parti
 
 import (
 	"context"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -245,5 +247,242 @@ func TestManager_CapTwoPhaseHandoff_ReportsWhenWired(t *testing.T) {
 
 		require.Zero(t, mgr.Capabilities()&types.CapTwoPhaseHandoff,
 			"CapTwoPhaseHandoff must be clear when EnableTwoPhaseHandoff=false")
+	})
+}
+
+func TestManager_prepareStart(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		m := &Manager{
+			cfg: Config{StartupTimeout: 5 * time.Second},
+		}
+		ctx, cancel, err := m.prepareStart(context.Background())
+		require.NoError(t, err)
+		require.NotNil(t, ctx)
+		require.NotNil(t, cancel)
+		defer cancel()
+
+		// Verify context has timeout
+		deadline, ok := ctx.Deadline()
+		require.True(t, ok)
+		require.WithinDuration(t, time.Now().Add(5*time.Second), deadline, 100*time.Millisecond)
+	})
+
+	t.Run("already started", func(t *testing.T) {
+		m := &Manager{
+			ctx: context.Background(), // Simulate started
+		}
+		ctx, cancel, err := m.prepareStart(context.Background())
+		require.ErrorIs(t, err, types.ErrAlreadyStarted)
+		require.Nil(t, ctx)
+		require.NotNil(t, cancel) // Should return no-op cancel
+		cancel()
+	})
+
+	t.Run("no timeout", func(t *testing.T) {
+		m := &Manager{
+			cfg: Config{StartupTimeout: 0},
+		}
+		ctx, cancel, err := m.prepareStart(context.Background())
+		require.NoError(t, err)
+		defer cancel()
+
+		// Verify context has NO deadline (if parent doesn't)
+		_, ok := ctx.Deadline()
+		require.False(t, ok)
+	})
+}
+
+// TestManager_warnOnFiniteMaxReconnects covers the read-only startup
+// warning that fires when the caller-owned nats.Conn is configured
+// with a finite MaxReconnects. -1 (unlimited) is the recommended
+// posture and must be silent. Anything else (including 0 = disabled
+// and any positive cap) must emit the warning exactly once.
+//
+// Defensive cases: a nil m.js or a nil m.js.Conn() must NOT panic and
+// must NOT emit a warning (the helper is read-only and must not
+// constrain test doubles that bypass the real JetStream surface).
+func TestManager_warnOnFiniteMaxReconnects(t *testing.T) {
+	// The helper accesses ONLY conn.Opts.MaxReconnects, which is a
+	// value field on nats.Options. A zero-valued *nats.Conn with only
+	// Opts populated is therefore safe to construct directly for this
+	// unit test — no embedded NATS server required.
+	// nats.Options field name is MaxReconnect (singular). The nats.MaxReconnects
+	// setter (plural) is the Option-constructor; the underlying field is singular.
+	mkConn := func(maxReconnect int) *nats.Conn {
+		return &nats.Conn{Opts: nats.Options{MaxReconnect: maxReconnect}}
+	}
+
+	const warnSubstr = "finite MaxReconnect"
+
+	// assertWarnedAbout fails the test unless exactly one WARN line
+	// containing warnSubstr was emitted. Inlined assertion sidesteps
+	// the unparam lint warning that fires on a single-call helper
+	// whose substring argument never varies.
+	assertWarnedOnce := func(t *testing.T, log *warnSpy) {
+		t.Helper()
+		var matches int
+		for _, w := range log.snapshot() {
+			if strings.Contains(w, warnSubstr) {
+				matches++
+			}
+		}
+		require.Equal(t, 1, matches, "expected exactly one warning matching %q; got warns=%v", warnSubstr, log.snapshot())
+	}
+	assertSilent := func(t *testing.T, log *warnSpy) {
+		t.Helper()
+		var matches int
+		for _, w := range log.snapshot() {
+			if strings.Contains(w, warnSubstr) {
+				matches++
+			}
+		}
+		require.Equal(t, 0, matches, "expected no warnings; got warns=%v", log.snapshot())
+	}
+
+	t.Run("unlimited -1 silent (recommended posture)", func(t *testing.T) {
+		log := &warnSpy{}
+		warnOnFiniteMaxReconnects(mkConn(-1), log)
+		assertSilent(t, log)
+	})
+
+	t.Run("zero (disabled reconnect) warns", func(t *testing.T) {
+		log := &warnSpy{}
+		warnOnFiniteMaxReconnects(mkConn(0), log)
+		assertWarnedOnce(t, log)
+	})
+
+	t.Run("finite positive warns", func(t *testing.T) {
+		log := &warnSpy{}
+		warnOnFiniteMaxReconnects(mkConn(5), log)
+		assertWarnedOnce(t, log)
+	})
+
+	t.Run("nil conn silent (defensive)", func(t *testing.T) {
+		log := &warnSpy{}
+		require.NotPanics(t, func() {
+			warnOnFiniteMaxReconnects(nil, log)
+		})
+		assertSilent(t, log)
+	})
+}
+
+// configurableGateUpdater is a WorkerConsumerUpdater + CapabilityReporter
+// whose reported capability bits are caller-controlled. Unlike
+// gateReportingUpdater (which flips the gate ON in UpdateWorkerConsumer),
+// this stub leaves the bits at whatever the test set them to, letting the
+// F10-B warning test exercise the "consumer never wires the gate"
+// misconfiguration scenario.
+type configurableGateUpdater struct {
+	reported atomic.Uint32
+	updates  atomic.Int64
+}
+
+func (g *configurableGateUpdater) UpdateWorkerConsumer(_ context.Context, _ string, _ []Partition) error {
+	g.updates.Add(1)
+	return nil
+}
+
+func (g *configurableGateUpdater) Capabilities() uint32 { return g.reported.Load() }
+
+// setupTwoPhaseGateWarningTest wires a Manager with a spy logger and a
+// caller-controlled capability stub. The stub's initial reported bit is
+// `initialCaps`, which the test can mutate before driving apply.
+//
+// The spy is the shared warnSpy; each test owns its own instance, so the
+// P0.3 test does not couple to P0.1's branch.
+func setupTwoPhaseGateWarningTest(t *testing.T, twoPhase bool, initialCaps uint32) (*Manager, *warnSpy) {
+	t.Helper()
+
+	stub := &configurableGateUpdater{}
+	stub.reported.Store(initialCaps)
+
+	m, _, _, _ := newTestManager(t)
+	m.cfg = Config{EnableTwoPhaseHandoff: twoPhase}
+	spy := &warnSpy{}
+	m.logger = spy
+	m.consumerUpdater = stub
+	m.capReporter = asCapabilityReporter(stub)
+	m.handoffCoordinator = &forwardingHandoff{updater: stub}
+
+	return m, spy
+}
+
+func driveOneApply(t *testing.T, m *Manager, version int64) {
+	t.Helper()
+	err := m.applyAssignmentWithPrev(Assignment{}, Assignment{
+		Version:        version,
+		LeaderRevision: uint64(version), //nolint:gosec // monotonic test sequence; non-negative
+		Partitions:     []Partition{{Keys: []string{"p1"}}},
+	})
+	require.NoError(t, err, "applyAssignmentWithPrev must succeed for the warning-path tests")
+}
+
+func countTwoPhaseGateWarns(spy *warnSpy) int {
+	n := 0
+	for _, w := range spy.snapshot() {
+		if strings.Contains(w, "two-phase handoff is enabled but the consumer reports no processing gate") {
+			n++
+		}
+	}
+
+	return n
+}
+
+// TestManager_F10B_TwoPhaseHandoffWithoutGate_Warns covers the five
+// configurations that distinguish the F10-B warning's intended
+// behavior from any silent-failure or false-positive mode.
+func TestManager_F10B_TwoPhaseHandoffWithoutGate_Warns(t *testing.T) {
+	t.Parallel()
+	t.Run("two-phase ON + no gate reported → warns once", func(t *testing.T) {
+		t.Parallel()
+		m, spy := setupTwoPhaseGateWarningTest(t, true, 0)
+		driveOneApply(t, m, 1)
+		require.Equal(t, 1, countTwoPhaseGateWarns(spy),
+			"misconfigured two-phase handoff must surface a single WARN")
+	})
+
+	t.Run("two-phase ON + gate reported → silent", func(t *testing.T) {
+		t.Parallel()
+		m, spy := setupTwoPhaseGateWarningTest(t, true, types.CapProcessingGate)
+		driveOneApply(t, m, 1)
+		require.Equal(t, 0, countTwoPhaseGateWarns(spy),
+			"the happy path (gate present) must be silent")
+	})
+
+	t.Run("two-phase ON + no gate, repeated applies → warns only once", func(t *testing.T) {
+		t.Parallel()
+		m, spy := setupTwoPhaseGateWarningTest(t, true, 0)
+		driveOneApply(t, m, 1)
+		driveOneApply(t, m, 2)
+		driveOneApply(t, m, 3)
+		require.Equal(t, 1, countTwoPhaseGateWarns(spy),
+			"capProcessingGateWarned guard must suppress repeat applies")
+	})
+
+	t.Run("two-phase OFF → silent regardless of caps", func(t *testing.T) {
+		t.Parallel()
+		m, spy := setupTwoPhaseGateWarningTest(t, false, 0)
+		driveOneApply(t, m, 1)
+		require.Equal(t, 0, countTwoPhaseGateWarns(spy),
+			"the flag gates the warning; nothing to warn about when off")
+	})
+
+	t.Run("nil capReporter → silent (limitation acknowledged)", func(t *testing.T) {
+		t.Parallel()
+		m, _, _, _ := newTestManager(t)
+		m.cfg = Config{EnableTwoPhaseHandoff: true}
+		spy := &warnSpy{}
+		m.logger = spy
+		// Important: leave m.capReporter == nil (no CapabilityReporter
+		// wired). The fwdHandoff still needs an updater; provide a
+		// non-reporting stub for that.
+		nonReportingStub := &configurableGateUpdater{}
+		m.consumerUpdater = nonReportingStub
+		m.capReporter = nil
+		m.handoffCoordinator = &forwardingHandoff{updater: nonReportingStub}
+
+		driveOneApply(t, m, 1)
+		require.Equal(t, 0, countTwoPhaseGateWarns(spy),
+			"without a CapabilityReporter the gate signal is undetectable; the warning correctly stays silent (documented limitation)")
 	})
 }

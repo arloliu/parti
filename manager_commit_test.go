@@ -1,8 +1,6 @@
 package parti
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -356,29 +354,7 @@ func TestCommitStateMachine_Case_C_FullChainSucceeds_AppliesAndAcks(t *testing.T
 	wid := m.WorkerID()
 
 	parts := []types.Partition{{Keys: []string{"alpha"}}, {Keys: []string{"beta"}}}
-	payload := types.AssignmentPayload{
-		SchemaVersion: types.AssignmentSchemaVersion,
-		Partitions:    parts,
-	}
-	canonical, jerr := json.Marshal(payload)
-	require.NoError(t, jerr)
-	hash := sha256.Sum256(canonical)
-	hashHex := hex.EncodeToString(hash[:])
-	key := "assignment._payload." + hashHex
-
-	var gzBuf bytes.Buffer
-	gzw, _ := gzip.NewWriterLevel(&gzBuf, gzip.BestCompression)
-	_, err := gzw.Write(canonical)
-	require.NoError(t, err)
-	require.NoError(t, gzw.Close())
-	_, err = akv.Create(t.Context(), key, gzBuf.Bytes())
-	require.NoError(t, err)
-
-	ref := types.AssignmentPayloadRef{
-		Key:         key,
-		PayloadHash: hashHex,
-		SetDigest:   types.PartitionSetDigest(parts),
-	}
+	ref := publishCommitPayload(t, akv, parts)
 	commit := &types.AssignmentCommit{
 		Version:             7,
 		LeaderRevision:      31,
@@ -402,118 +378,132 @@ func TestCommitStateMachine_Case_C_FullChainSucceeds_AppliesAndAcks(t *testing.T
 	require.Equal(t, types.PartitionSetDigest(parts), snap.AppliedDigest)
 }
 
-func TestCommitStateMachine_Case_C_PayloadFetchError_NoApply(t *testing.T) {
+// TestCommitStateMachine_Case_C_PayloadRejection table-drives the §3.6 case (c)
+// payload-rejection matrix: each row corrupts the commit's payload ref (or the
+// planted bytes) in a distinct way, then asserts the transition is dropped
+// (no Apply) and the row-specific rejection metric fires. Each former
+// standalone test becomes a t.Run subtest carrying its exact assertions.
+func TestCommitStateMachine_Case_C_PayloadRejection(t *testing.T) {
 	t.Parallel()
-	_, nc := partitest.StartEmbeddedNATS(t)
-	akv := partitest.CreateJetStreamKV(t, nc, "case-c-fetch-err-asgn")
 
-	m, rh, _, rm := newTestManager(t)
-	m.assignmentKV = akv
-	wid := m.WorkerID()
-
-	// Ref points at a key that does not exist.
-	commit := &types.AssignmentCommit{
-		Version:        7,
-		LeaderRevision: 31,
-		Workers:        []string{wid},
-		Payloads: map[string]types.AssignmentPayloadRef{
-			wid: {
-				Key:         "assignment._payload.nonexistent",
-				PayloadHash: "deadbeef",
-				SetDigest:   1,
+	tests := []struct {
+		name string
+		// corrupt plants any needed payload bytes in kv and returns the ref
+		// the commit must carry for this rejection case.
+		corrupt func(t *testing.T, kv jetstream.KeyValue, parts []types.Partition) types.AssignmentPayloadRef
+		// wantCounter selects the rejection metric that must read 1 after the
+		// dropped transition.
+		wantCounter func(rm *recordingMetrics) *atomic.Int64
+		// assertLSR asserts case (c) failure leaves LSR unchanged at 0. The
+		// hash-mismatch original did not make this assertion, so it is opt-in.
+		assertLSR bool
+		// assertSnapshot additionally asserts the snapshot is unchanged (the
+		// decompress-error original makes this stronger claim).
+		assertSnapshot bool
+	}{
+		{
+			// Ref points at a key that does not exist.
+			name: "PayloadFetchError",
+			corrupt: func(_ *testing.T, _ jetstream.KeyValue, _ []types.Partition) types.AssignmentPayloadRef {
+				return types.AssignmentPayloadRef{
+					Key:         "assignment._payload.nonexistent",
+					PayloadHash: "deadbeef",
+					SetDigest:   1,
+				}
 			},
+			wantCounter: func(rm *recordingMetrics) *atomic.Int64 { return &rm.payloadFetchError },
+			assertLSR:   true,
+		},
+		{
+			// Ref's PayloadHash deliberately does not match the planted bytes.
+			name: "PayloadHashMismatch",
+			corrupt: func(t *testing.T, kv jetstream.KeyValue, parts []types.Partition) types.AssignmentPayloadRef {
+				ref := publishCommitPayload(t, kv, parts)
+				ref.PayloadHash = "deadbeef-wrong"
+				return ref
+			},
+			wantCounter: func(rm *recordingMetrics) *atomic.Int64 { return &rm.payloadHashMismatch },
+		},
+		{
+			// The PayloadHash is correct (so the bytes verify) but the SetDigest
+			// in the ref does NOT match the decoded payload's partitions. This
+			// is the internal-consistency failure surfaced by the
+			// ErrCommitPayloadDigestMismatch sentinel.
+			name: "SetDigestMismatch",
+			corrupt: func(t *testing.T, kv jetstream.KeyValue, parts []types.Partition) types.AssignmentPayloadRef {
+				ref := publishCommitPayload(t, kv, parts)
+				ref.SetDigest = 0xDEADBEEF
+				return ref
+			},
+			wantCounter: func(rm *recordingMetrics) *atomic.Int64 { return &rm.setDigestMismatch },
+			assertLSR:   true,
+		},
+		{
+			// Write the canonical JSON UNCOMPRESSED. PayloadHash matches the raw
+			// bytes, so the pre-strict implementation would have happily accepted
+			// this payload. With strict gzip, decompression fails first and the
+			// drop transition fires. The strict policy means the worker MUST NOT
+			// silently accept uncompressed payloads. (Deliberately bypasses the
+			// gzip helper.)
+			name: "PayloadDecompressError",
+			corrupt: func(t *testing.T, kv jetstream.KeyValue, parts []types.Partition) types.AssignmentPayloadRef {
+				payload := types.AssignmentPayload{
+					SchemaVersion: types.AssignmentSchemaVersion,
+					Partitions:    parts,
+				}
+				canonical, jerr := json.Marshal(payload)
+				require.NoError(t, jerr)
+				hash := sha256.Sum256(canonical)
+				hashHex := hex.EncodeToString(hash[:])
+				key := "assignment._payload." + hashHex
+				_, err := kv.Create(t.Context(), key, canonical) // intentionally not gzipped
+				require.NoError(t, err)
+
+				return types.AssignmentPayloadRef{
+					Key:         key,
+					PayloadHash: hashHex,
+					SetDigest:   types.PartitionSetDigest(parts),
+				}
+			},
+			wantCounter:    func(rm *recordingMetrics) *atomic.Int64 { return &rm.payloadDecompressError },
+			assertLSR:      true,
+			assertSnapshot: true,
 		},
 	}
-	m.handleCommitValue(commit)
-	require.Equal(t, int64(0), rh.applyCount.Load(), "fetch error MUST NOT call Apply")
-	require.Equal(t, int64(1), rm.payloadFetchError.Load())
-	require.Equal(t, uint64(0), m.lastSeenLeaderRevision.Load(), "case (c) failure leaves LSR unchanged")
-}
 
-func TestCommitStateMachine_Case_C_PayloadHashMismatch_RejectsPayload(t *testing.T) {
-	t.Parallel()
-	_, nc := partitest.StartEmbeddedNATS(t)
-	akv := partitest.CreateJetStreamKV(t, nc, "case-c-hash-mismatch-asgn")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, nc := partitest.StartEmbeddedNATS(t)
+			akv := partitest.CreateJetStreamKV(t, nc, "case-c-reject-asgn")
 
-	m, rh, _, rm := newTestManager(t)
-	m.assignmentKV = akv
-	wid := m.WorkerID()
+			m, rh, _, rm := newTestManager(t)
+			m.assignmentKV = akv
+			wid := m.WorkerID()
 
-	parts := []types.Partition{{Keys: []string{"p1"}}}
-	payload := types.AssignmentPayload{
-		SchemaVersion: types.AssignmentSchemaVersion,
-		Partitions:    parts,
+			parts := []types.Partition{{Keys: []string{"alpha"}}}
+			ref := tc.corrupt(t, akv, parts)
+
+			commit := &types.AssignmentCommit{
+				Version:        7,
+				LeaderRevision: 31,
+				Workers:        []string{wid},
+				Payloads:       map[string]types.AssignmentPayloadRef{wid: ref},
+			}
+			m.handleCommitValue(commit)
+
+			require.Equal(t, int64(0), rh.applyCount.Load(), "rejected payload MUST NOT call Apply")
+			require.Equal(t, int64(1), tc.wantCounter(rm).Load())
+			if tc.assertLSR {
+				require.Equal(t, uint64(0), m.lastSeenLeaderRevision.Load(),
+					"case (c) failure leaves LSR unchanged")
+			}
+			if tc.assertSnapshot {
+				require.Equal(t, Assignment{}, m.CurrentAssignment(),
+					"case (c) drop leaves snapshot unchanged")
+			}
+		})
 	}
-	canonical, _ := json.Marshal(payload)
-	hash := sha256.Sum256(canonical)
-	hashHex := hex.EncodeToString(hash[:])
-	key := "assignment._payload." + hashHex
-
-	var gzBuf bytes.Buffer
-	gzw, _ := gzip.NewWriterLevel(&gzBuf, gzip.BestCompression)
-	_, err := gzw.Write(canonical)
-	require.NoError(t, err)
-	require.NoError(t, gzw.Close())
-	_, err = akv.Create(t.Context(), key, gzBuf.Bytes())
-	require.NoError(t, err)
-
-	// Ref's PayloadHash deliberately does not match the planted bytes.
-	commit := &types.AssignmentCommit{
-		Version:        7,
-		LeaderRevision: 31,
-		Workers:        []string{wid},
-		Payloads: map[string]types.AssignmentPayloadRef{
-			wid: {Key: key, PayloadHash: "deadbeef-wrong", SetDigest: types.PartitionSetDigest(parts)},
-		},
-	}
-	m.handleCommitValue(commit)
-	require.Equal(t, int64(0), rh.applyCount.Load())
-	require.Equal(t, int64(1), rm.payloadHashMismatch.Load())
-}
-
-func TestCommitStateMachine_Case_C_SetDigestMismatch_RejectsPayload(t *testing.T) {
-	t.Parallel()
-	_, nc := partitest.StartEmbeddedNATS(t)
-	akv := partitest.CreateJetStreamKV(t, nc, "case-c-set-digest-mismatch-asgn")
-
-	m, rh, _, rm := newTestManager(t)
-	m.assignmentKV = akv
-	wid := m.WorkerID()
-
-	parts := []types.Partition{{Keys: []string{"alpha"}}}
-	payload := types.AssignmentPayload{
-		SchemaVersion: types.AssignmentSchemaVersion,
-		Partitions:    parts,
-	}
-	canonical, _ := json.Marshal(payload)
-	hash := sha256.Sum256(canonical)
-	hashHex := hex.EncodeToString(hash[:])
-	key := "assignment._payload." + hashHex
-
-	var gzBuf bytes.Buffer
-	gzw, _ := gzip.NewWriterLevel(&gzBuf, gzip.BestCompression)
-	_, err := gzw.Write(canonical)
-	require.NoError(t, err)
-	require.NoError(t, gzw.Close())
-	_, err = akv.Create(t.Context(), key, gzBuf.Bytes())
-	require.NoError(t, err)
-
-	// The PayloadHash is correct (so the bytes verify) but the SetDigest
-	// in the ref does NOT match the decoded payload's partitions. This
-	// is the internal-consistency failure surfaced by the
-	// ErrCommitPayloadDigestMismatch sentinel.
-	commit := &types.AssignmentCommit{
-		Version:        7,
-		LeaderRevision: 31,
-		Workers:        []string{wid},
-		Payloads: map[string]types.AssignmentPayloadRef{
-			wid: {Key: key, PayloadHash: hashHex, SetDigest: 0xDEADBEEF},
-		},
-	}
-	m.handleCommitValue(commit)
-	require.Equal(t, int64(0), rh.applyCount.Load(), "set-digest mismatch must NOT call Apply")
-	require.Equal(t, int64(1), rm.setDigestMismatch.Load())
-	require.Equal(t, uint64(0), m.lastSeenLeaderRevision.Load(), "case (c) failure leaves LSR unchanged")
 }
 
 // TestCommitStateMachine_DeleteEventIgnored verifies that a watcher delete
@@ -555,23 +545,7 @@ func TestCommitStateMachine_ApplyError_LSRUnchanged(t *testing.T) {
 	// Plant a fully valid payload so the case-(c) chain succeeds up to
 	// applyAssignment, then inject a one-shot apply error.
 	parts := []types.Partition{{Keys: []string{"alpha"}}}
-	payload := types.AssignmentPayload{
-		SchemaVersion: types.AssignmentSchemaVersion,
-		Partitions:    parts,
-	}
-	canonical, jerr := json.Marshal(payload)
-	require.NoError(t, jerr)
-	hash := sha256.Sum256(canonical)
-	hashHex := hex.EncodeToString(hash[:])
-	key := "assignment._payload." + hashHex
-
-	var gzBuf bytes.Buffer
-	gzw, _ := gzip.NewWriterLevel(&gzBuf, gzip.BestCompression)
-	_, err := gzw.Write(canonical)
-	require.NoError(t, err)
-	require.NoError(t, gzw.Close())
-	_, err = akv.Create(t.Context(), key, gzBuf.Bytes())
-	require.NoError(t, err)
+	ref := publishCommitPayload(t, akv, parts)
 
 	rh.errOnce.Store(&errBox{err: errors.New("synthetic apply failure")})
 
@@ -579,9 +553,7 @@ func TestCommitStateMachine_ApplyError_LSRUnchanged(t *testing.T) {
 		Version:        7,
 		LeaderRevision: 100,
 		Workers:        []string{wid},
-		Payloads: map[string]types.AssignmentPayloadRef{
-			wid: {Key: key, PayloadHash: hashHex, SetDigest: types.PartitionSetDigest(parts)},
-		},
+		Payloads:       map[string]types.AssignmentPayloadRef{wid: ref},
 	}
 	m.handleCommitValue(commit)
 
@@ -630,57 +602,6 @@ func (aliasEntry) Created() time.Time              { return time.Time{} }
 func (aliasEntry) Delta() uint64                   { return 0 }
 func (aliasEntry) Operation() jetstream.KeyValueOp { return jetstream.KeyValuePut }
 
-// TestCommitStateMachine_Case_C_PayloadDecompressError_NoApply verifies the
-// §3.6 case (c) state-table requirement that gzip-decompression failure
-// drops the transition (no Apply, no LSR advance, no snapshot mutation)
-// and records RecordPayloadDecompressError. The strict policy means the
-// worker MUST NOT silently accept uncompressed payloads.
-func TestCommitStateMachine_Case_C_PayloadDecompressError_NoApply(t *testing.T) {
-	t.Parallel()
-	_, nc := partitest.StartEmbeddedNATS(t)
-	akv := partitest.CreateJetStreamKV(t, nc, "case-c-decompress-err-asgn")
-
-	m, rh, _, rm := newTestManager(t)
-	m.assignmentKV = akv
-	wid := m.WorkerID()
-
-	// Write the canonical JSON UNCOMPRESSED. PayloadHash matches the raw
-	// bytes, so the pre-strict implementation would have happily accepted
-	// this payload. With strict gzip, decompression fails first and the
-	// drop transition fires.
-	parts := []types.Partition{{Keys: []string{"alpha"}}}
-	payload := types.AssignmentPayload{
-		SchemaVersion: types.AssignmentSchemaVersion,
-		Partitions:    parts,
-	}
-	canonical, jerr := json.Marshal(payload)
-	require.NoError(t, jerr)
-	hash := sha256.Sum256(canonical)
-	hashHex := hex.EncodeToString(hash[:])
-	key := "assignment._payload." + hashHex
-	_, err := akv.Create(t.Context(), key, canonical) // intentionally not gzipped
-	require.NoError(t, err)
-
-	commit := &types.AssignmentCommit{
-		Version:        7,
-		LeaderRevision: 31,
-		Workers:        []string{wid},
-		Payloads: map[string]types.AssignmentPayloadRef{
-			wid: {Key: key, PayloadHash: hashHex, SetDigest: types.PartitionSetDigest(parts)},
-		},
-	}
-	m.handleCommitValue(commit)
-
-	require.Equal(t, int64(0), rh.applyCount.Load(),
-		"decompress failure MUST drop transition — no Apply")
-	require.Equal(t, int64(1), rm.payloadDecompressError.Load(),
-		"RecordPayloadDecompressError MUST fire on gzip decode failure")
-	require.Equal(t, uint64(0), m.lastSeenLeaderRevision.Load(),
-		"case (c) drop leaves LSR unchanged")
-	require.Equal(t, Assignment{}, m.CurrentAssignment(),
-		"case (c) drop leaves snapshot unchanged")
-}
-
 // TestApplyRetry_SuccessAdvancesLSR closes the v2-review P0: when a commit
 // fails its first Apply, the scheduled retry succeeds, and LSR MUST be
 // advanced by the retry's success — otherwise a subsequent lower-LR
@@ -711,23 +632,7 @@ func TestApplyRetry_SuccessAdvancesLSR(t *testing.T) {
 
 	// Plant a fully valid gzipped payload so case (c) verification passes.
 	parts := []types.Partition{{Keys: []string{"alpha"}}}
-	payload := types.AssignmentPayload{
-		SchemaVersion: types.AssignmentSchemaVersion,
-		Partitions:    parts,
-	}
-	canonical, jerr := json.Marshal(payload)
-	require.NoError(t, jerr)
-	hash := sha256.Sum256(canonical)
-	hashHex := hex.EncodeToString(hash[:])
-	key := "assignment._payload." + hashHex
-
-	var gzBuf bytes.Buffer
-	gzw, _ := gzip.NewWriterLevel(&gzBuf, gzip.BestCompression)
-	_, err := gzw.Write(canonical)
-	require.NoError(t, err)
-	require.NoError(t, gzw.Close())
-	_, err = akv.Create(t.Context(), key, gzBuf.Bytes())
-	require.NoError(t, err)
+	ref := publishCommitPayload(t, akv, parts)
 
 	// Arm a one-shot apply failure. errOnce is consumed by Swap(nil) on
 	// the first call, so the retry will succeed.
@@ -737,9 +642,7 @@ func TestApplyRetry_SuccessAdvancesLSR(t *testing.T) {
 		Version:        7,
 		LeaderRevision: 100,
 		Workers:        []string{wid},
-		Payloads: map[string]types.AssignmentPayloadRef{
-			wid: {Key: key, PayloadHash: hashHex, SetDigest: types.PartitionSetDigest(parts)},
-		},
+		Payloads:       map[string]types.AssignmentPayloadRef{wid: ref},
 	}
 	m.handleCommitValue(v7)
 
