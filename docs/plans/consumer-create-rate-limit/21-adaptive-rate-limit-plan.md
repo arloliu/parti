@@ -1,6 +1,6 @@
 # Adaptive (fleet-size-aware) rate limiting — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** Implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make the two v2.8.0 opt-in rate limits (consumer-create, claim-write) fleet-size-aware so each worker enforces `effective_rate = min(perWorkerMax, clusterRate / observed_N)`, bounding the steady-state cluster-wide aggregate instead of letting it scale as `N × perWorkerMax`.
 
@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go, `golang.org/x/time/rate` (wrapped in `internal/ratelimit`), NATS JetStream, testify (`require`/`assert`), `make test` (`-race`), `make test-integration` (`-race`).
 
-**Design spec:** `docs/superpowers/specs/2026-06-17-adaptive-rate-limit-design.md` (read it first — this plan implements it).
+**Design spec:** `docs/plans/consumer-create-rate-limit/20-adaptive-rate-limit-design.md` (read it first — this plan implements it).
 
 **Conventions (this repo):**
 - Reproducer/test-first: write the failing test, confirm it fails, then implement.
