@@ -9,148 +9,145 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestEmergencyDetector_Hysteresis verifies grace period prevents false positives.
-func TestEmergencyDetector_Hysteresis(t *testing.T) {
+// TestEmergencyDetector_GraceWindow folds the EmergencyDetector grace-window
+// boundary tests (hysteresis, worker reappearance, multiple disappearances,
+// partial reappearance, and zero grace period) into one table-driven test.
+//
+// Each row is a sequence of steps. A step optionally sleeps, then calls
+// CheckEmergency(prev, curr) once and runs the step's assertion closure on the
+// (emergency, workers) result. prev is fixed per row; curr can change per step
+// (e.g. a reappearance observation).
+func TestEmergencyDetector_GraceWindow(t *testing.T) {
 	t.Parallel()
-	gracePeriod := 200 * time.Millisecond
-	detector := NewEmergencyDetector(gracePeriod)
 
-	prev := map[string]bool{"worker-1": true, "worker-2": true, "worker-3": true}
-
-	// Worker-2 disappears
-	curr := map[string]bool{"worker-1": true, "worker-3": true}
-
-	// Immediate check - should NOT be emergency (grace period not expired)
-	emergency, workers, _ := detector.CheckEmergency(prev, curr)
-	require.False(t, emergency)
-	require.Empty(t, workers)
-
-	// Wait half grace period
-	time.Sleep(100 * time.Millisecond)
-	emergency, workers, _ = detector.CheckEmergency(prev, curr)
-	require.False(t, emergency)
-	require.Empty(t, workers)
-
-	// Wait full grace period
-	time.Sleep(110 * time.Millisecond) // Total: 210ms
-	emergency, workers, _ = detector.CheckEmergency(prev, curr)
-	require.True(t, emergency)
-	require.Len(t, workers, 1)
-	require.Contains(t, workers, "worker-2")
-}
-
-// TestEmergencyDetector_WorkerReappears verifies tracking cleared when worker returns.
-func TestEmergencyDetector_WorkerReappears(t *testing.T) {
-	t.Parallel()
-	// Reduce grace period from 2s to 200ms for faster test
-	gracePeriod := 200 * time.Millisecond
-	detector := NewEmergencyDetector(gracePeriod)
-
-	prev := map[string]bool{"worker-1": true, "worker-2": true}
-
-	// Worker-2 disappears
-	curr := map[string]bool{"worker-1": true}
-	emergency, _, _ := detector.CheckEmergency(prev, curr)
-	require.False(t, emergency)
-
-	// Wait 100ms
-	time.Sleep(100 * time.Millisecond)
-
-	// Worker-2 reappears
-	currReappeared := map[string]bool{"worker-1": true, "worker-2": true}
-	emergency, workers, _ := detector.CheckEmergency(prev, currReappeared)
-	require.False(t, emergency)
-	require.Empty(t, workers)
-
-	// Wait another 200ms - should still not be emergency (tracking cleared)
-	time.Sleep(200 * time.Millisecond)
-	emergency, workers, _ = detector.CheckEmergency(prev, currReappeared)
-	require.False(t, emergency)
-	require.Empty(t, workers)
-}
-
-// TestEmergencyDetector_MultipleWorkers verifies tracking multiple disappeared workers.
-func TestEmergencyDetector_MultipleWorkers(t *testing.T) {
-	t.Parallel()
-	gracePeriod := 200 * time.Millisecond
-	detector := NewEmergencyDetector(gracePeriod)
-
-	prev := map[string]bool{
-		"worker-1": true,
-		"worker-2": true,
-		"worker-3": true,
-		"worker-4": true,
+	type step struct {
+		sleep  time.Duration // slept before the CheckEmergency call
+		curr   map[string]bool
+		assert func(t *testing.T, emergency bool, workers []string)
 	}
 
-	// Two workers disappear
-	curr := map[string]bool{"worker-1": true, "worker-2": true}
-
-	// Immediate check - no emergency yet
-	emergency, workers, _ := detector.CheckEmergency(prev, curr)
-	require.False(t, emergency)
-	require.Empty(t, workers)
-
-	// Wait past grace period
-	time.Sleep(210 * time.Millisecond)
-
-	emergency, workers, _ = detector.CheckEmergency(prev, curr)
-	require.True(t, emergency)
-	require.Len(t, workers, 2)
-	require.Contains(t, workers, "worker-3")
-	require.Contains(t, workers, "worker-4")
-}
-
-// TestEmergencyDetector_PartialReappearance verifies partial worker recovery.
-func TestEmergencyDetector_PartialReappearance(t *testing.T) {
-	t.Parallel()
-	gracePeriod := 200 * time.Millisecond
-	detector := NewEmergencyDetector(gracePeriod)
-
-	prev := map[string]bool{
-		"worker-1": true,
-		"worker-2": true,
-		"worker-3": true,
+	expectQuiet := func(t *testing.T, emergency bool, workers []string) {
+		t.Helper()
+		require.False(t, emergency)
+		require.Empty(t, workers)
+	}
+	// expectFalseOnly asserts emergency is false without inspecting workers
+	// (replicates originals that discarded the workers slice).
+	expectFalseOnly := func(t *testing.T, emergency bool, _ []string) {
+		t.Helper()
+		require.False(t, emergency)
+	}
+	expectFired := func(want ...string) func(t *testing.T, emergency bool, workers []string) {
+		return func(t *testing.T, emergency bool, workers []string) {
+			t.Helper()
+			require.True(t, emergency)
+			require.Len(t, workers, len(want))
+			for _, w := range want {
+				require.Contains(t, workers, w)
+			}
+		}
 	}
 
-	// Two workers disappear
-	curr := map[string]bool{"worker-1": true}
+	tests := []struct {
+		name        string
+		gracePeriod time.Duration
+		prev        map[string]bool
+		steps       []step
+	}{
+		{
+			// TestEmergencyDetector_Hysteresis
+			name:        "hysteresis",
+			gracePeriod: 200 * time.Millisecond,
+			prev:        map[string]bool{"worker-1": true, "worker-2": true, "worker-3": true},
+			steps: []step{
+				// Worker-2 disappears. Immediate check - not emergency yet.
+				{curr: map[string]bool{"worker-1": true, "worker-3": true}, assert: expectQuiet},
+				// Wait half grace period.
+				{sleep: 100 * time.Millisecond, curr: map[string]bool{"worker-1": true, "worker-3": true}, assert: expectQuiet},
+				// Wait full grace period (total 210ms).
+				{sleep: 110 * time.Millisecond, curr: map[string]bool{"worker-1": true, "worker-3": true}, assert: expectFired("worker-2")},
+			},
+		},
+		{
+			// TestEmergencyDetector_WorkerReappears
+			name:        "worker reappears",
+			gracePeriod: 200 * time.Millisecond,
+			prev:        map[string]bool{"worker-1": true, "worker-2": true},
+			steps: []step{
+				// Worker-2 disappears.
+				{curr: map[string]bool{"worker-1": true}, assert: expectFalseOnly},
+				// Wait 100ms, worker-2 reappears.
+				{sleep: 100 * time.Millisecond, curr: map[string]bool{"worker-1": true, "worker-2": true}, assert: expectQuiet},
+				// Wait another 200ms - still no emergency (tracking cleared).
+				{sleep: 200 * time.Millisecond, curr: map[string]bool{"worker-1": true, "worker-2": true}, assert: expectQuiet},
+			},
+		},
+		{
+			// TestEmergencyDetector_MultipleWorkers
+			name:        "multiple workers",
+			gracePeriod: 200 * time.Millisecond,
+			prev: map[string]bool{
+				"worker-1": true,
+				"worker-2": true,
+				"worker-3": true,
+				"worker-4": true,
+			},
+			steps: []step{
+				// Two workers disappear. Immediate check - no emergency yet.
+				{curr: map[string]bool{"worker-1": true, "worker-2": true}, assert: expectQuiet},
+				// Wait past grace period.
+				{sleep: 210 * time.Millisecond, curr: map[string]bool{"worker-1": true, "worker-2": true}, assert: expectFired("worker-3", "worker-4")},
+			},
+		},
+		{
+			// TestEmergencyDetector_PartialReappearance
+			name:        "partial reappearance",
+			gracePeriod: 200 * time.Millisecond,
+			prev: map[string]bool{
+				"worker-1": true,
+				"worker-2": true,
+				"worker-3": true,
+			},
+			steps: []step{
+				// Two workers disappear. Start tracking.
+				{curr: map[string]bool{"worker-1": true}, assert: expectFalseOnly},
+				// Wait 100ms, worker-2 reappears, worker-3 still missing.
+				{sleep: 100 * time.Millisecond, curr: map[string]bool{"worker-1": true, "worker-2": true}, assert: expectQuiet},
+				// Wait another 120ms (total 220ms for worker-3). Only worker-3 fires.
+				{sleep: 120 * time.Millisecond, curr: map[string]bool{"worker-1": true, "worker-2": true}, assert: func(t *testing.T, emergency bool, workers []string) {
+					t.Helper()
+					require.True(t, emergency)
+					require.Len(t, workers, 1)
+					require.Contains(t, workers, "worker-3")
+					require.NotContains(t, workers, "worker-2") // worker-2 tracking was cleared
+				}},
+			},
+		},
+		{
+			// TestEmergencyDetector_ZeroGracePeriod
+			name:        "zero grace period",
+			gracePeriod: 0 * time.Second,
+			prev:        map[string]bool{"worker-1": true, "worker-2": true},
+			steps: []step{
+				// With zero grace period, should be immediate emergency.
+				{curr: map[string]bool{"worker-1": true}, assert: expectFired("worker-2")},
+			},
+		},
+	}
 
-	// Start tracking
-	emergency, _, _ := detector.CheckEmergency(prev, curr)
-	require.False(t, emergency)
-
-	// Wait 100ms
-	time.Sleep(100 * time.Millisecond)
-
-	// Worker-2 reappears, worker-3 still missing
-	currPartial := map[string]bool{"worker-1": true, "worker-2": true}
-	emergency, workers, _ := detector.CheckEmergency(prev, currPartial)
-	require.False(t, emergency) // worker-3 not past grace period yet
-	require.Empty(t, workers)
-
-	// Wait another 120ms (total 220ms for worker-3)
-	time.Sleep(120 * time.Millisecond)
-
-	emergency, workers, _ = detector.CheckEmergency(prev, currPartial)
-	require.True(t, emergency)
-	require.Len(t, workers, 1)
-	require.Contains(t, workers, "worker-3")
-	require.NotContains(t, workers, "worker-2") // worker-2 tracking was cleared
-}
-
-// TestEmergencyDetector_ZeroGracePeriod verifies immediate emergency with zero grace period.
-func TestEmergencyDetector_ZeroGracePeriod(t *testing.T) {
-	t.Parallel()
-	detector := NewEmergencyDetector(0 * time.Second)
-
-	prev := map[string]bool{"worker-1": true, "worker-2": true}
-	curr := map[string]bool{"worker-1": true}
-
-	// With zero grace period, should be immediate emergency
-	emergency, workers, _ := detector.CheckEmergency(prev, curr)
-	require.True(t, emergency)
-	require.Len(t, workers, 1)
-	require.Contains(t, workers, "worker-2")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			detector := NewEmergencyDetector(tt.gracePeriod)
+			for _, s := range tt.steps {
+				if s.sleep > 0 {
+					time.Sleep(s.sleep)
+				}
+				emergency, workers, _ := detector.CheckEmergency(tt.prev, s.curr)
+				s.assert(t, emergency, workers)
+			}
+		})
+	}
 }
 
 // TestCheckEmergency_RecoveryThenSecondDisappearance_HonorsGracePeriod is the FP-1

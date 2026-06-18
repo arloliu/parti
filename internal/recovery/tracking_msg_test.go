@@ -6,132 +6,176 @@ import (
 	"testing"
 
 	"github.com/arloliu/parti/v2/internal/logging"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 )
 
 // --- WrapForTracking ---
 
-func TestWrapForTracking_NilController_ReturnsOriginal(t *testing.T) {
-	msg := &mockMsg{seq: 1}
-	var c *Controller
+func TestWrapForTracking(t *testing.T) {
+	cases := []struct {
+		name string
+		// newController builds the receiver. A nil return exercises the
+		// nil-receiver path (typed-nil *Controller or NewController(Disabled)).
+		newController func(t *testing.T) *Controller
+		// nilController, when true, uses a typed-nil *Controller rather than
+		// invoking newController.
+		nilController bool
+		expectWrapper bool // true => *trackingMsg, false => original *mockMsg
+	}{
+		{
+			name:          "NilController_ReturnsOriginal",
+			nilController: true,
+			expectWrapper: false,
+		},
+		{
+			name: "DisabledStrategy_ReturnsOriginal",
+			newController: func(t *testing.T) *Controller {
+				// NewController returns nil for Disabled strategy.
+				c := NewController(ControllerConfig{Strategy: Disabled, Logger: logging.NewNop()})
+				require.Nil(t, c)
 
-	got := c.WrapForTracking(msg)
-	tm, ok := got.(*mockMsg)
-	require.True(t, ok)
-	require.Same(t, msg, tm, "nil controller must return the original message unchanged")
+				return c // nil receiver is safe
+			},
+			expectWrapper: false,
+		},
+		{
+			name: "FromNew_ReturnsOriginal",
+			newController: func(t *testing.T) *Controller {
+				return NewController(ControllerConfig{Strategy: FromNew, Logger: logging.NewNop()})
+			},
+			expectWrapper: false,
+		},
+		{
+			name: "FromBeginning_ReturnsOriginal",
+			newController: func(t *testing.T) *Controller {
+				return NewController(ControllerConfig{Strategy: FromBeginning, Logger: logging.NewNop()})
+			},
+			expectWrapper: false,
+		},
+		{
+			name: "FromLastProcessed_ReturnsWrapper",
+			newController: func(t *testing.T) *Controller {
+				return NewController(ControllerConfig{Strategy: FromLastProcessed, Logger: logging.NewNop()})
+			},
+			expectWrapper: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var c *Controller
+			if !tc.nilController {
+				c = tc.newController(t)
+			}
+
+			seq := uint64(1)
+			if tc.expectWrapper {
+				seq = 5
+			}
+			msg := &mockMsg{seq: seq}
+
+			got := c.WrapForTracking(msg)
+
+			if tc.expectWrapper {
+				tm, ok := got.(*trackingMsg)
+				require.True(t, ok, "FromLastProcessed should return a *trackingMsg")
+				require.Equal(t, msg, tm.Msg)
+				require.Equal(t, c, tm.controller)
+
+				return
+			}
+
+			tm, ok := got.(*mockMsg)
+			require.True(t, ok)
+			require.Same(t, msg, tm, "non-wrapping strategy must return the original message unchanged")
+		})
+	}
 }
 
-func TestWrapForTracking_DisabledStrategy_ReturnsOriginal(t *testing.T) {
-	// NewController returns nil for Disabled strategy.
-	c := NewController(ControllerConfig{Strategy: Disabled, Logger: logging.NewNop()})
-	require.Nil(t, c)
+// --- trackingMsg checkpoint advancement ---
 
-	msg := &mockMsg{seq: 1}
-	got := c.WrapForTracking(msg) // nil receiver is safe
-	tm, ok := got.(*mockMsg)
-	require.True(t, ok)
-	require.Same(t, msg, tm)
-}
+func TestTrackingMsg_CheckpointAdvancement(t *testing.T) {
+	cases := []struct {
+		name string
+		// invoke performs the message method under test and returns its error.
+		invoke func(wrapped jetstream.Msg) error
+		// withErr, when true, configures the mock to fail the method.
+		withErr  bool
+		seq      uint64
+		advances bool // true => checkpoint advances to seq; false => stays 0
+	}{
+		{
+			name:     "Ack_AdvancesCheckpoint",
+			invoke:   func(w jetstream.Msg) error { return w.Ack() },
+			seq:      10,
+			advances: true,
+		},
+		{
+			name:     "Ack_ErrorDoesNotAdvanceCheckpoint",
+			invoke:   func(w jetstream.Msg) error { return w.Ack() },
+			withErr:  true,
+			seq:      10,
+			advances: false,
+		},
+		{
+			name:     "DoubleAck_AdvancesCheckpoint",
+			invoke:   func(w jetstream.Msg) error { return w.DoubleAck(context.Background()) },
+			seq:      20,
+			advances: true,
+		},
+		{
+			name:     "DoubleAck_ErrorDoesNotAdvanceCheckpoint",
+			invoke:   func(w jetstream.Msg) error { return w.DoubleAck(context.Background()) },
+			withErr:  true,
+			seq:      20,
+			advances: false,
+		},
+		{
+			name:     "Nak_DoesNotAdvanceCheckpoint",
+			invoke:   func(w jetstream.Msg) error { return w.Nak() },
+			seq:      5,
+			advances: false,
+		},
+		{
+			name:     "Term_DoesNotAdvanceCheckpoint",
+			invoke:   func(w jetstream.Msg) error { return w.Term() },
+			seq:      5,
+			advances: false,
+		},
+	}
 
-func TestWrapForTracking_FromNew_ReturnsOriginal(t *testing.T) {
-	c := NewController(ControllerConfig{Strategy: FromNew, Logger: logging.NewNop()})
-	msg := &mockMsg{seq: 1}
-	got := c.WrapForTracking(msg)
-	tm, ok := got.(*mockMsg)
-	require.True(t, ok)
-	require.Same(t, msg, tm, "non-FromLastProcessed strategy must return original message")
-}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := NewController(ControllerConfig{Strategy: FromLastProcessed, Logger: logging.NewNop()})
 
-func TestWrapForTracking_FromBeginning_ReturnsOriginal(t *testing.T) {
-	c := NewController(ControllerConfig{Strategy: FromBeginning, Logger: logging.NewNop()})
-	msg := &mockMsg{seq: 1}
-	got := c.WrapForTracking(msg)
-	tm, ok := got.(*mockMsg)
-	require.True(t, ok)
-	require.Same(t, msg, tm)
-}
+			msg := &mockMsg{seq: tc.seq}
+			if tc.withErr {
+				switch tc.name {
+				case "Ack_ErrorDoesNotAdvanceCheckpoint":
+					msg.ackErr = errors.New("ack failed")
+				case "DoubleAck_ErrorDoesNotAdvanceCheckpoint":
+					msg.doubleAckErr = errors.New("double ack failed")
+				}
+			}
+			wrapped := c.WrapForTracking(msg)
 
-func TestWrapForTracking_FromLastProcessed_ReturnsWrapper(t *testing.T) {
-	c := NewController(ControllerConfig{Strategy: FromLastProcessed, Logger: logging.NewNop()})
-	msg := &mockMsg{seq: 5}
-	got := c.WrapForTracking(msg)
+			require.Equal(t, uint64(0), c.checkpoint.Value(), "checkpoint starts at zero")
 
-	tm, ok := got.(*trackingMsg)
-	require.True(t, ok, "FromLastProcessed should return a *trackingMsg")
-	require.Equal(t, msg, tm.Msg)
-	require.Equal(t, c, tm.controller)
-}
+			err := tc.invoke(wrapped)
+			if tc.withErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
 
-// --- trackingMsg.Ack ---
-
-func TestTrackingMsg_Ack_AdvancesCheckpoint(t *testing.T) {
-	c := NewController(ControllerConfig{Strategy: FromLastProcessed, Logger: logging.NewNop()})
-
-	msg := &mockMsg{seq: 10}
-	wrapped := c.WrapForTracking(msg)
-
-	require.Equal(t, uint64(0), c.checkpoint.Value(), "checkpoint starts at zero")
-
-	err := wrapped.Ack()
-	require.NoError(t, err)
-	require.Equal(t, uint64(10), c.checkpoint.Value(), "checkpoint must advance to seq 10 after Ack")
-}
-
-func TestTrackingMsg_Ack_ErrorDoesNotAdvanceCheckpoint(t *testing.T) {
-	c := NewController(ControllerConfig{Strategy: FromLastProcessed, Logger: logging.NewNop()})
-
-	msg := &mockMsg{seq: 10, ackErr: errors.New("ack failed")}
-	wrapped := c.WrapForTracking(msg)
-
-	err := wrapped.Ack()
-	require.Error(t, err)
-	require.Equal(t, uint64(0), c.checkpoint.Value(), "failed Ack must not advance checkpoint")
-}
-
-// --- trackingMsg.DoubleAck ---
-
-func TestTrackingMsg_DoubleAck_AdvancesCheckpoint(t *testing.T) {
-	c := NewController(ControllerConfig{Strategy: FromLastProcessed, Logger: logging.NewNop()})
-
-	msg := &mockMsg{seq: 20}
-	wrapped := c.WrapForTracking(msg)
-
-	err := wrapped.DoubleAck(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, uint64(20), c.checkpoint.Value(), "checkpoint must advance after DoubleAck")
-}
-
-func TestTrackingMsg_DoubleAck_ErrorDoesNotAdvanceCheckpoint(t *testing.T) {
-	c := NewController(ControllerConfig{Strategy: FromLastProcessed, Logger: logging.NewNop()})
-
-	msg := &mockMsg{seq: 20, doubleAckErr: errors.New("double ack failed")}
-	wrapped := c.WrapForTracking(msg)
-
-	err := wrapped.DoubleAck(context.Background())
-	require.Error(t, err)
-	require.Equal(t, uint64(0), c.checkpoint.Value())
-}
-
-// --- non-ack methods are promoted (no checkpoint side-effect) ---
-
-func TestTrackingMsg_Nak_DoesNotAdvanceCheckpoint(t *testing.T) {
-	c := NewController(ControllerConfig{Strategy: FromLastProcessed, Logger: logging.NewNop()})
-
-	msg := &mockMsg{seq: 5}
-	wrapped := c.WrapForTracking(msg)
-
-	require.NoError(t, wrapped.Nak())
-	require.Equal(t, uint64(0), c.checkpoint.Value())
-}
-
-func TestTrackingMsg_Term_DoesNotAdvanceCheckpoint(t *testing.T) {
-	c := NewController(ControllerConfig{Strategy: FromLastProcessed, Logger: logging.NewNop()})
-
-	msg := &mockMsg{seq: 5}
-	wrapped := c.WrapForTracking(msg)
-
-	require.NoError(t, wrapped.Term())
-	require.Equal(t, uint64(0), c.checkpoint.Value())
+			if tc.advances {
+				require.Equal(t, tc.seq, c.checkpoint.Value(), "checkpoint must advance to seq after success")
+			} else {
+				require.Equal(t, uint64(0), c.checkpoint.Value(), "checkpoint must not advance")
+			}
+		})
+	}
 }
 
 // --- promoted accessors pass through correctly ---

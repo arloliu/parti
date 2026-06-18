@@ -150,63 +150,101 @@ func baseWorkerConfigForStreamHook() WorkerConsumerConfig {
 	}
 }
 
-func TestWorkerConsumerConfig_Validate_NoHook_AnyStrategyAccepted(t *testing.T) {
-	cases := []struct {
-		name     string
+func TestWorkerConsumerConfig_Validate_StreamHook(t *testing.T) {
+	tests := []struct {
+		name string
+		// strategy is the RecoveryStrategy applied to the base config.
 		strategy RecoveryStrategy
+		// hookSet controls whether a StreamMissingHook is installed.
+		hookSet bool
+		// wantErr is true when Validate must reject the combination.
+		wantErr bool
+		// errContains, when non-empty, must appear in the rejection message.
+		errContains string
+		// msg is the assertion message for this case.
+		msg string
 	}{
-		{"disabled", RecoveryDisabled},
-		{"from_new", RecoverFromNew},
-		{"from_last_processed", RecoverFromLastProcessed},
-		{"from_beginning", RecoverFromBeginning},
+		// No hook: every RecoveryStrategy must remain accepted (was the
+		// 4-case TestWorkerConsumerConfig_Validate_NoHook_AnyStrategyAccepted).
+		{
+			name:     "no_hook/disabled",
+			strategy: RecoveryDisabled,
+			hookSet:  false,
+			wantErr:  false,
+			msg:      "without StreamMissingHook, every RecoveryStrategy must remain accepted",
+		},
+		{
+			name:     "no_hook/from_new",
+			strategy: RecoverFromNew,
+			hookSet:  false,
+			wantErr:  false,
+			msg:      "without StreamMissingHook, every RecoveryStrategy must remain accepted",
+		},
+		{
+			name:     "no_hook/from_last_processed",
+			strategy: RecoverFromLastProcessed,
+			hookSet:  false,
+			wantErr:  false,
+			msg:      "without StreamMissingHook, every RecoveryStrategy must remain accepted",
+		},
+		{
+			name:     "no_hook/from_beginning",
+			strategy: RecoverFromBeginning,
+			hookSet:  false,
+			wantErr:  false,
+			msg:      "without StreamMissingHook, every RecoveryStrategy must remain accepted",
+		},
+		// Hook set: strategy-specific pre-conditions.
+		{
+			name:        "hook/recovery_disabled_rejected",
+			strategy:    RecoveryDisabled,
+			hookSet:     true,
+			wantErr:     true,
+			errContains: "RecoveryStrategy",
+			msg:         "StreamMissingHook + RecoveryDisabled must be rejected; without the controller the hook-success path cannot rebuild",
+		},
+		{
+			name:        "hook/recover_from_new_rejected",
+			strategy:    RecoverFromNew,
+			hookSet:     true,
+			wantErr:     true,
+			errContains: "RecoverFromNew",
+			msg:         "StreamMissingHook + RecoverFromNew must be rejected; the recreated-stream replay override does not apply, so messages published after a fresh-stream recreate would be silently skipped",
+		},
+		{
+			name:     "hook/recover_from_last_processed_accepted",
+			strategy: RecoverFromLastProcessed,
+			hookSet:  true,
+			wantErr:  false,
+			msg:      "StreamMissingHook + RecoverFromLastProcessed is the canonical at-least-once configuration",
+		},
+		{
+			name:     "hook/recover_from_beginning_accepted",
+			strategy: RecoverFromBeginning,
+			hookSet:  true,
+			wantErr:  false,
+			msg:      "StreamMissingHook + RecoverFromBeginning (replay-all) is an accepted intentional-duplicate-processing configuration",
+		},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			cfg := baseWorkerConfigForStreamHook()
-			cfg.RecoveryStrategy = tc.strategy
-			require.NoError(t, cfg.Validate(),
-				"without StreamMissingHook, every RecoveryStrategy must remain accepted")
+			cfg.RecoveryStrategy = tt.strategy
+			if tt.hookSet {
+				cfg.StreamMissingHook = types.StreamMissingHook(func(string) error { return nil })
+			}
+
+			err := cfg.Validate()
+			if tt.wantErr {
+				require.Error(t, err, tt.msg)
+				if tt.errContains != "" {
+					require.Contains(t, err.Error(), tt.errContains,
+						"the rejection message must name %s so operators can fix the config", tt.errContains)
+				}
+				return
+			}
+			require.NoError(t, err, tt.msg)
 		})
 	}
-}
-
-func TestWorkerConsumerConfig_Validate_Hook_RecoveryDisabled_Rejected(t *testing.T) {
-	cfg := baseWorkerConfigForStreamHook()
-	cfg.RecoveryStrategy = RecoveryDisabled
-	cfg.StreamMissingHook = types.StreamMissingHook(func(string) error { return nil })
-
-	err := cfg.Validate()
-	require.Error(t, err,
-		"StreamMissingHook + RecoveryDisabled must be rejected; without the controller the hook-success path cannot rebuild")
-	require.Contains(t, err.Error(), "RecoveryStrategy",
-		"the rejection message must name RecoveryStrategy so operators can fix the config")
-}
-
-func TestWorkerConsumerConfig_Validate_Hook_RecoverFromNew_Rejected(t *testing.T) {
-	cfg := baseWorkerConfigForStreamHook()
-	cfg.RecoveryStrategy = RecoverFromNew
-	cfg.StreamMissingHook = types.StreamMissingHook(func(string) error { return nil })
-
-	err := cfg.Validate()
-	require.Error(t, err,
-		"StreamMissingHook + RecoverFromNew must be rejected; the recreated-stream replay override does not apply, so messages published after a fresh-stream recreate would be silently skipped")
-	require.Contains(t, err.Error(), "RecoverFromNew")
-}
-
-func TestWorkerConsumerConfig_Validate_Hook_RecoverFromLastProcessed_Accepted(t *testing.T) {
-	cfg := baseWorkerConfigForStreamHook()
-	cfg.RecoveryStrategy = RecoverFromLastProcessed
-	cfg.StreamMissingHook = types.StreamMissingHook(func(string) error { return nil })
-
-	require.NoError(t, cfg.Validate(),
-		"StreamMissingHook + RecoverFromLastProcessed is the canonical at-least-once configuration")
-}
-
-func TestWorkerConsumerConfig_Validate_Hook_RecoverFromBeginning_Accepted(t *testing.T) {
-	cfg := baseWorkerConfigForStreamHook()
-	cfg.RecoveryStrategy = RecoverFromBeginning
-	cfg.StreamMissingHook = types.StreamMissingHook(func(string) error { return nil })
-
-	require.NoError(t, cfg.Validate(),
-		"StreamMissingHook + RecoverFromBeginning (replay-all) is an accepted intentional-duplicate-processing configuration")
 }

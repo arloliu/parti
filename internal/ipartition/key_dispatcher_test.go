@@ -305,71 +305,65 @@ func TestKeyDispatcher_CustomKeyExtractor(t *testing.T) {
 	assert.Equal(t, 1, kd.ActiveKeys())
 }
 
-func TestKeyDispatcher_ManualAck(t *testing.T) {
-	logger := logging.NewNop()
+func TestKeyDispatcher_AckModes(t *testing.T) {
+	tests := []struct {
+		name          string
+		manualAck     bool
+		handlerErrors bool
+		expectedAcked bool
+		expectedNaked bool
+	}{
+		{
+			// With manualAck, dispatcher should not call ack/nak
+			name:          "manual ack",
+			manualAck:     true,
+			handlerErrors: false,
+			expectedAcked: false,
+			expectedNaked: false,
+		},
+		{
+			// With auto-ack, successful handler should ack
+			name:          "auto ack",
+			manualAck:     false,
+			handlerErrors: false,
+			expectedAcked: true,
+			expectedNaked: false,
+		},
+		{
+			// With auto-ack, failed handler should nak
+			name:          "auto nak",
+			manualAck:     false,
+			handlerErrors: true,
+			expectedAcked: false,
+			expectedNaked: true,
+		},
+	}
 
-	handler := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
-		// Don't call ack - handler is responsible
-		return nil
-	})
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			logger := logging.NewNop()
 
-	kd := newKeyDispatcher(logger, handler, testKeyExtractor, 16, 100*time.Millisecond, true, nil, nil)
-	defer func() {
-		_ = kd.Close(t.Context())
-	}()
+			handler := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
+				if tc.handlerErrors {
+					return assert.AnError // failure
+				}
+				return nil // success
+			})
 
-	msg := &mockMsg{subject: "events.0.key"}
-	kd.Dispatch(t.Context(), msg)
+			kd := newKeyDispatcher(logger, handler, testKeyExtractor, 16, 100*time.Millisecond, tc.manualAck, nil, nil)
+			defer func() {
+				_ = kd.Close(t.Context())
+			}()
 
-	time.Sleep(20 * time.Millisecond)
+			msg := &mockMsg{subject: "events.0.key"}
+			kd.Dispatch(t.Context(), msg)
 
-	// With manualAck, dispatcher should not call ack/nak
-	assert.False(t, msg.acked.Load())
-	assert.False(t, msg.naked.Load())
-}
+			time.Sleep(20 * time.Millisecond)
 
-func TestKeyDispatcher_AutoAck(t *testing.T) {
-	logger := logging.NewNop()
-
-	handler := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
-		return nil // success
-	})
-
-	kd := newKeyDispatcher(logger, handler, testKeyExtractor, 16, 100*time.Millisecond, false, nil, nil)
-	defer func() {
-		_ = kd.Close(t.Context())
-	}()
-
-	msg := &mockMsg{subject: "events.0.key"}
-	kd.Dispatch(t.Context(), msg)
-
-	time.Sleep(20 * time.Millisecond)
-
-	// With auto-ack, successful handler should ack
-	assert.True(t, msg.acked.Load())
-	assert.False(t, msg.naked.Load())
-}
-
-func TestKeyDispatcher_AutoNak(t *testing.T) {
-	logger := logging.NewNop()
-
-	handler := messageHandlerFunc(func(ctx context.Context, msg jetstream.Msg) error {
-		return assert.AnError // failure
-	})
-
-	kd := newKeyDispatcher(logger, handler, testKeyExtractor, 16, 100*time.Millisecond, false, nil, nil)
-	defer func() {
-		_ = kd.Close(t.Context())
-	}()
-
-	msg := &mockMsg{subject: "events.0.key"}
-	kd.Dispatch(t.Context(), msg)
-
-	time.Sleep(20 * time.Millisecond)
-
-	// With auto-ack, failed handler should nak
-	assert.False(t, msg.acked.Load())
-	assert.True(t, msg.naked.Load())
+			assert.Equal(t, tc.expectedAcked, msg.acked.Load())
+			assert.Equal(t, tc.expectedNaked, msg.naked.Load())
+		})
+	}
 }
 
 // Helper to find byte index

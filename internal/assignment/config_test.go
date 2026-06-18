@@ -8,6 +8,7 @@ import (
 	"github.com/arloliu/parti/v2/internal/metrics"
 	"github.com/arloliu/parti/v2/source"
 	"github.com/arloliu/parti/v2/strategy"
+	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 )
@@ -144,57 +145,87 @@ func TestConfig_Validate(t *testing.T) {
 }
 
 func TestConfig_SetDefaults(t *testing.T) {
-	cfg := &Config{
-		AssignmentKV:     &mockKV{},
-		HeartbeatKV:      &mockKV{},
-		Source:           source.NewStatic(nil),
-		Strategy:         strategy.NewRoundRobin(),
-		AssignmentPrefix: "assignment",
-		HeartbeatPrefix:  "heartbeat",
-		HeartbeatTTL:     3 * time.Second,
-		// Optional fields not set
-	}
-
-	cfg.SetDefaults()
-
-	// Check all defaults were set
-	require.Equal(t, 5*time.Second, cfg.EmergencyGracePeriod)
-	require.Equal(t, 10*time.Second, cfg.Cooldown)
-	require.Equal(t, 30*time.Second, cfg.ColdStartWindow)
-	require.Equal(t, 10*time.Second, cfg.PlannedScaleWindow)
-	require.NotNil(t, cfg.Metrics)
-	require.NotNil(t, cfg.Logger)
-}
-
-func TestConfig_SetDefaults_PreservesExistingValues(t *testing.T) {
 	customLogger := logging.NewNop()
 	customMetrics := metrics.NewNop()
 
-	cfg := &Config{
-		AssignmentKV:         &mockKV{},
-		HeartbeatKV:          &mockKV{},
-		Source:               source.NewStatic(nil),
-		Strategy:             strategy.NewRoundRobin(),
-		AssignmentPrefix:     "assignment",
-		HeartbeatPrefix:      "heartbeat",
-		HeartbeatTTL:         3 * time.Second,
-		EmergencyGracePeriod: 7 * time.Second,
-		Cooldown:             15 * time.Second,
-		ColdStartWindow:      45 * time.Second,
-		PlannedScaleWindow:   12 * time.Second,
-		Logger:               customLogger,
-		Metrics:              customMetrics,
+	tests := []struct {
+		name string
+		cfg  *Config
+
+		wantEmergencyGracePeriod time.Duration
+		wantCooldown             time.Duration
+		wantColdStartWindow      time.Duration
+		wantPlannedScaleWindow   time.Duration
+		// When checkLoggerMetricsEqual is false, the test only asserts the
+		// defaulted Logger/Metrics are non-nil; when true it asserts they equal
+		// the provided custom instances.
+		checkLoggerMetricsEqual bool
+		wantLogger              types.Logger
+		wantMetrics             CalculatorAndAssignmentMetrics
+	}{
+		{
+			name: "applies defaults when optional fields unset",
+			cfg: &Config{
+				AssignmentKV:     &mockKV{},
+				HeartbeatKV:      &mockKV{},
+				Source:           source.NewStatic(nil),
+				Strategy:         strategy.NewRoundRobin(),
+				AssignmentPrefix: "assignment",
+				HeartbeatPrefix:  "heartbeat",
+				HeartbeatTTL:     3 * time.Second,
+				// Optional fields not set
+			},
+			wantEmergencyGracePeriod: 5 * time.Second,
+			wantCooldown:             10 * time.Second,
+			wantColdStartWindow:      30 * time.Second,
+			wantPlannedScaleWindow:   10 * time.Second,
+			checkLoggerMetricsEqual:  false,
+		},
+		{
+			name: "preserves existing values",
+			cfg: &Config{
+				AssignmentKV:         &mockKV{},
+				HeartbeatKV:          &mockKV{},
+				Source:               source.NewStatic(nil),
+				Strategy:             strategy.NewRoundRobin(),
+				AssignmentPrefix:     "assignment",
+				HeartbeatPrefix:      "heartbeat",
+				HeartbeatTTL:         3 * time.Second,
+				EmergencyGracePeriod: 7 * time.Second,
+				Cooldown:             15 * time.Second,
+				ColdStartWindow:      45 * time.Second,
+				PlannedScaleWindow:   12 * time.Second,
+				Logger:               customLogger,
+				Metrics:              customMetrics,
+			},
+			wantEmergencyGracePeriod: 7 * time.Second,
+			wantCooldown:             15 * time.Second,
+			wantColdStartWindow:      45 * time.Second,
+			wantPlannedScaleWindow:   12 * time.Second,
+			checkLoggerMetricsEqual:  true,
+			wantLogger:               customLogger,
+			wantMetrics:              customMetrics,
+		},
 	}
 
-	cfg.SetDefaults()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.cfg.SetDefaults()
 
-	// Check custom values were preserved
-	require.Equal(t, 7*time.Second, cfg.EmergencyGracePeriod)
-	require.Equal(t, 15*time.Second, cfg.Cooldown)
-	require.Equal(t, 45*time.Second, cfg.ColdStartWindow)
-	require.Equal(t, 12*time.Second, cfg.PlannedScaleWindow)
-	require.Equal(t, customLogger, cfg.Logger)
-	require.Equal(t, customMetrics, cfg.Metrics)
+			require.Equal(t, tt.wantEmergencyGracePeriod, tt.cfg.EmergencyGracePeriod)
+			require.Equal(t, tt.wantCooldown, tt.cfg.Cooldown)
+			require.Equal(t, tt.wantColdStartWindow, tt.cfg.ColdStartWindow)
+			require.Equal(t, tt.wantPlannedScaleWindow, tt.cfg.PlannedScaleWindow)
+
+			if tt.checkLoggerMetricsEqual {
+				require.Equal(t, tt.wantLogger, tt.cfg.Logger)
+				require.Equal(t, tt.wantMetrics, tt.cfg.Metrics)
+			} else {
+				require.NotNil(t, tt.cfg.Metrics)
+				require.NotNil(t, tt.cfg.Logger)
+			}
+		})
+	}
 }
 
 func TestNewCalculator(t *testing.T) {
