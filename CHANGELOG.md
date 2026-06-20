@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Manager startup data race** — `markStartupAssignmentApplied` read the
+  `calculator` field without holding the manager lock while a concurrent `Stop`
+  could write it (a race detectable under `-race`). The field is now read under
+  the read lock.
+- **Source bucket-missing gauge consistency** — the `SourceBucketMissing` gauge
+  write happened outside the mutex that serializes the underlying availability
+  state, so concurrent transitions could leave the gauge inverted until the next
+  edge. The gauge write is now ordered with the state change.
+
+### Documentation
+
+- Corrected the `Assignment` struct in the architecture doc, the default
+  `StartupTimeout` (60s, not 30s), the force-reassign method name
+  (`RefreshPartitions`), the `NewNatsKV` signature, the `strategy` extreme-weight
+  threshold default (>20×, configurable via `WithExtremeThreshold`), a `partictl`
+  exit-code note, and the `types` / `election` / `heartbeat` package doc
+  synopses and examples.
+
 ## [v2.8.0] - 2026-06-17
 
 Two opt-in rate-limit controls that bound the per-worker RPC rate Parti drives

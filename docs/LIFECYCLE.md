@@ -434,7 +434,7 @@ commit, and heartbeat — all intentionally ignore `KeyValueDelete` operations.
 
 The consequence is that "delete a key and watch parti react" is not a supported
 extension point. Operators wishing to force a reassignment should call
-`Manager.TriggerRebalance` (leader-only) or restart the affected worker.
+`Manager.RefreshPartitions` (leader-only) or restart the affected worker.
 
 ## Cold-Start Worker-Monitor Start Gap
 

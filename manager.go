@@ -1085,7 +1085,13 @@ func (m *Manager) invokeHook(name string, hook func() error) {
 func (m *Manager) logError(msg string, keysAndValues ...any) {
 	m.logger.Error(msg, keysAndValues...)
 
-	// Invoke OnError hook if configured
+	// Invoke OnError hook if configured.
+	// NOTE: the m.hooks != nil guard is retained here (unlike the
+	// leadership-hook sites) because logError is reachable from
+	// Manager values constructed directly in tests that bypass the
+	// constructor's &nopHooks default (e.g.
+	// TestMonitorAssignmentChanges_RewatchesOnChannelClose), where
+	// m.hooks is nil.
 	if m.hooks != nil && m.hooks.OnError != nil {
 		// Find the error in keysAndValues
 		var err error

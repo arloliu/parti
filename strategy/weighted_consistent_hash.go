@@ -478,7 +478,7 @@ func (wch *WeightedConsistentHash) findLightestWorkerIndexed(workerLoad []int64)
 
 	for i := 1; i < len(workerLoad); i++ {
 		load := workerLoad[i]
-		if load < minLoad || (load == minLoad && i < lightestIdx) {
+		if load < minLoad {
 			lightestIdx = i
 			minLoad = load
 		}

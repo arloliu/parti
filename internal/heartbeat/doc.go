@@ -17,16 +17,16 @@
 //
 // The Publisher manages the complete heartbeat lifecycle:
 //
-//  1. Create publisher with New(kv, prefix, interval)
-//  2. Set worker ID with SetWorkerID(workerID)
-//  3. Start publishing with Start(ctx)
-//  4. Stop publishing with Stop()
+//  1. Create publisher with New(kv, prefix, workerID, interval, metrics, logger)
+//  2. Start publishing with Start(ctx)
+//  3. Stop publishing with Stop()
+//
+// The workerID is immutable and must be provided at construction time.
 //
 // Example:
 //
 //	// Create publisher
-//	publisher := heartbeat.New(kv, "worker-hb", 2*time.Second)
-//	publisher.SetWorkerID("worker-1")
+//	publisher := heartbeat.New(kv, "worker-hb", "worker-1", 2*time.Second, metrics, logger)
 //
 //	// Start publishing
 //	err := publisher.Start(ctx)

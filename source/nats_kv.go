@@ -515,15 +515,7 @@ func (s *NatsKV) List(_ context.Context) ([]types.Partition, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	result := make([]types.Partition, len(s.partitions))
-	for i, p := range s.partitions {
-		cp := types.Partition{
-			Weight: p.Weight,
-		}
-		cp.Keys = make([]string, len(p.Keys))
-		copy(cp.Keys, p.Keys)
-		result[i] = cp
-	}
+	result := deepCopyPartitions(s.partitions)
 
 	return result, nil
 }
@@ -547,15 +539,7 @@ func (s *NatsKV) Snapshot(_ context.Context) ([]types.Partition, uint64, bool, e
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	result := make([]types.Partition, len(s.partitions))
-	for i, p := range s.partitions {
-		cp := types.Partition{
-			Weight: p.Weight,
-		}
-		cp.Keys = make([]string, len(p.Keys))
-		copy(cp.Keys, p.Keys)
-		result[i] = cp
-	}
+	result := deepCopyPartitions(s.partitions)
 
 	return result, s.revision, s.known, nil
 }
@@ -1431,12 +1415,10 @@ func (s *NatsKV) noteBucketUnavailable(err error) bool {
 	gaugeChanged := !s.bucketMissing
 	if gaugeChanged {
 		s.bucketMissing = true
+		s.metrics.SetSourceBucketMissing(true)
 	}
 	s.unavailableMu.Unlock()
 
-	if gaugeChanged {
-		s.metrics.SetSourceBucketMissing(true)
-	}
 	if fire {
 		s.unavailableHook(err)
 	}
@@ -1453,10 +1435,7 @@ func (s *NatsKV) noteBucketAvailable() {
 	gaugeChanged := s.bucketMissing
 	if gaugeChanged {
 		s.bucketMissing = false
-	}
-	s.unavailableMu.Unlock()
-
-	if gaugeChanged {
 		s.metrics.SetSourceBucketMissing(false)
 	}
+	s.unavailableMu.Unlock()
 }

@@ -12,7 +12,7 @@
 // WeightedConsistentHash:
 //   - Use when partitions have significantly different processing costs
 //   - Balances cache affinity with load distribution
-//   - Handles extreme partitions (2x+ average weight) via round-robin
+//   - Handles extreme partitions (by default >20x average weight, configurable via WithExtremeThreshold) via round-robin
 //   - Applies soft load caps to prevent worker overload
 //   - Configuration: virtual nodes, hash seed, overload threshold, extreme threshold
 //

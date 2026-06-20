@@ -194,10 +194,8 @@ func (m *Manager) participateElection(ctx context.Context, kv jetstream.KeyValue
 	m.isLeader.Store(isLeader)
 
 	// Invoke leadership hook if status changed (initial state is false)
-	if isLeader && m.hooks != nil && m.hooks.OnLeadershipChanged != nil {
-		m.invokeHook("leadership changed", func() error {
-			return m.hooks.OnLeadershipChanged(m.ctx, true)
-		})
+	if isLeader {
+		m.emitLeadershipChanged("leadership changed", true)
 	}
 
 	if isLeader {
@@ -264,11 +262,7 @@ func (m *Manager) monitorLeadership() {
 					m.logger.Info("lost leadership", "worker_id", m.WorkerID())
 
 					// Invoke leadership hook (tracked by WaitGroup)
-					if m.hooks != nil && m.hooks.OnLeadershipChanged != nil {
-						m.invokeHook("leadership lost", func() error {
-							return m.hooks.OnLeadershipChanged(m.ctx, false)
-						})
-					}
+					m.emitLeadershipChanged("leadership lost", false)
 
 					_ = m.stopCalculator()
 
@@ -310,11 +304,7 @@ func (m *Manager) monitorLeadership() {
 					m.logger.Info("became leader", "worker_id", m.WorkerID())
 
 					// Invoke leadership hook (tracked by WaitGroup)
-					if m.hooks != nil && m.hooks.OnLeadershipChanged != nil {
-						m.invokeHook("leadership gained", func() error {
-							return m.hooks.OnLeadershipChanged(m.ctx, true)
-						})
-					}
+					m.emitLeadershipChanged("leadership gained", true)
 
 					// Start calculator. If this fails we must NOT silently keep
 					// leadership — the pod would hold the election lease without
@@ -351,9 +341,17 @@ func (m *Manager) releaseLeadershipAfterCalculatorFailure(cause error) {
 		m.logError("failed to release leadership after calculator failure", "error", relErr)
 	}
 
+	m.emitLeadershipChanged("leadership released after calculator failure", false)
+}
+
+// emitLeadershipChanged invokes the OnLeadershipChanged hook (tracked by the
+// WaitGroup via invokeHook) when configured. The m.hooks != nil guard is
+// retained (matching logError) because Manager values constructed directly in
+// tests can bypass the constructor's &nopHooks default, leaving m.hooks nil.
+func (m *Manager) emitLeadershipChanged(label string, leader bool) {
 	if m.hooks != nil && m.hooks.OnLeadershipChanged != nil {
-		m.invokeHook("leadership released after calculator failure", func() error {
-			return m.hooks.OnLeadershipChanged(m.ctx, false)
+		m.invokeHook(label, func() error {
+			return m.hooks.OnLeadershipChanged(m.ctx, leader)
 		})
 	}
 }

@@ -24,7 +24,7 @@
 //	})
 //
 //	// Create election agent
-//	election := election.NewNATS(kv, "leader")
+//	election := election.NewNATSElection(kv, "leader")
 //
 //	// Request leadership
 //	isLeader, err := election.RequestLeadership(ctx, workerID, 30)
@@ -73,9 +73,10 @@
 //
 // # Concurrency Safety
 //
-// The NATSElection implementation is NOT thread-safe. Each worker
-// should have a single election instance. Multiple goroutines should
-// not call methods concurrently.
+// NATSElection is thread-safe. All internal state is protected by a
+// sync.RWMutex, so methods may be called concurrently from multiple
+// goroutines. The manager relies on this: RenewLeadership runs on a
+// background ticker while Stop calls ReleaseLeadership concurrently.
 //
 // # Error Handling
 //

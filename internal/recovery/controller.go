@@ -599,7 +599,7 @@ func (c *Controller) emitIteratorRestart(reason string) {
 	}
 }
 
-// --- metrics helpers (subsume recoveryutil) ---
+// --- metrics helpers ---
 
 type attempt struct {
 	metrics types.WorkerConsumerMetrics
