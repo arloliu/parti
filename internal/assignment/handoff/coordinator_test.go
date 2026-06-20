@@ -43,10 +43,6 @@ func TestDirectCoordinator_Apply(t *testing.T) {
 	require.Equal(t, "a", stored[0].Keys[0])
 }
 
-func TestTwoPhaseCoordinator_ApplyDelegates(t *testing.T) {
-	t.Skip("moved to twophase_test.go")
-}
-
 func TestCoordinator_IdempotentNoUpdater(t *testing.T) {
 	coord := handoff.New(handoff.Config{}, true) // no updater -> no-op
 	oldA := types.Assignment{Version: 10}
