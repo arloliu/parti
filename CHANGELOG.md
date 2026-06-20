@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v2.8.1] - 2026-06-21
+
+Maintenance release on top of v2.8.0. Two small correctness fixes — a
+`-race`-detectable data race on the manager's calculator field when startup and
+`Stop` overlap, and a `SourceBucketMissing` gauge that could read inverted under
+concurrent source-availability transitions — plus a batch of documentation
+corrections and several behavior-preserving internal cleanups (leadership-hook
+dedup, a dead tie-break branch, and removal of an orphaned internal package). No
+exported-API or behavioral-contract changes; upgrading is a drop-in.
+
 ### Fixed
 
 - **Manager startup data race** — `markStartupAssignmentApplied` read the
