@@ -194,10 +194,13 @@ A mapping of partitions to workers. Assignments are:
 
 ```go
 type Assignment struct {
-    Version    uint64
-    WorkerID   string
-    Partitions []Partition
-    UpdatedAt  time.Time
+    Version             int64
+    Lifecycle           string
+    Partitions          []Partition
+    LeaderRevision      uint64
+    SourceRevision      uint64
+    SourceRevisionKnown bool
+    TotalWorkers        int
 }
 ```
 

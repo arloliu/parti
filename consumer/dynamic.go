@@ -596,13 +596,7 @@ func (d *Dynamic) UpdateWorkerConsumer(ctx context.Context, workerID string, par
 	// bypassed the check entirely, so a stale Dynamic registered with
 	// the manager could silently accept an incompatible
 	// WorkQueuePolicy/recovery combination on a recreated stream.
-	if d.inner.Closed() {
-		return fmt.Errorf("dynamic consumer: %w", ErrConsumerStopped)
-	}
-	if err := d.ensureCompatChecked(ctx); err != nil {
-		return err
-	}
-	return d.inner.UpdateWorkerConsumer(ctx, workerID, partitions)
+	return d.Update(ctx, workerID, partitions)
 }
 
 // ensureCompatChecked runs the WorkQueue/recovery compatibility check at

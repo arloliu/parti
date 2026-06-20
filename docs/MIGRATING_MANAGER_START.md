@@ -132,7 +132,7 @@ use(mgr.CurrentAssignment())
 
 - `WaitState(state, timeout)` returns a `<-chan error`. The channel always produces exactly one value, then closes. Receive with `<-mgr.WaitState(...)`.
 - On `WaitState` timeout, **you own the cleanup**. `Manager.Start`'s auto-cleanup defer only fires on its own non-nil return — once `Start` returned `nil`, any later failure path must call `mgr.Stop(...)` to tear down the running background goroutines (runner, watchdog, heartbeat). Use a short bounded context for `Stop` (e.g., 10 s) so a slow shutdown can't hang your caller.
-- Pick a timeout that bounds your readiness expectations. `30 * time.Second` matches the default `StartupTimeout`; if you've configured a longer `StartupTimeout`, increase the `WaitState` timeout to match (otherwise `WaitState` returns timeout while the runner is still happily retrying).
+- Pick a timeout that bounds your readiness expectations. `60 * time.Second` matches the default `StartupTimeout`; if you've configured a longer `StartupTimeout`, increase the `WaitState` timeout to match (otherwise `WaitState` returns timeout while the runner is still happily retrying). The examples above use `30 * time.Second` as a deliberately shorter bound for illustration; production callers should use the full timeout or a value matched to their configured `StartupTimeout`.
 
 ---
 

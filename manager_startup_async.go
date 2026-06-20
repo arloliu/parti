@@ -110,7 +110,10 @@ func (m *Manager) markStartupAssignmentApplied() {
 	if !isCalculatorOwnedActiveState(m.State()) {
 		return
 	}
-	if m.calculator == nil || m.calculator.GetState() != types.CalcStateIdle {
+	m.mu.RLock()
+	calc := m.calculator
+	m.mu.RUnlock()
+	if calc == nil || calc.GetState() != types.CalcStateIdle {
 		return
 	}
 

@@ -37,7 +37,7 @@ import (
 // order.
 //
 // Errors wrap ErrInvalidConfig and are surfaced as static-validation
-// failures (CLI exit code 2):
+// failures (CLI exit code 3):
 //
 //   - streamName == ""        → "%w: streamName is required"
 //   - consumerPrefix == ""    → "%w: consumerPrefix is required"

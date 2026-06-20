@@ -1556,7 +1556,7 @@ src := source.NewStatic(partitions)
 NATS KeyValue-backed partition source that supports dynamic updates.
 
 ```go
-func NewNatsKV(kv jetstream.KeyValue, key string, logger types.Logger) *NatsKV
+func NewNatsKV(kv jetstream.KeyValue, key string, logger types.Logger, opts ...NatsKVOption) *NatsKV
 ```
 
 **Methods**:
