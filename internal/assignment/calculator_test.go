@@ -647,7 +647,7 @@ func TestGetActiveWorkers_EnumRecoverySignalsBeforeCredibilityGate(t *testing.T)
 		require.NoError(t, err)
 	}
 
-	fault := &keysTimeoutKV{KeyValue: heartbeatKV}
+	fault := &keysFaultKV{KeyValue: heartbeatKV, err: context.DeadlineExceeded}
 	var enumErr, enumOK atomic.Int64
 	calc, err := NewCalculator(&Config{
 		AssignmentKV:                         assignmentKV,
