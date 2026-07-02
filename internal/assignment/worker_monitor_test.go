@@ -467,6 +467,20 @@ type fakeKV struct {
 	currentWatcher *fakeKeyWatcher
 	// keysBlocking, when true, causes Keys to block until ctx.Done().
 	keysBlocking bool
+	// keys is the server-side truth returned by Keys when keysBlocking is
+	// false. The zero value (nil) preserves the pre-existing behavior of
+	// every test that does not call SetKeys: Keys returns (nil, nil), which
+	// GetActiveWorkers treats as an empty worker set.
+	keys []string
+}
+
+// SetKeys configures the key list returned by a subsequent (non-blocking)
+// Keys call. Safe for concurrent use: GetActiveWorkers may call Keys from a
+// callback goroutine while the test goroutine drives the watcher loop.
+func (f *fakeKV) SetKeys(keys []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.keys = keys
 }
 
 func (f *fakeKV) WatchCallCount() int {
@@ -503,7 +517,10 @@ func (f *fakeKV) Keys(ctx context.Context, _ ...jetstream.WatchOpt) ([]string, e
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
-	return nil, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.keys, nil
 }
 
 // Unimplemented stubs required by the jetstream.KeyValue interface.
@@ -607,4 +624,613 @@ func TestWorkerMonitor_GetActiveWorkers_BoundedTimeout(t *testing.T) {
 	// Elapsed should be roughly fakeTTL/2 (100ms). Allow 3× for CI headroom.
 	require.Less(t, elapsed, 3*fakeTTL,
 		"GetActiveWorkers returned too late (%v); expected ~%v", elapsed, fakeTTL/2)
+}
+
+// fakeKVEntry is a minimal jetstream.KeyValueEntry double for driving
+// processWatcherEvents directly.
+type fakeKVEntry struct {
+	key string
+	op  jetstream.KeyValueOp
+}
+
+func (e *fakeKVEntry) Bucket() string                  { return "fake" }
+func (e *fakeKVEntry) Key() string                     { return e.key }
+func (e *fakeKVEntry) Value() []byte                   { return nil }
+func (e *fakeKVEntry) Revision() uint64                { return 0 }
+func (e *fakeKVEntry) Created() time.Time              { return time.Time{} }
+func (e *fakeKVEntry) Delta() uint64                   { return 0 }
+func (e *fakeKVEntry) Operation() jetstream.KeyValueOp { return e.op }
+
+// watcherSession drives one processWatcherEvents session against fakeKV.
+type watcherSession struct {
+	push func(jetstream.KeyValueEntry) // blocks until the loop consumes the entry
+	stop func()                        // cancels the session and waits for exit
+}
+
+// startWatcherSession starts processWatcherEvents in a goroutine and returns
+// a session handle. The fakeKV's unbuffered updates channel means push()
+// returns only after the loop has received (though not necessarily fully
+// processed) the entry.
+func startWatcherSession(t *testing.T, m *WorkerMonitor, kv *fakeKV) *watcherSession {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = m.processWatcherEvents(ctx)
+	}()
+	// Wait for the session's Watch call so currentWatcher is set.
+	require.Eventually(t, func() bool { return kv.WatchCallCount() >= 1 }, time.Second, time.Millisecond)
+
+	return &watcherSession{
+		push: func(e jetstream.KeyValueEntry) {
+			kv.mu.Lock()
+			w := kv.currentWatcher
+			kv.mu.Unlock()
+			require.NotNil(t, w)
+			select {
+			case w.updates <- e:
+			case <-time.After(2 * time.Second):
+				t.Fatal("watcher loop did not consume entry")
+			}
+		},
+		stop: func() {
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("watcher session did not exit")
+			}
+		},
+	}
+}
+
+// newFakeClockAt returns the package's fakeClock (see newFakeClock in
+// calculator_state_test.go) initialized to start rather than time.Now(), so
+// classifier tests below can pin the same documented base times used
+// throughout this file. fakeClock is mutex-guarded, so — unlike the
+// atomic.Pointer[time.Time] machinery this replaces — Advance/Now are safe
+// to call from the test goroutine while the watcher goroutine concurrently
+// reads via m.now.
+func newFakeClockAt(start time.Time) *fakeClock {
+	c := newFakeClock()
+	c.Advance(start.Sub(c.Now()))
+
+	return c
+}
+
+// newClassifierMonitor builds a monitor wired to a fake clock and an
+// onChange counter, suitable for driving processWatcherEvents directly.
+func newClassifierMonitor(hbTTL time.Duration, clock *fakeClock) (*WorkerMonitor, *fakeKV, *atomic.Int32) {
+	kv := &fakeKV{}
+	var calls atomic.Int32
+	m := NewWorkerMonitor(kv, "worker", hbTTL,
+		func(ctx context.Context) error { calls.Add(1); return nil },
+		logging.NewNop(),
+	)
+	m.now = clock.Now
+
+	return m, kv, &calls
+}
+
+// waitDebounce sleeps past the 100ms debounce window plus scheduling slack.
+func waitDebounce() { time.Sleep(250 * time.Millisecond) }
+
+func TestWorkerMonitor_RefreshSuppressed(t *testing.T) {
+	t.Parallel()
+	clock := newFakeClockAt(time.Unix(1000, 0))
+	m, kv, calls := newClassifierMonitor(10*time.Second, clock)
+	s := startWatcherSession(t, m, kv)
+	defer s.stop()
+
+	// First PUT of w1 is a join → one check.
+	s.push(&fakeKVEntry{key: "worker.w1", op: jetstream.KeyValuePut})
+	waitDebounce()
+	require.EqualValues(t, 1, calls.Load(), "first PUT (join) must trigger one check")
+
+	// Refreshes within hbTTL: advance clock 3s per beat, push 3 refreshes.
+	for i := 0; i < 3; i++ {
+		clock.Advance(3 * time.Second)
+		s.push(&fakeKVEntry{key: "worker.w1", op: jetstream.KeyValuePut})
+	}
+	waitDebounce()
+	require.EqualValues(t, 1, calls.Load(), "refresh PUTs within hbTTL must be suppressed (no additional checks)")
+}
+
+func TestWorkerMonitor_JoinAndLeaveTrigger(t *testing.T) {
+	t.Parallel()
+	clock := newFakeClockAt(time.Unix(1000, 0))
+	m, kv, calls := newClassifierMonitor(10*time.Second, clock)
+	s := startWatcherSession(t, m, kv)
+	defer s.stop()
+
+	s.push(&fakeKVEntry{key: "worker.w1", op: jetstream.KeyValuePut}) // join
+	waitDebounce()
+	require.EqualValues(t, 1, calls.Load())
+
+	s.push(&fakeKVEntry{key: "worker.w2", op: jetstream.KeyValuePut}) // another join
+	waitDebounce()
+	require.EqualValues(t, 2, calls.Load(), "unknown-key PUT must trigger")
+
+	s.push(&fakeKVEntry{key: "worker.w1", op: jetstream.KeyValueDelete}) // graceful leave
+	waitDebounce()
+	require.EqualValues(t, 3, calls.Load(), "DELETE must trigger")
+
+	s.push(&fakeKVEntry{key: "worker.w2", op: jetstream.KeyValuePurge}) // purge
+	waitDebounce()
+	require.EqualValues(t, 4, calls.Load(), "PURGE must trigger")
+}
+
+func TestWorkerMonitor_StaleRejoinTriggers(t *testing.T) {
+	t.Parallel()
+	clock := newFakeClockAt(time.Unix(1000, 0))
+	m, kv, calls := newClassifierMonitor(10*time.Second, clock)
+	s := startWatcherSession(t, m, kv)
+	defer s.stop()
+
+	s.push(&fakeKVEntry{key: "worker.w1", op: jetstream.KeyValuePut}) // join
+	waitDebounce()
+	require.EqualValues(t, 1, calls.Load())
+
+	// Gap > hbTTL: the worker's key must have expired server-side; the next
+	// PUT is a re-join and must trigger. This is a single stale key with no
+	// other tracked worker, so the PUT itself updates lastSeen[key] = now
+	// BEFORE sweepExpired runs (worker_monitor.go:434-452) — the same key
+	// can no longer be found stale by the sweep in the same event. The
+	// check fires from classification (join) alone, so exactly one
+	// additional check is expected.
+	clock.Advance(11 * time.Second)
+	s.push(&fakeKVEntry{key: "worker.w1", op: jetstream.KeyValuePut})
+	waitDebounce()
+	require.EqualValues(t, 2, calls.Load(), "PUT after >hbTTL gap must trigger exactly once (re-join)")
+}
+
+func TestWorkerMonitor_ZeroTTLAlwaysTriggers(t *testing.T) {
+	t.Parallel()
+	clock := newFakeClockAt(time.Unix(1000, 0))
+	// hbTTL == 0: direct unit seam only (Start would panic on ticker);
+	// every PUT must classify as join, reproducing pre-change behavior.
+	m, kv, calls := newClassifierMonitor(0, clock)
+	s := startWatcherSession(t, m, kv)
+	defer s.stop()
+
+	for i := 0; i < 3; i++ {
+		s.push(&fakeKVEntry{key: "worker.w1", op: jetstream.KeyValuePut})
+		waitDebounce()
+	}
+	require.EqualValues(t, 3, calls.Load(), "hbTTL==0 must trigger on every PUT (no suppression)")
+}
+
+func TestWorkerMonitor_SweepFlagsExpiredWorker(t *testing.T) {
+	t.Parallel()
+	clock := newFakeClockAt(time.Unix(1000, 0))
+	m, kv, calls := newClassifierMonitor(10*time.Second, clock)
+	s := startWatcherSession(t, m, kv)
+	defer s.stop()
+
+	// Join A and B.
+	s.push(&fakeKVEntry{key: "worker.a", op: jetstream.KeyValuePut})
+	s.push(&fakeKVEntry{key: "worker.b", op: jetstream.KeyValuePut})
+	waitDebounce()
+	joins := calls.Load()
+
+	// B refreshes on a 3s beat; A goes silent. When B's refresh arrives
+	// with A stale (>= hbTTL since A's lastSeen), the sweep must flag A
+	// and force a check even though B's PUT alone is a suppressed refresh.
+	for i := 0; i < 3; i++ { // t=+3s,+6s,+9s — A not yet stale, suppressed
+		clock.Advance(3 * time.Second)
+		s.push(&fakeKVEntry{key: "worker.b", op: jetstream.KeyValuePut})
+	}
+	waitDebounce()
+	require.Equal(t, joins, calls.Load(), "no check while A is within hbTTL and B refreshes")
+
+	clock.Advance(3 * time.Second) // t=+12s — A stale (12s >= 10s)
+	s.push(&fakeKVEntry{key: "worker.b", op: jetstream.KeyValuePut})
+	waitDebounce()
+	require.Equal(t, joins+1, calls.Load(), "sweep must force a check when a tracked worker exceeds hbTTL")
+}
+
+func TestWorkerMonitor_HolidayUnsuppressesThenResumes(t *testing.T) {
+	t.Parallel()
+	clock := newFakeClockAt(time.Unix(1000, 0))
+	m, kv, calls := newClassifierMonitor(10*time.Second, clock)
+	s := startWatcherSession(t, m, kv)
+	defer s.stop()
+
+	s.push(&fakeKVEntry{key: "worker.a", op: jetstream.KeyValuePut})
+	s.push(&fakeKVEntry{key: "worker.b", op: jetstream.KeyValuePut})
+	waitDebounce()
+
+	// Make A stale → sweep fires at B's next refresh, opening a 3×hbTTL holiday.
+	clock.Advance(11 * time.Second)
+	s.push(&fakeKVEntry{key: "worker.b", op: jetstream.KeyValuePut})
+	waitDebounce()
+	afterFlag := calls.Load()
+
+	// During the holiday every refresh triggers (crash-window behavior
+	// identical to pre-change code).
+	for i := 0; i < 3; i++ {
+		clock.Advance(3 * time.Second)
+		s.push(&fakeKVEntry{key: "worker.b", op: jetstream.KeyValuePut})
+		waitDebounce()
+	}
+	require.Equal(t, afterFlag+3, calls.Load(), "refreshes during the holiday must trigger checks")
+
+	// Advance past the holiday (3×hbTTL = 30s from the flag at t=+11s,
+	// i.e. until t=+41s) with B fresh — suppression resumes. Beat every
+	// 3s so B never goes stale itself: pushes land at t=+23..+44s.
+	for i := 0; i < 8; i++ {
+		clock.Advance(3 * time.Second)
+		s.push(&fakeKVEntry{key: "worker.b", op: jetstream.KeyValuePut})
+	}
+	waitDebounce()
+	settled := calls.Load()
+	clock.Advance(3 * time.Second)
+	s.push(&fakeKVEntry{key: "worker.b", op: jetstream.KeyValuePut})
+	waitDebounce()
+	require.Equal(t, settled, calls.Load(), "after the holiday, refreshes are suppressed again")
+}
+
+func TestWorkerMonitor_OverlappingCrashExtendsHoliday(t *testing.T) {
+	t.Parallel()
+	// A second worker crossing staleness DURING an open holiday must be
+	// swept too, and sweeping re-stamps unsuppressedUntil — the holiday
+	// EXTENDS. During a holiday every refresh triggers anyway, so the
+	// only observable that discriminates the second sweep is whether
+	// refreshes still trigger AFTER the first holiday would have ended.
+	clock := newFakeClockAt(time.Unix(1000, 0))
+	m, kv, calls := newClassifierMonitor(10*time.Second, clock)
+	s := startWatcherSession(t, m, kv)
+	defer s.stop()
+
+	// Joins at t=0.
+	s.push(&fakeKVEntry{key: "worker.a", op: jetstream.KeyValuePut})
+	s.push(&fakeKVEntry{key: "worker.b", op: jetstream.KeyValuePut})
+	s.push(&fakeKVEntry{key: "worker.c", op: jetstream.KeyValuePut})
+	waitDebounce()
+
+	// Keep B and C fresh through t=+9s while A goes silent.
+	for i := 0; i < 3; i++ { // pushes at +3, +6, +9
+		clock.Advance(3 * time.Second)
+		s.push(&fakeKVEntry{key: "worker.b", op: jetstream.KeyValuePut})
+		s.push(&fakeKVEntry{key: "worker.c", op: jetstream.KeyValuePut})
+	}
+	waitDebounce()
+
+	// t=+12s: A stale (12s ≥ 10s), B fresh (3s) → sweep flags ONLY A.
+	// First holiday: until +12+30 = +42s.
+	clock.Advance(3 * time.Second)
+	s.push(&fakeKVEntry{key: "worker.c", op: jetstream.KeyValuePut})
+	waitDebounce()
+
+	// B goes silent after its +9s beat. C beats on: at t=+21s the sweep
+	// finds B stale (12s since +9s) → flags B → holiday RE-STAMPED to
+	// +21+30 = +51s.
+	for i := 0; i < 3; i++ { // C pushes at +15, +18, +21
+		clock.Advance(3 * time.Second)
+		s.push(&fakeKVEntry{key: "worker.c", op: jetstream.KeyValuePut})
+	}
+	waitDebounce()
+
+	// C beats through the ORIGINAL holiday end (+42s): pushes at
+	// +24..+45s. Settle, then probe.
+	for i := 0; i < 8; i++ {
+		clock.Advance(3 * time.Second)
+		s.push(&fakeKVEntry{key: "worker.c", op: jetstream.KeyValuePut})
+	}
+	waitDebounce()
+	settled := calls.Load()
+
+	// Probe 1 — t=+48s: AFTER the first holiday (+42s) but INSIDE the
+	// extension (+51s): a C refresh must STILL trigger. This is the
+	// discriminator: without B's sweep-extension, this push would be
+	// suppressed.
+	clock.Advance(3 * time.Second)
+	s.push(&fakeKVEntry{key: "worker.c", op: jetstream.KeyValuePut})
+	waitDebounce()
+	require.Equal(t, settled+1, calls.Load(),
+		"refresh after the first holiday's end must still trigger — the second crash extended the holiday")
+
+	// Probe 2 — t=+54s: past the extension (+51s): suppressed again.
+	clock.Advance(6 * time.Second)
+	s.push(&fakeKVEntry{key: "worker.c", op: jetstream.KeyValuePut})
+	waitDebounce()
+	require.Equal(t, settled+1, calls.Load(), "suppression resumes after the extended holiday")
+
+	// B's rejoin after being swept classifies as a join and triggers.
+	s.push(&fakeKVEntry{key: "worker.b", op: jetstream.KeyValuePut})
+	waitDebounce()
+	require.Equal(t, settled+2, calls.Load(), "swept worker's rejoin must classify as join and trigger")
+}
+
+func TestWorkerMonitor_FalseFlagSelfCorrects(t *testing.T) {
+	t.Parallel()
+	clock := newFakeClockAt(time.Unix(1000, 0))
+
+	kv := &fakeKV{}
+	var calls atomic.Int32
+	release := make(chan struct{})
+	m := NewWorkerMonitor(kv, "worker", 10*time.Second,
+		func(ctx context.Context) error {
+			calls.Add(1)
+			if calls.Load() == 2 { // block only the sweep-triggered check
+				<-release
+			}
+			return nil
+		},
+		logging.NewNop(),
+	)
+	m.now = clock.Now
+	s := startWatcherSession(t, m, kv)
+	defer s.stop()
+
+	s.push(&fakeKVEntry{key: "worker.a", op: jetstream.KeyValuePut})
+	s.push(&fakeKVEntry{key: "worker.b", op: jetstream.KeyValuePut})
+	waitDebounce() // check #1 (joins coalesced)
+
+	// Keep B FRESH with 3s beats while A goes silent. These are suppressed
+	// refreshes — no checks. Critical for the discriminator below: B must
+	// never itself classify as stale, so the only thing that can force a
+	// check at t=+12s is the sweep flagging A.
+	for i := 0; i < 3; i++ { // pushes at +3, +6, +9
+		clock.Advance(3 * time.Second)
+		s.push(&fakeKVEntry{key: "worker.b", op: jetstream.KeyValuePut})
+	}
+	waitDebounce()
+	require.EqualValues(t, 1, calls.Load(), "B's fresh refreshes must stay suppressed while A ages")
+
+	// t=+12s: B's entry is a fresh refresh (3s since its last beat) —
+	// suppressed by classification alone. The sweep, however, finds A
+	// stale (12s ≥ hbTTL) and forces check #2: this assertion FAILS if
+	// sweepExpired does not exist or does not fire. (False-flag framing:
+	// locally-stale lastSeen[a] simulates delivery delay; A may be alive
+	// server-side.) The callback blocks at check #2.
+	clock.Advance(3 * time.Second)
+	s.push(&fakeKVEntry{key: "worker.b", op: jetstream.KeyValuePut})
+	require.Eventually(t, func() bool { return calls.Load() == 2 },
+		2*time.Second, 5*time.Millisecond,
+		"sweep must force a check off B's suppressed refresh when A is locally stale")
+
+	// A's own delayed PUT arrives while the callback blocks. Push from a
+	// goroutine: the loop is busy in onChangeCb, so this send parks until
+	// the callback returns.
+	pushed := make(chan struct{})
+	go func() {
+		defer close(pushed)
+		kv.mu.Lock()
+		w := kv.currentWatcher
+		kv.mu.Unlock()
+		w.updates <- &fakeKVEntry{key: "worker.a", op: jetstream.KeyValuePut}
+	}()
+
+	close(release) // unblock check #2
+	select {
+	case <-pushed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("queued entry was not consumed after callback release")
+	}
+	waitDebounce()
+	// A was swept from lastSeen, so its delayed PUT is a join → check #3.
+	// Self-correction: the triggered check's real scan (in production)
+	// observes A alive; at this unit level we pin the classification and
+	// trigger behavior only — see TestWorkerMonitor_FalseFlagSelfCorrectsWithLiveScan
+	// for the companion test that proves the scan/emergency half.
+	require.EqualValues(t, 3, calls.Load(), "swept-then-reappearing worker must re-trigger exactly once (join)")
+}
+
+// TestWorkerMonitor_FalseFlagSelfCorrectsWithLiveScan is the companion to
+// TestWorkerMonitor_FalseFlagSelfCorrects: it proves the scan/emergency half
+// that the classification-only test above documents as out of scope. Server
+// truth (the fake KV's key list) holds A and B alive for the whole test —
+// only A's LOCAL lastSeen goes stale (simulating a delivery delay) — so the
+// sweep's flag on A is a false flag by construction. The onChange callback
+// wired here mirrors the real reconciliation shape used by
+// Calculator.observeAndDecideLocked (calculator.go:1017-1049): a fresh
+// GetActiveWorkers scan feeds a real EmergencyDetector.CheckEmergency, and
+// because A is visible in curr, the detector must clear it and claim
+// nothing.
+func TestWorkerMonitor_FalseFlagSelfCorrectsWithLiveScan(t *testing.T) {
+	t.Parallel()
+	clock := newFakeClockAt(time.Unix(1000, 0))
+
+	kv := &fakeKV{}
+	// Server-side truth never changes: both workers stay heartbeat-visible
+	// for the whole test, even while A's local lastSeen goes stale.
+	kv.SetKeys([]string{"worker.a", "worker.b"})
+
+	detector := NewEmergencyDetector(10 * time.Second)
+	detector.now = clock.Now // same fake clock as the monitor: deterministic grace math
+
+	var calls atomic.Int32
+	var scanResult []string
+	var scanErr error
+	var emergencyClaimed atomic.Bool
+	var pendingClaimed atomic.Bool
+	release := make(chan struct{})
+
+	var m *WorkerMonitor
+	m = NewWorkerMonitor(kv, "worker", 10*time.Second,
+		func(ctx context.Context) error {
+			n := calls.Add(1)
+			if n == 2 { // the sweep-triggered check
+				// Real reconciliation shape: scan current KV truth via the
+				// monitor's own GetActiveWorkers, then reconcile against a
+				// real EmergencyDetector exactly as the calculator does.
+				workers, err := m.GetActiveWorkers(ctx)
+				scanResult = workers
+				scanErr = err
+
+				curr := make(map[string]bool, len(workers))
+				for _, w := range workers {
+					curr[w] = true
+				}
+				prev := map[string]bool{"a": true, "b": true} // last known-active set before the sweep
+				emergency, _, pending := detector.CheckEmergency(prev, curr)
+				emergencyClaimed.Store(emergency)
+				pendingClaimed.Store(pending)
+
+				<-release // block only the sweep-triggered check, same pattern as the classification-only test
+			}
+
+			return nil
+		},
+		logging.NewNop(),
+	)
+	m.now = clock.Now
+	s := startWatcherSession(t, m, kv)
+	defer s.stop()
+
+	s.push(&fakeKVEntry{key: "worker.a", op: jetstream.KeyValuePut})
+	s.push(&fakeKVEntry{key: "worker.b", op: jetstream.KeyValuePut})
+	waitDebounce() // check #1 (joins coalesced)
+
+	// Keep B fresh with 3s beats while A goes silent locally. Server truth
+	// (kv.keys) is untouched throughout: A stays alive from a live-scan
+	// perspective.
+	for i := 0; i < 3; i++ { // pushes at +3, +6, +9
+		clock.Advance(3 * time.Second)
+		s.push(&fakeKVEntry{key: "worker.b", op: jetstream.KeyValuePut})
+	}
+	waitDebounce()
+	require.EqualValues(t, 1, calls.Load(), "B's fresh refreshes must stay suppressed while A ages")
+
+	// t=+12s: B's entry is a fresh refresh — suppressed by classification
+	// alone. The sweep finds A locally stale (12s >= hbTTL) and forces
+	// check #2, which blocks inside the scan/emergency reconciliation above.
+	clock.Advance(3 * time.Second)
+	s.push(&fakeKVEntry{key: "worker.b", op: jetstream.KeyValuePut})
+	require.Eventually(t, func() bool { return calls.Load() == 2 },
+		2*time.Second, 5*time.Millisecond,
+		"sweep must force a check off B's suppressed refresh when A is locally stale")
+
+	// A's own delayed PUT arrives while the callback blocks. Push from a
+	// goroutine: the loop is busy in onChangeCb, so this send parks until
+	// the callback returns — reusing the queued-PUT pattern from the
+	// classification-only test.
+	pushed := make(chan struct{})
+	go func() {
+		defer close(pushed)
+		kv.mu.Lock()
+		w := kv.currentWatcher
+		kv.mu.Unlock()
+		w.updates <- &fakeKVEntry{key: "worker.a", op: jetstream.KeyValuePut}
+	}()
+
+	close(release) // unblock check #2
+	select {
+	case <-pushed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("queued entry was not consumed after callback release")
+	}
+	waitDebounce()
+
+	// (a) The sweep-triggered check's real scan observes A alive.
+	require.NoError(t, scanErr, "sweep-triggered GetActiveWorkers scan must succeed")
+	require.ElementsMatch(t, []string{"a", "b"}, scanResult,
+		"sweep-triggered check's real scan must observe A alive alongside B")
+
+	// (b) No emergency is claimed and nothing is left pending: A visible in
+	// curr must clear the detector's tracking for A.
+	require.False(t, emergencyClaimed.Load(), "A visible in curr must clear the detector; no emergency may be claimed")
+	require.False(t, pendingClaimed.Load(), "A visible in curr must clear the disappearance; nothing may remain pending")
+
+	// (c) A was swept from lastSeen, so its delayed PUT classifies as a
+	// join → exactly one additional check (#3), no oscillation.
+	require.EqualValues(t, 3, calls.Load(), "swept-then-reappearing worker must re-trigger exactly once (join)")
+}
+
+func TestWorkerMonitor_SweepDisabledAtZeroTTL(t *testing.T) {
+	t.Parallel()
+	clock := newFakeClockAt(time.Unix(1000, 0))
+	m, kv, calls := newClassifierMonitor(0, clock)
+	s := startWatcherSession(t, m, kv)
+	defer s.stop()
+
+	s.push(&fakeKVEntry{key: "worker.a", op: jetstream.KeyValuePut})
+	waitDebounce()
+	clock.Advance(time.Hour)
+	s.push(&fakeKVEntry{key: "worker.a", op: jetstream.KeyValuePut})
+	waitDebounce()
+	// Both PUTs trigger (zero-TTL: every PUT is a join); the sweep is a
+	// guard-disabled no-op and must not panic or double-fire.
+	require.EqualValues(t, 2, calls.Load())
+}
+
+func TestWorkerMonitor_InitialReplayCoalescesWithinWindow(t *testing.T) {
+	t.Parallel()
+	clock := newFakeClockAt(time.Unix(1000, 0))
+	m, kv, calls := newClassifierMonitor(10*time.Second, clock)
+	s := startWatcherSession(t, m, kv)
+	defer s.stop()
+
+	// K replayed keys delivered within one 100ms debounce window →
+	// exactly one coalesced check (spec: window-scoped claim; a replay
+	// spanning multiple windows may produce multiple checks, same as
+	// pre-change code).
+	for i := 1; i <= 5; i++ {
+		s.push(&fakeKVEntry{key: fmt.Sprintf("worker.w%d", i), op: jetstream.KeyValuePut})
+	}
+	waitDebounce()
+	require.EqualValues(t, 1, calls.Load(), "replay entries within one debounce window must coalesce into one check")
+}
+
+func TestWorkerMonitor_RestartSessionResetsClassifierState(t *testing.T) {
+	t.Parallel()
+	clock := newFakeClockAt(time.Unix(1000, 0))
+
+	kv := &fakeKV{}
+	var calls atomic.Int32
+	m := NewWorkerMonitor(kv, "worker", 10*time.Second,
+		func(ctx context.Context) error { calls.Add(1); return nil },
+		logging.NewNop(),
+	)
+	m.now = clock.Now
+	m.watchBaseBackoff = 10 * time.Millisecond // fast retry, matches existing restart tests
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.monitorWatcherWithRetry(ctx)
+	require.Eventually(t, func() bool { return kv.WatchCallCount() >= 1 }, time.Second, time.Millisecond)
+
+	// Session 1: a single join establishes classifier state.
+	kv.mu.Lock()
+	w := kv.currentWatcher
+	kv.mu.Unlock()
+	w.updates <- &fakeKVEntry{key: "worker.a", op: jetstream.KeyValuePut}
+	waitDebounce()
+	require.EqualValues(t, 1, calls.Load())
+
+	// Kill the session; the retry loop must start a fresh one.
+	kv.CloseUpdates()
+	require.Eventually(t, func() bool { return kv.WatchCallCount() >= 2 }, 2*time.Second, 10*time.Millisecond)
+
+	// Session 2: the SAME key replayed is unknown to the fresh session's
+	// lastSeen → join → triggers. (Fresh state; no staleness carryover.)
+	kv.mu.Lock()
+	w = kv.currentWatcher
+	kv.mu.Unlock()
+	w.updates <- &fakeKVEntry{key: "worker.a", op: jetstream.KeyValuePut}
+	waitDebounce()
+	require.EqualValues(t, 2, calls.Load(), "restarted session must rebuild classifier state from replay")
+}
+
+func TestWorkerMonitor_PollingCadenceUnaffectedBySuppression(t *testing.T) {
+	t.Parallel()
+	// Full monitor via Start: the polling ticker (hbTTL/2) must keep
+	// invoking onChange regardless of watcher-side suppression — it is
+	// the ground-truth crash detector and the enumeration-stall
+	// detector's designed sampling source (counter behavior itself is
+	// pinned in calculator_audit_test.go).
+	kv := &fakeKV{}
+	var calls atomic.Int32
+	m := NewWorkerMonitor(kv, "worker", 200*time.Millisecond, // ticker at 100ms
+		func(ctx context.Context) error { calls.Add(1); return nil },
+		logging.NewNop(),
+	)
+	require.NoError(t, m.Start(context.Background()))
+	defer func() { _ = m.Stop() }()
+
+	require.Eventually(t, func() bool { return calls.Load() >= 3 },
+		2*time.Second, 10*time.Millisecond,
+		"polling ticker must fire at hbTTL/2 cadence independent of watcher suppression")
 }

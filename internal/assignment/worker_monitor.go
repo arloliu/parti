@@ -21,11 +21,38 @@ var (
 	workerWatcherJitter      = 0.3 // ±30%
 )
 
+// suppressionHolidayFactor scales HeartbeatTTL into the suppression-holiday
+// length opened by sweepExpired. 3×hbTTL covers the single-serialization
+// worst-case emergency-confirmation chain:
+//
+//	firstSeen ≤ flag + 100ms (debounce) + hbTTL/2 (pollMu wait: one
+//	in-flight observation) + hbTTL/2 (own scan, boundedOpCtx)
+//	deadline  ≤ firstSeen + EmergencyGracePeriod (≤ HeartbeatTTL —
+//	enforced by the PUBLIC parti.Config.Validate ltefield tag; the
+//	internal assignment.Config does NOT re-enforce it, so direct
+//	internal constructions must respect it themselves)
+//	confirming entry ≤ deadline + HeartbeatInterval (≤ hbTTL/2)
+//	              ≤ flag + 2.5×hbTTL + 100ms  < flag + 3×hbTTL
+//	              (margin positive for hbTTL > 200ms; valid sub-200ms
+//	              TTLs route through the polling backstop below, whose
+//	              hbTTL/2 bound is faster than the debounce there)
+//
+// Deeper adversarial pollMu stacking falls to the polling backstop
+// (+hbTTL/2) — the same worst-case bound the pre-suppression code
+// degrades to under identical stacking. Do not shorten: 1×hbTTL fails
+// at EmergencyGracePeriod == HeartbeatTTL; 2×hbTTL fails once the
+// pollMu wait term is modeled.
+const suppressionHolidayFactor = 3
+
 // WorkerMonitor handles worker health detection via NATS KV heartbeats.
 //
 // It provides hybrid monitoring:
-//   - Watcher (primary): Fast detection <100ms via NATS KV Watch
-//   - Polling (fallback): Reliable detection ~1.5s via periodic KV scan
+//   - Watcher (primary): Fast detection <100ms via NATS KV Watch.
+//     Routine heartbeat refreshes are classified against a session-local
+//     lastSeen map and suppressed (no check, no Keys() scan); joins,
+//     graceful leaves, and sweep-detected silent expiries trigger checks.
+//   - Polling (fallback): Reliable detection ~hbTTL/2 via periodic KV
+//     scan; the ground-truth path for silent TTL expiry.
 //
 // The monitor runs in a background goroutine and invokes a callback
 // when worker topology changes are detected.
@@ -47,6 +74,10 @@ type WorkerMonitor struct {
 	// Defaults to workerWatcherBaseBackoff; tests may set a smaller value
 	// on the struct before calling Start to avoid racy global mutations.
 	watchBaseBackoff time.Duration
+
+	// now returns the current time for watcher-entry classification and
+	// the expiry sweep. Defaults to time.Now; tests inject a fake clock.
+	now func() time.Time
 
 	// Lifecycle management
 	mu      sync.Mutex
@@ -82,6 +113,7 @@ func NewWorkerMonitor(
 		onChangeCb:       onChange,
 		logger:           logger,
 		watchBaseBackoff: workerWatcherBaseBackoff,
+		now:              time.Now,
 		stopCh:           make(chan struct{}),
 		doneCh:           make(chan struct{}),
 	}
@@ -351,7 +383,19 @@ func (m *WorkerMonitor) processWatcherEvents(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to start heartbeat watcher: %w", err)
 	}
+	// Watcher-session-local classification state: suppressedCount,
+	// lastSeen, and unsuppressedUntil are owned exclusively by this
+	// goroutine and rebuilt from the initial replay after every watcher
+	// restart, so no staleness survives a session boundary. A PUT of a
+	// key last seen < hbTTL ago is a refresh — the worker was
+	// continuously alive, so topology cannot have changed and the
+	// (expensive) Keys()-scan check is skipped. Unknown/stale PUTs
+	// (joins) and DELETE/PURGE (graceful leaves) trigger as before.
+	var suppressedCount uint64
+	lastSeen := make(map[string]time.Time)
+	var unsuppressedUntil time.Time
 	defer func() {
+		m.logger.Debug("watcher session ended", "suppressed_refreshes", suppressedCount)
 		if serr := watcher.Stop(); serr != nil && !natsutil.IsBenignWatcherStopErr(serr) {
 			m.logger.Warn("failed to stop heartbeat watcher", "error", serr)
 		}
@@ -383,7 +427,32 @@ func (m *WorkerMonitor) processWatcherEvents(ctx context.Context) error {
 				continue
 			}
 			m.logger.Debug("watcher: received entry", "key", entry.Key(), "operation", entry.Operation())
-			if !pendingCheck {
+
+			now := m.now()
+			trigger := true
+			switch entry.Operation() {
+			case jetstream.KeyValuePut:
+				key := entry.Key()
+				prev, known := lastSeen[key]
+				lastSeen[key] = now
+				// hbTTL==0: now.Sub(prev) is never negative under a forward
+				// clock, so this never suppresses — mirrors the explicit
+				// guard in sweepExpired.
+				if known && now.Sub(prev) < m.hbTTL && now.After(unsuppressedUntil) {
+					// Refresh under active suppression: worker was
+					// continuously alive; skip the check.
+					trigger = false
+					suppressedCount++
+				}
+			case jetstream.KeyValueDelete, jetstream.KeyValuePurge:
+				delete(lastSeen, entry.Key())
+			}
+
+			if m.sweepExpired(lastSeen, now, &unsuppressedUntil) {
+				trigger = true
+			}
+
+			if trigger && !pendingCheck {
 				pendingCheck = true
 				debounceTimer.Reset(100 * time.Millisecond)
 			}
@@ -399,4 +468,41 @@ func (m *WorkerMonitor) processWatcherEvents(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// sweepExpired flags tracked workers whose heartbeat key must have
+// expired server-side (no PUT received for ≥ hbTTL). Flagged entries are
+// removed from lastSeen (a later PUT from the same worker classifies as
+// a join). When anything is flagged it opens a suppression holiday of
+// suppressionHolidayFactor×hbTTL so follow-up observation — including
+// emergency-grace progression and confirmation — runs at the
+// pre-suppression refresh-triggered cadence for the crash window.
+//
+// lastSeen records receive time, which trails server publish time, so a
+// delayed delivery can flag a still-alive worker (false flag). That is
+// safe by construction: the triggered check performs a real Keys() scan
+// and an unchanged worker set short-circuits; the cost is one extra
+// check when the flagged worker's next PUT re-joins.
+//
+// hbTTL == 0 disables the sweep (direct unit seams only; Start requires
+// a positive hbTTL for its polling ticker).
+func (m *WorkerMonitor) sweepExpired(lastSeen map[string]time.Time, now time.Time, unsuppressedUntil *time.Time) bool {
+	if m.hbTTL == 0 {
+		return false
+	}
+	holidayUntil := now.Add(suppressionHolidayFactor * m.hbTTL)
+	flagged := false
+	for k, seen := range lastSeen {
+		if now.Sub(seen) >= m.hbTTL {
+			delete(lastSeen, k)
+			flagged = true
+			m.logger.Debug("watcher: heartbeat key expired without event; forcing check",
+				"key", k, "holiday_until", holidayUntil)
+		}
+	}
+	if flagged {
+		*unsuppressedUntil = holidayUntil
+	}
+
+	return flagged
 }
