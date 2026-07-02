@@ -16,6 +16,7 @@ import (
 	"github.com/arloliu/parti/v2/internal/natsutil"
 	"github.com/arloliu/parti/v2/partitest"
 	"github.com/arloliu/parti/v2/types"
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 )
@@ -732,24 +733,27 @@ func fullCapsAck(leaderRev uint64, appliedVer int64, srcRev uint64, srcKnown boo
 
 // --- merged from calculator_enumeration_stall_test.go ---
 
-// keysTimeoutKV wraps a real jetstream.KeyValue and, when armed, makes Keys()
-// return context.DeadlineExceeded while every other operation — notably the
+// keysFaultKV wraps a real jetstream.KeyValue and, when armed, makes Keys()
+// return the configured err while every other operation — notably the
 // single-key Put/Get a worker uses for its own heartbeat — passes through to
-// the real bucket unchanged. This is NP-10's defining asymmetry: the
-// stream-wide heartbeat-enumeration scan times out, single-key ops do not.
+// the real bucket unchanged. Configuring err as context.DeadlineExceeded
+// models NP-10's defining asymmetry: the stream-wide heartbeat-enumeration
+// scan times out, single-key ops do not. Configuring err as a connectivity
+// error (e.g. nats.ErrConnectionClosed) models the §5.4 connectivity row.
 //
-// The wrapper returns the deadline directly rather than blocking on ctx so the
-// calculator-level proof is deterministic and timing-free; the resulting error
-// value is identical to what a real Keys scan returns when WorkerMonitor's
-// bounded op-context (hbTTL/2) expires mid-scan.
-type keysTimeoutKV struct {
+// The wrapper returns err directly rather than blocking on ctx so the
+// calculator-level proof is deterministic and timing-free; the deadline
+// variant's error value is identical to what a real Keys scan returns when
+// WorkerMonitor's bounded op-context (hbTTL/2) expires mid-scan.
+type keysFaultKV struct {
 	jetstream.KeyValue
 	armed atomic.Bool
+	err   error
 }
 
-func (k *keysTimeoutKV) Keys(ctx context.Context, opts ...jetstream.WatchOpt) ([]string, error) {
+func (k *keysFaultKV) Keys(ctx context.Context, opts ...jetstream.WatchOpt) ([]string, error) {
 	if k.armed.Load() {
-		return nil, context.DeadlineExceeded
+		return nil, k.err
 	}
 
 	return k.KeyValue.Keys(ctx, opts...)
@@ -814,7 +818,7 @@ func TestNP10_GetActiveWorkers_EnumerationDeadline_IsSwallowed(t *testing.T) {
 	_, err := heartbeatKV.Put(ctx, "worker-hb.worker-1", []byte(time.Now().Format(time.RFC3339Nano)))
 	require.NoError(t, err)
 
-	fault := &keysTimeoutKV{KeyValue: heartbeatKV}
+	fault := &keysFaultKV{KeyValue: heartbeatKV, err: context.DeadlineExceeded}
 	calc, err := NewCalculator(&Config{
 		AssignmentKV:     assignmentKV,
 		HeartbeatKV:      fault,
@@ -865,7 +869,7 @@ func TestNP10_GetActiveWorkers_SustainedEnumerationDeadline_FiresCallback(t *tes
 	_, err := heartbeatKV.Put(ctx, "worker-hb.worker-1", []byte(time.Now().Format(time.RFC3339Nano)))
 	require.NoError(t, err)
 
-	fault := &keysTimeoutKV{KeyValue: heartbeatKV}
+	fault := &keysFaultKV{KeyValue: heartbeatKV, err: context.DeadlineExceeded}
 	var enumErr, enumOK atomic.Int64
 	calc, err := NewCalculator(&Config{
 		AssignmentKV:                assignmentKV,
@@ -901,4 +905,42 @@ func TestNP10_GetActiveWorkers_SustainedEnumerationDeadline_FiresCallback(t *tes
 	_, _, err = calc.getActiveWorkers(ctx)
 	require.NoError(t, err)
 	require.Positive(t, enumOK.Load(), "a healthy enumeration must signal recovery via OnEnumerationSuccess")
+}
+
+// TestGetActiveWorkers_ConnectivityErrorBypassesStallCounter pins the
+// §5.4 connectivity row: a connectivity-classified enumeration failure
+// takes the cache-fallback path and must NOT feed the enumeration-stall
+// counter (that class stays owned by the heartbeat-Put circuit).
+func TestGetActiveWorkers_ConnectivityErrorBypassesStallCounter(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	_, nc := partitest.StartEmbeddedNATS(t)
+	assignmentKV := partitest.CreateJetStreamKV(t, nc, "connfb-assign")
+	heartbeatKV := partitest.CreateJetStreamKV(t, nc, "connfb-hb")
+
+	_, err := heartbeatKV.Put(ctx, "worker-hb.worker-1", []byte(time.Now().Format(time.RFC3339Nano)))
+	require.NoError(t, err)
+
+	fault := &keysFaultKV{KeyValue: heartbeatKV, err: nats.ErrConnectionClosed}
+	var enumErr atomic.Int64
+	calc, err := NewCalculator(&Config{
+		AssignmentKV:                assignmentKV,
+		HeartbeatKV:                 fault,
+		AssignmentPrefix:            "assignment",
+		Source:                      &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}}},
+		Strategy:                    &mockStrategy{},
+		HeartbeatPrefix:             "worker-hb",
+		HeartbeatTTL:                6 * time.Second,
+		EnumerationFailureThreshold: 1, // even threshold=1 must not fire on connectivity errors
+		OnEnumerationError:          func(error) { enumErr.Add(1) },
+	})
+	require.NoError(t, err)
+
+	fault.armed.Store(true)
+	for range 3 {
+		_, _, _ = calc.getActiveWorkers(ctx)
+	}
+	require.Zero(t, enumErr.Load(),
+		"connectivity-classified enumeration failures must bypass the stall counter (cache-fallback path)")
 }
