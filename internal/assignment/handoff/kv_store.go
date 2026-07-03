@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/arloliu/parti/v2/internal/natsutil"
 	"github.com/arloliu/parti/v2/kvutil"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -76,15 +77,36 @@ type ClaimStore interface {
 type natsClaimStore struct {
 	kv         jetstream.KeyValue
 	claimsPref string // e.g., "claims/"
+	probeKV    jetstream.KeyValue
 }
 
-// NewNATSClaimStore constructs a ClaimStore.
-func NewNATSClaimStore(kv jetstream.KeyValue, prefix string) ClaimStore {
+// buildNATSClaimStore builds the concrete store, normalizing the claims
+// prefix to a trailing slash. Shared by both exported constructors.
+func buildNATSClaimStore(kv jetstream.KeyValue, prefix string) *natsClaimStore {
 	p := prefix
 	if p != "" && !strings.HasSuffix(p, "/") {
 		p += "/"
 	}
 	return &natsClaimStore{kv: kv, claimsPref: p}
+}
+
+// NewNATSClaimStore constructs a ClaimStore.
+func NewNATSClaimStore(kv jetstream.KeyValue, prefix string) ClaimStore {
+	return buildNATSClaimStore(kv, prefix)
+}
+
+// NewNATSClaimStoreWithProbe constructs a ClaimStore whose sweep gate
+// can probe the backing stream position. probeKV MUST be a dedicated
+// handle for the same bucket, used only by the sweep goroutine's
+// probes — never the handle production reads/writes go through
+// (kv.Status mutates shared *stream state under concurrent Get/Put;
+// the epoch-monitor race class). A nil probeKV yields the same
+// (ungated) behavior as NewNATSClaimStore.
+func NewNATSClaimStoreWithProbe(kv, probeKV jetstream.KeyValue, prefix string) ClaimStore {
+	store := buildNATSClaimStore(kv, prefix)
+	store.probeKV = probeKV
+
+	return store
 }
 
 func (s *natsClaimStore) key(partitionID string) string { return s.claimsPref + partitionID }
@@ -148,6 +170,22 @@ func (s *natsClaimStore) Delete(ctx context.Context, partitionID string, revisio
 	}
 
 	return nil
+}
+
+// BucketPos reports the position of the stream backing the claims
+// bucket via one read-only STREAM.INFO request on the dedicated probe
+// handle — the optional bucketPosProber capability the sweep gate
+// activates on. Prefix scoping does not matter here: any mutation
+// anywhere in the bucket advances the position, which is exactly the
+// conservative signal the gate needs. Without a probe handle it
+// returns errNoProbeHandle, which permanently disables the gate for
+// this coordinator (fail open into full sweeps).
+func (s *natsClaimStore) BucketPos(ctx context.Context) (natsutil.KVStreamPos, error) {
+	if s.probeKV == nil {
+		return natsutil.KVStreamPos{}, errNoProbeHandle
+	}
+
+	return natsutil.ProbeKVStreamPos(ctx, s.probeKV)
 }
 
 // Now returns time.Now() and allows override in tests.

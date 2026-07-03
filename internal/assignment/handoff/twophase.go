@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/arloliu/parti/v2/internal/natsutil"
 	"github.com/arloliu/parti/v2/internal/ratelimit"
 	"github.com/arloliu/parti/v2/types"
 	"golang.org/x/sync/errgroup"
@@ -41,6 +42,56 @@ type twoPhaseCoordinator struct {
 	// restart or leadership change restarts the grace clock, which is the
 	// conservative direction.
 	orphanAbsentSince map[string]time.Time
+
+	// Sweep scan-gate state, all guarded by sweepMu like every other
+	// sweep field. sweepCache holds the (claim, revision) view of the
+	// bucket from the last clean ticker-origin full pass; it is valid
+	// only while sweepCacheValid and the probed position still equals
+	// sweepCachePos. The cache is only ever replaced whole by a clean
+	// full pass — never patched.
+	sweepCacheValid     bool
+	sweepCachePos       natsutil.KVStreamPos
+	sweepCache          map[string]cachedClaim
+	sweepSkipsSinceFull int
+	sweepConfigGuard    natsutil.ScanGateConfigGuard
+	// sweepConfirmGap is the double-probe confirmation wait; tests
+	// shorten it. Set by New to natsutil.ScanGateDefaultConfirmGap.
+	sweepConfirmGap time.Duration
+	// prober is cfg.Store's optional position-probe capability,
+	// type-asserted once by New; nil disables the gate.
+	prober bucketPosProber
+}
+
+// sweepOrigin tags who initiated a sweep pass. The scan gate is
+// ticker-only: Apply-origin passes run the full sweep body verbatim and
+// leave all gate state untouched, so the manager's apply pipeline never
+// pays a probe or a confirm-gap wait.
+type sweepOrigin int
+
+const (
+	sweepOriginApply sweepOrigin = iota
+	sweepOriginTicker
+)
+
+// bucketPosProber is an optional capability of a ClaimStore: reporting
+// the backing stream's position without creating a consumer. The sweep
+// gate activates only when the store implements it; stores that do not
+// (test fakes, alternative backends) get today's full-sweep behavior
+// unchanged.
+type bucketPosProber interface {
+	BucketPos(ctx context.Context) (natsutil.KVStreamPos, error)
+}
+
+// errNoProbeHandle signals a store that implements bucketPosProber but
+// was constructed without a dedicated probe handle. The coordinator
+// treats it as "capability permanently absent" and stops probing.
+var errNoProbeHandle = errors.New("handoff: no dedicated probe handle configured")
+
+// cachedClaim is one entry of the sweep's claim cache: the body and KV
+// revision a clean full pass read.
+type cachedClaim struct {
+	claim Claim
+	rev   uint64
 }
 
 // Start launches a background goroutine that sweeps stale claims at SweepInterval.
@@ -64,7 +115,7 @@ func (t *twoPhaseCoordinator) Start(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				t.maybeSweepClaims(ctx)
+				t.maybeSweepClaims(ctx, sweepOriginTicker)
 			}
 		}
 	}()
@@ -75,7 +126,7 @@ func (t *twoPhaseCoordinator) Start(ctx context.Context) {
 func (t *twoPhaseCoordinator) Apply(ctx context.Context, workerID string, previous, next types.Assignment) error {
 	// Opportunistic sweep of expired/non-stable claims; skip metrics as requested.
 	// Runs before any early returns to maximize cleanup.
-	t.maybeSweepClaims(ctx)
+	t.maybeSweepClaims(ctx, sweepOriginApply)
 
 	inst := newInstrumenter(t.cfg.Metrics)
 
@@ -482,7 +533,18 @@ func (t *twoPhaseCoordinator) stabilizePhase(ctx context.Context, workerID strin
 // every time — but never concurrently: sweep bodies are single-flight (see the
 // sweepMu field doc), and a pass arriving while another sweep is mid-body is
 // skipped rather than blocked, so Apply never waits on another sweep's KV I/O.
-func (t *twoPhaseCoordinator) maybeSweepClaims(ctx context.Context) {
+//
+// Ticker-origin passes are additionally scan-gated: when the store can
+// report its backing stream position (bucketPosProber) and two probes
+// sweepConfirmGap apart both equal the position latched by the last
+// clean full pass, the pass body runs against the cached claim view
+// instead of a fresh ListKeys + per-key Get storm. The cached pass runs
+// every decision arm — commit finalization, TTL-expiry reset, orphan
+// reaping against a FRESH LivePartitions resolution — so time-triggered
+// work keeps firing at today's cadence on an idle bucket. Apply-origin
+// passes never use the gate (no probe, no confirm wait, no gate-state
+// mutation): the manager's apply pipeline is byte-for-byte unchanged.
+func (t *twoPhaseCoordinator) maybeSweepClaims(ctx context.Context, origin sweepOrigin) {
 	if t.cfg.Store == nil {
 		return
 	}
@@ -497,58 +559,286 @@ func (t *twoPhaseCoordinator) maybeSweepClaims(ctx context.Context) {
 	}
 	t.lastSweep = now
 
+	// The gate is ticker-only; stores without the probe capability are
+	// never gated either. Both cases run today's body verbatim and leave
+	// all gate state untouched (coherence needs no bookkeeping: any
+	// write such a pass performs advances the stream position, so a
+	// stale cache can never satisfy the next ticker probe).
+	if origin != sweepOriginTicker || t.prober == nil {
+		t.sweepPass(ctx, now, nil)
+
+		return
+	}
+
+	pos, ok, reason := t.sweepProbe(ctx)
+	if ok && t.sweepCacheValid && pos.Same(t.sweepCachePos) {
+		if t.sweepSkipsSinceFull >= natsutil.ScanGateMaxSkippedPasses {
+			reason = "forced"
+		} else {
+			// Double-probe confirmation. The wait holds sweepMu on the
+			// ticker goroutine (which has no other duties); a concurrent
+			// Apply's opportunistic sweep TryLock-skips rather than
+			// blocks. ctx cancellation aborts the pass with gate state
+			// untouched.
+			if !t.sweepConfirmWait(ctx) {
+				return
+			}
+			pos2, ok2, reason2 := t.sweepProbe(ctx)
+			if ok2 && pos2.Same(t.sweepCachePos) {
+				t.sweepCachedPass(ctx, now)
+
+				return
+			}
+			pos, ok = pos2, ok2
+			reason = reason2
+			if reason == "" {
+				reason = "mismatch"
+			}
+		}
+	} else if ok && reason == "" {
+		if t.sweepCacheValid {
+			reason = "mismatch"
+		} else {
+			reason = "unlatched"
+		}
+	}
+
+	var latch *natsutil.KVStreamPos
+	if ok {
+		latch = &pos
+	}
+	t.sweepPass(ctx, now, latch)
+	if t.cfg.Logger != nil {
+		t.cfg.Logger.Debug("handoff sweep full pass",
+			"cached_passes_since_last_full", t.sweepSkipsSinceFull,
+			"reason", reason,
+		)
+	}
+	t.sweepSkipsSinceFull = 0
+}
+
+// sweepProbe takes one stream-position probe under the fail-open and
+// config-validation rules: any error or unsafe config invalidates the
+// cache so no cached pass can run until a clean full pass re-latches.
+// Runs under sweepMu.
+func (t *twoPhaseCoordinator) sweepProbe(ctx context.Context) (natsutil.KVStreamPos, bool, string) {
+	pos, err := t.prober.BucketPos(ctx)
+	if err != nil {
+		t.sweepCacheValid = false
+		if errors.Is(err, errNoProbeHandle) {
+			// The store implements the capability interface but has no
+			// probe handle: permanently ungate this coordinator so we
+			// stop paying a doomed probe (and a log line) every tick.
+			t.prober = nil
+			if t.cfg.Logger != nil {
+				t.cfg.Logger.Debug("handoff sweep gate disabled: store has no probe handle")
+			}
+
+			return natsutil.KVStreamPos{}, false, "no_probe_handle"
+		}
+		if t.cfg.Logger != nil {
+			t.cfg.Logger.Debug("handoff sweep: stream position probe failed", "error", err)
+		}
+
+		return natsutil.KVStreamPos{}, false, "probe_error"
+	}
+	if !t.sweepConfigGuard.Check(pos, t.cfg.Logger) {
+		t.sweepCacheValid = false
+
+		return pos, false, "unsafe_config"
+	}
+
+	return pos, true, ""
+}
+
+// sweepConfirmWait blocks for sweepConfirmGap or until ctx cancellation.
+// Returns false when the pass should be aborted.
+func (t *twoPhaseCoordinator) sweepConfirmWait(ctx context.Context) bool {
+	timer := time.NewTimer(t.sweepConfirmGap)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+// resolveLiveSet resolves the live partition set once per pass for
+// orphan reaping. liveOK=false (supplier not vouching: not the leader,
+// source down) skips all reap decisions for the pass AND resets every
+// absence clock: time spent unvouched is time this worker could not
+// verify continuous absence, so it must not count toward OrphanGrace —
+// otherwise a clock started before a long follower stint would reap
+// instantly on the first vouched pass after it. Runs under sweepMu.
+func (t *twoPhaseCoordinator) resolveLiveSet(ctx context.Context) (map[string]struct{}, bool) {
+	if t.cfg.OrphanGrace <= 0 || t.cfg.LivePartitions == nil {
+		return nil, false
+	}
+	live, liveOK := t.cfg.LivePartitions(ctx)
+	if !liveOK {
+		clear(t.orphanAbsentSince)
+	}
+
+	return live, liveOK
+}
+
+// sweepClaim runs the per-claim sweep decision arms shared by full and
+// cached passes: the sweepReconcile pre-filter (with the authoritative
+// re-decide on a fresh read inside updateClaim's CAS loop) and, for
+// claims needing no reconcile, the orphan-reap check.
+func (t *twoPhaseCoordinator) sweepClaim(
+	ctx context.Context,
+	pid string,
+	cur Claim,
+	rev uint64,
+	live map[string]struct{},
+	liveOK bool,
+	now time.Time,
+) {
+	// Cheap pre-filter: skip a CAS write attempt when this claim needs
+	// no reconcile (the common case for already-stable claims).
+	if sweepReconcile(&cur, now) != nil {
+		if err := t.updateClaim(ctx, pid, func(cur *Claim) (*Claim, error) {
+			// Re-decide on the fresh read inside the CAS loop.
+			return sweepReconcile(cur, now), nil
+		}); err == nil {
+			if t.cfg.Metrics != nil {
+				t.cfg.Metrics.IncClaimStoreStale()
+			}
+		}
+		// A just-reconciled claim is in flux; it is not reap-eligible
+		// this pass. The next pass re-evaluates it from a fresh read.
+		return
+	}
+
+	if liveOK {
+		t.maybeReapOrphan(ctx, pid, cur, rev, live, now)
+	}
+}
+
+// sweepPass is the full sweep body: ListKeys + per-key Get + decision
+// arms. When latch is non-nil (a gated ticker-origin pass with a usable
+// probe), the pass additionally rebuilds the claim cache and latches
+// the probed position iff the pass was clean: list succeeded (an empty
+// list is clean — latch an empty cache), and zero per-key Gets errored
+// (reads returning rev == 0 — deleted between list and get — do not
+// block latching; that deletion consumed a sequence after the probe, so
+// the very next probe unlatches anyway). When latch is nil (Apply
+// origin, no prober, or an unusable probe) the body is today's sweep,
+// byte-for-byte, and gate state is untouched. Runs under sweepMu.
+func (t *twoPhaseCoordinator) sweepPass(ctx context.Context, now time.Time, latch *natsutil.KVStreamPos) {
 	keys, err := t.cfg.Store.ListKeys(ctx)
-	if err != nil || len(keys) == 0 {
+	if err != nil {
+		if latch != nil {
+			t.sweepCacheValid = false
+		}
+
+		return
+	}
+	if len(keys) == 0 {
+		if latch != nil {
+			// A clean empty pass: without latching here, a bucket whose
+			// last claim was deleted would either full-scan forever or
+			// retain a stale non-empty cache. The early return itself is
+			// today's behavior (no metric call, no live-set resolution,
+			// no prune).
+			t.latchCache(make(map[string]cachedClaim), *latch)
+		}
+
 		return
 	}
 	if t.cfg.Metrics != nil {
 		t.cfg.Metrics.SetClaimStoreSize(len(keys))
 	}
 
-	// Resolve the live partition set once per pass for orphan reaping.
-	// liveOK=false (supplier not vouching: not the leader, source down)
-	// skips all reap decisions for the pass AND resets every absence clock:
-	// time spent unvouched is time this worker could not verify continuous
-	// absence, so it must not count toward OrphanGrace — otherwise a clock
-	// started before a long follower stint would reap instantly on the
-	// first vouched pass after it.
-	var live map[string]struct{}
-	liveOK := false
-	if t.cfg.OrphanGrace > 0 && t.cfg.LivePartitions != nil {
-		live, liveOK = t.cfg.LivePartitions(ctx)
-		if !liveOK {
-			clear(t.orphanAbsentSince)
-		}
+	live, liveOK := t.resolveLiveSet(ctx)
+
+	var cache map[string]cachedClaim
+	if latch != nil {
+		cache = make(map[string]cachedClaim, len(keys))
 	}
+	getFailed := false
 
 	for _, pid := range keys {
 		cur, rev, err := t.cfg.Store.Get(ctx, pid)
-		if err != nil || rev == 0 {
-			continue
-		}
-		// Cheap pre-filter: skip a CAS write attempt when this claim needs no
-		// reconcile (the common case for already-stable claims).
-		if sweepReconcile(&cur, now) != nil {
-			if err := t.updateClaim(ctx, pid, func(cur *Claim) (*Claim, error) {
-				// Re-decide on the fresh read inside the CAS loop.
-				return sweepReconcile(cur, now), nil
-			}); err == nil {
-				if t.cfg.Metrics != nil {
-					t.cfg.Metrics.IncClaimStoreStale()
-				}
-			}
-			// A just-reconciled claim is in flux; it is not reap-eligible
-			// this pass. The next pass re-evaluates it from a fresh read.
-			continue
-		}
+		if err != nil {
+			getFailed = true
 
-		if liveOK {
-			t.maybeReapOrphan(ctx, pid, cur, rev, live, now)
+			continue
 		}
+		if rev == 0 {
+			continue
+		}
+		if cache != nil {
+			cache[pid] = cachedClaim{claim: cur, rev: rev}
+		}
+		t.sweepClaim(ctx, pid, cur, rev, live, liveOK, now)
 	}
 
 	if liveOK {
 		t.pruneOrphanCandidates(keys)
+	}
+
+	if latch != nil {
+		if getFailed {
+			// A transient read failure: do not trust this pass's view.
+			// The cache is invalidated so the next ticker pass re-walks —
+			// today's retry-on-next-pass semantics, unweakened.
+			t.sweepCacheValid = false
+		} else {
+			t.latchCache(cache, *latch)
+		}
+	}
+}
+
+// latchCache replaces the sweep's cached bucket view whole and records the
+// probed position it is valid at. Callers latch only after a clean full
+// pass; the cache is never patched incrementally.
+func (t *twoPhaseCoordinator) latchCache(cache map[string]cachedClaim, pos natsutil.KVStreamPos) {
+	t.sweepCache = cache
+	t.sweepCachePos = pos
+	t.sweepCacheValid = true
+}
+
+// sweepCachedPass runs the sweep decision arms against the cached claim
+// view. Under the gate invariant the cached bodies and revisions ARE the
+// current KV state, so this pass is behavior-identical to a full pass —
+// minus the ListKeys and per-key Get storm. Time and the live set are
+// the only inputs that legitimately change without bucket writes, and
+// both are re-read fresh. Runs under sweepMu.
+func (t *twoPhaseCoordinator) sweepCachedPass(ctx context.Context, now time.Time) {
+	// Accounting first: empty cached passes must count toward the
+	// forced full pass too.
+	t.sweepSkipsSinceFull++
+	if t.sweepSkipsSinceFull == 1 && t.cfg.Logger != nil {
+		t.cfg.Logger.Debug("handoff sweep gate engaged")
+	}
+	if len(t.sweepCache) == 0 {
+		return // mirrors today's empty-list early return
+	}
+	if t.cfg.Metrics != nil {
+		// Identical to a fresh list's count: the key set provably has
+		// not changed.
+		t.cfg.Metrics.SetClaimStoreSize(len(t.sweepCache))
+	}
+
+	live, liveOK := t.resolveLiveSet(ctx)
+
+	for pid, cc := range t.sweepCache {
+		t.sweepClaim(ctx, pid, cc.claim, cc.rev, live, liveOK, now)
+	}
+
+	// The cached key set IS the current bucket key set (the gate proved
+	// the bucket unchanged), so prune absence clocks directly against the
+	// cache instead of materializing a throwaway key slice for
+	// pruneOrphanCandidates.
+	if liveOK && len(t.orphanAbsentSince) > 0 {
+		for pid := range t.orphanAbsentSince {
+			if _, ok := t.sweepCache[pid]; !ok {
+				delete(t.orphanAbsentSince, pid)
+			}
+		}
 	}
 }
 
