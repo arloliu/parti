@@ -1665,6 +1665,10 @@ type mockKVForReconcile struct {
 	store     map[string][]byte
 	revision  uint64
 	afterKeys func()
+	// keysCalls counts Keys() invocations so gate tests can assert a
+	// gated tick performs zero list scans. Incremented by both this
+	// type's Keys and the mockKVWithKeyErr override.
+	keysCalls atomic.Int32
 }
 
 func newMockKVForReconcile(store map[string][]byte, revision uint64) *mockKVForReconcile {
@@ -1675,6 +1679,7 @@ func newMockKVForReconcile(store map[string][]byte, revision uint64) *mockKVForR
 }
 
 func (m *mockKVForReconcile) Keys(ctx context.Context, _ ...jetstream.WatchOpt) ([]string, error) {
+	m.keysCalls.Add(1)
 	defer func() {
 		if m.afterKeys != nil {
 			m.afterKeys()
@@ -1758,6 +1763,7 @@ func newMockKVWithKeyErr(store map[string][]byte, revision uint64) *mockKVWithKe
 // The afterKeys hook is still honoured.
 func (m *mockKVWithKeyErr) Keys(ctx context.Context, opts ...jetstream.WatchOpt) ([]string, error) {
 	if m.keysErr != nil {
+		m.keysCalls.Add(1)
 		return nil, m.keysErr
 	}
 	return m.mockKVForReconcile.Keys(ctx, opts...)
@@ -2602,6 +2608,19 @@ func (c *captureLogger) has(substr string) bool {
 	}
 
 	return false
+}
+
+func (c *captureLogger) count(substr string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for _, m := range c.msgs {
+		if strings.Contains(m, substr) {
+			n++
+		}
+	}
+
+	return n
 }
 
 // TestReconcile_LogsUnreadableKeys pins F-D2c: a reconcile pass that lists keys

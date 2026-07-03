@@ -591,11 +591,26 @@ func (wc *WorkerConsumer) ensureGateResolver(ctx context.Context) error {
 	// so the value is always positive here. The resolver-package contract
 	// is preserved: direct callers of NewClaimBasedResolver who pass 0 via
 	// WithReconcileInterval still get polling disabled.
+
+	// Dedicated probe handle for the reconcile scan gate. The gate must
+	// never probe through the resolver's production handle (kv.Status
+	// mutates shared *stream state under concurrent Get/Watch — the
+	// epoch-monitor race class); a missing probe handle just leaves
+	// reconcile ungated, the pre-gate behavior.
+	resolverOpts := make([]ResolverOption, 0, 2)
+	resolverOpts = append(resolverOpts, WithReconcileInterval(wc.config.Resolver.ReconcileInterval))
+	probeKV, perr := wc.js.KeyValue(ctx, wc.config.Resolver.HandoffBucketName)
+	if perr != nil {
+		wc.logger.Debug("reconcile scan gate disabled: probe handle unavailable", "error", perr)
+	}
+	// WithStreamPosProbe is a no-op on a nil handle, so an unavailable
+	// probe leaves the gate inert (full scans, the pre-gate behavior).
+	resolverOpts = append(resolverOpts, WithStreamPosProbe(probeKV))
 	resolver := NewClaimBasedResolver(
 		kv,
 		wc.config.Resolver.HandoffClaimsPrefix,
 		wc.logger,
-		WithReconcileInterval(wc.config.Resolver.ReconcileInterval),
+		resolverOpts...,
 	)
 	resolver.SetBatching(wc.config.Resolver.BatchWindow, wc.config.Resolver.BatchMaxItems)
 	if wc.resolverMetrics != nil {
