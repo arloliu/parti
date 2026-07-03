@@ -7,8 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v2.8.2] - 2026-07-03
+
+Scalability release: Parti's coordination buckets no longer pay steady-state
+scan costs. Routine heartbeat refreshes stop triggering full key scans of the
+heartbeat bucket — the source of the "JetStream cluster new consumer leader"
+log churn at scale — and the two handoff-bucket scan sites (claim-resolver
+reconcile, two-phase sweep) are gated behind a cheap read-only
+stream-position probe. Idle scan cost now scales with worker count instead
+of workers × partitions, cutting idle meta-layer consumer churn and KV read
+load by ~95% — the property that matters on the path to 10,000-partition
+deployments. All recovery guarantees, public APIs, and defaults are
+unchanged; upgrading is a drop-in.
+
 ### Changed
 
+- **Heartbeat watcher scan suppression** — routine heartbeat refreshes no
+  longer trigger a full key scan of the heartbeat bucket, eliminating
+  steady-state ephemeral-consumer churn (~12k consumer creations/hour at
+  10 workers × 3s heartbeat interval — the "JetStream cluster new consumer
+  leader" log spam at scale). Crash-detection cadence is preserved via a
+  client-side expiry sweep that suspends suppression for the crash window;
+  non-connectivity enumeration-stall degradation now enters at its designed
+  polling cadence (≤ threshold × HeartbeatTTL/2) instead of an undocumented
+  heartbeat-write-coupled cadence.
 - **Idle handoff-bucket scan gating** — the claim resolver's periodic
   reconcile and the two-phase sweep ticker no longer pay fixed-rate scan
   costs while the handoff bucket is unchanged. Each ticker pass first
