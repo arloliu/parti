@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/arloliu/parti/v2/internal/natsutil"
 	"github.com/arloliu/parti/v2/internal/ratelimit"
 	"github.com/arloliu/parti/v2/types"
 )
@@ -102,8 +103,13 @@ type Config struct {
 	Store ClaimStore
 	// TTL provides an advisory TTL to set on created claims.
 	TTL time.Duration
-	// SweepInterval controls how often stale/expired claims are opportunistically
-	// swept during Apply calls. If zero or negative, a sweep is attempted on every Apply.
+	// SweepInterval controls the cadence of the background claim-sweep
+	// ticker started by Start, and the throttle on opportunistic sweeps
+	// attempted during Apply (at most one sweep body per interval).
+	// Zero is defaulted to 30s by New. A NEGATIVE value disables the
+	// background ticker AND the throttle: a sweep is then attempted on
+	// every Apply. Ticker sweeps are scan-gated when the store can
+	// probe its backing stream position; Apply-origin sweeps never are.
 	SweepInterval time.Duration
 	// Retry/backoff settings for CAS operations. Zero values get sensible defaults in New().
 	MaxRetries  int
@@ -188,10 +194,16 @@ func New(cfg Config, enableTwoPhase bool) Coordinator {
 		cfg.TTL = 1 * time.Minute
 	}
 	if enableTwoPhase {
-		return &twoPhaseCoordinator{
+		coord := &twoPhaseCoordinator{
 			cfg:               cfg,
 			orphanAbsentSince: make(map[string]time.Time),
+			sweepConfirmGap:   natsutil.ScanGateDefaultConfirmGap,
 		}
+		// Optional store capability: probing the backing stream position
+		// lets ticker sweeps skip provably-no-op ListKeys+Get storms.
+		coord.prober, _ = cfg.Store.(bucketPosProber)
+
+		return coord
 	}
 
 	return &direct{cfg: cfg}

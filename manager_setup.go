@@ -201,7 +201,20 @@ func (m *Manager) setupHandoff(startupCtx context.Context, js jetstream.JetStrea
 		return rErr
 	}
 
-	store := handoff.NewNATSClaimStore(handoffKV, "claims/")
+	// Dedicated probe handle for the sweep scan gate: probing must not
+	// share the production handle (kv.Status mutates cached *stream
+	// state under concurrent claim reads/writes — the epoch-monitor
+	// race class). On failure the store just stays ungated (full
+	// sweeps, the pre-gate behavior).
+	pctx, pcancel := context.WithTimeout(startupCtx, m.cfg.OperationTimeout)
+	probeKV, perr := js.KeyValue(pctx, m.cfg.KVBuckets.HandoffBucket)
+	pcancel()
+	if perr != nil {
+		m.logger.Debug("handoff sweep scan gate disabled: probe handle unavailable", "error", perr)
+	}
+	// A nil probeKV (probe handle unavailable) yields the same ungated
+	// store as the plain constructor.
+	store := handoff.NewNATSClaimStoreWithProbe(handoffKV, probeKV, "claims/")
 	m.handoffStore = store
 	// Build the per-worker claim-write limiter once and share it across the
 	// coordinator (site 1) and the startup hygiene/resume loops (sites 2-3) so
