@@ -3158,9 +3158,48 @@ func handleLeaderGoroutineNetworkDisconnect(
 	})
 }
 
+// longDisconnectDetectionFactor mirrors the suppressionHolidayFactor const
+// in internal/assignment/worker_monitor.go (unexported there, so it cannot
+// be imported directly from sim code; duplicated here as a literal). See
+// that file's doc comment (worker_monitor.go:24-45) for the full worst-case
+// single-serialization derivation this bounds: firstSeen -> debounce ->
+// pollMu wait -> own scan -> EmergencyGracePeriod -> confirming entry, all
+// of which collapses to < 3×HeartbeatTTL under warm suppression.
+const longDisconnectDetectionFactor = 3
+
+// longDisconnectCISlack is generous fixed headroom added on top of the
+// analytically-derived detection bound to absorb CI scheduler jitter.
+const longDisconnectCISlack = 15 * time.Second
+
+// pickLowestID returns the candidate with the lexicographically smallest
+// ID, giving deterministic target selection across repeated runs against
+// the same worker set (rather than a clock-seeded random pick).
+func pickLowestID(candidates []*coordinator.GoroutineInfo) *coordinator.GoroutineInfo {
+	best := candidates[0]
+	for _, c := range candidates[1:] {
+		if c.ID < best.ID {
+			best = c
+		}
+	}
+
+	return best
+}
+
 // handleLongGoroutineNetworkDisconnect implements the long-disconnect chaos
-// variant (Gap 12): pick a random worker, register a reassignment expectation,
-// suppress its slow-start assertion, disconnect it for 60–180s, then reconnect.
+// variant (Gap 12): pick a non-leader worker that currently owns at least
+// one partition, register a reassignment expectation bounded by the
+// heartbeat-suppression worst-case detection latency, suppress its
+// slow-start assertion, disconnect it for 60–180s, then reconnect.
+//
+// Target selection is a warm-suppression latency guard: excluding the
+// leader matters because a disconnected LEADER forces a fresh election and
+// a COLD monitor (lastSeen freshly replayed on the new leader) to notice
+// the departure, which is a materially easier detection path than a WARM
+// leader's suppression-holiday sweep noticing a silent expiry from a
+// follower it has been steadily tracking. Pinning the target to a
+// non-leader owner makes this scenario the sole sim detector of that
+// production-critical warm case. Selection is deterministic (see
+// pickLowestID) so the same worker set always yields the same target.
 //
 // Sequence (must be respected — advisor note, point 5):
 //  1. Register slow-start suppression BEFORE disconnect (coord.SuspendSlowStartAssertions).
@@ -3182,7 +3221,7 @@ func handleLongGoroutineNetworkDisconnect(
 	}
 	// Phase 4b: allow scenario to pin an explicit target_worker (e.g.
 	// "worker-0") so the disconnect lands on the worker with the tiny-
-	// pool stable-ID. Empty / "random" falls back to random selection.
+	// pool stable-ID. Empty / "random" falls back to selection below.
 	var target *coordinator.GoroutineInfo
 	if explicit, _ := params["target_worker"].(string); explicit != "" && explicit != "random" {
 		for i := range workers {
@@ -3192,29 +3231,40 @@ func handleLongGoroutineNetworkDisconnect(
 			}
 		}
 		if target == nil {
-			log.Printf("[Chaos] long_disconnect: target_worker=%s not found; falling back to non-empty random", explicit)
+			log.Printf("[Chaos] long_disconnect: target_worker=%s not found; falling back to selection", explicit)
 		}
 	}
 	if target == nil {
-		// Prefer workers with a non-empty current assignment so the
-		// reassignment-observed invariant (Phase 3 INV1) can actually
-		// fire. Random pick among workers with len(owned)>0; fall back
-		// to plain random (with a loud warning) only when no worker
-		// owns any partitions, which means the owner snapshot has not
-		// initialized yet — proceeding would yield an inconclusive
-		// expectation.
-		var nonEmpty []*coordinator.GoroutineInfo
+		// Prefer a NON-LEADER worker with a non-empty current assignment
+		// (see the function doc for why). Fall back to any owner
+		// (possibly the leader) only when no follower currently owns
+		// anything; skip the firing entirely when no worker owns
+		// anything, exactly as before.
+		var nonLeaderOwned []*coordinator.GoroutineInfo
+		var anyOwned []*coordinator.GoroutineInfo
 		if aioCoord != nil {
 			for i := range workers {
-				if owned := aioCoord.PartitionsOwnedBy(workers[i].ID); len(owned) > 0 {
-					nonEmpty = append(nonEmpty, workers[i])
+				if len(aioCoord.PartitionsOwnedBy(workers[i].ID)) == 0 {
+					continue
+				}
+				anyOwned = append(anyOwned, workers[i])
+				isLeader := false
+				if wk, ok := workers[i].Obj.(*worker.Worker); ok {
+					isLeader = wk.IsLeader()
+				}
+				if !isLeader {
+					nonLeaderOwned = append(nonLeaderOwned, workers[i])
 				}
 			}
 		}
 		switch {
-		case len(nonEmpty) > 0:
-			target = nonEmpty[time.Now().UnixNano()%int64(len(nonEmpty))]
-			log.Printf("[Chaos] long_disconnect: selected target=%s (had non-empty owner snapshot)", target.ID)
+		case len(nonLeaderOwned) > 0:
+			target = pickLowestID(nonLeaderOwned)
+			log.Printf("[Chaos] long_disconnect: selected non-leader target=%s (owns partitions; warm leader monitor is the sole detector)", target.ID)
+		case len(anyOwned) > 0:
+			target = pickLowestID(anyOwned)
+			log.Printf("[Chaos] long_disconnect: WARN no non-leader worker owns any partitions; falling back to target=%s "+
+				"(may be the leader, degrading warm-suppression coverage for this firing)", target.ID)
 		default:
 			log.Printf("[Chaos] long_disconnect: WARN no worker currently owns any partitions in the owner snapshot; " +
 				"skipping this chaos firing — the reassignment expectation would be vacuous (empty→empty). " +
@@ -3237,10 +3287,30 @@ func handleLongGoroutineNetworkDisconnect(
 		return
 	}
 
-	// T_reassign = ElectionTimeout (default 10s) + OperationTimeout (default 5s) + buffer.
-	// Use dur + 30s as the reassignment deadline: the partitions must migrate
-	// before the disconnect window closes (dur) plus a generous scheduling buffer.
-	tReassign := dur + 30*time.Second
+	// Reassignment deadline: bounds the worst-case latency for a WARM
+	// leader's WorkerMonitor to detect the target's silent heartbeat-key
+	// expiry and reassign its partitions — NOT the disconnect window
+	// itself. `dur` is otherwise irrelevant to detection latency: the key
+	// silently expires within one HeartbeatTTL of the last successful
+	// renewal regardless of how long the disconnect subsequently lasts
+	// (network_disconnect_long's contract guarantees dur > 2×HeartbeatTTL,
+	// so the key always has time to expire). Derivation, mirroring
+	// bucket_chaos.go:66's parti.DefaultConfig() pattern for reading
+	// HeartbeatTTL (the coordinator has no direct handle on it):
+	//   key-expiry:      up to 1×HeartbeatTTL for the last heartbeat PUT
+	//                    to silently lapse once the connection is severed.
+	//   detection bound: longDisconnectDetectionFactor(=3)×HeartbeatTTL,
+	//                    the worst-case single-serialization detection
+	//                    chain under warm suppression (see
+	//                    internal/assignment/worker_monitor.go:24-45, the
+	//                    suppressionHolidayFactor doc comment this mirrors).
+	//   CI slack:        longDisconnectCISlack, fixed headroom for
+	//                    scheduler jitter.
+	// Total = 4×HeartbeatTTL + slack (75s at the 15s default) — tighter
+	// than the previous dur+30s (~90s for this scenario's 60s override)
+	// and, unlike that bound, immune to the disconnect-duration override.
+	hbTTL := parti.DefaultConfig().HeartbeatTTL
+	tReassign := hbTTL + longDisconnectDetectionFactor*hbTTL + longDisconnectCISlack
 
 	// 1. Suppress slow-start assertion for this worker (per-worker scope).
 	// Window = dur + recovery headroom.
