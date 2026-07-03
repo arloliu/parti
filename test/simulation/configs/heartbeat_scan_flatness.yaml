@@ -1,0 +1,135 @@
+# Heartbeat scan-rate flatness (FM7 / FM3) — suppression-benefit guard.
+#
+# WHY: the sole purpose of the leader WorkerMonitor's heartbeat-refresh
+# suppression (internal/assignment/worker_monitor.go) is to keep the leader's
+# parti-heartbeat Keys() scan rate at the polling floor. Each Keys() spins up a
+# throwaway ordered consumer, so without suppression every routine heartbeat
+# refresh (each worker PUTs its key every HeartbeatInterval=5s) would force a
+# full scan. A regression that keeps the suppression holiday permanently open,
+# forces a check per watcher event, or otherwise re-scans per refresh is
+# CORRECTNESS-INVISIBLE — reassignment still fires, ownership/gap oracles stay
+# green — yet it deletes the whole benefit of the feature. No ownership/gap
+# oracle can see it; only a direct scan-rate assertion can.
+#
+# SHAPE: all-in-one, 8 workers, static source, 10 partitions, low message rate.
+#   Phase A  0–90s   quiet  — leader suppression goes fully warm (no chaos).
+#   Phase B  90–210s chaos  — 2 leader_failure + 1 network_disconnect_long +
+#                             one scale_up + one scale_down (scheduled, so the
+#                             timing is deterministic).
+#   Phase C  210–285s quiet — chaos has stopped; after one full suppression
+#                             holiday (3×HeartbeatTTL=45s) the scan rate MUST
+#                             return to the polling floor.
+#
+# ASSERTION (heartbeat_scan_chaos.go, separate return path):
+#   heartbeat-bucket Keys+ListKeys scan count, summed across all workers, in
+#   each 30s quiet window must stay ≤ floor_budget.
+#     phaseA_tail window = [60s, 90s]    (quiet baseline)
+#     phaseC_tail window = [253s, 283s]  (final 30s, ending 2s before shutdown;
+#                                         73s past the last chaos event @180s and
+#                                         the disconnect reconnect ~180s — one
+#                                         suppression holiday, 45s, plus margin)
+#
+# FLOOR BUDGET DERIVATION (documented arithmetic + ×2 CI headroom):
+#   HeartbeatTTL default        = 15s      (parti.DefaultConfig, config.go:415)
+#   Polling ticker cadence       = hbTTL/2 = 7.5s   (worker_monitor.go:307)
+#   Scans per poll               = 1        (pollForChanges → observeAndDecide →
+#                                            GetActiveWorkers → one Keys() scan)
+#   Monitor runs on the LEADER ONLY (Calculator.Start is leader-only), so the
+#   across-all-workers sum equals the single current leader's count in a quiet
+#   window; suppressed refreshes add ~0 scans.
+#   Polling-only lower bound     = 30 / 7.5 = 4 scans/window
+#   Measured quiet floor         = 6 scans/window (both phaseA and phaseC tail,
+#                                  empirically stable) — polling 4 plus ~2
+#                                  residual scans from watcher-session initial-
+#                                  replay re-classification.
+#   floor_budget = measured_floor 6 × 2 (CI headroom) = 12
+#
+# DETECTION: a scan-per-watcher-event regression (stuck-open holiday or per-event
+#   forced check) lifts the window count to ~workers / HeartbeatInterval × 30s ≈
+#   8/5 × 30 ≈ 48 scans — ~8× the floor, far above the budget of 12.
+
+simulation:
+  duration: 285s
+  mode: all-in-one
+
+nats:
+  mode: embedded
+
+partitions:
+  count: 10
+  message_rate_per_partition: 1
+  distribution: uniform
+
+producers:
+  count: 1
+
+workers:
+  count: 8
+  # RoundRobin (not WeightedConsistentHash) so all 8 initial-cohort workers get
+  # >=1 partition at cold start: 10 partitions spread [2,2,1,1,1,1,1,1]. Under
+  # WCH, hash imbalance can leave a worker with 0 partitions, so its first-
+  # assignment latency runs until a later chaos rebalance and trips the initial
+  # slow-start SLO (25s budget) — an incidental cross-cutting invariant flake
+  # unrelated to scan rate. Even distribution removes that flake; the heartbeat
+  # scan floor is strategy-independent.
+  assignment_strategy: RoundRobin
+  processing_delay:
+    min: 1ms
+    max: 5ms
+
+chaos:
+  # enabled=true is required for the scheduled_events dispatcher to run; the
+  # random ticker never fires (events list empty, interval far in the future).
+  enabled: true
+  interval: "3600s-3601s"
+  events: []
+  # scale_up goes 8→9 (needs max ≥ 9); scale_down goes 9→8 (needs min ≤ 8).
+  min_workers: 6
+  max_workers: 10
+  # network_disconnect_long defaults to a 60s disconnect (< WorkerIDTTL 75s, so
+  # the stable-ID claim survives and no claimLostShutdown fires). The handler
+  # pins a NON-LEADER partition owner so the warm leader's suppression-holiday
+  # sweep is the sole detector of the silent heartbeat-key expiry.
+  scheduled_events:
+    - at: 100s
+      event: leader_failure
+    - at: 120s
+      event: network_disconnect_long
+    - at: 135s
+      event: scale_up
+      params:
+        count: 1
+    - at: 160s
+      event: leader_failure
+    - at: 180s
+      event: scale_down
+      params:
+        count: 1
+  heartbeat_scan:
+    enabled: true
+    # Quiet baseline window (last 30s of phase A).
+    phase_a_tail_start: 60s
+    phase_a_tail_end: 90s
+    # Post-chaos quiet window: [253s, 283s] = 30s. Starts 73s after the last
+    # chaos event (scale_down @180s) — well past one suppression holiday
+    # (3×HeartbeatTTL=45s). Ends 2s before duration (285s) so the snapshot is
+    # captured before ordered shutdown (worker heartbeat DELETEs during teardown
+    # would otherwise trigger a burst of leader scans into the window).
+    phase_c_tail_start: 253s
+    phase_c_tail_end: 283s
+    # 2 × measured quiet floor (6 scans/30s); ~4× below the ~48-scan sabotage.
+    floor_budget: 12
+
+coordinator:
+  # gap_aging must exceed the 60s disconnect window + reassignment/recovery so a
+  # transient gap during phase B chaos does not escalate falsely.
+  gap_aging: 120s
+  slo:
+    enable_catch_up: true
+    catch_up_deadline: 60s
+    catch_up_percent: 99
+    absence_threshold: 20s
+
+metrics:
+  prometheus:
+    enabled: false

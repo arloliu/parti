@@ -809,6 +809,13 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 		startStorageTypeOracle(ctx, goroutineRegistry)
 	}
 
+	// Heartbeat scan-flatness oracle (heartbeat_scan_flatness scenario):
+	// snapshot the leader WorkerMonitor's parti-heartbeat scan count at the
+	// phase-A/phase-C quiet-window boundaries so the final gate can assert
+	// suppression holds the scan rate at the polling floor. Started here
+	// (before workers emit traffic) so the phase-A baseline snapshot lands.
+	startHeartbeatScanFlatnessOracle(ctx, kvFaults, cfg)
+
 	// Phase 8 / Gap 9b: fire the election-replicas oracle once all
 	// workers reach StateStable (election_replicas_override mode only).
 	if cfg.Chaos.Storage.ElectionReplicasOverride > 0 {
@@ -1226,6 +1233,17 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 
 					return invariantsErr
 				}
+			}
+
+			// Heartbeat scan-flatness gate (heartbeat_scan_flatness scenario):
+			// a separate return path — like the unresolved-gaps gate above —
+			// so the new counter need not be threaded through the duplicated
+			// invariants OR + its three fmt strings. No-op unless the scenario
+			// enables chaos.heartbeat_scan.
+			if hbErr := checkHeartbeatScanFloor(kvFaults, cfg); hbErr != nil {
+				coord.TriggerFailure("Heartbeat scan floor exceeded at shutdown", hbErr)
+
+				return hbErr
 			}
 
 			return nil
