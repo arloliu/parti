@@ -198,6 +198,7 @@ func New(cfg Config, enableTwoPhase bool) Coordinator {
 			cfg:               cfg,
 			orphanAbsentSince: make(map[string]time.Time),
 			sweepConfirmGap:   natsutil.ScanGateDefaultConfirmGap,
+			sweepMaxSkips:     natsutil.ScanGateMaxSkippedPasses,
 		}
 		// Optional store capability: probing the backing stream position
 		// lets ticker sweeps skip provably-no-op ListKeys+Get storms.
