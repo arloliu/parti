@@ -245,7 +245,7 @@ jobs:
         # boundary (peer-takeover vs whole-bucket-loss) plus the
         # bucket-recreate epoch fence.
         run: |
-          set -e
+          set -eo pipefail
           for scn in chaos_bucket_delete chaos_bucket_recreate chaos_bucket_peer_takeover chaos_kv_unavailable; do
             echo "::group::${scn}"
             ./tmp/simulation \
@@ -282,7 +282,7 @@ jobs:
         # recovery path in internal/source/nats_kv.go and the composed
         # bucket-delete error surface.
         run: |
-          set -e
+          set -eo pipefail
           for scn in chaos_natskv_source chaos_natskv_source_bucket_delete; do
             echo "::group::${scn}"
             ./tmp/simulation \
@@ -318,7 +318,7 @@ jobs:
         # reassignment, direct stable-ID claim steal, tiny-pool stale
         # takeover, and MaxAge-expiry returning-worker self-stop.
         run: |
-          set -e
+          set -eo pipefail
           for scn in chaos_network_disconnect_long chaos_stableid_claim_steal chaos_stableid_tiny_pool chaos_stableid_maxage_expiry; do
             echo "::group::${scn}"
             ./tmp/simulation \
@@ -355,7 +355,7 @@ jobs:
         # assignment-commit CAS storm, handoff bucket MaxAge contract,
         # orphan stable-claim drift, and handoff claim write-fault recovery.
         run: |
-          set -e
+          set -eo pipefail
           for scn in chaos_producer_disconnect chaos_assignment_cas_storm handoff_precreate_maxage handoff_orphan_stable_claim chaos_handoff_startup_write_fault chaos_handoff_version_write_fault; do
             echo "::group::${scn}"
             ./tmp/simulation \
@@ -393,7 +393,7 @@ jobs:
         # Phase 7 (Gaps 8b, 8c, 8a-OS) — process-mode IPC smoke +
         # SIGSTOP claim-loss takeover with same-pool replacement.
         run: |
-          set -e
+          set -eo pipefail
           for scn in process_smoke chaos_process_sigstop_long; do
             echo "::group::${scn}"
             ./tmp/simulation \
@@ -431,7 +431,7 @@ jobs:
         # operator-precreated replicas, burst-after-quiet KV-op ceiling.
         # heartbeat_scan_flatness (FM7/FM3) — leader heartbeat scan-rate floor.
         run: |
-          set -e
+          set -eo pipefail
           for scn in storage_assertion storage_replicas_operator burst_after_quiet heartbeat_scan_flatness; do
             echo "::group::${scn}"
             ./tmp/simulation \

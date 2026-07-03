@@ -30,7 +30,7 @@
 #                                         suppression holiday, 45s, plus margin)
 #
 # FLOOR BUDGET DERIVATION (documented arithmetic + ×2 CI headroom):
-#   HeartbeatTTL default        = 15s      (parti.DefaultConfig, config.go:415)
+#   HeartbeatTTL default        = 15s      (parti.DefaultConfig, config.go:418)
 #   Polling ticker cadence       = hbTTL/2 = 7.5s   (worker_monitor.go:307)
 #   Scans per poll               = 1        (pollForChanges → observeAndDecide →
 #                                            GetActiveWorkers → one Keys() scan)
