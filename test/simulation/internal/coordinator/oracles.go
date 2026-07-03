@@ -731,7 +731,14 @@ func matchesAnySubstring(s string, subs []string) bool {
 //   - claim_loss_stop_ordering_violations: A RevocationReport for worker W
 //     arrived BEFORE the watcher observed W's StateShutdown transition; OR a
 //     ReceivedMessage for one of W's last-known-assigned partitions arrived
-//     STRICTLY AFTER the observed StateShutdown timestamp.
+//     MORE THAN claimLossDrainToleranceWindow after the observed StateShutdown
+//     timestamp. parti transitions to StateShutdown FIRST and revokes the
+//     worker consumer asynchronously afterwards, and WithDrainOnRemove lets an
+//     already-in-flight handler run to completion ("not a zero-overlap
+//     guarantee") — so a bounded burst of messages during that Stop→revoke→
+//     drain window is CORRECT, not a violation. Only traffic that persists
+//     beyond the drain window demonstrates a worker that never stopped
+//     consuming after losing its claim (see ObserveMessage).
 //
 // The oracle uses the StableWorkerID as the join key because that's what the
 // claim-lost ObserveClaimLostShutdown path reports. Assignment snapshots are
@@ -747,6 +754,21 @@ func matchesAnySubstring(s string, subs []string) bool {
 // state right now?" — yes → backfill (the watcher was just late), no →
 // violation.
 type WorkerStateSampler func(simWorkerID string) (state int, known bool)
+
+// claimLossDrainToleranceWindow bounds the legitimate post-shutdown consumer
+// drain when checking for post_shutdown_message violations. parti provides no
+// zero-overlap guarantee at StateShutdown: claimLostShutdown transitions to
+// Shutdown via Manager.Stop FIRST, then revokes the worker consumer
+// asynchronously, and consumer.WithDrainOnRemove permits an already-in-flight
+// handler to run to completion. A message for a previously-owned partition
+// therefore legitimately lands shortly after the observed shutdown. Empirically
+// these drain messages arrive within ~170ms of the (poll-lagged) observed
+// shutdown; a stuck worker that keeps consuming instead produces messages
+// continuously at the partition message rate for the rest of the run. Two
+// seconds sits far above the drain and far below the sustained-traffic regime,
+// so it eliminates the drain false positive while still catching a worker that
+// never stops.
+const claimLossDrainToleranceWindow = 2 * time.Second
 
 type ClaimLossOrderingOracle struct {
 	mu sync.Mutex
@@ -999,11 +1021,22 @@ func (o *ClaimLossOrderingOracle) ObserveRevocation(simWorkerID, stableID string
 
 // ObserveMessage is called from the ReceivedMessage path. The contract is
 // "no ReceivedMessage with worker=W for one of W's previously-assigned
-// partitions arrived AFTER the watcher observed W's StateShutdown". Both
-// the assignment snapshot AND the message attribution are keyed by
-// simWorkerID — a different sim worker that takes over the same stable
-// ID via stale-takeover is GOOD behavior, not a violation, so the lookup
-// MUST NOT cross sim-worker boundaries.
+// partitions arrived MORE THAN claimLossDrainToleranceWindow after the watcher
+// observed W's StateShutdown". Both the assignment snapshot AND the message
+// attribution are keyed by simWorkerID — a different sim worker that takes over
+// the same stable ID via stale-takeover is GOOD behavior, not a violation, so
+// the lookup MUST NOT cross sim-worker boundaries.
+//
+// The tolerance window absorbs the legitimate post-shutdown consumer drain:
+// parti reaches StateShutdown before the worker consumer is revoked, and
+// WithDrainOnRemove lets an in-flight handler complete (no zero-overlap
+// guarantee). A single message reported during that window is correct
+// behavior. Only a message arriving beyond the window — which requires the
+// worker to have kept pulling new frames long after it lost its claim —
+// counts as a violation. The at value is stamped at coordinator drain time,
+// so it already includes handler + queueing latency; the observed shutdown
+// lags the real transition by up to the watcher poll interval, which only
+// shrinks the measured gap, so the window need not compensate for it.
 func (o *ClaimLossOrderingOracle) ObserveMessage(simWorkerID string, partition int, at time.Time) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -1021,8 +1054,18 @@ func (o *ClaimLossOrderingOracle) ObserveMessage(simWorkerID string, partition i
 	if _, owned := parts[partition]; !owned {
 		return
 	}
-	log.Printf("[ClaimLossOrderingOracle] VIOLATION post_shutdown_message worker=%s partition=%d msg_at=%v shutdown_at=%v",
-		simWorkerID, partition, at.Format(time.RFC3339Nano), tShutdown.Format(time.RFC3339Nano))
+	if !at.After(tShutdown.Add(claimLossDrainToleranceWindow)) {
+		// Audit-only: a previously-owned partition's frame landed inside
+		// the tolerated Stop→revoke→drain window. Correct behavior; logged
+		// so runs demonstrate the oracle observed (not merely missed) the
+		// drain.
+		log.Printf("[ClaimLossOrderingOracle] post_shutdown_drain_tolerated worker=%s partition=%d msg_at=%v shutdown_at=%v gap=%v",
+			simWorkerID, partition, at.Format(time.RFC3339Nano), tShutdown.Format(time.RFC3339Nano), at.Sub(tShutdown))
+
+		return
+	}
+	log.Printf("[ClaimLossOrderingOracle] VIOLATION post_shutdown_message worker=%s partition=%d msg_at=%v shutdown_at=%v tolerance=%v",
+		simWorkerID, partition, at.Format(time.RFC3339Nano), tShutdown.Format(time.RFC3339Nano), claimLossDrainToleranceWindow)
 	o.violations.Add(1)
 }
 
