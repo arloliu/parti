@@ -58,6 +58,14 @@ type ResolverConfig struct {
 	// HeartbeatTTL below ~6s, set ReconcileInterval to HeartbeatTTL or
 	// HeartbeatTTL/2.
 	//
+	// Idle-bucket cost note: reconcile passes are scan-gated — when a
+	// cheap stream-position probe proves the bucket unchanged since the
+	// last full pass, the pass skips its key walk entirely (no ephemeral
+	// consumer creation). Shortening this interval therefore no longer
+	// multiplies steady-state consumer churn on an idle handoff bucket;
+	// the interval still bounds worst-case staleness recovery as described
+	// above.
+	//
 	// Zero uses the default (30s). Negative values are rejected at startup.
 	// Ignored when a custom OwnershipResolver is provided.
 	ReconcileInterval time.Duration `default:"30s" validate:"gte=0"`
