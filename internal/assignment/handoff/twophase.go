@@ -53,7 +53,13 @@ type twoPhaseCoordinator struct {
 	sweepCachePos       natsutil.KVStreamPos
 	sweepCache          map[string]cachedClaim
 	sweepSkipsSinceFull int
-	sweepConfigGuard    natsutil.ScanGateConfigGuard
+	// sweepMaxSkips bounds consecutive gated (cached) passes before a
+	// full pass is forced regardless of the probes. Initialized to
+	// natsutil.ScanGateMaxSkippedPasses by New; only in-package tests
+	// shorten it to reach the forced-pass backstop on a test timescale.
+	// Production behavior is byte-identical to reading the constant.
+	sweepMaxSkips    int
+	sweepConfigGuard natsutil.ScanGateConfigGuard
 	// sweepConfirmGap is the double-probe confirmation wait; tests
 	// shorten it. Set by New to natsutil.ScanGateDefaultConfirmGap.
 	sweepConfirmGap time.Duration
@@ -572,7 +578,7 @@ func (t *twoPhaseCoordinator) maybeSweepClaims(ctx context.Context, origin sweep
 
 	pos, ok, reason := t.sweepProbe(ctx)
 	if ok && t.sweepCacheValid && pos.Same(t.sweepCachePos) {
-		if t.sweepSkipsSinceFull >= natsutil.ScanGateMaxSkippedPasses {
+		if t.sweepSkipsSinceFull >= t.sweepMaxSkips {
 			reason = "forced"
 		} else {
 			// Double-probe confirmation. The wait holds sweepMu on the

@@ -237,7 +237,14 @@ type ClaimBasedResolver struct {
 	gateLatchValid     bool
 	gateLatch          natsutil.KVStreamPos
 	gateSkipsSinceFull int
-	gateConfigGuard    natsutil.ScanGateConfigGuard
+	// gateMaxSkips bounds consecutive gated skips before a full pass is
+	// forced regardless of the probes. Initialized to
+	// natsutil.ScanGateMaxSkippedPasses by NewClaimBasedResolver;
+	// only in-package tests shorten it to reach the forced-pass backstop
+	// on a test timescale. Production behavior is byte-identical to
+	// reading the constant directly.
+	gateMaxSkips    int
+	gateConfigGuard natsutil.ScanGateConfigGuard
 	// gateConfirmGap is the double-probe confirmation wait; tests
 	// shorten it. Production value is natsutil.ScanGateDefaultConfirmGap.
 	gateConfirmGap time.Duration
@@ -344,6 +351,7 @@ func NewClaimBasedResolver(
 		refreshCooldown:   1 * time.Second,
 		reconcileInterval: defaultReconcileInterval,
 		gateConfirmGap:    natsutil.ScanGateDefaultConfirmGap,
+		gateMaxSkips:      natsutil.ScanGateMaxSkippedPasses,
 		// Allocate lifecycle channels eagerly so Stop is safe before Start.
 		stopCh: make(chan struct{}),
 		doneCh: make(chan struct{}),
@@ -1185,7 +1193,7 @@ func (r *ClaimBasedResolver) reconcileOnce(ctx context.Context) {
 
 	pos, ok, reason := r.gateProbe(ctx)
 	if ok && r.gateLatchValid && pos.Same(r.gateLatch) {
-		if r.gateSkipsSinceFull >= natsutil.ScanGateMaxSkippedPasses {
+		if r.gateSkipsSinceFull >= r.gateMaxSkips {
 			reason = "forced"
 		} else {
 			// Double-probe confirmation (stop/ctx-aware wait; on stop,
