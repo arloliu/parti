@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Idle handoff-bucket scan gating** — the claim resolver's periodic
+  reconcile and the two-phase sweep ticker no longer pay fixed-rate scan
+  costs while the handoff bucket is unchanged. Each ticker pass first
+  probes the bucket's backing stream position (one read-only
+  `STREAM.INFO` request through a dedicated KV handle — no consumer
+  creation) and skips the `Keys()`/`ListKeys()` walk and per-key reads
+  once two consecutive probes taken 2s apart confirm the bucket
+  byte-identical to the last clean pass. At 10 workers / 2,000 claims
+  with default intervals this removes ~40 ephemeral consumer
+  creations/min (each a JetStream meta-layer Raft proposal) and ~80k
+  per-key reads/min at idle across the two scan sites; idle scan cost
+  now scales with worker count instead of workers × partitions.
+- **Fail-open safety** — full-rate scanning resumes automatically on any
+  bucket write, probe failure, or unsafe bucket config, and an
+  unconditional full scan still runs at least every 20 passes, bounding
+  the effect of a stale probe answer to a single interval. An
+  edge-triggered warning fires once if the handoff bucket's config is
+  changed to permit TTL-based expiry (which would break position-based
+  change detection), with an info line on recovery.
+- **Recovery semantics unchanged** — sweep expiry resets, commit
+  finalization, and orphan reaping still run every tick (from a cached
+  claim view when the bucket is provably unchanged), and `Apply`-path
+  sweeps are entirely unaffected. No new public APIs or configuration
+  knobs; observability is log-only.
+
 ## [v2.8.1] - 2026-06-21
 
 Maintenance release on top of v2.8.0. Two small correctness fixes — a
