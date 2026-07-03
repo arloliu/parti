@@ -164,8 +164,9 @@ func TestClaimLossOrderingOracle_RevokeStableThenRealShutdownThenMessage_Violati
 	o.RecordAssignment("worker-0", []int{1, 2, 3})
 	tShut := t0.Add(1 * time.Second)
 	o.ObserveShutdown("worker-0", "freeze-victim-1", tShut)
-	// Post-shutdown message for an owned partition → violation.
-	o.ObserveMessage("worker-0", 2, tShut.Add(100*time.Millisecond))
+	// Message beyond the drain tolerance window for an owned partition →
+	// violation (the worker kept consuming well past the stop boundary).
+	o.ObserveMessage("worker-0", 2, tShut.Add(claimLossDrainToleranceWindow+100*time.Millisecond))
 	if got := o.Violations(); got != 1 {
 		t.Fatalf("real shutdown then post-shutdown message: expected 1 violation, got %d", got)
 	}
@@ -191,8 +192,10 @@ func TestClaimLossOrderingOracle_RevokeTimestampBeforeShutdown_Violation(t *test
 }
 
 // TestClaimLossOrderingOracle_PostShutdownMessage_Violation verifies that
-// a ReceivedMessage arriving strictly after Shutdown, for a partition
-// the SAME sim worker was last known to own, is flagged.
+// a ReceivedMessage arriving MORE THAN the drain tolerance window after
+// Shutdown, for a partition the SAME sim worker was last known to own, is
+// flagged — this is the "worker kept consuming past the stop boundary"
+// signal the oracle exists to catch.
 func TestClaimLossOrderingOracle_PostShutdownMessage_Violation(t *testing.T) {
 	o := NewClaimLossOrderingOracle()
 	o.RegisterStableID("worker-0", "freeze-victim-1")
@@ -200,16 +203,42 @@ func TestClaimLossOrderingOracle_PostShutdownMessage_Violation(t *testing.T) {
 
 	t0 := time.Now()
 	o.ObserveShutdown("worker-0", "freeze-victim-1", t0)
-	// Message for an owned partition arrives AFTER shutdown.
-	o.ObserveMessage("worker-0", 2, t0.Add(100*time.Millisecond))
+	// Message for an owned partition arrives well beyond the drain window.
+	o.ObserveMessage("worker-0", 2, t0.Add(claimLossDrainToleranceWindow+100*time.Millisecond))
 	if got := o.Violations(); got != 1 {
 		t.Fatalf("expected 1 violation, got %d", got)
 	}
 
 	// A message for a partition the worker did NOT own → no violation.
-	o.ObserveMessage("worker-0", 99, t0.Add(200*time.Millisecond))
+	o.ObserveMessage("worker-0", 99, t0.Add(claimLossDrainToleranceWindow+200*time.Millisecond))
 	if got := o.Violations(); got != 1 {
 		t.Fatalf("expected violations unchanged, got %d", got)
+	}
+}
+
+// TestClaimLossOrderingOracle_PostShutdownMessage_WithinDrainWindow_NoViolation
+// is the regression guard for the drain false positive that failed CI on
+// chaos_stableid_claim_steal / chaos_bucket_peer_takeover: parti transitions
+// to StateShutdown before revoking the worker consumer, and WithDrainOnRemove
+// lets an in-flight handler complete. A message for a previously-owned
+// partition arriving inside the drain tolerance window is CORRECT behavior and
+// MUST NOT be flagged.
+func TestClaimLossOrderingOracle_PostShutdownMessage_WithinDrainWindow_NoViolation(t *testing.T) {
+	o := NewClaimLossOrderingOracle()
+	o.RegisterStableID("worker-0", "freeze-victim-1")
+	o.RecordAssignment("worker-0", []int{1, 2, 3})
+
+	t0 := time.Now()
+	o.ObserveShutdown("worker-0", "freeze-victim-1", t0)
+	// A single drained frame lands shortly after the observed shutdown,
+	// still inside the drain window — the empirically observed CI gap was
+	// ~170ms. No violation.
+	o.ObserveMessage("worker-0", 2, t0.Add(claimLossDrainToleranceWindow-100*time.Millisecond))
+	// A frame exactly at the window boundary is still tolerated (strictly
+	// greater-than is required to flag).
+	o.ObserveMessage("worker-0", 2, t0.Add(claimLossDrainToleranceWindow))
+	if got := o.Violations(); got != 0 {
+		t.Fatalf("in-window drain: expected 0 violations, got %d", got)
 	}
 }
 
