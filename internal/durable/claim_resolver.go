@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/arloliu/parti/v2/internal/assignment/handoff"
+	"github.com/arloliu/parti/v2/internal/natsutil"
 	"github.com/arloliu/parti/v2/internal/retry"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
@@ -86,13 +87,39 @@ func WithReconcileInterval(d time.Duration) ResolverOption {
 	}
 }
 
+// WithStreamPosProbe enables the reconcile scan gate by supplying a
+// DEDICATED KV handle used only for stream-position probes on the
+// reconciler goroutine. The handle must not be shared with any other
+// goroutine's KV operations: kv.Status resolves through stream.Info,
+// which mutates the handle's cached *stream state and races concurrent
+// Get/Put/Watch on the same handle (the race class fixed for the epoch
+// monitor by a dedicated probe handle). Passing nil leaves the gate
+// disabled: every reconcile tick runs the full scan, the pre-gate
+// behavior.
+//
+// Parameters:
+//   - probeKV: Dedicated KV handle for probing; nil disables the gate.
+//
+// Returns:
+//   - ResolverOption: Option function
+func WithStreamPosProbe(probeKV jetstream.KeyValue) ResolverOption {
+	return func(r *ClaimBasedResolver) {
+		if probeKV == nil {
+			return
+		}
+		r.streamPos = func(ctx context.Context) (natsutil.KVStreamPos, error) {
+			return natsutil.ProbeKVStreamPos(ctx, probeKV)
+		}
+	}
+}
+
 // WithDriftRestartCooldown sets the minimum interval between
-// reconciler-triggered watcher restarts. When reconcileOnce observes drift
+// reconciler-triggered watcher restarts. When reconcileScan observes drift
 // between KV and the in-memory cache, it asks the supervisor to tear down
 // and re-establish the watcher; this signal is rate-limited so that a
 // persistently unreachable NATS server cannot trigger a restart storm.
 //
-// A value of 0 disables drift-driven restarts entirely: reconcileOnce will
+// A value of 0 disables drift-driven restarts entirely: reconcileScan will
 // still observe drift and rescue the cache (emitting IncReconcileRescue),
 // but the watcher is NOT torn down. The default is 2 × reconcileInterval,
 // floored at 60s. If reconcileInterval is 0 (reconciler disabled), drift
@@ -200,6 +227,28 @@ type ClaimBasedResolver struct {
 	// Reconcile configuration.
 	reconcileInterval time.Duration
 
+	// Scan-gate state for the periodic reconciler. Owned exclusively by
+	// the reconcileLoop goroutine — never touched by the watcher,
+	// supervisor, or ForceRefreshPartition. A gated tick proves via two
+	// stream-position probes (gateConfirmGap apart) that the bucket is
+	// byte-identical to what the last clean full pass observed, and
+	// skips the Keys()+Get walk entirely; any probe error or unsafe
+	// bucket config fails open into a full pass.
+	gateLatchValid     bool
+	gateLatch          natsutil.KVStreamPos
+	gateSkipsSinceFull int
+	gateConfigGuard    natsutil.ScanGateConfigGuard
+	// gateConfirmGap is the double-probe confirmation wait; tests
+	// shorten it. Production value is natsutil.ScanGateDefaultConfirmGap.
+	gateConfirmGap time.Duration
+	// streamPos probes the position of the bucket's backing stream.
+	// nil means no probe seam is configured and the gate is inert
+	// (every tick runs the full scan — pre-gate behavior). Set by
+	// WithStreamPosProbe over a DEDICATED probe handle, or injected
+	// directly by unit tests (jetstream.KeyValueBucketStatus cannot be
+	// fabricated outside nats.go).
+	streamPos func(ctx context.Context) (natsutil.KVStreamPos, error)
+
 	// Drift-driven watcher restart configuration. The reconciler signals
 	// the supervisor to tear down the current watcher when drift is
 	// observed; the supervisor's existing restart path then re-establishes
@@ -294,6 +343,7 @@ func NewClaimBasedResolver(
 		lastRefresh:       make(map[string]time.Time),
 		refreshCooldown:   1 * time.Second,
 		reconcileInterval: defaultReconcileInterval,
+		gateConfirmGap:    natsutil.ScanGateDefaultConfirmGap,
 		// Allocate lifecycle channels eagerly so Stop is safe before Start.
 		stopCh: make(chan struct{}),
 		doneCh: make(chan struct{}),
@@ -936,10 +986,12 @@ func (r *ClaimBasedResolver) reconcileLoop(ctx context.Context) {
 	}
 }
 
-// reconcileOnce performs a single reconcile pass: re-list the bucket, build a
-// pending-batch of upserts and tombstones for entries that disagree with the
-// cache, and apply through the shared revision-aware apply path. A no-op when
-// the cache is already in sync with KV.
+// reconcileScan is the full reconcile pass body (list + per-key read +
+// tombstone synthesis + apply). It reports whether the pass was CLEAN —
+// the list succeeded (the "no keys found" empty-bucket normalization
+// counts as success) and every listed key was readable — which is the
+// gate's precondition for latching a bucket position. Cleanliness is
+// about read health, not about whether the pass applied changes.
 //
 // Tombstone semantics: when a key is absent from KV but present (non-deleted)
 // in the cache, we stamp the tombstone with the cache's current revision + 1.
@@ -952,7 +1004,7 @@ func (r *ClaimBasedResolver) reconcileLoop(ctx context.Context) {
 //
 // This is the same revision-aware tombstone shape used by the watcher
 // at applyPendingBatch.
-func (r *ClaimBasedResolver) reconcileOnce(ctx context.Context) {
+func (r *ClaimBasedResolver) reconcileScan(ctx context.Context) bool {
 	// Snapshot the cache BEFORE walking KV Keys(). Any cache entry
 	// added by the watcher concurrently with Keys()/Get() will not appear in
 	// `snap` and therefore cannot be synthesized into a tombstone by the
@@ -967,7 +1019,7 @@ func (r *ClaimBasedResolver) reconcileOnce(ctx context.Context) {
 	// We pick this "snapshot first" form over a CAS-style atomic check
 	// inside applyPendingBatch because it is the minimum change to close
 	// the race and keeps the tombstone-or-skip decision local to
-	// reconcileOnce.
+	// reconcileScan.
 	cur := r.cache.Load()
 	snap := map[string]claimEntry{}
 	if cur != nil {
@@ -980,7 +1032,7 @@ func (r *ClaimBasedResolver) reconcileOnce(ctx context.Context) {
 			if r.logger != nil {
 				r.logger.Debug("claim resolver reconcile: list keys failed", "error", err)
 			}
-			return
+			return false
 		}
 		keys = nil
 	}
@@ -1070,7 +1122,7 @@ func (r *ClaimBasedResolver) reconcileOnce(ctx context.Context) {
 	}
 
 	if len(pendingByPID) == 0 {
-		return
+		return len(unreadable) == 0
 	}
 	// Emit the rescue metric BEFORE applying so the event is observable
 	// even if applyPendingBatch were ever to panic.
@@ -1086,9 +1138,109 @@ func (r *ClaimBasedResolver) reconcileOnce(ctx context.Context) {
 	// path will re-establish via WatchAll and re-deliver historical state
 	// through the initial replay. Rate-limited by driftRestartCooldown.
 	r.requestWatcherRestartFromReconcile()
+
+	return len(unreadable) == 0
 }
 
-// requestWatcherRestartFromReconcile is called by reconcileOnce when it has
+// gateProbe takes one stream-position probe and applies the fail-open
+// and config-validation rules: any probe error or unsafe bucket config
+// invalidates the latch, so no skip can happen until a clean full pass
+// re-latches. Returns the probe result, whether it is usable for
+// gating/latching, and the full-pass reason label when it is not.
+func (r *ClaimBasedResolver) gateProbe(ctx context.Context) (natsutil.KVStreamPos, bool, string) {
+	pos, err := r.streamPos(ctx)
+	if err != nil {
+		r.gateLatchValid = false
+		if r.logger != nil {
+			r.logger.Debug("claim resolver reconcile: stream position probe failed", "error", err)
+		}
+
+		return natsutil.KVStreamPos{}, false, "probe_error"
+	}
+	if !r.gateConfigGuard.Check(pos, r.logger) {
+		r.gateLatchValid = false
+
+		return pos, false, "unsafe_config"
+	}
+
+	return pos, true, ""
+}
+
+// reconcileOnce gates a reconcile tick behind a stream-position probe:
+// when two probes gateConfirmGap apart both equal the position latched
+// by the last clean full pass, the bucket is provably byte-identical to
+// what that pass observed and the tick is skipped (no snapshot, no
+// Keys(), no Gets, no apply, no drift signal). Anything else — probe
+// error, unsafe config, position mismatch, unlatched state, or the
+// forced-pass budget running out — runs the full reconcileScan.
+func (r *ClaimBasedResolver) reconcileOnce(ctx context.Context) {
+	if r.streamPos == nil {
+		// No probe seam configured (no dedicated probe handle was
+		// supplied): the gate is inert. Today's behavior, byte-for-byte
+		// — no probes, no gate bookkeeping, no gate logging.
+		_ = r.reconcileScan(ctx)
+
+		return
+	}
+
+	pos, ok, reason := r.gateProbe(ctx)
+	if ok && r.gateLatchValid && pos.Same(r.gateLatch) {
+		if r.gateSkipsSinceFull >= natsutil.ScanGateMaxSkippedPasses {
+			reason = "forced"
+		} else {
+			// Double-probe confirmation (stop/ctx-aware wait; on stop,
+			// end the pass without scanning or latching).
+			if !r.sleepWithStop(ctx, r.gateConfirmGap) {
+				return
+			}
+			pos2, ok2, reason2 := r.gateProbe(ctx)
+			if ok2 && pos2.Same(r.gateLatch) {
+				r.gateSkipsSinceFull++
+				if r.gateSkipsSinceFull == 1 && r.logger != nil {
+					r.logger.Debug("claim resolver reconcile gate engaged")
+				}
+
+				return
+			}
+			// Confirmation failed: fall through to the full pass. The
+			// freshest usable probe (if any) becomes the latch candidate.
+			pos, ok = pos2, ok2
+			reason = reason2
+			if reason == "" {
+				reason = "mismatch"
+			}
+		}
+	} else if ok && reason == "" {
+		if r.gateLatchValid {
+			reason = "mismatch"
+		} else {
+			reason = "unlatched"
+		}
+	}
+
+	clean := r.reconcileScan(ctx)
+
+	if ok && clean {
+		// Latch the pre-scan probe. Conservative by construction: any
+		// mutation landing between this probe and the scan's reads makes
+		// the NEXT probe differ from the latch, forcing a full pass —
+		// the scan may observe newer state than the latch claims, never
+		// older.
+		r.gateLatch = pos
+		r.gateLatchValid = true
+	} else {
+		r.gateLatchValid = false
+	}
+	if r.logger != nil {
+		r.logger.Debug("claim resolver reconcile full pass",
+			"gated_skips_since_last_full", r.gateSkipsSinceFull,
+			"reason", reason,
+		)
+	}
+	r.gateSkipsSinceFull = 0
+}
+
+// requestWatcherRestartFromReconcile is called by reconcileScan when it has
 // applied any change to the cache. The reconciler engaging means the watcher
 // missed events — likely a silent stall (the nats.go KV watcher does not
 // surface server restarts as Updates() channel close). The supervisor's

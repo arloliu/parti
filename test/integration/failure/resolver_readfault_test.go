@@ -379,6 +379,24 @@ func TestResolverReadFault_ConsumerSurvivesQuorumLossWindow(t *testing.T) {
 	// stays committed at R.
 	fc.ArmReads()
 
+	// (3b) Nudge the bucket position so the reconcile scan gate cannot keep
+	// skipping passes. Reconcile ticks are gated behind a stream-position
+	// probe (Status passes through the fault wrapper, so the probe stays
+	// healthy), and over a byte-idle bucket every tick provably no-ops and
+	// skips — the faulted claim-key Get below would then never fire. One
+	// write OUTSIDE the claims/ prefix advances the bucket position without
+	// touching any claim: the next tick mismatches the latch and runs a
+	// full pass, and that pass's faulted Get is unclean, so no pass can
+	// re-latch until reads recover — every subsequent tick stays a full
+	// pass for the rest of the fault window. This is the gate's designed
+	// contract (skips only when the bucket is provably unchanged), and it
+	// is exactly the shape observation-style reconcile tests must use in
+	// the gated world.
+	nudgeKV, err := realJS.KeyValue(ctx, rfHandoffBucket)
+	require.NoError(t, err)
+	_, err = nudgeKV.Put(ctx, "rf-gate-nudge", []byte("x"))
+	require.NoError(t, err)
+
 	// (4) Force at least one reconcileOnce pass under the fault: wait until a
 	// claim-key Get has actually faulted at least twice (proves a reconcile
 	// cycle observed the Keys-ok/Get-fail window — the exact condition that
