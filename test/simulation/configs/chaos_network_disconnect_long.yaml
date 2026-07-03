@@ -1,5 +1,6 @@
 # Phase 3 — Long network disconnect (Gap 12): lease expiry → reassignment →
-# post-recovery convergence.
+# post-recovery convergence. Doubles as a warm-suppression detection-latency
+# guard for the heartbeat silent-expiry sweep (internal/assignment/worker_monitor.go).
 #
 # Setup:
 #   - 5 workers, static partition source.
@@ -7,6 +8,10 @@
 #     HeartbeatTTL default = 15s; disconnect (60s) > HeartbeatTTL × 2 (30s),
 #     so the disconnected worker's lease expires and remaining workers must
 #     claim its partitions before reconnection.
+#   - Target selection prefers a NON-LEADER worker that currently owns
+#     partitions (cmd/simulation/main.go handleLongGoroutineNetworkDisconnect),
+#     so the warm leader's suppression-holiday sweep is the sole detector —
+#     not a cold post-election monitor.
 #   - cooldown=120s stops chaos at T+60s, ensuring exactly one disconnect
 #     event fires before chaos halts.
 #   - Total runtime 3 minutes: covers disconnect (60s) + recovery (~30s)
@@ -15,7 +20,11 @@
 # Invariants asserted:
 #   - INV1 (Gap 12): long_disconnect_reassignment_observed >= 1.
 #     The disconnected worker's partitions migrate to remaining workers within
-#     T_reassign = disconnect_duration + 30s.
+#     T_reassign = HeartbeatTTL + 3×HeartbeatTTL (suppression-holiday
+#     detection bound, worker_monitor.go:24-45) + 15s CI slack = 75s at the
+#     15s default — independent of the disconnect duration itself, since
+#     detection only requires the heartbeat key to have already silently
+#     expired.
 #   - INV2: post-recovery assignment is gap-free (unassigned=0, no snapshot
 #     overlap violations, zero double-leader observations).
 #   - INV3: slow-start assertions are suppressed for the disconnect-target
