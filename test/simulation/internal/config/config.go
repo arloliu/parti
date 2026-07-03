@@ -309,6 +309,13 @@ type ChaosConfig struct {
 	// burst-after-quiet (Gap 13) scenario knobs.
 	Storage StorageChaosConfig `yaml:"storage"`
 
+	// HeartbeatScan carries the heartbeat scan-flatness oracle knobs
+	// (heartbeat_scan_flatness scenario). When enabled a sampler snapshots
+	// the leader WorkerMonitor's parti-heartbeat Keys+ListKeys scan count at
+	// phase boundaries and the final gate asserts the quiet-window scan rate
+	// stays at the polling floor.
+	HeartbeatScan HeartbeatScanConfig `yaml:"heartbeat_scan"`
+
 	// Faults carries startup-armed fault injection knobs. Scheduled chaos
 	// events are usually preferred; this is only for faults that must be
 	// active before the initial worker Start path.
@@ -382,6 +389,43 @@ type StorageChaosConfig struct {
 	// A value of 1.5 is the tight bound; 5.0 is the conservative first-
 	// run default.
 	KvOpRateCeilingMultiplier float64 `yaml:"kv_op_rate_ceiling_multiplier"`
+}
+
+// HeartbeatScanConfig configures the heartbeat scan-flatness oracle. It guards
+// the benefit of the leader WorkerMonitor's heartbeat-refresh suppression
+// (internal/assignment/worker_monitor.go): in a quiet window only the hbTTL/2
+// polling ticker should scan parti-heartbeat; routine heartbeat refreshes must
+// be suppressed (no Keys() scan). A stuck-open suppression holiday or a
+// per-watcher-event forced check reverts to a scan-per-refresh storm — a pure
+// performance regression that no ownership/gap oracle can see — which this
+// oracle catches as a scan count above the polling floor.
+type HeartbeatScanConfig struct {
+	// Enabled turns on the scan-flatness sampler and the final-gate floor
+	// assertion.
+	Enabled bool `yaml:"enabled"`
+
+	// PhaseATailStart / PhaseATailEnd bound the quiet baseline window (the
+	// last 30s of phase A, before any chaos). The oracle asserts the
+	// heartbeat scan count over this window stays at/below FloorBudget.
+	PhaseATailStart time.Duration `yaml:"phase_a_tail_start"`
+	PhaseATailEnd   time.Duration `yaml:"phase_a_tail_end"`
+
+	// PhaseCTailStart / PhaseCTailEnd bound the post-chaos quiet window (the
+	// final ~30s). PhaseCTailStart MUST begin at least one full suppression
+	// holiday (3×HeartbeatTTL = 45s at the 15s default) after the last chaos
+	// event so a correct holiday has already closed and scans returned to the
+	// floor. PhaseCTailEnd MUST land a few seconds before simulation.duration
+	// so the snapshot is captured before ordered shutdown — worker heartbeat
+	// DELETEs during teardown would otherwise trigger a burst of leader scans
+	// and contaminate the window.
+	PhaseCTailStart time.Duration `yaml:"phase_c_tail_start"`
+	PhaseCTailEnd   time.Duration `yaml:"phase_c_tail_end"`
+
+	// FloorBudget is the maximum heartbeat Keys+ListKeys scan count allowed
+	// in each quiet window, summed across all workers. Derive it from the
+	// WorkerMonitor polling cadence (1 scan per hbTTL/2) with CI headroom;
+	// see the scenario YAML for the arithmetic.
+	FloorBudget int64 `yaml:"floor_budget"`
 }
 
 // ScheduledChaosEvent is a one-shot scenario-scheduled chaos event.

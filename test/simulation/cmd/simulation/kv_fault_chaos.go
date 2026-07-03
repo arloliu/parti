@@ -29,12 +29,51 @@ type simKVFaultController struct {
 
 	kvUnavailableInjected     atomic.Int64
 	handoffClaimWriteInjected atomic.Int64
+
+	// scanMu guards scanCalls, a per-bucket count of key-enumeration scans
+	// (Keys + ListKeys) issued through this wrapper. Each Keys()/ListKeys()
+	// spins up a throwaway ordered consumer on the bucket's stream, so this
+	// counter is a faithful proxy for the leader WorkerMonitor's scan cost.
+	// Read by the heartbeat scan-flatness oracle (heartbeat_scan_chaos.go).
+	scanMu    sync.Mutex
+	scanCalls map[string]*atomic.Int64
 }
 
 func newSimKVFaultController() *simKVFaultController {
 	return &simKVFaultController{
 		kvUnavailableBuckets: make(map[string]struct{}),
+		scanCalls:            make(map[string]*atomic.Int64),
 	}
+}
+
+// recordScan counts one key-enumeration scan (Keys or ListKeys) against the
+// bucket. Both nats.go key-listing entry points funnel here so the oracle sees
+// the true scan rate regardless of which API the caller used. Counting happens
+// at call entry (before any fault check) because a scan attempt is a scan
+// attempt whether or not it is subsequently faulted.
+func (fc *simKVFaultController) recordScan(bucket string) {
+	fc.scanMu.Lock()
+	counter, ok := fc.scanCalls[bucket]
+	if !ok {
+		counter = &atomic.Int64{}
+		fc.scanCalls[bucket] = counter
+	}
+	fc.scanMu.Unlock()
+
+	counter.Add(1)
+}
+
+// scanCount returns the cumulative Keys+ListKeys scan count for the bucket, or
+// 0 if the bucket has never been scanned through the wrapper.
+func (fc *simKVFaultController) scanCount(bucket string) int64 {
+	fc.scanMu.Lock()
+	counter, ok := fc.scanCalls[bucket]
+	fc.scanMu.Unlock()
+	if !ok {
+		return 0
+	}
+
+	return counter.Load()
 }
 
 func (fc *simKVFaultController) armKVUnavailable(buckets []string) uint64 {
@@ -282,11 +321,26 @@ func (kv *simKVFaultKeyValue) WatchFiltered(ctx context.Context, keys []string, 
 }
 
 func (kv *simKVFaultKeyValue) Keys(ctx context.Context, opts ...jetstream.WatchOpt) ([]string, error) {
+	kv.fc.recordScan(kv.bucket)
 	if kv.fc.shouldFaultKVUnavailable(kv.bucket) {
 		return nil, context.DeadlineExceeded
 	}
 
 	return kv.KeyValue.Keys(ctx, opts...)
+}
+
+// ListKeys mirrors Keys for the streaming key-lister API. nats.go's concrete
+// Keys() is built on WatchAll (not ListKeys), so this override only fires when
+// a caller invokes ListKeys directly on the wrapped handle — the embedded
+// Keys() never re-enters this method, so there is no double counting. Counted
+// so the heartbeat scan-flatness oracle observes every key-enumeration path.
+func (kv *simKVFaultKeyValue) ListKeys(ctx context.Context, opts ...jetstream.WatchOpt) (jetstream.KeyLister, error) {
+	kv.fc.recordScan(kv.bucket)
+	if kv.fc.shouldFaultKVUnavailable(kv.bucket) {
+		return nil, context.DeadlineExceeded
+	}
+
+	return kv.KeyValue.ListKeys(ctx, opts...)
 }
 
 func (kv *simKVFaultKeyValue) History(ctx context.Context, key string, opts ...jetstream.WatchOpt) ([]jetstream.KeyValueEntry, error) {

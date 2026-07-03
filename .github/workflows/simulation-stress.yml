@@ -414,8 +414,9 @@ jobs:
 
   sim-storage-residuals:
     runs-on: ubuntu-latest
-    # 3 scenarios: ~60s each ≈ 4m + setup ≈ 5m; 9m gives headroom.
-    timeout-minutes: 9
+    # 4 scenarios: three ~60s + heartbeat_scan_flatness ~285s ≈ 9m + setup;
+    # 16m gives headroom.
+    timeout-minutes: 16
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -428,9 +429,10 @@ jobs:
       - name: Run Storage & Burst Scenarios
         # Phase 8 (Gaps 9, 13) — manager create-time StorageType assertion,
         # operator-precreated replicas, burst-after-quiet KV-op ceiling.
+        # heartbeat_scan_flatness (FM7/FM3) — leader heartbeat scan-rate floor.
         run: |
           set -e
-          for scn in storage_assertion storage_replicas_operator burst_after_quiet; do
+          for scn in storage_assertion storage_replicas_operator burst_after_quiet heartbeat_scan_flatness; do
             echo "::group::${scn}"
             ./tmp/simulation \
               --config "test/simulation/configs/${scn}.yaml" \
@@ -447,3 +449,4 @@ jobs:
             failure_report.json
             tmp/storage_*.log
             tmp/burst_*.log
+            tmp/heartbeat_scan_flatness.log
