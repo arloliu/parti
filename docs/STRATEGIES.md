@@ -21,6 +21,7 @@
     - [WeightedConsistentHash](#weightedconsistenthash)
     - [RoundRobin](#roundrobin)
     - [Custom Strategies](#custom-strategies)
+    - [Label Routing](#label-routing)
   - [Partition Sources](#partition-sources)
     - [Import](#import-1)
     - [Source Interface](#source-interface)
@@ -288,6 +289,30 @@ func (s *AffinityStrategy) Assign(
     return result, nil
 }
 ```
+
+---
+
+### Label Routing
+
+Label-based partition assignment (`Partition.Label` / `Config.WorkerLabels`)
+sits **above** this layer, not inside it. Labels partition the worker set and
+the partition set into pools first (a "vip" pool, a "general" pool, and so
+on); the configured `AssignmentStrategy` then runs once per pool, unmodified,
+exactly as it would for a single unlabeled fleet.
+
+Concretely, `AssignmentStrategy` stays the two-method interface shown above —
+it never receives label information and never needs to. A custom strategy
+you've already written keeps working with **no changes** once labels are
+enabled; it simply gets called once per eligible pool instead of once for the
+whole fleet, and its own load-balancing behavior (including
+`Partition.Weight` handling) applies *within* each pool. Balancing capacity
+*across* pools is deliberately not a strategy concern — pools are isolation
+domains, not shared capacity.
+
+See [Label-Based Partition Assignment](LABELS.md) for the full model: the
+worker/partition label match rule, the `dedicated`/`shared` unlabeled policy,
+the park-then-spill grace window for an empty pool, and the rollout rules for
+upgrading a fleet safely.
 
 ---
 

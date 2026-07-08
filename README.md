@@ -42,6 +42,7 @@ Use it for stream processors, job queues, sharded caches, or any system where a 
 - **Processing Gate**: Per-message admission control based on assignment status, NAKing deliveries for revoked partitions.
 - **Cache Affinity**: Preserves >80% partition locality during rebalancing using consistent hashing.
 - **Weighted Assignment**: Supports partition weights for uneven workload distribution.
+- **Label-Based Routing**: Pins labeled partitions to matching worker pools (e.g., a dedicated "VIP" tier) with runtime promotion/demotion, an empty-pool park-then-spill grace window, and a stale-incarnation guard for stable-ID takeover. See [Label-Based Partition Assignment](docs/LABELS.md).
 
 ### Consumer Auto-Recovery
 
@@ -191,6 +192,7 @@ func main() {
 - **Features**
     - [Consumer Helpers](docs/CONSUMERS.md): JetStream consumer management.
     - [Static Partitioning](docs/STATIC_PARTITIONING.md): Deterministic partitioning without coordination.
+    - [Label-Based Partition Assignment](docs/LABELS.md): Dedicated worker pools for partition classes (VIP routing).
 - **Reference**
     - [API Reference](docs/API_REFERENCE.md): Detailed API documentation.
     - [Reference](docs/REFERENCE.md): Hooks, error codes, and glossary.

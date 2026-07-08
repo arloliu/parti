@@ -51,6 +51,7 @@ mgr.Start(context.Background())
 | [Strategies & Sources](STRATEGIES.md)         | Assignment strategies, partition sources                    |
 | [Static Partitioning](STATIC_PARTITIONING.md) | Key-based routing plus static partition publisher/subscriber helpers |
 | [Scaling](SCALING.md)                         | Bounded-cost partitioning: NATS `partition()` + `Dynamic` over a fixed K |
+| [Labels](LABELS.md)                           | Dedicated worker pools for partition classes (VIP routing), park/spill, rollout rules |
 
 ### Reference
 

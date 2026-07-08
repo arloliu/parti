@@ -7,6 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v2.9.0] - 2026-07-08
+
+Label-based partition assignment: pin a subset of partitions to a dedicated
+worker pool (a "VIP" tier, a latency-sensitive tenant, a GPU-backed task
+class) inside the same management plane — one heartbeat/election/assignment
+bucket set, one partition list, one leader — instead of running a second
+deployment of Parti. Fully additive: with zero labels anywhere in the fleet,
+assignment output is unchanged from every prior release. Promote or demote a
+partition at runtime by rewriting the partition list; no worker restart
+required.
+
+### Added
+
+- **`types.Partition.Label`** — one optional string label per partition. A
+  routing hint, not identity: excluded from `CanonicalID`, `HashID`,
+  `Compare`, and `PartitionSetDigest`, so relabeling a partition that is
+  already on a matching worker moves no ownership.
+- **`types.Heartbeat.Labels`** — a worker's label set, fixed for the process
+  lifetime and published on every heartbeat.
+- **`Config.WorkerLabels`** (yaml `workerLabels`) and **`parti.WithWorkerLabels(labels...)`**
+  — configure a worker's label set; the option overrides the config field
+  when both are set. Validated, sorted, and deduplicated at construction
+  time (charset rules matching partition keys, 64-byte cap, 16 labels max).
+- **`Config.UnlabeledPartitionPolicy`** (yaml `unlabeledPartitionPolicy`,
+  default `"dedicated"`) — `"dedicated"` routes unlabeled partitions to
+  unlabeled workers only (falling back to all workers when none are live);
+  `"shared"` routes them to any worker. Leader-side; must be fleet-uniform,
+  same contract as the `AssignmentStrategy` choice.
+- **`Config.LabelSpillGrace`** (yaml `labelSpillGrace`, default `60s`) — how
+  long a label's worker pool must be continuously empty before its
+  partitions spill to the fallback ladder (unlabeled workers, or — only in
+  an all-labeled fleet — any worker). A partition parked during the grace
+  window is deliberately unassigned and durably accounted for in the
+  assignment commit (`AssignmentCommit.ParkedCount` / `ParkedDigest`); it is
+  never silently dropped from coverage.
+- **`types.LabelMetrics`** — optional extension interface a
+  `MetricsCollector` may also implement for per-label pool-size and
+  parked-count gauges plus spill/label-change/incarnation-reject/fallback
+  counters. Existing collectors that don't implement it are unaffected;
+  label mode runs without them.
+- **`AssignmentPayload.WorkerLabels` / `WorkerLabelsKnown`** and
+  **`AssignmentCommit.ParkedCount` / `ParkedDigest`** — wire additions
+  carrying labels-of-record and parked-partition accounting through both the
+  commit path and the legacy alias path. A worker whose configured labels
+  don't match its payload's labels-of-record rejects the assignment outright
+  (no consumer attach/detach, no ack) instead of misapplying a payload
+  computed for a different process incarnation behind the same stable ID —
+  the guard that makes stable-ID takeover across a relabel safe.
+- **`provision`**: partition records carry `label` alongside `keys` and
+  `weight`; `partictl partitions plan`/`apply` report label-only edits as a
+  change (`PartitionWeightChange.OldLabel` / `NewLabel`), never as a
+  no-op.
+- See [Label-Based Partition Assignment](docs/LABELS.md) for the full
+  operator guide: the worker/partition match rule, the park-then-spill
+  grace window and its worst-case-stall formula, the stale-incarnation
+  guard, and the recommended one-`WorkerIDPrefix`-per-deployment pattern.
+
+### Compatibility and rollout
+
+Two rollout-ordering rules apply before adopting labels on an existing
+fleet; skipping either produces a silent failure mode, not an error:
+
+1. **Upgrade every deployment to a label-aware version before labeling any
+   partition.** Any worker can win leader election — a mixed fleet flips
+   between labeled and legacy (label-blind) assignment on every failover
+   until every deployment is upgraded.
+2. **Upgrade every writer of the partition list first, including the
+   `provision` CLI.** An old writer's full-list rewrite silently strips the
+   `Label` field, and the new label-aware change detection faithfully
+   propagates that stripped list as a real edit — demoting every labeled
+   partition, not leaving them untouched.
+
+On the first commit published by an upgraded leader, every worker's payload
+is re-hashed once (the new labels-of-record presence bit enters the
+canonical payload bytes even for unlabeled workers), so the fleet runs one
+apply+ack cycle with no ownership movement — the same benign shape as a
+label-only edit.
+
 ## [v2.8.2] - 2026-07-03
 
 Scalability release: Parti's coordination buckets no longer pay steady-state
