@@ -9,7 +9,7 @@
 - [Configuration Guide](CONFIGURATION.md) - Configuration options
 - [Lifecycle](LIFECYCLE.md) - Worker states, handoff, degraded mode
 - [Operations Guide](OPERATIONS.md) - Metrics, troubleshooting
-- [Kubernetes Guide](KUBERNETES.md) - Deployment patterns (one Deployment per label pool)
+- [Kubernetes Operator Guide](KUBERNETES.md) - The `ProvisionedPartiEnv` CRD and operator
 - [Provision Guide](PROVISION.md) - `partitions:` records, including labels
 
 ---
@@ -19,17 +19,24 @@
 - [Label-Based Partition Assignment](#label-based-partition-assignment)
   - [Table of Contents](#table-of-contents)
   - [Overview](#overview)
+  - [Architecture](#architecture)
   - [The model](#the-model)
   - [Configuring labels](#configuring-labels)
     - [Worker labels](#worker-labels)
     - [Assignment policy (fleet-uniform)](#assignment-policy-fleet-uniform)
   - [The VIP promotion workflow](#the-vip-promotion-workflow)
+  - [Assignment flow](#assignment-flow)
+    - [Leader: one rebalance pass](#leader-one-rebalance-pass)
+    - [Worker: applying a commit](#worker-applying-a-commit)
   - [Parking and spill](#parking-and-spill)
     - [Worst-case stall](#worst-case-stall)
     - [Grace clocks reset on leader failover](#grace-clocks-reset-on-leader-failover)
   - [The stale-incarnation guard](#the-stale-incarnation-guard)
   - [Rollout rules](#rollout-rules)
-  - [Recommended pattern: one `WorkerIDPrefix` per deployment](#recommended-pattern-one-workeridprefix-per-deployment)
+  - [Label-based Kubernetes deployment](#label-based-kubernetes-deployment)
+    - [One `WorkerIDPrefix` per deployment](#one-workeridprefix-per-deployment)
+    - [Deployment topology](#deployment-topology)
+    - [Rolling updates](#rolling-updates)
   - [What operators see](#what-operators-see)
   - [Gotchas](#gotchas)
 
@@ -51,6 +58,49 @@ and `vip` — each running the same binary with a different `WorkerLabels`
 value baked into its pod config. The VIP set is not static: operators promote
 and demote partitions between pools at runtime by rewriting the partition
 list, without redeploying or restarting any worker.
+
+## Architecture
+
+Labels add no new NATS bucket and no second management plane: the same
+Partitions, Heartbeat, and Assignment buckets every Parti deployment already
+uses carry the extra fields, and the same elected leader that would otherwise
+run one label-blind `Strategy.Assign` call now runs it once per label pool.
+
+```
+    ┌─────────────── NATS JetStream (shared control plane) ────────────────┐
+    │ ┌─ Partitions KV ─┐  ┌──── Heartbeat KV ────┐  ┌── Assignment KV ──┐ │
+    │ │  Keys[], Label  │  │ WorkerID -> Labels[] │  │ labels-of-record, │ │
+    │ │                 │  │                      │  │ WorkerLabelsKnown │ │
+    │ └─────────────────┘  └──────────────────────┘  └───────────────────┘ │
+    └───────────────────────────────────┼──────────────────────────────────┘
+                                        │ every worker publishes its heartbeat + watches its own commit;
+                                        │ the elected leader also reads Partitions + all Heartbeats,
+                                        │ computes and publishes the Assignment commit
+                                        │
+                        ┬───────────────┬────────────────────────────┬
+                        ▼                                            ▼
+    ┌────────────── vip pool ──────────────┐        ┌───────── general pool ──────────┐
+    │ WorkerLabels: ["vip"]                │        │ WorkerLabels: []                │
+    │ WorkerIDPrefix: "vip-"               │        │ WorkerIDPrefix: "worker-"       │
+    │                                      │        │                                 │
+    │ ┌──── vip-0 ────┐   ┌─── vip-1 ────┐ │        │ ┌─ worker-0 ─┐   ┌─ worker-1 ─┐ │
+    │ │   (LEADER)    │   │  consumers:  │ │        │ │ consumers: │   │ consumers: │ │
+    │ │  Calculator   │   │ [tenant-xyz] │ │        │ │ [tenant-w] │   │ [tenant-v] │ │
+    │ │  consumers:   │   └──────────────┘ │        │ └────────────┘   └────────────┘ │
+    │ │ [tenant-acme] │                    │        └─────────────────────────────────┘
+    │ └───────────────┘                    │
+    └──────────────────────────────────────┘
+```
+
+The leader shown here happens to be a `vip-0` process — leadership is not
+tied to any pool. Any worker in the fleet, labeled or not, can win election;
+whichever one does simply starts reading every worker's heartbeat and
+computing assignments for the whole fleet, labels included. This is why
+`WorkerLabels` and `UnlabeledPartitionPolicy`/`LabelSpillGrace` have such
+different scopes ([Assignment policy](#assignment-policy-fleet-uniform)):
+labels vary per pool because they describe *that pool's* capacity, while
+policy must be fleet-uniform because *any* pool's worker might end up
+computing it.
 
 ## The model
 
@@ -204,6 +254,106 @@ weight are untouched) and fires a rebalance. If the target pool has an
 eligible worker, the promoted partition moves there on the next assignment;
 if it doesn't, it parks — see below.
 
+## Assignment flow
+
+The two diagrams below give the pipeline's shape end to end: what the leader
+does on one rebalance pass, and what a worker does when a resulting
+assignment reaches it. Every box is elaborated in its own section afterward
+([Parking and spill](#parking-and-spill),
+[The stale-incarnation guard](#the-stale-incarnation-guard)) — treat these as
+a map, not the full story.
+
+### Leader: one rebalance pass
+
+```
+    Rebalance triggered
+    (worker join/leave, label-only edit, detected label change, or recheck timer)
+
+                                        │
+                                        ▼
+                           ┌────── 1. Observe ──────┐   if this observation is not FRESH (cached worker set):
+                           │ Read worker heartbeats │   replay the previous commit when content-identical to
+                           └────────────┬───────────┘   it, else defer benignly and wait for the next trigger.
+                                        │
+                                        ▼
+                       ┌──── 2. Build label topology ────┐
+                       │ pool per label + fallback pool, │
+                       │  per UnlabeledPartitionPolicy   │
+                       └────────────────┬────────────────┘
+                                        │
+                                        ▼
+                            ┌──── 3. Per label ─────┐
+                            │    eligible worker    │
+                            │ in this label's pool? │
+                            └───────────┬───────────┘
+                    ┌───────────────────┼───────────────────┐
+                 yes                                      no
+        ┌───────────────────────┐               ┌───────────────────────┐
+        │ assign to pool worker │               │ defer once, then park │
+        └───────────┬───────────┘               │ (unassigned; counted  │
+                    │                           │    in the commit)     │
+                    │                           └───────────┬───────────┘
+                    │                                       │
+                    │                                       ▼
+                    │                             ┌───────────────────┐
+                    │                             │ still empty after │
+                    │                             │ LabelSpillGrace?  │
+                    │                             └─────────┬─────────┘
+                    │                        ┌──────────────┼──────────────┐
+                    │                      no                            yes
+                    │               ┌─────────────────┐           ┌─────────────────┐
+                    │               │    assign to    │           │    spill to     │
+                    │               │ rejoined worker │           │ fallback ladder │
+                    │               └────────┬────────┘           └────────┬────────┘
+                    │                        │                             │
+                    └───────────────────┬────┴─────────────────────────────┘
+                                        │
+                                        ▼
+             ┌──────────────────── 4. Publish ────────────────────┐
+             │ merge every label's result + unlabeled partitions, │
+             │           publish the Assignment commit            │
+             │     (labels-of-record, WorkerLabelsKnown=true,     │
+             │            ParkedCount / ParkedDigest)             │
+             └────────────────────────────────────────────────────┘
+```
+
+Step 3 runs independently per label — one label's pool being empty never
+blocks or delays another label's assignment, and never reaches into a
+different label's dedicated capacity (see
+[Gotchas](#gotchas)). The "defer once" in step 3's `no` branch is the same
+two-consecutive-observations guard described under
+[Parking and spill](#parking-and-spill): a single bad reading parks nothing.
+
+### Worker: applying a commit
+
+```
+                         ┌────────────── 5. Apply ──────────────┐
+                         │ Worker receives an Assignment commit │
+                         └───────────────────┬──────────────────┘
+                                             │
+                                             ▼
+                        ┌────── The stale-incarnation guard ──────┐
+                        │ do the payload's labels-of-record match │
+                        │  this worker's own configured labels?   │
+                        └────────────────────┬────────────────────┘
+                ┌────────────────────────────┼────────────────────────────────┐
+             match               unknown (pre-label leader)              mismatch
+  ┌──────────────────────────┐    ┌─────────────────────┐    ┌────────────────────────────────┐
+  │   apply: attach/detach   │    │        apply        │    │   reject: no apply, no ack.    │
+  │ consumers as needed, ack │    │ (back-compat with a │    │  Keep the current assignment;  │
+  └──────────────────────────┘    │  pre-label leader)  │    │ keep heartbeating true labels. │
+                                  └─────────────────────┘    └────────────────────────────────┘
+
+                                                             -> the leader's heartbeat watcher sees this worker's
+                                                                true labels on its very next heartbeat and fires an
+                                                                immediate targeted recheck — no audit-cycle wait.
+```
+
+The three outcomes are mutually exclusive and exhaustive — every apply is
+exactly one of match, mismatch, or unknown. See
+[The stale-incarnation guard](#the-stale-incarnation-guard) for why the
+mismatch branch is a first-class outcome rather than an error to retry.
+
 ## Parking and spill
 
 A **parked** partition is deliberately unassigned: no worker owns it, no
@@ -316,8 +466,9 @@ durably — strictly preferable to a wrong-class worker processing them.
 You do not need to configure or invoke this guard; it runs unconditionally
 whenever any worker in the fleet carries labels. See
 [What operators see](#what-operators-see) for the log line and metric it
-emits, and the recommended pattern below for shrinking how often it can ever
-fire.
+emits, and
+[One `WorkerIDPrefix` per deployment](#one-workeridprefix-per-deployment) for
+shrinking how often it can ever fire.
 
 ## Rollout rules
 
@@ -352,7 +503,9 @@ canonical payload bytes for the first time, which changes `PayloadHash` even
 though no partition moved. Every worker runs one apply+ack cycle with no
 ownership change as a result — expected, and harmless.
 
-## Recommended pattern: one `WorkerIDPrefix` per deployment
+## Label-based Kubernetes deployment
+
+### One `WorkerIDPrefix` per deployment
 
 Give each Deployment its own `WorkerIDPrefix` (e.g. `vip-0`, `vip-1`, … vs.
 `worker-0`, `worker-1`, …) instead of sharing one prefix across deployments
@@ -365,6 +518,79 @@ job down to the one residual case it exists to cover: a *single* deployment
 relabeling itself across a rollout while keeping its own prefix. As a bonus,
 worker IDs become self-describing in logs and metrics: `vip-3` identifies its
 pool at a glance, where `worker-17` requires a lookup.
+
+### Deployment topology
+
+One Kubernetes Deployment per label pool, all pointed at the same NATS
+cluster — no per-pool NATS setup, no second control plane:
+
+```
+  ┌─────────────────────────────── Kubernetes namespace ───────────────────────────────┐
+  │                                                                                    │
+  │  ┌─── Deployment: vip-workers ────┐      ┌──── Deployment: general-workers ─────┐  │
+  │  │ WorkerLabels: ["vip"]          │      │ WorkerLabels: []                     │  │
+  │  │ WorkerIDPrefix: "vip-"         │      │ WorkerIDPrefix: "worker-"            │  │
+  │  │                                │      │                                      │  │
+  │  │ ┌────────────┐  ┌────────────┐ │      │ ┌───────────────┐  ┌───────────────┐ │  │
+  │  │ │ Pod: vip-0 │  │ Pod: vip-1 │ │      │ │ Pod: worker-0 │  │ Pod: worker-1 │ │  │
+  │  │ └────────────┘  └────────────┘ │      │ └───────────────┘  └───────────────┘ │  │
+  │  └────────────────────────────────┘      └──────────────────────────────────────┘  │
+  │                                                                                    │
+  └──────────────────────────────────────────┬─────────────────────────────────────────┘
+                                             │
+                                             ▼
+                       ┌─ NATS JetStream (in- or out-of-cluster) ─┐
+                       │     Buckets: Partitions, Heartbeat,      │
+                       │      Assignment, Election, StableID      │
+                       └──────────────────────────────────────────┘
+```
+
+Each Deployment's pod template sets `WorkerLabels` and `WorkerIDPrefix`
+differently (e.g. via distinct config maps or `env` values feeding
+`WithWorkerLabels`/`Config.WorkerIDPrefix`); everything else — the NATS
+connection, `UnlabeledPartitionPolicy`, `LabelSpillGrace`, the
+`AssignmentStrategy` — comes from shared configuration, because those are
+fleet-uniform (see [Assignment policy](#assignment-policy-fleet-uniform)).
+Scale each Deployment's `replicas` independently: growing `vip-workers` adds
+capacity to the `vip` pool only, exactly like scaling any other Deployment.
+A third pool (say `gpu`) is the same pattern again — one more Deployment,
+one more label, no change to the other two.
+
+### Rolling updates
+
+A rollout of one pool's Deployment does not, by itself, cause parking in
+that pool — as long as at least one pod of the label stays `Ready`
+throughout, which is exactly what Kubernetes' default rolling-update
+strategy already guarantees:
+
+```
+Rolling update of vip-workers, maxUnavailable: 1 (default) — always >= 1 Ready "vip" pod
+
+     before     during rollout      after
+    ┌───────┐      ┌───────┐      ┌───────┐
+    │ vip-0 │      │ vip-0 │      │ vip-0 │
+    │ (old) │      │ (new) │      │ (new) │
+    └───────┘      └───────┘      └───────┘
+    ┌───────┐      ┌───────┐      ┌───────┐
+    │ vip-1 │      │ vip-1 │      │ vip-1 │
+    │ (old) │      │ (old) │      │ (new) │
+    └───────┘      └───────┘      └───────┘
+
+                 ^ terminating, then replaced
+                   one pod at a time
+
+At every instant at least one "vip" pod is Ready, so the vip pool
+never goes empty during a routine rollout: no parking, no grace
+timer, no spill.
+```
+
+This is the same property called out under
+[Parking and spill](#parking-and-spill): parking is reserved for a pool
+going *completely* empty. Set `maxUnavailable: 0` (or leave the default of
+`1` with `replicas >= 2`) on every label-pool Deployment so an ordinary
+rollout never has a moment where the pool's last pod is down — reserve
+`LabelSpillGrace` for the failures a rollout doesn't cause (crash loops,
+node drains without a PodDisruptionBudget, a scale-to-zero).
 
 ## What operators see
 
