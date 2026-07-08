@@ -315,22 +315,26 @@ func skippedWritePartitions(res *WritePartitionsResource) SkippedAction {
 }
 
 // partitionTablesEqual reports whether a and b describe the same partition
-// table: the same set of CanonicalIDs with the same per-record Weight, order
-// independent. Both inputs are duplicate-free (partcodec.Decode and
-// ValidatePartitionSet reject duplicate CanonicalIDs), so an equal length plus
-// a matching lookup is a bijection.
+// table: the same set of CanonicalIDs with the same per-record Weight and
+// Label, order independent. Both inputs are duplicate-free (partcodec.Decode
+// and ValidatePartitionSet reject duplicate CanonicalIDs), so an equal
+// length plus a matching lookup is a bijection.
 func partitionTablesEqual(a, b []types.Partition) bool {
 	if len(a) != len(b) {
 		return false
 	}
 
-	weightByID := make(map[string]int64, len(a))
+	type wl struct {
+		w int64
+		l string
+	}
+	byID := make(map[string]wl, len(a))
 	for _, p := range a {
-		weightByID[p.CanonicalID()] = p.Weight
+		byID[p.CanonicalID()] = wl{w: p.Weight, l: p.Label}
 	}
 	for _, p := range b {
-		w, ok := weightByID[p.CanonicalID()]
-		if !ok || w != p.Weight {
+		v, ok := byID[p.CanonicalID()]
+		if !ok || v.w != p.Weight || v.l != p.Label {
 			return false
 		}
 	}
