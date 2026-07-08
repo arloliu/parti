@@ -185,6 +185,9 @@ func TestPublisher_Crash_BeforeCommit_PayloadsInert(t *testing.T) {
 	canonical := mustMarshalCanonicalPayload(t, types.AssignmentPayload{
 		SchemaVersion: types.AssignmentSchemaVersion,
 		Partitions:    []types.Partition{ps("p1")},
+		// Label-aware publisher stamps WorkerLabelsKnown=true on every payload
+		// (Task 7); mirror it here so the planted content-address matches.
+		WorkerLabelsKnown: true,
 	})
 	hash := sha256.Sum256(canonical)
 	orphanKey := "assignment._payload." + hex.EncodeToString(hash[:])
@@ -483,6 +486,9 @@ func TestPublisher_ErrKeyExists_VerifiedAndReused(t *testing.T) {
 	canonical := mustMarshalCanonicalPayload(t, types.AssignmentPayload{
 		SchemaVersion: types.AssignmentSchemaVersion,
 		Partitions:    []types.Partition{ps("p1")},
+		// Label-aware publisher stamps WorkerLabelsKnown=true on every payload
+		// (Task 7); mirror it here so the planted content-address matches.
+		WorkerLabelsKnown: true,
 	})
 	hash := sha256.Sum256(canonical)
 	key := "assignment._payload." + hex.EncodeToString(hash[:])
@@ -515,6 +521,9 @@ func TestPublisher_ErrKeyExists_HashMismatchSurfacesCollisionError(t *testing.T)
 	canonical := mustMarshalCanonicalPayload(t, types.AssignmentPayload{
 		SchemaVersion: types.AssignmentSchemaVersion,
 		Partitions:    []types.Partition{ps("p1")},
+		// Label-aware publisher stamps WorkerLabelsKnown=true on every payload
+		// (Task 7); mirror it here so the planted content-address matches.
+		WorkerLabelsKnown: true,
 	})
 	hash := sha256.Sum256(canonical)
 	key := "assignment._payload." + hex.EncodeToString(hash[:])
@@ -602,7 +611,7 @@ func TestPublisher_SetEqualityCoversAllPartitions(t *testing.T) {
 
 	// Also exercise the "duplicate" path: a strategy assigning p1 to two
 	// workers must fail the coverage check too. The publisher catches this
-	// via the multiset count check: assigned_raw=4 but source unique=3.
+	// via the multiset count check: covered_raw=4 but source unique=3.
 	f.putV1Heartbeat(t, ctx, "w2")
 	err = f.pub.Publish(ctx, PublishInput{
 		Workers: []string{"w1", "w2"},
@@ -1005,7 +1014,12 @@ func mustMarshalCanonicalPayload(t *testing.T, p types.AssignmentPayload) []byte
 			canonical[j-1], canonical[j] = canonical[j], canonical[j-1]
 		}
 	}
-	out := types.AssignmentPayload{SchemaVersion: p.SchemaVersion, Partitions: canonical}
+	out := types.AssignmentPayload{
+		SchemaVersion:     p.SchemaVersion,
+		Partitions:        canonical,
+		WorkerLabels:      p.WorkerLabels,
+		WorkerLabelsKnown: p.WorkerLabelsKnown,
+	}
 	b, err := json.Marshal(out)
 	require.NoError(t, err)
 

@@ -602,10 +602,15 @@ func newV9Calculator(t *testing.T, bucketSuffix string) (*Calculator, *time.Time
 	return calc, &now
 }
 
-// putHeartbeat publishes a heartbeat for a worker so monitor.GetActiveWorkers sees it.
+// putHeartbeat publishes a heartbeat for a worker so monitor.GetActiveWorkers
+// sees it. The payload is a legacy timestamp (not an opaque marker): the
+// label-aware rebalance decodes heartbeats to read labels-of-record, and a
+// legacy timestamp decodes as a well-formed pre-label worker (nil labels),
+// whereas an undecodeable marker would be an UNKNOWN worker and defer or
+// broad-fail the rebalance.
 func putHeartbeat(t *testing.T, calc *Calculator, ctx context.Context, workerID string) {
 	t.Helper()
-	_, err := calc.HeartbeatKV.Put(ctx, "v9-hb."+workerID, []byte("alive"))
+	_, err := calc.HeartbeatKV.Put(ctx, "v9-hb."+workerID, []byte(time.Now().Format(time.RFC3339Nano)))
 	require.NoError(t, err)
 }
 

@@ -236,6 +236,58 @@ func jsonMarshal(v any) ([]byte, error) {
 	return json.Marshal(v)
 }
 
+// putHeartbeatJSON marshals hb to v1 JSON and Puts it under key. Named
+// distinctly from the package's existing putHeartbeat helper (in
+// calculator_state_test.go, which Puts a bare "alive" string keyed by
+// worker ID) to avoid a redeclaration in this package.
+func putHeartbeatJSON(t *testing.T, kv jetstream.KeyValue, key string, hb types.Heartbeat) {
+	t.Helper()
+	b, err := jsonMarshal(hb)
+	require.NoError(t, err)
+	_, err = kv.Put(context.Background(), key, b)
+	require.NoError(t, err)
+}
+
+// TestWorkerMonitor_GetHeartbeatsFor verifies the targeted per-worker fetch
+// used by the rebalance path: exactly one bounded Get per listed worker ID,
+// no Keys() scan. Per-worker Get/decode failures must be absent from the
+// heartbeat map but present in the error map with the original error, so
+// the caller can classify the failure (connectivity vs not) rather than
+// having it masquerade as a bare "unknown labels" omission.
+func TestWorkerMonitor_GetHeartbeatsFor(t *testing.T) {
+	t.Parallel()
+	_, nc := partitest.StartEmbeddedNATS(t)
+	hbKV := partitest.CreateJetStreamKV(t, nc, "test-monitor-hbfor")
+
+	ctx := context.Background()
+
+	// Seed: worker-0 v1 JSON with labels, worker-1 v1 JSON without,
+	// worker-2 malformed payload. worker-9 is never written (missing key).
+	putHeartbeatJSON(t, hbKV, "heartbeat.worker-0", types.Heartbeat{
+		WorkerID: "worker-0", SchemaVersion: 1, Labels: []string{"vip"},
+		Timestamp: time.Now(),
+	})
+	putHeartbeatJSON(t, hbKV, "heartbeat.worker-1", types.Heartbeat{
+		WorkerID: "worker-1", SchemaVersion: 1, Timestamp: time.Now(),
+	})
+	_, err := hbKV.Put(ctx, "heartbeat.worker-2", []byte("not-json-not-time"))
+	require.NoError(t, err)
+
+	m := NewWorkerMonitor(hbKV, "heartbeat", 5*time.Second, nil, logging.NewNop())
+
+	got, errs, err := m.GetHeartbeatsFor(ctx, []string{"worker-0", "worker-1", "worker-2", "worker-9"})
+	require.NoError(t, err)
+	require.Equal(t, []string{"vip"}, got["worker-0"].Labels)
+	require.Empty(t, got["worker-1"].Labels)
+	_, ok := got["worker-2"]
+	require.False(t, ok, "malformed payload omitted from heartbeats")
+	require.Error(t, errs["worker-2"], "…but its decode error is preserved for classification")
+	_, ok = got["worker-9"]
+	require.False(t, ok, "missing key omitted from heartbeats")
+	require.Error(t, errs["worker-9"], "…and its Get error is preserved (jetstream.ErrKeyNotFound)")
+	require.Len(t, errs, 2)
+}
+
 func TestWorkerMonitor_GetActiveWorkers_EmptyPrefix(t *testing.T) {
 	t.Parallel()
 	_, nc := partitest.StartEmbeddedNATS(t)
@@ -627,15 +679,19 @@ func TestWorkerMonitor_GetActiveWorkers_BoundedTimeout(t *testing.T) {
 }
 
 // fakeKVEntry is a minimal jetstream.KeyValueEntry double for driving
-// processWatcherEvents directly.
+// processWatcherEvents directly. value is nil unless the test carries a
+// heartbeat payload (label-fingerprint tests); nil reproduces the pre-existing
+// behavior of every classification test — Value() returns nil and the label
+// decode is skipped.
 type fakeKVEntry struct {
-	key string
-	op  jetstream.KeyValueOp
+	key   string
+	op    jetstream.KeyValueOp
+	value []byte
 }
 
 func (e *fakeKVEntry) Bucket() string                  { return "fake" }
 func (e *fakeKVEntry) Key() string                     { return e.key }
-func (e *fakeKVEntry) Value() []byte                   { return nil }
+func (e *fakeKVEntry) Value() []byte                   { return e.value }
 func (e *fakeKVEntry) Revision() uint64                { return 0 }
 func (e *fakeKVEntry) Created() time.Time              { return time.Time{} }
 func (e *fakeKVEntry) Delta() uint64                   { return 0 }

@@ -483,9 +483,13 @@ func TestCalculator_Stop_PreserveAssignments(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Publish heartbeats for 3 workers
+	// Publish heartbeats for 3 workers. Legacy timestamp payloads (not an
+	// opaque marker): the label-aware rebalance decodes heartbeats to read
+	// labels-of-record, and a legacy timestamp decodes as a well-formed
+	// pre-label worker (nil labels), whereas an undecodeable marker would be
+	// an UNKNOWN worker and trip the broad-failure abort.
 	for _, workerID := range []string{"w1", "w2", "w3"} {
-		_, err := heartbeatKV.Put(ctx, fmt.Sprintf("worker.%s", workerID), []byte("heartbeat"))
+		_, err := heartbeatKV.Put(ctx, fmt.Sprintf("worker.%s", workerID), []byte(time.Now().Format(time.RFC3339Nano)))
 		require.NoError(t, err)
 	}
 
@@ -844,10 +848,12 @@ func TestCalculator_CacheFallback_ConnectivityError(t *testing.T) {
 	heartbeatKV := partitest.CreateJetStreamKV(t, ncConn, "test-cache-fallback-heartbeat")
 	assignmentKV := partitest.CreateJetStreamKV(t, ncConn, "test-cache-fallback-assignment")
 
-	// Create initial worker heartbeats
+	// Create initial worker heartbeats. Legacy timestamp payloads so the
+	// label-aware initial rebalance decodes them as pre-label workers (nil
+	// labels) instead of tripping the unreadable-labels broad-failure abort.
 	initialWorkers := []string{"worker-1", "worker-2", "worker-3"}
 	for _, workerID := range initialWorkers {
-		_, err := heartbeatKV.Put(ctx, "worker-hb."+workerID, []byte("active"))
+		_, err := heartbeatKV.Put(ctx, "worker-hb."+workerID, []byte(time.Now().Format(time.RFC3339Nano)))
 		require.NoError(t, err)
 	}
 
@@ -964,10 +970,11 @@ func TestCalculator_CacheUpdate_OnSuccess(t *testing.T) {
 	heartbeatKV := partitest.CreateJetStreamKV(t, ncConn, "test-cache-update-heartbeat")
 	assignmentKV := partitest.CreateJetStreamKV(t, ncConn, "test-cache-update-assignment")
 
-	// Create initial worker heartbeats
+	// Create initial worker heartbeats (legacy timestamp payloads — decodable
+	// by the label-aware rebalance path, consistent with the other fixtures).
 	initialWorkers := []string{"worker-1", "worker-2"}
 	for _, workerID := range initialWorkers {
-		_, err := heartbeatKV.Put(ctx, "worker-hb."+workerID, []byte("active"))
+		_, err := heartbeatKV.Put(ctx, "worker-hb."+workerID, []byte(time.Now().Format(time.RFC3339Nano)))
 		require.NoError(t, err)
 	}
 
@@ -1002,7 +1009,7 @@ func TestCalculator_CacheUpdate_OnSuccess(t *testing.T) {
 	require.Less(t, age1, 1*time.Second)
 
 	// Add a new worker
-	_, err = heartbeatKV.Put(ctx, "worker-hb.worker-3", []byte("active"))
+	_, err = heartbeatKV.Put(ctx, "worker-hb.worker-3", []byte(time.Now().Format(time.RFC3339Nano)))
 	require.NoError(t, err)
 
 	// Fetch workers again - should update cache
