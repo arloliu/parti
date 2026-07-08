@@ -537,6 +537,47 @@ func TestPublisher_JSONOutputRoundTrip(t *testing.T) {
 	require.False(t, hb.Timestamp.IsZero())
 }
 
+// TestPublisher_EmitsLabels verifies SetLabels is reflected in every published
+// heartbeat, and that an unlabeled publisher emits payload bytes with no "labels"
+// field (byte-compat for unlabeled fleets and pre-label readers).
+func TestPublisher_EmitsLabels(t *testing.T) {
+	ctx := t.Context()
+
+	_, nc := partitest.StartEmbeddedNATS(t)
+
+	t.Run("labels present after SetLabels", func(t *testing.T) {
+		kv := partitest.CreateJetStreamKV(t, nc, "test-hb-labels-present")
+		p := New(kv, "worker-hb", "worker-1", 10*time.Second, nil, nil)
+		p.SetLabels([]string{"vip"})
+		require.NoError(t, p.Start(ctx))
+		t.Cleanup(func() { _ = p.Stop() })
+
+		entry, err := kv.Get(ctx, "worker-hb.worker-1")
+		require.NoError(t, err)
+		require.Contains(t, string(entry.Value()), `"labels":["vip"]`)
+
+		hb, err := types.DecodeHeartbeat(entry.Value())
+		require.NoError(t, err)
+		require.Equal(t, []string{"vip"}, hb.Labels)
+	})
+
+	t.Run("labels field absent without SetLabels", func(t *testing.T) {
+		kv := partitest.CreateJetStreamKV(t, nc, "test-hb-labels-absent")
+		p := New(kv, "worker-hb", "worker-2", 10*time.Second, nil, nil)
+		require.NoError(t, p.Start(ctx))
+		t.Cleanup(func() { _ = p.Stop() })
+
+		entry, err := kv.Get(ctx, "worker-hb.worker-2")
+		require.NoError(t, err)
+		require.NotContains(t, string(entry.Value()), "labels",
+			"unlabeled fleets must keep byte-compatible payloads (omitempty)")
+
+		hb, err := types.DecodeHeartbeat(entry.Value())
+		require.NoError(t, err)
+		require.Nil(t, hb.Labels)
+	})
+}
+
 // capturingLogger captures Warn messages for test assertions.
 type capturingLogger struct {
 	mu    sync.Mutex
