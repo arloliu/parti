@@ -341,13 +341,16 @@ type StreamStampMarkerResource struct {
 }
 
 // PartitionWeightChange records a partition present in both the live and
-// declared tables whose Weight differs. Keys identifies the partition (it is
-// unchanged — a different key set is a different partition, i.e. an add plus
-// a remove, not a change).
+// declared tables whose Weight or Label differs. Keys identifies the
+// partition (it is unchanged — a different key set is a different
+// partition, i.e. an add plus a remove, not a change). The name predates
+// label support and is kept for API compatibility.
 type PartitionWeightChange struct {
 	Keys      []string `json:"keys"`
 	OldWeight int64    `json:"oldWeight"`
 	NewWeight int64    `json:"newWeight"`
+	OldLabel  string   `json:"oldLabel,omitempty"`
+	NewLabel  string   `json:"newLabel,omitempty"`
 }
 
 // DriftFinding describes how a live resource differs from the desired state,

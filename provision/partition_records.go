@@ -159,7 +159,7 @@ func readPartitionKey(ctx context.Context, js jetstream.JetStream, bucket, key s
 //
 //   - added   — declared records absent from live.
 //   - removed — live records absent from the declared set.
-//   - changed — records present in both whose Weight differs.
+//   - changed — records present in both whose Weight or Label differs.
 //
 // A record whose key set differs is a distinct partition: it appears as one
 // add and one remove, never a change. Every returned slice is non-nil and
@@ -185,11 +185,13 @@ func diffPartitions(live, desired []types.Partition) (added, removed []types.Par
 			added = append(added, clonePartition(d))
 			continue
 		}
-		if live.Weight != d.Weight {
+		if live.Weight != d.Weight || live.Label != d.Label {
 			changed = append(changed, PartitionWeightChange{
 				Keys:      slices.Clone(d.Keys),
 				OldWeight: live.Weight,
 				NewWeight: d.Weight,
+				OldLabel:  live.Label,
+				NewLabel:  d.Label,
 			})
 		}
 	}
@@ -220,7 +222,10 @@ func canonicalIDOfKeys(keys []string) string {
 
 // clonePartition deep-copies a partition, reallocating its Keys slice.
 func clonePartition(p types.Partition) types.Partition {
-	return types.Partition{Keys: slices.Clone(p.Keys), Weight: p.Weight}
+	cp := p // struct-value copy: Weight, Label, and future fields
+	cp.Keys = slices.Clone(p.Keys)
+
+	return cp
 }
 
 // clonePartitions deep-copies a partition slice. The result is always non-nil
