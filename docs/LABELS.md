@@ -511,13 +511,47 @@ Give each Deployment its own `WorkerIDPrefix` (e.g. `vip-0`, `vip-1`, … vs.
 `worker-0`, `worker-1`, …) instead of sharing one prefix across deployments
 with different label sets.
 
-This makes cross-deployment stable-ID takeover **structurally impossible** —
-a `general` pod can never claim an ID from the `vip` pool, because the pools
-don't overlap. That shrinks the [stale-incarnation guard](#the-stale-incarnation-guard)'s
-job down to the one residual case it exists to cover: a *single* deployment
-relabeling itself across a rollout while keeping its own prefix. As a bonus,
-worker IDs become self-describing in logs and metrics: `vip-3` identifies its
-pool at a glance, where `worker-17` requires a lookup.
+**Why this matters: `WorkerIDPrefix` and `WorkerLabels` are orthogonal.** A
+stable worker ID is claimed from a KV-backed pool keyed only by prefix — the
+claim path has no idea what labels the claiming process configured. Sharing
+one prefix across two deployments means they draw from the *same* ID pool
+despite being logically different worker populations.
+
+Concrete scenario: a `vip` pod holding `worker-0` dies. Before the leader's
+heartbeat-TTL detection notices the membership change, a `general` pod
+restarts and claims that same `worker-0` ID — nothing in the claim path stops
+it. That pod now inherits whatever assignment the leader last computed for
+`worker-0`, which was VIP work, computed on the assumption that `worker-0`
+was `vip`-labeled.
+
+The [stale-incarnation guard](#the-stale-incarnation-guard) exists precisely
+for this: the worker checks the payload's labels-of-record against its own
+configured labels before applying, and rejects on mismatch — no consumer
+ever attaches to the wrong class of machine, so correctness is never at
+risk. But relying on the guard as your *only* protection still costs you on
+every such collision:
+
+- **A real, if brief, availability gap** on that partition — the rejected
+  assignment queues durably until the leader's heartbeat watcher notices
+  `worker-0`'s true labels changed and fires a corrective rebalance. Fast and
+  self-healing, but not instant.
+- **Log and metric noise** (`rejecting assignment computed for a different
+  incarnation of this worker ID`, `IncrementLabelIncarnationReject`) on what
+  should be a rare, meaningful signal, not routine background noise from
+  ordinary pod churn.
+- **Worker IDs stop being self-describing** — `worker-7` could be VIP or
+  general depending on history, a real cost when reading logs and dashboards
+  under pressure.
+
+Distinct prefixes fix this **structurally, not just probabilistically**:
+with `vip-*` and `worker-*` as disjoint namespaces, a `general` pod cannot
+claim an ID from the `vip` pool — the collision isn't made rare, it's made
+impossible. That shrinks the guard's real job down to the one case that
+can't be designed away: a *single* deployment relabeling its own
+`WorkerLabels` across a rollout while reusing its own prefix — a deliberate,
+comparatively rare operator action, not an accidental byproduct of routine
+pod churn across two unrelated fleets. There is no cost to choosing a
+different prefix string per deployment, so there's no reason not to.
 
 ### Deployment topology
 
