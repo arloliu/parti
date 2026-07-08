@@ -68,6 +68,11 @@ type Publisher struct {
 	// via SetCapabilitiesFn before Start is called.
 	capsFn func() uint32
 
+	// labels is the worker's label set, included in every heartbeat. Set once
+	// via SetLabels before Start (same set-once-before-Start discipline as
+	// capsFn), so build reads it without additional synchronization.
+	labels []string
+
 	// mu guards lifecycle fields: started, ticker, metrics, workerID.
 	mu        sync.Mutex
 	started   bool
@@ -155,6 +160,19 @@ func (p *Publisher) SetCapabilitiesFn(fn func() uint32) {
 	defer p.mu.Unlock()
 
 	p.capsFn = fn
+}
+
+// SetLabels registers the worker's label set to include in every
+// heartbeat. Call before Start. The slice is stored as-is (the manager
+// passes an already-normalized copy) and must not be mutated afterwards.
+//
+// Parameters:
+//   - labels: Worker label set (already normalized by the caller)
+func (p *Publisher) SetLabels(labels []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.labels = labels
 }
 
 // SetOnError registers a callback invoked on each heartbeat publish failure.
@@ -391,6 +409,7 @@ func (p *Publisher) build() types.Heartbeat {
 		WorkerID:              p.workerID,
 		SchemaVersion:         1, // v1 JSON writers always emit SchemaVersion=1; 0 is only for decoded legacy payloads
 		Capabilities:          caps,
+		Labels:                p.labels,
 		LeaderRevision:        snap.LeaderRevision,
 		AppliedVersion:        snap.AppliedVersion,
 		AppliedDigest:         snap.AppliedDigest,
