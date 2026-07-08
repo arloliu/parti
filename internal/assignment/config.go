@@ -173,6 +173,23 @@ type Config struct {
 	// applied to any value < 1, so a zero/negative config cannot fire on the
 	// first failure). Set explicitly to 1 to fire on the first failure.
 	EnumerationFailureThreshold int
+
+	// UnlabeledPartitionPolicy: "dedicated" (default when empty) routes
+	// unlabeled partitions to unlabeled workers only (falling back to all
+	// workers when none are live); "shared" routes them to all workers.
+	UnlabeledPartitionPolicy string
+
+	// LabelSpillGrace is how long a label pool must be continuously empty
+	// before its partitions spill. 0 = immediate spill.
+	LabelSpillGrace time.Duration
+
+	// OnLabelReadBroadFailure, if set, is invoked when a rebalance aborts
+	// because worker label reads failed broadly (connectivity/degrading-
+	// JetStream class, or above the isolated-failure cap). The manager
+	// wires this to its KV-error recorder so sustained heartbeat-read
+	// trouble trips the degraded circuit (spec §6). Mirrors the
+	// OnEnumerationError seam. Must be safe for concurrent use.
+	OnLabelReadBroadFailure func(err error)
 }
 
 // Validate checks configuration validity.
@@ -256,5 +273,8 @@ func (c *Config) SetDefaults() {
 	}
 	if c.EnumerationFailureThreshold < 1 {
 		c.EnumerationFailureThreshold = 3
+	}
+	if c.UnlabeledPartitionPolicy == "" {
+		c.UnlabeledPartitionPolicy = "dedicated"
 	}
 }

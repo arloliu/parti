@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -166,6 +168,54 @@ type Calculator struct {
 	// successful enumeration (nil-error GetActiveWorkers, before F10-A handling).
 	// Guarded by c.mu (same as workerShrunkObservations).
 	enumFailures int
+
+	// labelState carries per-label grace clocks and defer-once streaks
+	// (spec §8.5). Touched only on the rebalance path (serialized by
+	// rebalanceMu) and, once Task 9 lands, the label re-check timer; its
+	// own mutex fences the two.
+	labelState *labelState
+
+	// lastPublishedPartitions retains (a reference to) the source snapshot
+	// behind THIS calculator's most recent successful publish. The
+	// cached-observation replay proof compares the current snapshot against
+	// it by label-aware content (Keys + Weight + Label): the revision
+	// fast-path alone cannot prove "unchanged" for revision-blind sources,
+	// and PartitionSetDigest/BatchDigest are deliberately label-blind (a
+	// label-only edit slips through them). Holding a reference is safe:
+	// snapshot providers return a fresh slice per call (sources replace
+	// their backing slice rather than mutating it in place). Guarded by
+	// c.mu. Nil until the first successful publish by this instance.
+	lastPublishedPartitions []types.Partition
+
+	// Label re-check timer state (spec §8.3). The guaranteed second
+	// observation — grace expiry and deferral confirmation — must re-fire
+	// without any external event and survive busy states.
+	//
+	// pendingLabelRecheck is the sticky "a label re-check is owed" flag. Set
+	// by requestLabelRecheck (deferral / grace-expiry / non-fresh) and drained
+	// by monitorLabelRecheck under a CompareAndSwap; it survives a busy state
+	// machine because the monitor re-stores it when it cannot claim.
+	//
+	// labelRecheckCh (capacity 1) coalesces timer + external signals into a
+	// single monitor wake. A non-blocking send never blocks the rebalance path.
+	pendingLabelRecheck atomic.Bool
+	labelRecheckCh      chan struct{}
+
+	// labelRecheckTimer is the grace-expiry AfterFunc armed after a rebalance
+	// that parked anything (armLabelRecheckAfterRebalance). Guarded by
+	// labelRecheckTimerMu so Stop and re-arm can cancel the previous one.
+	labelRecheckTimer   *time.Timer
+	labelRecheckTimerMu sync.Mutex
+
+	// prevMetricLabels is the label set recorded by the last successful
+	// rebalance's LabelMetrics pass (spec §13 lifecycle: per-label gauges
+	// recomputed every rebalance; a label absent from the current snapshot
+	// is explicitly zeroed in the same pass rather than left at its last
+	// non-zero reading; a stopping leader zeroes and clears everything —
+	// the gauges are leader-scoped). Touched only inside recordLabelMetrics
+	// (called from rebalance under rebalanceMu) and zeroLabelGaugesOnStop
+	// (takes rebalanceMu itself) — no separate mutex needed.
+	prevMetricLabels map[string]bool
 }
 
 // cachedWorkerList bundles worker data with its timestamp for atomic operations.
@@ -223,10 +273,18 @@ func NewCalculator(cfg *Config) (*Calculator, error) {
 		stateProvider:       cfg.StateProvider, // Optional state provider for degraded mode checks
 		stopCh:              stopCh,
 		doneCh:              make(chan struct{}),
+		labelRecheckCh:      make(chan struct{}, 1), // capacity 1: timer + external signals coalesce
 	}
 
 	// Initialize emergency detector with configured grace period
 	c.emergencyDetector = NewEmergencyDetector(cfg.EmergencyGracePeriod)
+
+	// Label grace/confirmation state. cfg.Now is defaulted by SetDefaults
+	// above, so the injected clock (tests) or time.Now (production) is
+	// already resolved. UnlabeledPartitionPolicy is defaulted to
+	// "dedicated" by SetDefaults; the topology builder treats "" the same,
+	// so the default is belt-and-suspenders.
+	c.labelState = newLabelState(cfg.LabelSpillGrace, cfg.Now)
 
 	// Initialize components.
 	//
@@ -273,6 +331,19 @@ func NewCalculator(cfg *Config) (*Calculator, error) {
 		c.pollForChanges,
 		cfg.Logger,
 	)
+
+	// Route a detected worker-label change (a heartbeat PUT whose labels differ
+	// from the monitor's retained fingerprint — e.g. a stale-ID takeover behind
+	// a live worker ID) through the label re-check path. The worker-set change
+	// path no-ops on an unchanged set, so this is the only path that recomputes
+	// label-correct assignments when the fleet's labels shift without the set
+	// changing. The callback is coalesced by requestLabelRecheck.
+	c.monitor.SetOnLabelChange(func() {
+		if lm, ok := c.Metrics.(types.LabelMetrics); ok {
+			lm.IncrementLabelChangeTrigger()
+		}
+		c.requestLabelRecheck(lifecycleLabelChange)
+	})
 
 	return c, nil
 }
@@ -351,8 +422,23 @@ func (c *Calculator) Start(ctx context.Context) error {
 		initialReason = "takeover_immediate"
 	}
 	if err := c.rebalance(ctx, initialReason); err != nil {
-		c.started.Store(false)
-		return fmt.Errorf("immediate initial assignment failed: %w", err)
+		// A deferred label observation is benign HERE TOO (spec §8.5): a new
+		// leader's fresh per-term labelState (spec §8.4) defers its first
+		// adverse observation by design, and requestLabelRecheck (fired
+		// inside the rebalance) has already armed the confirming second
+		// observation. The incumbent commit stays valid meanwhile, so
+		// success-without-publish is safe. Failing Start instead would
+		// release leadership (releaseLeadershipAfterCalculatorFailure), hand
+		// the next leader another fresh labelState that defers again, and
+		// livelock the fleet in a leadership flap where the defer-once
+		// streak never reaches 2 and parked partitions are never committed
+		// (the Task 14 pool-outage reproducer, spec I2 violation).
+		if !errors.Is(err, errLabelObservationDeferred) {
+			c.started.Store(false)
+			return fmt.Errorf("immediate initial assignment failed: %w", err)
+		}
+		c.Logger.Info("initial assignment deferred pending label observation confirmation",
+			"reason", initialReason)
 	}
 
 	// Get worker count after immediate assignment and update lastWorkers
@@ -402,6 +488,14 @@ func (c *Calculator) Start(ctx context.Context) error {
 		})
 	}
 
+	// Start the label re-check monitor unconditionally (spec §8.3): grace
+	// expiry and deferral confirmation must re-fire without any external
+	// event, independent of whether the source is watchable. Joined on Stop
+	// via wg.Wait.
+	c.wg.Go(func() {
+		c.monitorLabelRecheck(ctx)
+	})
+
 	// Step 2: Enter stabilization window.
 	//   - Cold start: use the long ColdStartWindow so the initial fleet has
 	//     time to fully come online before the final rebalance fires.
@@ -449,6 +543,15 @@ func (c *Calculator) Stop(ctx context.Context) error {
 	c.stateMach.stopping.Store(true)
 	close(c.stopCh)
 
+	// Cancel any armed label re-check grace-expiry timer so a late AfterFunc
+	// cannot fire requestLabelRecheck after the monitor goroutine has joined.
+	c.labelRecheckTimerMu.Lock()
+	if c.labelRecheckTimer != nil {
+		c.labelRecheckTimer.Stop()
+		c.labelRecheckTimer = nil
+	}
+	c.labelRecheckTimerMu.Unlock()
+
 	// 2. Stop worker monitor (stops watcher and monitoring goroutines)
 	if err := c.monitor.Stop(); err != nil {
 		c.Logger.Error("failed to stop worker monitor", "error", err)
@@ -464,6 +567,13 @@ func (c *Calculator) Stop(ctx context.Context) error {
 
 	// 4. Wait for background goroutines (e.g., monitorPartitions)
 	c.wg.Wait()
+
+	// 5. Close out the leader-scoped label gauges (spec §13): zero every
+	// per-label gauge this leader last recorded so a deposed leader's
+	// metrics export doesn't freeze at stale non-zero readings. Placed
+	// after the joins above so no rebalance can record concurrently or
+	// after the zeroing pass.
+	c.zeroLabelGaugesOnStop()
 
 	return nil
 }
@@ -512,6 +622,17 @@ func (c *Calculator) TriggerRebalance(ctx context.Context) error {
 	c.Logger.Info("manual rebalance triggered")
 
 	if err := c.rebalance(ctx, "manual-refresh"); err != nil {
+		// A deferred label observation is benign everywhere (spec §8.5):
+		// success-without-publish. The re-check armed inside the rebalance
+		// owns the confirming retry; surfacing the internal sentinel to the
+		// manual-refresh API caller would report a designed no-op as a
+		// failure. lastWorkers is deliberately NOT updated on this path —
+		// mirroring handleRebalance's early sentinel return — so the next
+		// poll still observes any pending worker change.
+		if errors.Is(err, errLabelObservationDeferred) {
+			return nil
+		}
+
 		return err
 	}
 
@@ -640,9 +761,39 @@ const (
 	lifecyclePartitionUpdateDeferred = "partition_update_deferred"
 )
 
+// isPartitionLifecycle reports whether the lifecycle is one of the
+// monitor-claimed rebalances (monitorPartitions or monitorLabelRecheck) that
+// honor the in-rebalance recovery-grace re-check in shouldDeferForRecoveryGrace.
+// lifecycleLabelRecheck belongs here for the same reason as the partition
+// lifecycles: its monitor checks inRecoveryGrace before claiming, so a grace
+// flip between that pre-claim check and rebalanceMu acquisition must bail
+// (errShuttingDown) and be retried by the drain tick —
+// restorePendingLabelOnGraceBail restores the sticky flag on exactly that bail.
 func isPartitionLifecycle(lc string) bool {
-	return lc == lifecyclePartitionUpdate || lc == lifecyclePartitionUpdateDeferred
+	return lc == lifecyclePartitionUpdate || lc == lifecyclePartitionUpdateDeferred || lc == lifecycleLabelRecheck
 }
+
+// Label re-check lifecycle constants (spec §8.3). monitorLabelRecheck drives
+// its rebalances through the state-machine claim path under these reasons.
+const (
+	// lifecycleLabelRecheck drives a rebalance re-run owed to the label
+	// re-check timer / requestLabelRecheck (deferral confirmation, grace
+	// expiry, persistent-non-fresh convergence).
+	lifecycleLabelRecheck = "label_recheck"
+	// lifecycleLabelChange is the requestLabelRecheck reason fired when the
+	// worker monitor detects a heartbeat label change behind a live worker ID
+	// (SetOnLabelChange wiring in NewCalculator). It is distinct from
+	// reasonNonFreshObservation, so requestLabelRecheck wakes the monitor
+	// immediately for fast convergence.
+	lifecycleLabelChange = "label_change"
+)
+
+// reasonNonFreshObservation is the requestLabelRecheck reason fired from INSIDE
+// a rebalance when the worker observation degraded to the cached list (the
+// replay-skip / defer path). Defined as a constant so the call site and the
+// spin-guard comparison in requestLabelRecheck cannot drift: a non-fresh
+// re-check must NOT wake the monitor synchronously (see requestLabelRecheck).
+const reasonNonFreshObservation = "non_fresh_observation"
 
 // isStopping reports whether Stop has been called. Used as the
 // Publisher's IsShuttingDown gate.
@@ -662,9 +813,10 @@ func (c *Calculator) inRecoveryGrace() bool {
 
 // shouldDeferForRecoveryGrace reports whether a rebalance with the given
 // lifecycle should bail because the leader entered recovery grace between
-// the caller's check and rebalanceMu acquisition. Only partition-triggered
-// rebalances honor this re-check; worker-change / audit / emergency paths
-// have their own grace handling (checkForChanges, emergency bypass).
+// the caller's check and rebalanceMu acquisition. Only monitor-claimed
+// rebalances (partition-triggered and label re-check) honor this re-check;
+// worker-change / audit / emergency paths have their own grace handling
+// (checkForChanges, emergency bypass).
 func (c *Calculator) shouldDeferForRecoveryGrace(lifecycle string) bool {
 	if !isPartitionLifecycle(lifecycle) {
 		return false
@@ -845,6 +997,14 @@ func (c *Calculator) triggerPartitionRebalance(lifecycle string) error {
 		err = nil
 	}
 
+	// A deferred label observation is a benign "confirm before acting"
+	// decision. Unlike the suspicious-partition case above, do NOT re-arm
+	// pendingPartitionUpdate: the label re-check timer (Task 9) owns the
+	// retry, so re-arming here would double-drive the same rebalance.
+	if errors.Is(err, errLabelObservationDeferred) {
+		err = nil
+	}
+
 	// Tail-check on a FRESH stop-aware context: reqCtx may already be near or
 	// past its deadline; observeAndDecide exits fast on a cancelled context
 	// and would strand any emergency loser until the next poll tick.
@@ -931,6 +1091,81 @@ func (c *Calculator) monitorPartitions(ctx context.Context, source types.Watchab
 			err := c.triggerPartitionRebalance(lifecyclePartitionUpdate)
 			c.restorePendingOnGraceBail(err)
 		}
+	}
+}
+
+// restorePendingLabelOnGraceBail restores pendingLabelRecheck=true when the
+// rebalance returned errShuttingDown but stopCh is still open — the bail came
+// from an in-rebalance recovery-grace re-check (grace flipped between the
+// monitor's pre-claim check and rebalance entry), NOT from a real shutdown, so
+// the owed re-check should be retried on the next tick. Mirrors
+// restorePendingOnGraceBail for the label flag (a straight copy is clearer than
+// generalizing).
+func (c *Calculator) restorePendingLabelOnGraceBail(err error) {
+	if !errors.Is(err, errShuttingDown) {
+		return
+	}
+	select {
+	case <-c.stopCh:
+		// Real shutdown; nothing to restore.
+	default:
+		c.pendingLabelRecheck.Store(true)
+	}
+}
+
+// monitorLabelRecheck owns the guaranteed second observation (spec §8.3): it
+// re-runs a rebalance when a label re-check is owed (deferral confirmation,
+// grace expiry, persistent-non-fresh convergence) even if no external event
+// ever arrives. It mirrors monitorPartitions: a capacity-1 channel coalesces
+// signals, a drain ticker guarantees eventual service across busy/grace
+// states, and the pendingLabelRecheck flag is sticky so nothing is lost when
+// the state machine is busy. Started unconditionally by Start; joined on Stop
+// via wg.Wait (returns on stopCh close).
+func (c *Calculator) monitorLabelRecheck(ctx context.Context) {
+	drainTick := time.NewTicker(c.RebalanceGraceDrainInterval)
+	defer drainTick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-c.stopCh:
+			return
+		case <-c.labelRecheckCh:
+		case <-drainTick.C:
+		}
+
+		if !c.pendingLabelRecheck.CompareAndSwap(true, false) {
+			continue
+		}
+		if c.inRecoveryGrace() {
+			c.pendingLabelRecheck.Store(true) // retry next tick
+			continue
+		}
+		if !c.stateMach.TryClaimRebalancing(context.Background(), lifecycleLabelRecheck) {
+			c.pendingLabelRecheck.Store(true) // busy; sticky flag survives
+			// Short retry so a deferral raised INSIDE a running rebalance
+			// (claim still held when the wake arrives) confirms in ~2s rather
+			// than waiting a full drain tick (spec §16 item 7: re-check well
+			// under the drain cadence). Coalesced: the channel has capacity 1.
+			time.AfterFunc(2*time.Second, func() {
+				select {
+				case c.labelRecheckCh <- struct{}{}:
+				default:
+				}
+			})
+
+			continue
+		}
+
+		reqCtx, cancel := ctxFromStopCh(context.Background(), c.stopCh, partitionRebalanceRequestTimeout)
+		err := c.stateMach.RunClaimedRebalanceErr(reqCtx, lifecycleLabelRecheck)
+		cancel()
+		if errors.Is(err, errLabelObservationDeferred) {
+			// The deferral re-arms itself via requestLabelRecheck inside the
+			// rebalance; nothing extra to do (the flag is already set again).
+			continue
+		}
+		c.restorePendingLabelOnGraceBail(err)
 	}
 }
 
@@ -1274,6 +1509,403 @@ func (c *Calculator) getActiveWorkers(ctx context.Context) ([]string, bool, erro
 	return workers, true, nil
 }
 
+// readWorkerLabels fetches labels-of-record for the rebalance worker set
+// (spec §6). One bounded retry for missing workers; then the taxonomy:
+// more than max(1, 10%) unreadable ⇒ errLabelReadBroadFailure (broad
+// failures must never become label decisions). Legacy heartbeats decode
+// with nil labels — that is a SUCCESSFUL read of an empty set.
+//
+// Unreadable means unreadable for ANY reason: an absent heartbeat key
+// (worker departed between the active-set scan and this read) and a
+// present-but-undecodeable payload both leave the worker UNKNOWN and both
+// count toward the cap. Spec §6 is explicit: unreadable labels are
+// unknown, never guessed — "unlabeled" would hand general work to what
+// may be a dedicated worker under the dedicated policy. A decoded legacy
+// timestamp heartbeat proves a well-formed pre-label worker; an
+// undecodeable payload proves nothing.
+//
+// Connectivity / degrading-JetStream errors on ANY worker are broad by
+// class regardless of count (the 1-worker-fleet trap) and short-circuit
+// before the count rule, which only governs UNCLASSIFIED failures (e.g.
+// key-not-found on a live worker, malformed payloads).
+func (c *Calculator) readWorkerLabels(ctx context.Context, workers []string) (map[string][]string, map[string]bool, error) {
+	hbs, fails, err := c.monitor.GetHeartbeatsFor(ctx, workers)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %w", errLabelReadBroadFailure, err)
+	}
+	missing := missingWorkers(workers, hbs)
+	if len(missing) > 0 { // one inline retry for the stragglers
+		retry, retryFails, rerr := c.monitor.GetHeartbeatsFor(ctx, missing)
+		if rerr == nil {
+			maps.Copy(hbs, retry)
+			fails = retryFails // post-retry classification uses the fresh errors
+		}
+		missing = missingWorkers(workers, hbs)
+	}
+
+	// Error-CLASS taxonomy first (spec §6): a connectivity or
+	// degrading-JetStream failure is broad by nature, regardless of how
+	// many workers it hit — in a 1-worker fleet a count-based rule alone
+	// would misclassify it as an isolated unknown and eventually
+	// empty-assign the whole fleet.
+	for _, w := range missing {
+		ferr := fails[w]
+		if natsutil.IsConnectivityError(ferr) || natsutil.IsDegradingJetStreamError(ferr) {
+			return nil, nil, fmt.Errorf("%w: worker %s: %w", errLabelReadBroadFailure, w, ferr)
+		}
+	}
+
+	broadCap := max(1, len(workers)/10)
+	if len(missing) > broadCap {
+		return nil, nil, fmt.Errorf("%w: %d of %d workers unreadable", errLabelReadBroadFailure, len(missing), len(workers))
+	}
+
+	labels := make(map[string][]string, len(hbs))
+	for w, hb := range hbs {
+		labels[w] = hb.Labels
+	}
+	unknown := make(map[string]bool, len(missing))
+	for _, w := range missing {
+		unknown[w] = true
+	}
+
+	return labels, unknown, nil
+}
+
+// missingWorkers returns workers absent from the heartbeat map, sorted.
+func missingWorkers(workers []string, hbs map[string]types.Heartbeat) []string {
+	var out []string
+	for _, w := range workers {
+		if _, ok := hbs[w]; !ok {
+			out = append(out, w)
+		}
+	}
+	slices.Sort(out)
+
+	return out
+}
+
+// partitionsContentEqual reports label-aware content equality of two
+// partition slices: pairwise-equal Keys, Weight, AND Label, in order. The
+// replay proof must compare content directly because
+// PartitionSetDigest/BatchDigest are deliberately label-blind — a label-only
+// edit slips through them. Order-sensitive by design: a source that reorders
+// its listing without changing content merely degrades replay to the benign
+// defer, the conservative outcome.
+func partitionsContentEqual(a, b []types.Partition) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Weight != b[i].Weight || a[i].Label != b[i].Label || !slices.Equal(a[i].Keys, b[i].Keys) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// cachedObservationReplayable reports whether the last published commit
+// already covers the current (cached) observation exactly, so the rebalance
+// can skip the publish. Replay is provable iff:
+//
+//	(i)  the cached worker set equals the last commit's payload worker set, AND
+//	(ii) the source snapshot is unchanged since that publish — via the cheap
+//	     revision fast-path when BOTH revisions are known, else via label-aware
+//	     content equality against the snapshot retained at publish time (the
+//	     path that makes revision-blind sources provable).
+//
+// A bootstrapped commit (inherited from a previous leader, no local publish)
+// has no retained snapshot: only the revision fast-path can prove it; content
+// equality conservatively fails and the caller defers.
+func (c *Calculator) cachedObservationReplayable(workers []string, partitions []types.Partition, srcRev uint64, srcKnown bool) bool {
+	commit := c.publisher.LastCommit()
+	if commit == nil {
+		return false
+	}
+
+	// (i) worker-set equality against the commit's payload keys.
+	if len(commit.Payloads) != len(workers) {
+		return false
+	}
+	for _, w := range workers {
+		if _, ok := commit.Payloads[w]; !ok {
+			return false
+		}
+	}
+
+	// (ii) source unchanged: revision fast-path, then content equality.
+	if srcKnown && commit.SourceRevisionKnown && srcRev == commit.SourceRevision {
+		return true
+	}
+	c.mu.RLock()
+	last := c.lastPublishedPartitions
+	c.mu.RUnlock()
+
+	return last != nil && partitionsContentEqual(partitions, last)
+}
+
+// rebalanceOnCachedObservation handles a rebalance whose worker observation
+// degraded to the cached list (connectivity error or suspicious shrink)
+// WITHOUT emergency confirmation. The adjudicated contract: a non-fresh
+// observation may REPLAY the previously committed shape but must never
+// compute new label routing or mint new label provenance.
+//
+//   - Replay provable (cachedObservationReplayable): skip the publish
+//     entirely — the previous commit already covers this exact state.
+//     Success (nil).
+//   - Otherwise: benign defer (errLabelObservationDeferred; converted to a
+//     no-op by handleRebalance / triggerPartitionRebalance). Nothing is
+//     published; a pending source change is not lost — any later rebalance
+//     re-snapshots the source.
+//
+// Both exits request a label re-check (belt-and-braces; Task 9 gives the
+// stub teeth) so the system converges to a fresh label-aware rebalance once
+// conditions heal, even if no external event arrives. Neither exit advances
+// labelState: grace/confirmation clocks only move on trusted observations.
+func (c *Calculator) rebalanceOnCachedObservation( //nolint:revive // argument-limit: the rebalance-context bundle for the replay decision
+	lifecycle string, workers []string, partitions []types.Partition, srcRev uint64, srcKnown bool, start time.Time,
+) error {
+	replayable := c.cachedObservationReplayable(workers, partitions, srcRev, srcKnown)
+	c.requestLabelRecheck(reasonNonFreshObservation)
+	c.Metrics.RecordRebalanceDuration(time.Since(start).Seconds(), lifecycle)
+	c.Metrics.RecordRebalanceAttempt(lifecycle, true)
+
+	if replayable {
+		c.Logger.Info("rebalance skipped: cached worker observation already covered by the last published commit",
+			"lifecycle", lifecycle, "workers", len(workers), "partitions", len(partitions))
+		return nil
+	}
+
+	c.Logger.Info("rebalance deferred: cached worker observation not provably covered by the last published commit",
+		"lifecycle", lifecycle, "workers", len(workers), "partitions", len(partitions))
+
+	return errLabelObservationDeferred
+}
+
+// deriveRebalanceAssignments produces the assignment shape for a TRUSTED
+// worker observation by running the label pipeline (routing + parked set +
+// labels-of-record). Callers gate trust: a fresh enumeration, or the
+// emergency carve-out (emergency-confirmed deaths filtered from the cached
+// list).
+//
+// It owns the label-path side effects and their metrics: firing
+// OnLabelReadBroadFailure on a broad read failure, arming the re-check timer on
+// a deferral, and the attempt/duration metrics for the deferral and error
+// exits. A non-nil error is terminal for the rebalance — either the benign
+// errLabelObservationDeferred sentinel the caller maps to a no-op, or a wrapped
+// hard failure — and its metrics are already recorded here.
+//
+// The result is only meaningful on a nil error. Its topo/actions fields let
+// the caller's recordLabelMetrics pass report the label observability
+// metrics (spec §13) from the exact decision that will be published, without
+// recomputing (and re-mutating labelState's grace clocks) a second time.
+func (c *Calculator) deriveRebalanceAssignments(
+	ctx context.Context, lifecycle string, workers []string, partitions []types.Partition, start time.Time,
+) (labelPipelineResult, error) {
+	res, deferred, err := c.labelRoutedAssignments(ctx, workers, partitions)
+	if err != nil {
+		// Broad label-read failures (connectivity/degrading-JetStream class,
+		// or above the isolated-failure cap) route to the manager's KV-error/
+		// degraded machinery via the OnLabelReadBroadFailure seam (mirrors the
+		// OnEnumerationError precedent). Nil-safe: unit-test default leaves it
+		// unwired. Any label error aborts: a broad failure must never be
+		// converted into a label decision that empty-assigns the fleet.
+		//
+		// Suppressed while stopping: Stop's stop-channel close cancels the
+		// rebalance context, which makes the heartbeat reads abort "broadly"
+		// — that is shutdown, not a KV failure, and must not pollute the
+		// manager's degraded window. It also re-enters the manager through a
+		// lock-taking callback (recordLabelReadFailure → recordKVError →
+		// m.mu) exactly while Manager.Stop is tearing the calculator down —
+		// the Task 15 shutdown-deadlock ingredient this guard removes
+		// (defense-in-depth alongside stopCalculator's lock restructure,
+		// which is the load-bearing fix: a GENUINE broad failure can still
+		// race Stop and must not deadlock either).
+		if errors.Is(err, errLabelReadBroadFailure) && c.OnLabelReadBroadFailure != nil && !c.isStopping() {
+			c.OnLabelReadBroadFailure(err)
+		}
+		c.Metrics.RecordRebalanceAttempt(lifecycle, false)
+
+		return labelPipelineResult{}, c.wrapStopErr(err)
+	}
+	if deferred {
+		// First observation of a disruptive label condition: confirm before
+		// acting. The label re-check timer (Task 9) re-fires the rebalance.
+		c.requestLabelRecheck("observation_deferred")
+		c.Metrics.RecordRebalanceDuration(time.Since(start).Seconds(), lifecycle)
+		c.Metrics.RecordRebalanceAttempt(lifecycle, true)
+
+		return labelPipelineResult{}, errLabelObservationDeferred
+	}
+
+	return res, nil
+}
+
+// labelPipelineResult bundles the outputs of one label-pipeline run
+// (labelRoutedAssignments) for a trusted worker observation: everything the
+// rebalance needs to publish (assignments, parked set, labels-of-record) plus
+// the topology/actions the decision was made from, which the post-publish
+// LabelMetrics pass (recordLabelMetrics) reports without recomputing.
+type labelPipelineResult struct {
+	assignments map[string][]types.Partition // worker → merged partitions
+	parked      []types.Partition            // partitions parked awaiting an eligible worker
+	labels      map[string][]string          // workerID → labels-of-record for payload stamping
+	topo        labelTopology                // the topology the assignments were computed from
+	actions     map[string]emptyPoolAction   // empty-pool decisions applied (park/spill per label)
+}
+
+// labelRoutedAssignments runs the label pipeline (spec §7) for a TRUSTED
+// worker observation: reads labels-of-record, builds the pool topology,
+// advances the grace/confirmation state, and computes per-pool assignments
+// plus the parked set.
+//
+// deferred=true means a first disruptive label observation (an unreadable
+// worker or a newly-empty pool) needs confirmation before acting; the caller
+// aborts the rebalance with errLabelObservationDeferred and arms the re-check
+// timer. A broad label-read failure returns an error wrapping
+// errLabelReadBroadFailure; a strategy failure returns an error wrapped as
+// "assignment calculation failed". On success it returns the pipeline's
+// bundled outputs: the merged assignments, the parked set, the
+// labels-of-record for payload stamping, and the topology/actions the
+// decision was made from — the caller's LabelMetrics pass
+// (recordLabelMetrics) reads these AFTER a successful publish rather than
+// recomputing them, so it reports exactly what was applied.
+func (c *Calculator) labelRoutedAssignments(ctx context.Context, workers []string, partitions []types.Partition) (labelPipelineResult, bool, error) {
+	labels, unknown, err := c.readWorkerLabels(ctx, workers)
+	if err != nil {
+		return labelPipelineResult{}, false, err
+	}
+
+	unknownList := slices.Sorted(maps.Keys(unknown))
+	unknownDeferred := c.labelState.observeUnknownWorkers(unknownList)
+
+	topo := buildLabelTopology(topologyInput{
+		Workers:    workers,
+		Labels:     labels,
+		Unknown:    unknown,
+		Partitions: partitions,
+		Policy:     c.UnlabeledPartitionPolicy,
+	})
+
+	nonEmpty := make([]string, 0, len(topo.SortedLabels))
+	for _, l := range topo.SortedLabels {
+		if len(topo.Pools[l]) > 0 {
+			nonEmpty = append(nonEmpty, l)
+		}
+	}
+	c.labelState.observeNonEmpty(nonEmpty)
+	actions, emptyDeferred := c.labelState.observeEmptyPools(topo.EmptyLabels)
+
+	currentLabels := make(map[string]bool, len(topo.SortedLabels))
+	for _, l := range topo.SortedLabels {
+		currentLabels[l] = true
+	}
+	c.labelState.prune(currentLabels)
+
+	if unknownDeferred || emptyDeferred {
+		return labelPipelineResult{}, true, nil
+	}
+
+	assignments, parked, err := computeLabelAssignments(c.Strategy, topo, actions)
+	if err != nil {
+		return labelPipelineResult{}, false, fmt.Errorf("assignment calculation failed: %w", err)
+	}
+
+	return labelPipelineResult{
+		assignments: assignments,
+		parked:      parked,
+		labels:      labels,
+		topo:        topo,
+		actions:     actions,
+	}, false, nil
+}
+
+// recordLabelMetrics emits the label-observability metrics (spec §13) for a
+// rebalance that just published successfully. Per-label gauges are
+// recomputed from the topology/parked snapshot the publish used; a label
+// that left the snapshot since the last recorded pass is explicitly zeroed
+// in this SAME pass rather than left at its last non-zero reading. The
+// spill/fallback counters are derived from the same topo/actions — never
+// recomputed — so they report exactly what was applied, and both count
+// PARTITIONS (matching their interface Godoc), not rebalances:
+//
+//   - IncrementLabelSpill fires once per partition of every label whose
+//     empty-pool decision was emptyPoolSpill in the published rebalance.
+//   - IncrementUnlabeledFallback fires once per partition of the unlabeled
+//     group when its general/fallback pool was empty and the group itself
+//     was non-empty, forcing computeLabelAssignments' ladder down to
+//     topo.AllWorkers.
+//
+// No-ops entirely when the configured collector doesn't implement
+// types.LabelMetrics. Callers must only invoke this after a successful
+// publish: the cached-observation replay/defer paths and the broad-failure/
+// error aborts earlier in rebalance never reach here, so a rebalance that
+// didn't publish records nothing.
+func (c *Calculator) recordLabelMetrics(res labelPipelineResult) {
+	lm, ok := c.Metrics.(types.LabelMetrics)
+	if !ok {
+		return
+	}
+
+	topo := res.topo
+	parkedCountByLabel := make(map[string]int, len(topo.SortedLabels))
+	for _, p := range res.parked {
+		parkedCountByLabel[p.Label]++
+	}
+
+	current := make(map[string]bool, len(topo.SortedLabels))
+	for _, l := range topo.SortedLabels {
+		current[l] = true
+		lm.RecordLabelPoolSize(l, len(topo.Pools[l]))
+		lm.RecordParkedPartitions(l, parkedCountByLabel[l])
+		if res.actions[l] == emptyPoolSpill {
+			for range topo.Groups[l] {
+				lm.IncrementLabelSpill(l)
+			}
+		}
+	}
+	// Zero gauges for labels that left the snapshot since the last recorded
+	// pass — a drained label pool must not leave a stale non-zero reading.
+	for l := range c.prevMetricLabels {
+		if !current[l] {
+			lm.RecordLabelPoolSize(l, 0)
+			lm.RecordParkedPartitions(l, 0)
+		}
+	}
+	c.prevMetricLabels = current
+
+	if len(topo.GeneralPool) == 0 {
+		for range topo.Groups[""] {
+			lm.IncrementUnlabeledFallback()
+		}
+	}
+}
+
+// zeroLabelGaugesOnStop closes out the leader-scoped gauge lifecycle (spec
+// §13): a deposed/stopping leader zeroes every per-label gauge it last
+// recorded so its own metrics export doesn't freeze at stale non-zero
+// readings — the next leader's collector, not this one, owns the live
+// values from here on. Called from Stop after all rebalance-driving
+// goroutines have joined; rebalanceMu preserves prevMetricLabels' documented
+// single-lock discipline against any straggling external TriggerRebalance.
+func (c *Calculator) zeroLabelGaugesOnStop() {
+	c.rebalanceMu.Lock()
+	defer c.rebalanceMu.Unlock()
+
+	lm, ok := c.Metrics.(types.LabelMetrics)
+	if !ok {
+		c.prevMetricLabels = nil
+
+		return
+	}
+	for l := range c.prevMetricLabels {
+		lm.RecordLabelPoolSize(l, 0)
+		lm.RecordParkedPartitions(l, 0)
+	}
+	c.prevMetricLabels = nil
+}
+
 // cacheFallbackOrDegraded is the shared exit for getActiveWorkers' two degraded
 // fallbacks (a connectivity enumeration error and a suspicious worker-shrink). On
 // a cache hit it returns the last cached worker list as a NON-fresh observation
@@ -1522,6 +2154,11 @@ func (c *Calculator) handleRebalance(ctx context.Context, reason string) error {
 		if errors.Is(err, errSuspiciousWorkerObservation) {
 			return nil
 		}
+		// A deferred label observation is an explicit "confirm before
+		// acting" decision; the label re-check timer re-fires it. Benign.
+		if errors.Is(err, errLabelObservationDeferred) {
+			return nil
+		}
 
 		return fmt.Errorf("rebalance failed for %s: %w", reason, err)
 	}
@@ -1549,13 +2186,16 @@ func (c *Calculator) handleRebalance(ctx context.Context, reason string) error {
 // subsequent disappearance starts a fresh grace period.
 //
 // Returns the worker set, plus a "deaths confirmed" flag for the F10-A
-// rebalance-side floor. The flag is true iff EmergencyDetector has
-// captured at least one death — either consumed locally on the
-// emergency lifecycle, or still resident in c.disappearedWorkers on
-// the non-emergency lifecycle. The floor's check must see the
-// pre-clear state so an emergency rebalance is never wrongly
-// suppressed by its own consumption.
-func (c *Calculator) collectRebalanceWorkers(ctx context.Context, lifecycle string) ([]string, bool, error) {
+// rebalance-side floor and a "fresh" flag. The deaths-confirmed flag is
+// true iff EmergencyDetector has captured at least one death — either
+// consumed locally on the emergency lifecycle, or still resident in
+// c.disappearedWorkers on the non-emergency lifecycle. The floor's check
+// must see the pre-clear state so an emergency rebalance is never wrongly
+// suppressed by its own consumption. The fresh flag is false when the
+// observation was degraded to the cached worker list (connectivity error
+// or suspicious shrink); the label pipeline gates on it because a cached
+// set may contain departed workers whose heartbeats no longer decode.
+func (c *Calculator) collectRebalanceWorkers(ctx context.Context, lifecycle string) ([]string, bool, bool, error) { //nolint:revive // function-result-limit: four coordinated rebalance-input signals
 	var (
 		disappearedWorkers []string
 		deathsConfirmed    bool
@@ -1574,14 +2214,14 @@ func (c *Calculator) collectRebalanceWorkers(ctx context.Context, lifecycle stri
 
 	workers, fresh, err := c.getActiveWorkersFiltered(ctx, disappearedWorkers)
 	if err != nil {
-		return nil, false, c.wrapStopErr(fmt.Errorf("failed to get active workers: %w", err))
+		return nil, false, false, c.wrapStopErr(fmt.Errorf("failed to get active workers: %w", err))
 	}
 
 	if fresh {
 		c.emergencyDetector.ObserveAlive(workers)
 	}
 
-	return workers, deathsConfirmed, nil
+	return workers, deathsConfirmed, fresh, nil
 }
 
 // snapshotSource picks the best partition snapshot path for the source. If
@@ -1624,7 +2264,7 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 
 	start := time.Now()
 
-	workers, deathsConfirmed, err := c.collectRebalanceWorkers(ctx, lifecycle)
+	workers, deathsConfirmed, workersFresh, err := c.collectRebalanceWorkers(ctx, lifecycle)
 	if err != nil {
 		c.Metrics.RecordRebalanceAttempt(lifecycle, false)
 		return err
@@ -1703,23 +2343,43 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 	}
 	c.lastKnownPartitionCount = len(partitions)
 
-	// Calculate new assignments using strategy
-	assignments, err := c.Strategy.Assign(workers, partitions)
-	if err != nil {
-		c.Metrics.RecordRebalanceAttempt(lifecycle, false)
-		return c.wrapStopErr(fmt.Errorf("assignment calculation failed: %w", err))
+	// Trusted-observation gate. The label pipeline computes NEW routing only
+	// from a trustworthy worker set: a fresh enumeration, or the emergency
+	// carve-out — emergency-CONFIRMED deaths filtered out of the cached list
+	// make the survivor set trusted (EmergencyDetector independently verified
+	// the removals; the per-worker label reads below are fresh reads, so
+	// nothing is fabricated, and a broad read failure still aborts — never
+	// launder). Anything else (connectivity fallback, suspicious-shrink
+	// degrade) must not mint new routing or provenance: replay the previous
+	// commit if provable, else defer benignly.
+	trusted := workersFresh || (lifecycle == "emergency" && deathsConfirmed)
+	if !trusted {
+		return c.rebalanceOnCachedObservation(lifecycle, workers, partitions, srcRev, srcKnown, start)
 	}
+
+	// Assignment shape for this rebalance: routing, the parked set, and the
+	// labels-of-record for payload stamping, from the label pipeline. A
+	// non-nil error is terminal (a benign deferral sentinel or a wrapped
+	// hard failure) and its metrics are already recorded.
+	pipeline, derr := c.deriveRebalanceAssignments(ctx, lifecycle, workers, partitions, start)
+	if derr != nil {
+		return derr
+	}
+	assignments, parked, labels := pipeline.assignments, pipeline.parked, pipeline.labels
 
 	// Coverage is enforced strictly inside the publisher via set-equality of
 	// partition CanonicalIDs (§3.8 of the assignment robustness plan). We
 	// keep the orphaned-partition gauge for ops visibility but rely on the
 	// publisher to abort the batch on mismatch with ErrCoverageMismatch.
+	// Parked partitions are deliberately unassigned, so the orphan gauge
+	// compares assigned against the ELIGIBLE count (source minus parked).
 	assignedCount := 0
 	for _, parts := range assignments {
 		assignedCount += len(parts)
 	}
-	if assignedCount != len(partitions) {
-		c.Metrics.RecordOrphanedPartitions(len(partitions) - assignedCount)
+	eligible := len(partitions) - len(parked)
+	if assignedCount != eligible {
+		c.Metrics.RecordOrphanedPartitions(eligible - assignedCount)
 	} else {
 		c.Metrics.RecordOrphanedPartitions(0)
 	}
@@ -1785,6 +2445,8 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 		LeaderRevision:      leaderRevision,
 		Lifecycle:           lifecycle,
 		WorkersToRemove:     workersToRemove,
+		ParkedPartitions:    parked,
+		WorkerLabels:        labels,
 	}); err != nil {
 		c.Metrics.RecordRebalanceAttempt(lifecycle, false)
 		return c.wrapPublishErr(err)
@@ -1794,13 +2456,25 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 	c.Metrics.RecordRebalanceDuration(time.Since(start).Seconds(), lifecycle)
 	c.Metrics.RecordRebalanceAttempt(lifecycle, true)
 
-	// Update tracking state
+	// Label observability (spec §13). Placed strictly after the publish
+	// succeeded above: the cached-observation replay/defer paths and the
+	// broad-failure/error aborts earlier in this function return before
+	// reaching here, so a rebalance that didn't publish records nothing.
+	c.recordLabelMetrics(pipeline)
+
+	// Arm/disarm the label re-check timer for any parked grace (Task 9
+	// provides the body; the stub is a no-op).
+	c.armLabelRecheckAfterRebalance(len(parked))
+
+	// Update tracking state. lastPublishedPartitions backs the
+	// cached-observation replay proof (see the field Godoc).
 	c.mu.Lock()
 	clear(c.currentWorkers)
 	for _, w := range workers {
 		c.currentWorkers[w] = true
 	}
 	c.currentAssignments = assignments
+	c.lastPublishedPartitions = partitions
 	c.mu.Unlock()
 
 	c.Logger.Info("rebalance complete",

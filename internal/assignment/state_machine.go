@@ -376,7 +376,16 @@ func (sm *StateMachine) RunClaimedRebalanceErr(ctx context.Context, reason strin
 		// Logging it as a "failed" Error would surface false failures to
 		// operators tailing worker logs; the suppression is already
 		// recorded at Warn level by partitionInputCredibilityGuard.
-		if cbErr != nil && !errors.Is(cbErr, errSuspiciousPartitionObservation) {
+		//
+		// errLabelObservationDeferred is likewise benign: a "confirm before
+		// acting" decision whose retry the label re-check monitor owns (the
+		// deferral re-arms the sticky flag inside the rebalance). During a
+		// persistent non-fresh outage it recurs every drain tick, so an
+		// Error here would stream false failures for healthy degraded
+		// behavior.
+		if cbErr != nil &&
+			!errors.Is(cbErr, errSuspiciousPartitionObservation) &&
+			!errors.Is(cbErr, errLabelObservationDeferred) {
 			sm.logger.Error("partition rebalance failed", "reason", reason, "error", cbErr)
 		}
 	}

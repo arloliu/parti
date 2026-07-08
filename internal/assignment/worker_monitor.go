@@ -11,6 +11,7 @@ import (
 	"github.com/arloliu/parti/v2/internal/natsutil"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/zeebo/xxh3"
 )
 
 // Package-private backoff constants for the heartbeat watcher retry loop.
@@ -68,6 +69,22 @@ type WorkerMonitor struct {
 	// Callback invoked when changes are detected (from polling or watcher)
 	onChangeCb func(ctx context.Context) error
 
+	// onLabelChangeCb is invoked (coalesced by the caller) whenever a heartbeat
+	// PUT's labels differ from the retained fingerprint for that key — a label
+	// change behind a live worker ID that the worker-change path cannot see.
+	// Set once via SetOnLabelChange before Start, like onChangeCb; read only by
+	// the watcher goroutine thereafter.
+	onLabelChangeCb func()
+
+	// labelFP maps a heartbeat key to the fingerprint of its last well-formed
+	// label set. It is MONITOR-lifetime (survives watcher-session restarts) so a
+	// takeover PUT that lands while the watch is down is caught when the next
+	// session's initial replay delivers the key's current value and it differs
+	// from the retained fingerprint. Guarded by labelFPMu — the watcher
+	// goroutine mutates it and (in principle) concurrent readers are excluded.
+	labelFPMu sync.Mutex
+	labelFP   map[string]uint64
+
 	logger types.Logger
 
 	// watchBaseBackoff is the initial backoff for the watcher retry loop.
@@ -111,12 +128,112 @@ func NewWorkerMonitor(
 		hbTTL:            hbTTL,
 		hbWatchPattern:   fmt.Sprintf("%s.*", hbPrefix),
 		onChangeCb:       onChange,
+		labelFP:          make(map[string]uint64),
 		logger:           logger,
 		watchBaseBackoff: workerWatcherBaseBackoff,
 		now:              time.Now,
 		stopCh:           make(chan struct{}),
 		doneCh:           make(chan struct{}),
 	}
+}
+
+// SetOnLabelChange registers a callback invoked when a heartbeat PUT's labels
+// differ from the retained fingerprint for that key — a worker-label change
+// behind a live worker ID (e.g. a stale-ID takeover) that the worker-set change
+// path cannot detect. The callback is coalesced by the caller (the calculator
+// routes it through requestLabelRecheck). It must be called before Start, like
+// the constructor's onChange callback; the field is read only by the watcher
+// goroutine afterward.
+func (m *WorkerMonitor) SetOnLabelChange(fn func()) {
+	m.onLabelChangeCb = fn
+}
+
+// classifyPutSuppressed records a PUT's receive time in lastSeen and reports
+// whether it is a suppressible refresh — a key last seen < hbTTL ago while
+// outside a suppression holiday means the worker was continuously alive, so
+// topology cannot have changed and the expensive Keys()-scan check is skipped.
+// It bumps suppressedCount on suppression. hbTTL==0: now.Sub(prev) is never
+// negative under a forward clock, so this never suppresses — mirrors the
+// explicit guard in sweepExpired.
+func (m *WorkerMonitor) classifyPutSuppressed(key string, lastSeen map[string]time.Time, now, unsuppressedUntil time.Time, suppressedCount *uint64) bool {
+	prev, known := lastSeen[key]
+	lastSeen[key] = now
+	if known && now.Sub(prev) < m.hbTTL && now.After(unsuppressedUntil) {
+		*suppressedCount++
+		return true
+	}
+
+	return false
+}
+
+// checkLabelChange updates the retained fingerprint for a heartbeat key from
+// the PUT payload and reports whether the labels differ from a previously-seen
+// value (level-triggered across watcher sessions — labelFP is monitor-lifetime).
+// It is called on the watcher hot path once per PUT.
+//
+// Behavior:
+//   - Malformed payload: no-op — neither reports a change nor erases the
+//     retained fingerprint (a distinct decode failure must not churn state).
+//   - First-seen key: seeds the fingerprint silently and reports no change
+//     (joins are the worker-change path's job).
+//   - Fingerprint mismatch: retains the new fingerprint, logs, invokes the
+//     onLabelChange callback (outside labelFPMu), and reports a change.
+func (m *WorkerMonitor) checkLabelChange(key string, value []byte) bool {
+	hb, derr := types.DecodeHeartbeat(value)
+	if derr != nil {
+		return false
+	}
+	fp := labelFingerprint(hb.Labels)
+
+	m.labelFPMu.Lock()
+	prevFP, seen := m.labelFP[key]
+	m.labelFP[key] = fp
+	m.labelFPMu.Unlock()
+
+	if !seen || prevFP == fp {
+		return false
+	}
+
+	m.logger.Info("worker label change detected", "key", key)
+	if m.onLabelChangeCb != nil {
+		m.onLabelChangeCb()
+	}
+
+	return true
+}
+
+// dropLabelFingerprint forgets a heartbeat key's retained fingerprint on a
+// DELETE/PURGE (a leave), so a later rejoin with new labels seeds silently as a
+// first-seen join rather than firing a spurious label change.
+func (m *WorkerMonitor) dropLabelFingerprint(key string) {
+	m.labelFPMu.Lock()
+	delete(m.labelFP, key)
+	m.labelFPMu.Unlock()
+}
+
+// labelFingerprint hashes a label set into a 64-bit fingerprint used to detect
+// label changes across heartbeat PUTs. 0 is reserved for "no labels" so an
+// unlabeled worker fingerprints stably; a genuine hash that collides with 0 is
+// remapped to 1. The input is assumed pre-sorted and deduplicated (heartbeat
+// publishers sort labels at publish time), so the fingerprint is order-stable
+// for a given label set without re-sorting on the watcher hot path.
+func labelFingerprint(labels []string) uint64 {
+	if len(labels) == 0 {
+		return 0
+	}
+	var h xxh3.Hasher
+	for i, l := range labels {
+		if i > 0 {
+			_, _ = h.WriteString("\n")
+		}
+		_, _ = h.WriteString(l)
+	}
+	fp := h.Sum64()
+	if fp == 0 {
+		fp = 1
+	}
+
+	return fp
 }
 
 // Start begins monitoring workers in a background goroutine.
@@ -272,6 +389,46 @@ func (m *WorkerMonitor) GetHeartbeats(ctx context.Context) (map[string]types.Hea
 	}
 
 	return out, nil
+}
+
+// GetHeartbeatsFor returns decoded heartbeats for exactly the given
+// worker IDs, keyed by worker ID. Unlike GetHeartbeats it does NOT run a
+// Keys() scan — callers that already hold the active worker list (the
+// rebalance path) use this to avoid a second stream-wide enumeration.
+//
+// Per-worker Get or decode failures omit that worker from the heartbeat
+// map (logged at debug) but populate the error map under that worker ID
+// with the original error, so the caller can classify the failure
+// (connectivity/degrading-JetStream vs not) rather than have it
+// masquerade as a bare "unknown labels" omission. The only non-nil
+// returned error is context cancellation/deadline.
+func (m *WorkerMonitor) GetHeartbeatsFor(ctx context.Context, workerIDs []string) (map[string]types.Heartbeat, map[string]error, error) {
+	opCtx, cancel := m.boundedOpCtx(ctx)
+	defer cancel()
+
+	out := make(map[string]types.Heartbeat, len(workerIDs))
+	fails := make(map[string]error)
+	for _, workerID := range workerIDs {
+		if err := opCtx.Err(); err != nil {
+			return out, fails, fmt.Errorf("heartbeat fetch aborted: %w", err)
+		}
+		key := m.hbPrefix + "." + workerID
+		entry, gerr := m.heartbeatKV.Get(opCtx, key)
+		if gerr != nil {
+			m.logger.Debug("heartbeat get failed during targeted fetch", "key", key, "error", gerr)
+			fails[workerID] = gerr
+			continue
+		}
+		hb, derr := types.DecodeHeartbeat(entry.Value())
+		if derr != nil {
+			m.logger.Debug("heartbeat decode failed during targeted fetch", "key", key, "error", derr)
+			fails[workerID] = derr
+			continue
+		}
+		out[workerID] = hb
+	}
+
+	return out, fails, nil
 }
 
 // boundedOpCtx returns a child context with a deadline bounded to hbTTL/2.
@@ -433,19 +590,23 @@ func (m *WorkerMonitor) processWatcherEvents(ctx context.Context) error {
 			switch entry.Operation() {
 			case jetstream.KeyValuePut:
 				key := entry.Key()
-				prev, known := lastSeen[key]
-				lastSeen[key] = now
-				// hbTTL==0: now.Sub(prev) is never negative under a forward
-				// clock, so this never suppresses — mirrors the explicit
-				// guard in sweepExpired.
-				if known && now.Sub(prev) < m.hbTTL && now.After(unsuppressedUntil) {
+				if m.classifyPutSuppressed(key, lastSeen, now, unsuppressedUntil, &suppressedCount) {
 					// Refresh under active suppression: worker was
 					// continuously alive; skip the check.
 					trigger = false
-					suppressedCount++
+				}
+
+				// Label fingerprint: level-triggered across watcher sessions.
+				// A label change is never a suppressible refresh.
+				if m.checkLabelChange(key, entry.Value()) {
+					trigger = true
 				}
 			case jetstream.KeyValueDelete, jetstream.KeyValuePurge:
 				delete(lastSeen, entry.Key())
+				// Drop the retained fingerprint: a leave. A rejoin with new
+				// labels is a first-seen join covered by the worker-change path,
+				// so it must seed silently rather than fire a spurious change.
+				m.dropLabelFingerprint(entry.Key())
 			}
 
 			if m.sweepExpired(lastSeen, now, &unsuppressedUntil) {

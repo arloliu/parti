@@ -302,6 +302,15 @@ type PublishInput struct {
 	// AssignmentCommit.Workers are implicitly revoked at the commit level;
 	// alias sweeping is rolling-upgrade hygiene only.
 	WorkersToRemove []string
+
+	// ParkedPartitions is the set deliberately left unassigned this batch.
+	// Coverage becomes: assigned ∪ parked == source AND assigned ∩ parked == ∅.
+	// Nil (the default) degenerates to the pre-label set-equality check.
+	ParkedPartitions []types.Partition
+
+	// WorkerLabels maps workerID → labels-of-record for payload stamping.
+	// Workers absent from the map get WorkerLabels=nil (still Known=true).
+	WorkerLabels map[string][]string
 }
 
 // Publish runs the 12-step refs-always commit flow described in §3.5 of the
@@ -335,7 +344,7 @@ func (p *AssignmentPublisher) Publish(ctx context.Context, in PublishInput) erro
 	}
 
 	// --- step 3 of §3.5: publish-time set-equality coverage check ---
-	if err := p.checkCoverage(in.SourcePartitions, in.Assignments); err != nil {
+	if err := p.checkCoverage(in.SourcePartitions, in.Assignments, in.ParkedPartitions); err != nil {
 		p.metrics.IncrementBatchAborted("coverage_mismatch")
 		return err
 	}
@@ -345,7 +354,7 @@ func (p *AssignmentPublisher) Publish(ctx context.Context, in PublishInput) erro
 	proposedVersion := p.currentVersion + 1
 
 	// --- step 4 of §3.5: write content-addressable payload keys ---
-	refs, payloadByWorker, err := p.writePayloads(ctx, in.Workers, in.Assignments)
+	refs, payloadByWorker, err := p.writePayloads(ctx, in.Workers, in.Assignments, in.WorkerLabels)
 	if err != nil {
 		// Coverage was fine but a payload write failed; classify as a generic
 		// abort. We do not increment IncrementBatchAborted with a specific
@@ -412,6 +421,8 @@ func (p *AssignmentPublisher) Publish(ctx context.Context, in PublishInput) erro
 		Workers:             sortedWorkers,
 		Payloads:            refs,
 		BatchDigest:         batchDigest,
+		ParkedCount:         len(in.ParkedPartitions),
+		ParkedDigest:        types.PartitionSetDigest(in.ParkedPartitions),
 		PrevCommitRev:       p.lastCommitRev,
 		Lifecycle:           in.Lifecycle,
 	}
@@ -515,17 +526,30 @@ func (p *AssignmentPublisher) Publish(ctx context.Context, in PublishInput) erro
 	return nil
 }
 
-// checkCoverage implements §3.8: strict set-equality of sorted CanonicalIDs
-// across the assignments union and the source snapshot. Catches duplicates
-// AND missing partitions, unlike the count-based check.
-func (p *AssignmentPublisher) checkCoverage(source []types.Partition, assignments map[string][]types.Partition) error {
+// checkCoverage implements §3.8 widened for parked partitions (spec §4.3):
+// assigned ∪ parked == source AND assigned ∩ parked == ∅. The union check is a
+// strict set-equality of sorted CanonicalIDs; a raw multiset count catches
+// duplicates (a partition assigned twice, or both assigned and parked), and the
+// overlap check catches a partition that is simultaneously assigned and parked.
+//
+// A nil parked set degenerates to the pre-label check exactly: got == the
+// assignment union, rawCount == len(union), and overlap is empty.
+func (p *AssignmentPublisher) checkCoverage(source []types.Partition, assignments map[string][]types.Partition, parked []types.Partition) error {
 	union := unionPartitions(assignments)
-	got := canonicalIDSet(union) // sorted, deduped
+	assignedIDs := canonicalIDSet(union) // sorted, deduped
+	parkedIDs := canonicalIDSet(parked)  // sorted, deduped
 	expected := canonicalIDSet(source)
-	rawCount := len(union)
+
+	// Disjointness: a partition may not be both assigned and parked.
+	overlap := intersectSortedIDs(assignedIDs, parkedIDs)
+	// Union: assigned ∪ parked must equal source as a set, and the raw counts
+	// must match (multiset check catches duplicates within either set and
+	// across the assigned/parked boundary).
+	got := mergeSortedIDs(assignedIDs, parkedIDs) // sorted, deduped union
+	rawCount := len(union) + len(parked)
 	setOK := equalStringSlices(got, expected)
 	multisetOK := rawCount == len(expected)
-	if setOK && multisetOK {
+	if setOK && multisetOK && len(overlap) == 0 {
 		return nil
 	}
 
@@ -553,15 +577,17 @@ func (p *AssignmentPublisher) checkCoverage(source []types.Partition, assignment
 	duplicates := rawCount - len(got)
 	p.logger.Error("publish coverage mismatch",
 		"source_partitions", len(expected),
-		"assigned_unique", len(got),
-		"assigned_raw", rawCount,
+		"covered_unique", len(got),
+		"covered_raw", rawCount,
+		"parked", len(parked),
+		"overlap", len(overlap),
 		"missing", missing,
 		"extra", extra,
 		"duplicates", duplicates,
 	)
 
-	return fmt.Errorf("%w: source=%d assigned_unique=%d assigned_raw=%d missing=%d extra=%d duplicates=%d",
-		types.ErrCoverageMismatch, len(expected), len(got), rawCount, missing, extra, duplicates)
+	return fmt.Errorf("%w: source=%d covered_unique=%d covered_raw=%d parked=%d overlap=%d missing=%d extra=%d duplicates=%d",
+		types.ErrCoverageMismatch, len(expected), len(got), rawCount, len(parked), len(overlap), missing, extra, duplicates)
 }
 
 // checkLeadership implements steps 5 and 7: invoke the live leader-check
@@ -590,6 +616,7 @@ func (p *AssignmentPublisher) writePayloads(
 	ctx context.Context,
 	workers []string,
 	assignments map[string][]types.Partition,
+	labels map[string][]string,
 ) (map[string]types.AssignmentPayloadRef, map[string]types.AssignmentPayload, error) {
 	refs := make(map[string]types.AssignmentPayloadRef, len(workers))
 	payloads := make(map[string]types.AssignmentPayload, len(workers))
@@ -609,6 +636,17 @@ func (p *AssignmentPublisher) writePayloads(
 		payload := types.AssignmentPayload{
 			SchemaVersion: types.AssignmentSchemaVersion,
 			Partitions:    canonical,
+			// Labels feed the same content-addressed sha256 as the partitions,
+			// so stamp a SORTED copy — identical label sets must hash
+			// identically regardless of caller order, exactly like the
+			// CanonicalID sort above. Never mutates the caller's slice.
+			WorkerLabels: sortedLabelsCopy(labels[w]),
+			// WorkerLabelsKnown is UNCONDITIONAL: a label-aware leader always
+			// records presence, including for unlabeled workers (spec §4.3).
+			// The presence bit distinguishes "computed for an unlabeled worker"
+			// (true + empty) from "computed by a pre-label leader" (false).
+			// Mirrors the SourceRevisionKnown precedent.
+			WorkerLabelsKnown: true,
 		}
 		canonicalBytes, err := json.Marshal(payload)
 		if err != nil {
@@ -730,7 +768,10 @@ func (p *AssignmentPublisher) runAliasBarrier(
 			// Worker is in the batch but has no assignment slice — degenerate;
 			// we still write an empty payload alias so old workers see the
 			// "you're revoked" signal at version V.
-			payload = types.AssignmentPayload{SchemaVersion: types.AssignmentSchemaVersion}
+			// WorkerLabelsKnown stays true: a label-aware leader always records
+			// presence, even on this (currently unreachable) revoke fallback —
+			// future routing changes must not emit Known=false aliases.
+			payload = types.AssignmentPayload{SchemaVersion: types.AssignmentSchemaVersion, WorkerLabelsKnown: true}
 		}
 		legacy := buildLegacyAlias(payload, proposedVersion, in.LeaderRevision, in.SourceRevision, in.Lifecycle, len(in.Workers))
 		if werr := p.writeLegacyAliasWithRetry(ctx, w, legacy); werr != nil {
@@ -1224,6 +1265,79 @@ func equalStringSlices(a, b []string) bool {
 	return true
 }
 
+// intersectSortedIDs returns the sorted intersection of two sorted, deduped
+// string slices (as produced by canonicalIDSet). Returns nil when the inputs
+// share no elements. Used by checkCoverage to detect assigned∩parked overlap.
+func intersectSortedIDs(a, b []string) []string {
+	var out []string
+	i, j := 0, 0
+	for i < len(a) && j < len(b) {
+		switch {
+		case a[i] == b[j]:
+			out = append(out, a[i])
+			i++
+			j++
+		case a[i] < b[j]:
+			i++
+		default:
+			j++
+		}
+	}
+
+	return out
+}
+
+// mergeSortedIDs returns the sorted, deduped union of two sorted, deduped
+// string slices (as produced by canonicalIDSet). Used by checkCoverage to
+// compare assigned∪parked against the source set.
+func mergeSortedIDs(a, b []string) []string {
+	if len(a) == 0 {
+		return b
+	}
+	if len(b) == 0 {
+		return a
+	}
+	out := make([]string, 0, len(a)+len(b))
+	i, j := 0, 0
+	for i < len(a) && j < len(b) {
+		switch {
+		case a[i] == b[j]:
+			out = append(out, a[i])
+			i++
+			j++
+		case a[i] < b[j]:
+			out = append(out, a[i])
+			i++
+		default:
+			out = append(out, b[j])
+			j++
+		}
+	}
+	out = append(out, a[i:]...)
+	out = append(out, b[j:]...)
+
+	return out
+}
+
+// sortedLabelsCopy returns a sorted, de-duplicated copy of the given label set
+// for payload stamping. Labels are part of the canonical payload bytes (and
+// therefore the content-addressed PayloadHash), so ordering must be
+// deterministic regardless of caller order — the "heartbeat labels arrive
+// pre-sorted and deduped" invariant is an unenforced cross-package assumption,
+// so this helper enforces it locally (sort + compact) to stay symmetric with
+// normalizeWorkerLabels. Returns nil for empty input and never mutates the
+// caller's slice.
+func sortedLabelsCopy(labels []string) []string {
+	if len(labels) == 0 {
+		return nil
+	}
+	out := make([]string, len(labels))
+	copy(out, labels)
+	slices.Sort(out)
+
+	return slices.Compact(out)
+}
+
 // computeSetDigest delegates to types.PartitionSetDigest so the publisher and
 // the manager-side apply ack share a single source of truth for the
 // SetDigest / AppliedDigest values. Kept as a thin local alias for readability
@@ -1333,10 +1447,12 @@ func buildLegacyAlias(
 	totalWorkers int,
 ) types.Assignment {
 	return types.Assignment{
-		Version:        version,
-		Lifecycle:      lifecycle,
-		Partitions:     payload.Partitions,
-		LeaderRevision: leaderRevision,
-		TotalWorkers:   totalWorkers,
+		Version:           version,
+		Lifecycle:         lifecycle,
+		Partitions:        payload.Partitions,
+		LeaderRevision:    leaderRevision,
+		TotalWorkers:      totalWorkers,
+		WorkerLabels:      payload.WorkerLabels,
+		WorkerLabelsKnown: payload.WorkerLabelsKnown,
 	}
 }
