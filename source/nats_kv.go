@@ -1271,7 +1271,7 @@ func (s *NatsKV) fetchFromKV(ctx context.Context) ([]types.Partition, uint64, er
 func deepCopyPartitions(partitions []types.Partition) []types.Partition {
 	result := make([]types.Partition, len(partitions))
 	for i, p := range partitions {
-		cp := types.Partition{Weight: p.Weight}
+		cp := p // struct-value copy: all scalar fields (Weight, Label, future additions)
 		cp.Keys = make([]string, len(p.Keys))
 		copy(cp.Keys, p.Keys)
 		result[i] = cp
@@ -1290,13 +1290,11 @@ func partitionsEqual(a, b []types.Partition) bool {
 		if a[i].Weight != b[i].Weight {
 			return false
 		}
-		if len(a[i].Keys) != len(b[i].Keys) {
+		if a[i].Label != b[i].Label {
 			return false
 		}
-		for j := range a[i].Keys {
-			if a[i].Keys[j] != b[i].Keys[j] {
-				return false
-			}
+		if !slices.Equal(a[i].Keys, b[i].Keys) {
+			return false
 		}
 	}
 
@@ -1324,7 +1322,7 @@ func validateAndDedupe(partitions []types.Partition) ([]types.Partition, error) 
 		}
 		seen[cid] = struct{}{}
 		// Deep-copy Keys to protect the encode→write window against caller mutation.
-		cp := types.Partition{Weight: p.Weight}
+		cp := p // struct-value copy preserves Weight, Label, and future fields
 		cp.Keys = make([]string, len(p.Keys))
 		copy(cp.Keys, p.Keys)
 		result = append(result, cp)
