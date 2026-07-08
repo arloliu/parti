@@ -13,6 +13,13 @@ type managerOptions struct {
 	logger          Logger
 	consumerUpdater WorkerConsumerUpdater
 	handoffMetrics  HandoffMetricsRecorder
+
+	// workerLabels carries the raw label set supplied via WithWorkerLabels;
+	// workerLabelsSet distinguishes "option provided" from "unset" so the
+	// option can override Config.WorkerLabels. Normalized (and validated) in
+	// NewManager, because Option cannot return an error.
+	workerLabels    []string
+	workerLabelsSet bool
 }
 
 // WithElectionAgent sets a custom election agent.
@@ -97,6 +104,26 @@ func WithMetrics(metrics MetricsCollector) Option {
 func WithLogger(logger Logger) Option {
 	return func(o *managerOptions) {
 		o.logger = logger
+	}
+}
+
+// WithWorkerLabels sets this worker's label set, overriding
+// Config.WorkerLabels. Labels are fixed for the manager's lifetime,
+// published in every heartbeat, and drive label-based partition
+// assignment. Invalid labels cause NewManager to return an error.
+//
+// Use this instead of Config.WorkerLabels when several workers share one
+// Config value (e.g. test clusters) but need distinct labels.
+//
+// Parameters:
+//   - labels: Worker label set (validated, sorted, and deduplicated by NewManager)
+//
+// Returns:
+//   - Option: Functional option for NewManager
+func WithWorkerLabels(labels ...string) Option {
+	return func(o *managerOptions) {
+		o.workerLabels = labels
+		o.workerLabelsSet = true
 	}
 }
 

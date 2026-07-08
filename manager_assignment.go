@@ -122,25 +122,28 @@ func (m *Manager) startCalculator(assignmentKV, heartbeatKV jetstream.KeyValue) 
 	}
 
 	calc, err := assignment.NewCalculator(&assignment.Config{
-		AssignmentKV:          assignmentKV,
-		HeartbeatKV:           heartbeatKV,
-		Source:                m.source,
-		Strategy:              m.strategy,
-		AssignmentPrefix:      "assignment",
-		HeartbeatPrefix:       "heartbeat",
-		HeartbeatTTL:          m.cfg.HeartbeatTTL,
-		EmergencyGracePeriod:  m.cfg.EmergencyGracePeriod,
-		Cooldown:              m.cfg.RebalanceCooldown,
-		ColdStartWindow:       m.cfg.ColdStartWindow,
-		PlannedScaleWindow:    m.cfg.PlannedScaleWindow,
-		EnableTwoPhaseHandoff: m.cfg.EnableTwoPhaseHandoff,
-		Metrics:               m.metrics,
-		Logger:                m.logger,
-		StateProvider:         m, // Pass manager as state provider for degraded mode checks
-		LeaderRevision:        m.electionRevision,
-		LeaderCheck:           m.checkElectionLeadership,
-		OnEnumerationError:    m.onEnumerationStall,
-		OnEnumerationSuccess:  m.recordEnumerationSuccess,
+		AssignmentKV:             assignmentKV,
+		HeartbeatKV:              heartbeatKV,
+		Source:                   m.source,
+		Strategy:                 m.strategy,
+		AssignmentPrefix:         "assignment",
+		HeartbeatPrefix:          "heartbeat",
+		HeartbeatTTL:             m.cfg.HeartbeatTTL,
+		EmergencyGracePeriod:     m.cfg.EmergencyGracePeriod,
+		Cooldown:                 m.cfg.RebalanceCooldown,
+		ColdStartWindow:          m.cfg.ColdStartWindow,
+		PlannedScaleWindow:       m.cfg.PlannedScaleWindow,
+		EnableTwoPhaseHandoff:    m.cfg.EnableTwoPhaseHandoff,
+		Metrics:                  m.metrics,
+		Logger:                   m.logger,
+		StateProvider:            m, // Pass manager as state provider for degraded mode checks
+		LeaderRevision:           m.electionRevision,
+		LeaderCheck:              m.checkElectionLeadership,
+		OnEnumerationError:       m.onEnumerationStall,
+		OnEnumerationSuccess:     m.recordEnumerationSuccess,
+		UnlabeledPartitionPolicy: m.cfg.UnlabeledPartitionPolicy,
+		LabelSpillGrace:          m.cfg.LabelSpillGrace,
+		OnLabelReadBroadFailure:  m.recordLabelReadFailure,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create calculator: %w", err)
@@ -248,12 +251,33 @@ func (m *Manager) monitorCalculatorState(calc assignmentCalculator, readyCh chan
 }
 
 // stopCalculator stops the assignment calculator, returning true if it was running.
+//
+// LOCK ORDER (deadlock-critical): m.mu must NOT be held across calc.Stop().
+// calc.Stop joins the calculator's goroutines (worker monitor, state machine,
+// partition/label monitors), and an in-flight rebalance on those goroutines
+// re-enters the manager through lock-taking callbacks —
+// OnLabelReadBroadFailure → recordLabelReadFailure → recordKVError →
+// m.mu.Lock() — so holding m.mu here closed a circular wait that hung
+// Manager.Stop forever (the Task 15 pool-outage shutdown deadlock; the
+// pre-existing OnEnumerationError sibling deliberately avoids m.mu via
+// atomic CAS, which is why the cycle only appeared with the label seam).
+//
+// The calculator-field swap to the Nop default stays INSIDE the lock, which
+// is what keeps the unlock safe against interleavings: a concurrent
+// stopCalculator sees the Nop and returns false (exactly one caller reaches
+// calc.Stop — belt-and-braces on top of calc.Stop's own started-CAS
+// idempotence), and a concurrent startCalculator builds a fresh calculator
+// while the old instance drains outside the lock. In practice stop/start are
+// already serialized: the election monitor invokes both from one goroutine
+// (program order, and this function returns only after calc.Stop completes),
+// and Manager.Stop cancels m.ctx before calling here, so the election loop
+// is exiting.
 func (m *Manager) stopCalculator() bool {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	calc, ok := m.calculator.(*assignment.Calculator)
 	if !ok {
+		m.mu.Unlock()
 		return false
 	}
 
@@ -284,7 +308,14 @@ func (m *Manager) stopCalculator() bool {
 		// No state transition needed for non-leader states
 	}
 
-	// Stop calculator with fresh context for cleanup
+	// Swap in the Nop default while still holding the lock so every other
+	// m.calculator reader immediately sees a non-nil calculator that is not
+	// the draining instance.
+	m.calculator = assignment.NewNopCalculator()
+	m.mu.Unlock()
+
+	// Stop calculator OUTSIDE m.mu (see the lock-order note above) with a
+	// fresh context for cleanup.
 	// IMPORTANT: Cannot use m.ctx here because it's already cancelled during Stop()
 	// Creating a timeout from cancelled context would result in immediate cancellation
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), m.cfg.OperationTimeout)
@@ -293,8 +324,6 @@ func (m *Manager) stopCalculator() bool {
 	if err := calc.Stop(stopCtx); err != nil {
 		m.logError("failed to stop calculator", "error", err)
 	}
-
-	m.calculator = assignment.NewNopCalculator()
 
 	return true
 }
@@ -1217,6 +1246,8 @@ func (m *Manager) buildAssignmentFromCommit(commit *types.AssignmentCommit, work
 		SourceRevision:      commit.SourceRevision,
 		SourceRevisionKnown: commit.SourceRevisionKnown,
 		TotalWorkers:        len(commit.Workers),
+		WorkerLabels:        payload.WorkerLabels,
+		WorkerLabelsKnown:   payload.WorkerLabelsKnown,
 	}, true
 }
 
@@ -1422,6 +1453,56 @@ func (m *Manager) currentAssignmentApplied(cur Assignment) bool {
 		types.PartitionSetDigest(c.Partitions) == types.PartitionSetDigest(cur.Partitions)
 }
 
+// errLabelIncarnationRejected marks an assignment payload computed for a
+// different process incarnation behind this worker's stable ID (the
+// labels-of-record mismatch this worker's configured labels). Rejection
+// is terminal for that payload: no alias fallback, no apply retry, no
+// ack — convergence arrives as the next label-correct commit via the
+// leader's label-change trigger.
+var errLabelIncarnationRejected = errors.New("assignment labels-of-record mismatch worker labels; payload from a different incarnation")
+
+// labelIncarnationMismatch implements the spec §9 guard matrix. Both
+// sides are sorted+deduplicated (normalizeWorkerLabels for the worker,
+// publisher-normalized labels-of-record for the payload), so slice
+// equality is set equality.
+//
+//	WorkerLabelsKnown=false        → apply (pre-label leader; compat)
+//	Known + equal label sets       → apply
+//	Known + differing label sets   → reject
+//	Known + empty vs labeled worker→ reject
+//	Known + empty vs unlabeled     → apply (both empty)
+func (m *Manager) labelIncarnationMismatch(a Assignment) bool {
+	if !a.WorkerLabelsKnown {
+		return false // pre-label payload: compat apply
+	}
+
+	return !slices.Equal(a.WorkerLabels, m.workerLabels)
+}
+
+// rejectIfStaleIncarnation is the shared stale-incarnation guard invoked at
+// the head of BOTH applyAssignmentWithPrev and applyAssignmentWithPrevSkipJitter,
+// before jitter, before applyAssignmentWithPrevCore, and before any side
+// effect (no coordinator Apply, no LSR/snapshot advance, no ack, no retry
+// stash). On mismatch it returns errLabelIncarnationRejected so the payload is
+// dropped terminally rather than routed through scheduleApplyRetry (retrying a
+// payload that can never become applicable is the futile loop §9 forbids).
+func (m *Manager) rejectIfStaleIncarnation(newAssignment Assignment) error {
+	if m.labelIncarnationMismatch(newAssignment) {
+		m.logger.Warn("rejecting assignment computed for a different incarnation of this worker ID",
+			"worker_id", m.WorkerID(),
+			"payload_labels", newAssignment.WorkerLabels,
+			"worker_labels", m.workerLabels,
+			"version", newAssignment.Version)
+		if lm, ok := m.metrics.(types.LabelMetrics); ok {
+			lm.IncrementLabelIncarnationReject()
+		}
+
+		return errLabelIncarnationRejected
+	}
+
+	return nil
+}
+
 // applyAssignmentWithPrev is the fresh-version apply entry (watcher,
 // commit, alias, initial-bootstrap). It jitters once before calling core,
 // so a fleet of workers observing the same fresh version spreads its
@@ -1432,6 +1513,9 @@ func (m *Manager) currentAssignmentApplied(cur Assignment) bool {
 // exponential backoff; adding jitter on top compounds latency for no
 // fleet-spread benefit (the retry is one worker, not a fleet).
 func (m *Manager) applyAssignmentWithPrev(oldAssignment, newAssignment Assignment) error {
+	if err := m.rejectIfStaleIncarnation(newAssignment); err != nil {
+		return err
+	}
 	if jitter := m.cfg.ApplyStartJitter; jitter > 0 {
 		if hook := m.testHookApplyJittered; hook != nil {
 			hook()
@@ -1452,6 +1536,10 @@ func (m *Manager) applyAssignmentWithPrev(oldAssignment, newAssignment Assignmen
 // scheduleApplyRetry so a retry's compound delay is bounded by the
 // retry-backoff envelope alone.
 func (m *Manager) applyAssignmentWithPrevSkipJitter(oldAssignment, newAssignment Assignment) error {
+	if err := m.rejectIfStaleIncarnation(newAssignment); err != nil {
+		return err
+	}
+
 	return m.applyAssignmentWithPrevCore(oldAssignment, newAssignment)
 }
 
