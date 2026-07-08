@@ -83,6 +83,37 @@ func TestHeartbeat_DecodeV1JSON(t *testing.T) {
 	require.True(t, hb.Timestamp.Equal(ts))
 }
 
+// TestHeartbeat_DecodeLabels verifies the additive Labels field: a v1 payload
+// carrying "labels" decodes to the set; a legacy timestamp payload and a v1
+// payload without the field both decode to Labels=nil (distinct from error).
+func TestHeartbeat_DecodeLabels(t *testing.T) {
+	t.Run("v1 JSON with labels", func(t *testing.T) {
+		hb, err := types.DecodeHeartbeat([]byte(`{"worker_id":"w1","schema_version":1,"labels":["vip"],"applied_at":"0001-01-01T00:00:00Z","timestamp":"0001-01-01T00:00:00Z"}`))
+		require.NoError(t, err)
+		require.Equal(t, []string{"vip"}, hb.Labels)
+	})
+
+	t.Run("legacy timestamp payload has nil labels", func(t *testing.T) {
+		now := time.Now().UTC().Truncate(time.Nanosecond)
+		hb, err := types.DecodeHeartbeat([]byte(now.Format(time.RFC3339Nano)))
+		require.NoError(t, err)
+		require.Nil(t, hb.Labels, "pre-label workers decode with nil Labels")
+	})
+
+	t.Run("v1 JSON without labels field has nil labels", func(t *testing.T) {
+		// A pre-label v1 worker's payload omits "labels"; it must decode to nil,
+		// which is distinct from a decode error.
+		src := types.Heartbeat{WorkerID: "w2", SchemaVersion: 1}
+		payload, err := json.Marshal(src)
+		require.NoError(t, err)
+		require.NotContains(t, string(payload), "labels", "omitempty must drop the empty field")
+
+		hb, err := types.DecodeHeartbeat(payload)
+		require.NoError(t, err)
+		require.Nil(t, hb.Labels)
+	})
+}
+
 // TestHeartbeat_DecodeMalformed_ReturnsError verifies that a payload that is
 // neither valid JSON nor a parseable RFC3339 timestamp is returned as an error,
 // not silently degraded to an empty Heartbeat. Importantly, a payload that

@@ -381,3 +381,55 @@ type WorkerConsumerMetrics interface {
 	// due to ownership/state gating (v2 per-subject mode). Reason examples: "not_owner", "state_blocked".
 	IncrementWorkerConsumerPullSuppressed(reason string)
 }
+
+// LabelMetrics is an optional extension interface for label-based partition
+// assignment observability. A MetricsCollector implementation MAY also satisfy
+// LabelMetrics; the manager and calculator type-assert their configured
+// collector to LabelMetrics and, when the assertion fails, silently skip these
+// recordings (label mode still functions without them).
+//
+// Semantics:
+//   - The per-label gauges (RecordLabelPoolSize, RecordParkedPartitions) are
+//     recomputed on every completed rebalance. A label absent from the current
+//     snapshot is explicitly zeroed in the same pass, so a drained label pool
+//     does not leave a stale non-zero reading.
+//   - The per-label gauges are leader-scoped and are zeroed by the departing
+//     leader when it stops calculating, so a deposed leader's export does not
+//     freeze at stale non-zero readings.
+//   - The counters (IncrementLabelSpill, IncrementLabelChangeTrigger,
+//     IncrementLabelIncarnationReject, IncrementUnlabeledFallback) are
+//     monotonic per process.
+//
+// Implementations must be non-blocking and thread-safe: methods are called
+// from internal goroutines, matching the MetricsCollector contract.
+type LabelMetrics interface {
+	// RecordLabelPoolSize records the number of workers currently eligible for
+	// the given label. Recomputed each rebalance; absent labels are zeroed.
+	RecordLabelPoolSize(label string, workers int)
+
+	// RecordParkedPartitions records the number of partitions parked (awaiting
+	// an eligible worker) for the given label. Recomputed each rebalance;
+	// absent labels are zeroed.
+	RecordParkedPartitions(label string, count int)
+
+	// IncrementLabelSpill increments the count of partitions that spilled from
+	// their labeled pool to an unlabeled fallback worker for the given label.
+	IncrementLabelSpill(label string)
+
+	// IncrementLabelChangeTrigger increments the count of rebalances triggered
+	// by a detected worker-label change.
+	IncrementLabelChangeTrigger()
+
+	// IncrementLabelIncarnationReject increments the count of assignment
+	// payloads rejected by the worker-side stale-incarnation guard because the
+	// labels-of-record did not match the worker's configured labels.
+	IncrementLabelIncarnationReject()
+
+	// IncrementUnlabeledFallback increments once per unlabeled partition
+	// assigned while no worker was eligible for the unlabeled pool: under the
+	// "dedicated" policy this means the unlabeled pool was empty and the
+	// partitions were served by labeled workers; under "shared" (where every
+	// worker is eligible for unlabeled work) it fires only in the degenerate
+	// case of no live workers at all.
+	IncrementUnlabeledFallback()
+}

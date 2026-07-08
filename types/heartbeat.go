@@ -20,9 +20,15 @@ import (
 // v1 publishers always emit JSON. Legacy timestamp-byte payloads are parsed
 // for backwards-compatibility with pre-v1 workers.
 type Heartbeat struct {
-	WorkerID              string    `json:"worker_id"`
-	SchemaVersion         uint8     `json:"schema_version,omitempty"`
-	Capabilities          uint32    `json:"capabilities,omitempty"`
+	WorkerID      string `json:"worker_id"`
+	SchemaVersion uint8  `json:"schema_version,omitempty"`
+	Capabilities  uint32 `json:"capabilities,omitempty"`
+
+	// Labels is the worker's label set, fixed for the process lifetime.
+	// Sorted and deduplicated at publish time. Empty for unlabeled
+	// workers and for pre-label workers (additive JSON field).
+	Labels []string `json:"labels,omitempty"`
+
 	LeaderRevision        uint64    `json:"leader_revision,omitempty"`
 	AppliedVersion        int64     `json:"applied_version,omitempty"`
 	AppliedDigest         uint64    `json:"applied_digest,omitempty"`

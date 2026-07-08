@@ -103,6 +103,23 @@ func TestNopMetrics_InterfaceImplementation(t *testing.T) {
 	require.Implements(t, (*types.WorkerMetrics)(nil), metrics)
 	require.Implements(t, (*types.AssignmentMetrics)(nil), metrics)
 	require.Implements(t, (*types.MetricsCollector)(nil), metrics)
+	require.Implements(t, (*types.LabelMetrics)(nil), metrics)
+}
+
+func TestNopMetrics_LabelMetrics(t *testing.T) {
+	metrics := NewNop()
+
+	// Should not panic with label-metrics inputs
+	require.NotPanics(t, func() {
+		metrics.RecordLabelPoolSize("vip", 3)
+		metrics.RecordLabelPoolSize("", 0)
+		metrics.RecordParkedPartitions("vip", 2)
+		metrics.RecordParkedPartitions("", 0)
+		metrics.IncrementLabelSpill("vip")
+		metrics.IncrementLabelChangeTrigger()
+		metrics.IncrementLabelIncarnationReject()
+		metrics.IncrementUnlabeledFallback()
+	})
 }
 
 func BenchmarkNopMetrics_RecordStateTransition(b *testing.B) {

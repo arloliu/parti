@@ -23,6 +23,13 @@ type Partition struct {
 	// Negative values are treated as zero (strategy default).
 	// Used by weighted assignment strategies for load balancing.
 	Weight int64 `json:"weight" yaml:"weight"`
+
+	// Label optionally pins this partition to workers that carry the same
+	// label (see Heartbeat.Labels). Empty means unlabeled: the partition
+	// is assigned according to the unlabeled-partition policy. Label is a
+	// routing hint, NOT part of partition identity: it does not
+	// participate in CanonicalID, HashID, Compare, or PartitionSetDigest.
+	Label string `json:"label,omitempty" yaml:"label,omitempty"`
 }
 
 // Validate checks if the partition configuration is valid.
@@ -45,6 +52,18 @@ func (p Partition) Validate() error {
 		}
 		if strings.ContainsAny(key, " \t\n\r") {
 			return fmt.Errorf("partition key at index %d contains whitespace: %q", i, key)
+		}
+	}
+
+	if p.Label != "" {
+		if len(p.Label) > 64 {
+			return fmt.Errorf("partition label exceeds 64 bytes: %q", p.Label)
+		}
+		if strings.Contains(p.Label, ".") {
+			return fmt.Errorf("partition label contains invalid character '.': %q", p.Label)
+		}
+		if strings.ContainsAny(p.Label, " \t\n\r") {
+			return fmt.Errorf("partition label contains whitespace: %q", p.Label)
 		}
 	}
 
@@ -252,6 +271,14 @@ type Assignment struct {
 	// This field is informational only — the manager does not enforce it internally.
 	// Zero when not set by the publisher.
 	TotalWorkers int `json:"total_workers,omitempty"`
+
+	// WorkerLabels / WorkerLabelsKnown mirror the fetched AssignmentPayload's
+	// labels-of-record so the worker-side stale-incarnation guard can compare
+	// against its own label set. A label-aware leader stamps them onto both the
+	// payload and the legacy alias envelope; a pre-label leader leaves them
+	// empty/false (WorkerLabelsKnown=false).
+	WorkerLabels      []string `json:"worker_labels,omitempty"`
+	WorkerLabelsKnown bool     `json:"worker_labels_known,omitempty"`
 }
 
 // PartitionSetDigest returns the xxh3 hash of the sorted CanonicalIDs of the
