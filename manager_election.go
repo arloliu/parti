@@ -430,6 +430,10 @@ func (m *Manager) startHeartbeat(kv jetstream.KeyValue) error {
 	// Wire the capability function so the publisher reads the live bitmask on
 	// every heartbeat composition, reflecting runtime wire-up state.
 	publisher.SetCapabilitiesFn(m.Capabilities)
+	// Publish this worker's resolved label set in every heartbeat so the leader
+	// can drive label-based partition assignment. Set before Start (set-once
+	// discipline). nil/empty for unlabeled workers (field is omitempty).
+	publisher.SetLabels(m.workerLabels)
 	m.heartbeat = publisher
 
 	// Start heartbeat in background

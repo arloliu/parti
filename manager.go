@@ -61,6 +61,12 @@ type Manager struct {
 	hooks         *Hooks
 	metrics       MetricsCollector
 	logger        Logger
+
+	// workerLabels is this worker's resolved label set (WithWorkerLabels
+	// overrides Config.WorkerLabels). Normalized once in NewManager and
+	// immutable for the manager's lifetime; published in every heartbeat and
+	// consumed by label-based assignment. nil/empty = unlabeled worker.
+	workerLabels []string
 	// Optional worker consumer updater
 	consumerUpdater WorkerConsumerUpdater
 	// Cached CapabilityReporter view of consumerUpdater. Set once at
@@ -444,6 +450,22 @@ func NewManager(cfg *Config, js jetstream.JetStream, source PartitionSource, str
 		hooksInstance = &nopHooks
 	}
 
+	// Resolve the worker label set once, immutable for the manager's lifetime.
+	// WithWorkerLabels wins over Config.WorkerLabels; the config path is already
+	// normalized by cfg.Validate above, so only the option path needs normalizing
+	// here (Option cannot return an error, so validation is deferred to here).
+	workerLabels := cfg.WorkerLabels
+	if options.workerLabelsSet {
+		normalized, err := normalizeWorkerLabels(options.workerLabels)
+		if err != nil {
+			return nil, fmt.Errorf("WithWorkerLabels: %w", err)
+		}
+		workerLabels = normalized
+	}
+	if len(workerLabels) > 0 {
+		logger.Info("resolved worker labels", "labels", workerLabels)
+	}
+
 	// Initialize internal components with Nop implementations
 	// This ensures that these fields are never nil, simplifying lifecycle management
 	// and avoiding nil pointer checks in operational methods.
@@ -456,6 +478,7 @@ func NewManager(cfg *Config, js jetstream.JetStream, source PartitionSource, str
 		hooks:             hooksInstance,
 		metrics:           metricsCollector,
 		logger:            logger,
+		workerLabels:      workerLabels,
 		consumerUpdater:   options.consumerUpdater,
 		capReporter:       asCapabilityReporter(options.consumerUpdater),
 		fleetSizeObserver: asFleetSizeObserver(options.consumerUpdater),
@@ -714,6 +737,25 @@ func (m *Manager) applyInitialAssignment(ctx context.Context, assignmentKV jetst
 			// of truth — see applyAssignment Godoc). The watcher will
 			// redeliver on the next tick if Apply failed.
 			if err := m.applyAssignmentWithPrev(Assignment{}, newAsg); err != nil {
+				if errors.Is(err, errLabelIncarnationRejected) {
+					// The current commit was computed for a different
+					// incarnation of this worker ID (labels-of-record mismatch).
+					// Do NOT surface it as authoritative or apply it; the
+					// leader's label-change trigger republishes a label-correct
+					// commit, which the commit watcher applies normally.
+					//
+					// Clear the raw store from waitForAssignment: unlike an
+					// ordinary apply failure (which retries the SAME assignment
+					// until it lands), a rejected assignment is never applied
+					// by this incarnation, so leaving it stored would expose
+					// partitions this worker is NOT consuming through the
+					// public CurrentAssignment() until the label-correct
+					// commit arrives.
+					m.assignment.Store(Assignment{})
+					m.logger.Warn("startup: current commit is for a different incarnation; waiting for a label-correct commit")
+					return nil
+				}
+
 				return err
 			}
 			commitCopy := *commit
@@ -778,6 +820,17 @@ func (m *Manager) applyInitialAssignment(ctx context.Context, assignmentKV jetst
 		m.observeFleetSizeN(initial.Version, initial.LeaderRevision, initial.TotalWorkers)
 	}
 	if err := m.applyAssignmentWithPrev(Assignment{}, initial); err != nil {
+		if errors.Is(err, errLabelIncarnationRejected) {
+			// The legacy-alias-derived assignment carries labels-of-record for
+			// a different incarnation of this worker ID. Same disposition as the
+			// commit path: wait for a label-correct assignment via the watcher,
+			// and clear the raw store so the rejected assignment does not leak
+			// through CurrentAssignment() meanwhile.
+			m.assignment.Store(Assignment{})
+			m.logger.Warn("startup: current alias assignment is for a different incarnation; waiting for a label-correct assignment")
+			return nil
+		}
+
 		return err
 	}
 	m.runInitialHandoffResumeIfPending()

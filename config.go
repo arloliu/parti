@@ -3,6 +3,8 @@ package parti
 import (
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/arloliu/fuda"
@@ -384,6 +386,26 @@ type Config struct {
 	// WorkerIDPrefix is the prefix for worker IDs (e.g., "worker" produces "worker-0", "worker-1").
 	WorkerIDPrefix string `yaml:"workerIdPrefix" default:"worker" validate:"required"`
 
+	// WorkerLabels is this worker's label set, fixed at process startup.
+	// Labeled partitions (Partition.Label) are assigned only to workers
+	// whose set contains the partition's label. Validated with
+	// partition-key charset rules; sorted and deduplicated. At most 16
+	// labels, each at most 64 bytes. Empty = unlabeled worker.
+	// WithWorkerLabels overrides this field when both are set.
+	WorkerLabels []string `yaml:"workerLabels"`
+
+	// UnlabeledPartitionPolicy controls which workers receive unlabeled
+	// partitions. "dedicated" (default): unlabeled workers only, falling
+	// back to all workers when no unlabeled worker is live. "shared":
+	// all workers. Leader-side; MUST be identical across every manager
+	// in the fleet (same contract as the AssignmentStrategy choice).
+	UnlabeledPartitionPolicy string `yaml:"unlabeledPartitionPolicy" default:"dedicated" validate:"oneof=dedicated shared"`
+
+	// LabelSpillGrace is how long a label's worker pool must be
+	// continuously empty before its partitions spill to the fallback
+	// ladder. 0 spills immediately. Leader-side; MUST be fleet-uniform.
+	LabelSpillGrace time.Duration `yaml:"labelSpillGrace" default:"60s" validate:"gte=0"`
+
 	// WorkerIDMin is the minimum stable ID number (inclusive).
 	// Set to 0 for most use cases.
 	WorkerIDMin int `yaml:"workerIdMin" default:"0" validate:"gte=0"`
@@ -604,6 +626,42 @@ func SetDefaults(cfg *Config) error {
 	return nil
 }
 
+// normalizeWorkerLabels validates, sorts, and deduplicates a worker label
+// set. Rules mirror Partition.Validate's label rules: non-empty, no dots,
+// no whitespace, at most 64 bytes each, at most 16 labels total.
+func normalizeWorkerLabels(labels []string) ([]string, error) {
+	if len(labels) == 0 {
+		return nil, nil
+	}
+	out := make([]string, 0, len(labels))
+	seen := make(map[string]struct{}, len(labels))
+	for _, l := range labels {
+		if l == "" {
+			return nil, errors.New("worker label cannot be empty")
+		}
+		if len(l) > 64 {
+			return nil, fmt.Errorf("worker label exceeds 64 bytes: %q", l)
+		}
+		if strings.Contains(l, ".") {
+			return nil, fmt.Errorf("worker label contains invalid character '.': %q", l)
+		}
+		if strings.ContainsAny(l, " \t\n\r") {
+			return nil, fmt.Errorf("worker label contains whitespace: %q", l)
+		}
+		if _, dup := seen[l]; dup {
+			continue
+		}
+		seen[l] = struct{}{}
+		out = append(out, l)
+	}
+	slices.Sort(out)
+	if len(out) > 16 {
+		return nil, fmt.Errorf("too many worker labels: %d (max 16)", len(out))
+	}
+
+	return out, nil
+}
+
 // TTL Configuration Guide
 // =======================
 //
@@ -734,6 +792,15 @@ func (cfg *Config) Validate() error {
 	if cfg.AssignmentWatcherDebounce > 1*time.Second {
 		return errors.New("AssignmentWatcherDebounce must be <= 1s")
 	}
+
+	// Rule 13: Normalize the worker label set (validate charset/count, sort,
+	// dedupe) and store the canonical form back so downstream consumers
+	// (heartbeat publisher, calculator) see it in its resolved shape.
+	normalizedLabels, err := normalizeWorkerLabels(cfg.WorkerLabels)
+	if err != nil {
+		return fmt.Errorf("invalid WorkerLabels: %w", err)
+	}
+	cfg.WorkerLabels = normalizedLabels
 
 	return nil
 }

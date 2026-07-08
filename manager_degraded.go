@@ -3,6 +3,7 @@ package parti
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"time"
 
@@ -210,6 +211,25 @@ func (m *Manager) recordKVError(err error) {
 // does NOT route through here, keeping its claim-lost shutdown semantics.
 func (m *Manager) recordKVOpError(err error) {
 	m.recordKVError(markKVUnavailable(err))
+}
+
+// recordLabelReadFailure routes a broad label-read failure from the
+// calculator into the degraded circuit. Classed causes (connectivity /
+// degrading JetStream) pass through and are admitted as whole-bucket
+// loss. Count-based broad failures (many unclassified per-worker Get
+// failures — a connected-but-KV-misbehaving shape) carry no admissible
+// class of their own, so wrap ErrKVUnavailable: they enter the window as
+// the F-D1 transient class (DegradeReasonKVUnavailable), which healthy
+// ops clear — sustained trouble degrades, a transient blip does not.
+func (m *Manager) recordLabelReadFailure(err error) {
+	if err == nil {
+		return // classifyKVError(nil) is also kvRouteDrop — without this
+		//        guard a nil input would be wrapped into a live window entry
+	}
+	if classifyKVError(err).route == kvRouteDrop {
+		err = fmt.Errorf("%w: broad worker label read failure: %w", ErrKVUnavailable, err)
+	}
+	m.recordKVError(err)
 }
 
 // recordKVSuccess clears the ENTIRE degraded-circuit error window (both
