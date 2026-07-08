@@ -11,6 +11,10 @@ type NopMetrics struct{}
 // Compile-time assertion that NopMetrics implements MetricsCollector.
 var _ types.MetricsCollector = (*NopMetrics)(nil)
 
+// Compile-time assertion that NopMetrics implements the optional LabelMetrics
+// extension interface (spec §13).
+var _ types.LabelMetrics = (*NopMetrics)(nil)
+
 // NewNop creates a new no-op metrics collector.
 //
 // Returns:
@@ -329,6 +333,38 @@ func (n *NopMetrics) ObserveWorkerConsumerRecreationDuration(_ /* seconds */ flo
 
 // IncrementWorkerConsumerPullSuppressed discards pull suppression increments.
 func (n *NopMetrics) IncrementWorkerConsumerPullSuppressed(_ /* reason */ string) {
+	// No-op
+}
+
+// LabelMetrics implementation (optional extension interface, spec §13)
+
+// RecordLabelPoolSize discards the per-label worker pool size gauge.
+func (n *NopMetrics) RecordLabelPoolSize(_ /* label */ string, _ /* workers */ int) {
+	// No-op
+}
+
+// RecordParkedPartitions discards the per-label parked-partition count gauge.
+func (n *NopMetrics) RecordParkedPartitions(_ /* label */ string, _ /* count */ int) {
+	// No-op
+}
+
+// IncrementLabelSpill discards the label-spill counter.
+func (n *NopMetrics) IncrementLabelSpill(_ /* label */ string) {
+	// No-op
+}
+
+// IncrementLabelChangeTrigger discards the label-change-triggered-rebalance counter.
+func (n *NopMetrics) IncrementLabelChangeTrigger() {
+	// No-op
+}
+
+// IncrementLabelIncarnationReject discards the stale-incarnation label rejection counter.
+func (n *NopMetrics) IncrementLabelIncarnationReject() {
+	// No-op
+}
+
+// IncrementUnlabeledFallback discards the unlabeled-fallback counter.
+func (n *NopMetrics) IncrementUnlabeledFallback() {
 	// No-op
 }
 

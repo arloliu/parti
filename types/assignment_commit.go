@@ -31,6 +31,17 @@ type AssignmentPayload struct {
 	// CanonicalID. Sort is the canonicalization step that lets
 	// content-addressable keys reuse across commits.
 	Partitions []Partition `json:"partitions"`
+
+	// WorkerLabels is the labels-of-record: the label set the leader read
+	// from this worker's heartbeat when computing the assignment. Part of
+	// the canonical payload bytes (and therefore PayloadHash).
+	WorkerLabels []string `json:"worker_labels,omitempty"`
+
+	// WorkerLabelsKnown distinguishes "computed for an unlabeled worker"
+	// (true + empty WorkerLabels) from "computed by a pre-label leader"
+	// (false). Label-aware leaders ALWAYS set true. Mirrors the
+	// SourceRevisionKnown presence-bit precedent.
+	WorkerLabelsKnown bool `json:"worker_labels_known,omitempty"`
 }
 
 // AssignmentPayloadRef points to a content-addressable AssignmentPayload key in
@@ -112,6 +123,15 @@ type AssignmentCommit struct {
 	// Used as a coverage-proof handle for audit; matches the source partition
 	// set's digest at publish time.
 	BatchDigest uint64 `json:"batch_digest"`
+
+	// ParkedCount is the number of partitions intentionally left
+	// unassigned in this batch (label pool empty, spill grace not yet
+	// expired). Zero when nothing is parked.
+	ParkedCount int `json:"parked_count,omitempty"`
+
+	// ParkedDigest is types.PartitionSetDigest over the parked set.
+	// Zero when nothing is parked.
+	ParkedDigest uint64 `json:"parked_digest,omitempty"`
 
 	// PrevCommitRev is the KV revision the publisher CAS-updated FROM. Zero on
 	// the first ever commit (Create instead of Update). Diagnostic only —
