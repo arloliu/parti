@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -967,6 +968,18 @@ func (m *Manager) WorkerID() string {
 //   - bool: true if this manager is the leader, false otherwise.
 func (m *Manager) IsLeader() bool {
 	return m.isLeader.Load()
+}
+
+// WorkerLabels returns this worker's resolved label set (sorted,
+// deduplicated, normalized at construction — see NewManager and
+// normalizeWorkerLabels). Each call returns a fresh clone of the manager's
+// internal label slice, so the caller owns the result and may freely mutate
+// it without affecting the manager's internal state.
+//
+// Returns:
+//   - []string: A fresh copy of this worker's label set, or nil if unlabeled.
+func (m *Manager) WorkerLabels() []string {
+	return slices.Clone(m.workerLabels)
 }
 
 // CurrentAssignment returns the current partition assignment for this worker.
