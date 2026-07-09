@@ -37,12 +37,42 @@ func minDuration(a, b time.Duration) time.Duration {
 	return b
 }
 
+// buildPartitions constructs the static partition slice a worker's source
+// is seeded with. weights and labels are parallel arrays indexed by
+// partition ID; both default when shorter than count — weight defaults to
+// 1 (matching the strategy's own default-weight convention), label
+// defaults to "" (unlabeled). Factored out of NewWorker so it's testable
+// without a live NATS connection.
+func buildPartitions(count int, weights []int64, labels []string) []types.Partition {
+	partitions := make([]types.Partition, count)
+	for i := 0; i < count; i++ {
+		weight := int64(1)
+		if i < len(weights) {
+			weight = weights[i]
+		}
+		label := ""
+		if i < len(labels) {
+			label = labels[i]
+		}
+		partitions[i] = types.Partition{
+			Keys:   []string{fmt.Sprintf("%d", i)},
+			Weight: weight,
+			Label:  label,
+		}
+	}
+
+	return partitions
+}
+
 type Worker struct {
 	id      string
 	nc      *nats.Conn
 	js      jetstream.JetStream
 	cfg     *parti.Config
 	manager *parti.Manager
+	// chaosProof captures positive-proof counters for label chaos
+	// scenarios (see chaos_proof_metrics.go). Always non-nil.
+	chaosProof *ChaosProofMetrics
 	// updater is the manager-driven consumer updater. Holds the same instance
 	// as `dynamic` but typed as the parti interface for WithWorkerConsumerUpdater.
 	updater parti.WorkerConsumerUpdater
@@ -55,10 +85,20 @@ type Worker struct {
 	startLatencyCh      chan<- coordinator.StartLatencyReport
 	metricsCollector    *metrics.Collector
 	logger              types.Logger
-	currentPartitions   int // Track current partition count for metrics
-	ctx                 context.Context
-	cancel              context.CancelFunc
-	started             atomic.Bool // Prevents multiple Start() calls
+	// currentPartitions tracks the current partition count for metrics.
+	// atomic because handleAssignmentChanged (its sole writer) can run
+	// concurrently on itself: Manager.invokeHook dispatches each
+	// OnAssignmentChanged call on its own goroutine with no
+	// cross-invocation serialization, and the direct assignment watcher
+	// and the debounced commit watcher (manager_assignment.go) can each
+	// fire around the same instant — most commonly during a leader
+	// failover. Found via -race under the label_relabel_storm scenario
+	// (see task-12-report.md); reproduced by
+	// TestHandleAssignmentChanged_ConcurrentInvocationRace.
+	currentPartitions atomic.Int32
+	ctx               context.Context
+	cancel            context.CancelFunc
+	started           atomic.Bool // Prevents multiple Start() calls
 
 	// first-assignment latency tracking: captures the delay between Start()
 	// being called and the first OnAssignmentChanged with a non-empty set.
@@ -147,12 +187,15 @@ func (w *Worker) GetProcessingMultiplier() int {
 
 // Config configures a worker.
 type Config struct {
-	ID                  string
-	NC                  *nats.Conn
-	JS                  jetstream.JetStream
-	JetStreamWrapper    func(jetstream.JetStream) jetstream.JetStream
-	PartitionCount      int
-	PartitionWeights    []int64
+	ID               string
+	NC               *nats.Conn
+	JS               jetstream.JetStream
+	JetStreamWrapper func(jetstream.JetStream) jetstream.JetStream
+	PartitionCount   int
+	PartitionWeights []int64
+	// PartitionLabels is a parallel array to PartitionWeights, indexed by
+	// partition ID. "" (or out-of-range) means unlabeled.
+	PartitionLabels     []string
 	AssignmentStrategy  string
 	ProcessingDelayMin  time.Duration
 	ProcessingDelayMax  time.Duration
@@ -220,6 +263,24 @@ type Config struct {
 	WorkerIDMax    int
 	WorkerIDTTL    time.Duration
 
+	// WorkerLabels is this worker's fixed label set. Empty means
+	// unlabeled. Rides into parti.Config.WorkerLabels — see NewWorker.
+	WorkerLabels []string
+	// ChaosProof, when non-nil, is reused as this worker's positive-proof
+	// metrics collector instead of allocating a fresh one. The all-in-one
+	// restart path passes the SAME instance across every respawn of a given
+	// sim worker ID so label-chaos counters (e.g. LabelChangeTriggers) that
+	// increment on whichever incarnation was leader at detection time survive
+	// a subsequent crash+respawn of that worker. Nil (the default) allocates a
+	// fresh collector, preserving prior single-lifetime behavior.
+	ChaosProof *ChaosProofMetrics
+	// UnlabeledPartitionPolicy mirrors parti.Config.UnlabeledPartitionPolicy.
+	// Empty defers to parti.DefaultConfig()'s own default.
+	UnlabeledPartitionPolicy string
+	// LabelSpillGrace mirrors parti.Config.LabelSpillGrace. Zero defers to
+	// parti.DefaultConfig()'s own default.
+	LabelSpillGrace time.Duration
+
 	// RevocationReportCh receives a RevocationReport each time the manager
 	// drives a zero-partition UpdateWorkerConsumer call (Phase 4 ordering
 	// oracle). The signal is needed because OnAssignmentChanged does NOT
@@ -264,17 +325,7 @@ func NewWorker(cfg Config) (*Worker, error) { //nolint:cyclop,gocyclo // dispatc
 		cfg.ID, cfg.PartitionCount, cfg.AssignmentStrategy, cfg.EnforceExclusiveConsumption, cfg.HandlerConcurrency, cfg.ConsumerBatchSize)
 
 	// Create partition source
-	partitions := make([]types.Partition, cfg.PartitionCount)
-	for i := 0; i < cfg.PartitionCount; i++ {
-		weight := int64(1)
-		if i < len(cfg.PartitionWeights) {
-			weight = cfg.PartitionWeights[i]
-		}
-		partitions[i] = types.Partition{
-			Keys:   []string{fmt.Sprintf("%d", i)},
-			Weight: weight,
-		}
-	}
+	partitions := buildPartitions(cfg.PartitionCount, cfg.PartitionWeights, cfg.PartitionLabels)
 
 	// The partition source is constructed AFTER the Worker struct (below)
 	// so the WithLeadershipProbe closure can capture &worker for the
@@ -320,6 +371,18 @@ func NewWorker(cfg Config) (*Worker, error) { //nolint:cyclop,gocyclo // dispatc
 	if cfg.WorkerIDTTL != 0 {
 		partiCfg.WorkerIDTTL = cfg.WorkerIDTTL
 	}
+	// Label topology: override-if-set semantics, same idiom as the
+	// WorkerID* block above. Empty/zero values leave parti.DefaultConfig()'s
+	// own defaults in place.
+	if len(cfg.WorkerLabels) > 0 {
+		partiCfg.WorkerLabels = cfg.WorkerLabels
+	}
+	if cfg.UnlabeledPartitionPolicy != "" {
+		partiCfg.UnlabeledPartitionPolicy = cfg.UnlabeledPartitionPolicy
+	}
+	if cfg.LabelSpillGrace != 0 {
+		partiCfg.LabelSpillGrace = cfg.LabelSpillGrace
+	}
 	// Enable two-phase handoff only when exclusive consumption is requested.
 	// This publishes ownership claims to KV so the Processing Gate can enforce exclusivity.
 	partiCfg.EnableTwoPhaseHandoff = cfg.EnforceExclusiveConsumption
@@ -336,12 +399,17 @@ func NewWorker(cfg Config) (*Worker, error) { //nolint:cyclop,gocyclo // dispatc
 	// Default is 30s which is too long for fast testing
 	partiCfg.ColdStartWindow = 10 * time.Second
 
+	// Reuse a caller-provided collector across respawns when supplied (see
+	// Config.ChaosProof); otherwise allocate a fresh one.
+	chaosProof := resolveChaosProof(cfg.ChaosProof)
+
 	// Create worker struct first so we can reference it in hooks
 	worker := &Worker{
 		id:                     cfg.ID,
 		nc:                     cfg.NC,
 		js:                     cfg.JS,
 		cfg:                    &partiCfg,
+		chaosProof:             chaosProof,
 		processingDelayMin:     cfg.ProcessingDelayMin,
 		processingDelayMax:     cfg.ProcessingDelayMax,
 		coordinatorReportCh:    cfg.CoordinatorReportCh,
@@ -349,7 +417,6 @@ func NewWorker(cfg Config) (*Worker, error) { //nolint:cyclop,gocyclo // dispatc
 		startLatencyCh:         cfg.StartLatencyCh,
 		metricsCollector:       cfg.MetricsCollector,
 		logger:                 logger,
-		currentPartitions:      0,
 		handlerConcurrency:     cfg.HandlerConcurrency,
 		consumerBatchSize:      cfg.ConsumerBatchSize,
 		isInitialCohort:        cfg.IsInitialCohort,
@@ -570,7 +637,8 @@ func NewWorker(cfg Config) (*Worker, error) { //nolint:cyclop,gocyclo // dispatc
 	manager, err := parti.NewManager(&partiCfg, js, partitionSource, assignmentStrategy,
 		parti.WithLogger(logger),
 		parti.WithHooks(hooks),
-		parti.WithWorkerConsumerUpdater(worker.updater))
+		parti.WithWorkerConsumerUpdater(worker.updater),
+		parti.WithMetrics(chaosProof))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create manager: %w", err)
 	}
@@ -678,9 +746,9 @@ func (w *Worker) Start(ctx context.Context) error {
 // handleAssignmentChanged updates metrics on assignment changes.
 func (w *Worker) handleAssignmentChanged(ctx context.Context, oldSet, newSet []types.Partition) error {
 	start := time.Now()
-	w.currentPartitions = len(newSet)
+	w.currentPartitions.Store(int32(len(newSet))) //nolint:gosec // len(newSet) is a partition count, far below int32 range
 	if w.metricsCollector != nil {
-		w.metricsCollector.RecordPartitionsPerWorker(w.currentPartitions)
+		w.metricsCollector.RecordPartitionsPerWorker(int(w.currentPartitions.Load()))
 		w.metricsCollector.RecordRebalanceDuration(time.Since(start))
 	}
 
@@ -941,6 +1009,22 @@ func (w *Worker) StableWorkerID() string {
 	return w.manager.WorkerID()
 }
 
+// ChaosProof returns this worker's positive-proof metrics collector.
+func (w *Worker) ChaosProof() *ChaosProofMetrics {
+	return w.chaosProof
+}
+
+// resolveChaosProof returns cp when non-nil (reused across respawns) or a
+// freshly-allocated collector otherwise. Extracted from NewWorker to keep that
+// constructor within the revive statement-count budget.
+func resolveChaosProof(cp *ChaosProofMetrics) *ChaosProofMetrics {
+	if cp != nil {
+		return cp
+	}
+
+	return NewChaosProofMetrics()
+}
+
 // DegradedReason returns the most recently cached degraded reason captured by
 // the OnDegraded hook, or "" if the worker has not entered degraded mode.
 func (w *Worker) DegradedReason() string {
@@ -959,6 +1043,16 @@ func (w *Worker) DegradedReason() string {
 // Implements coordinator.WorkerObserver.
 func (w *Worker) ClaimLostObserved() bool {
 	return w.claimLostObserved.Load()
+}
+
+// WorkerLabels returns the manager's resolved label set, or nil if the
+// manager is nil or the worker is unlabeled.
+// Implements coordinator.WorkerObserver.
+func (w *Worker) WorkerLabels() []string {
+	if w.manager == nil {
+		return nil
+	}
+	return w.manager.WorkerLabels()
 }
 
 // handleError is the OnError hook implementation. It captures

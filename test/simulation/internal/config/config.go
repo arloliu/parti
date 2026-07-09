@@ -68,6 +68,41 @@ type PartitionsConfig struct {
 	MessageRatePerPartition float64       `yaml:"message_rate_per_partition"` // Messages per second per partition
 	Distribution            string        `yaml:"distribution"`               // "uniform", "exponential"
 	Weights                 WeightsConfig `yaml:"weights"`
+
+	// LabeledSubsets declares label assignment for contiguous partition
+	// index ranges. Partitions not covered by any subset are unlabeled
+	// (Label == ""). Ranges must not overlap and must stay within
+	// [0, Count). Mirrors WeightsConfig's declarative-range style but for
+	// label routing hints (types.Partition.Label) instead of processing
+	// weight.
+	LabeledSubsets []LabeledPartitionSubset `yaml:"labeled_subsets"`
+}
+
+// LabeledPartitionSubset declares a Label for the half-open partition
+// index range [Start, End).
+type LabeledPartitionSubset struct {
+	Label string `yaml:"label"`
+	Start int    `yaml:"start"`
+	End   int    `yaml:"end"`
+}
+
+// ExpandLabels flattens LabeledSubsets into a []string of length Count,
+// indexed by partition ID, defaulting to "" (unlabeled) for indices not
+// covered by any subset. Mirrors how producer.WeightGenerator.GenerateWeights
+// flattens WeightsConfig into a []int64 of the same length — see
+// cmd/simulation/main.go's weight-generation block immediately before the
+// worker-creation loop.
+func (pc PartitionsConfig) ExpandLabels() []string {
+	labels := make([]string, pc.Count)
+	for _, s := range pc.LabeledSubsets {
+		for i := s.Start; i < s.End && i < pc.Count; i++ {
+			if i >= 0 {
+				labels[i] = s.Label
+			}
+		}
+	}
+
+	return labels
 }
 
 // WeightsConfig configures partition weight distributions.
@@ -151,6 +186,24 @@ type WorkersConfig struct {
 	// tiny-pool scenarios. Keyed by sim worker ID (e.g. "worker-0").
 	// Workers not listed inherit the cluster-wide defaults.
 	PerWorker map[string]PerWorkerConfig `yaml:"per_worker"`
+
+	// Labels declares the fixed label set for specific workers, keyed by
+	// sim worker ID (e.g. "worker-0") exactly like PerWorker. Workers not
+	// listed are unlabeled. Rides into parti.Config.WorkerLabels at
+	// construction time (worker.go:NewWorker) — labels are fixed for a
+	// worker's lifetime, matching the production contract.
+	Labels map[string][]string `yaml:"labels"`
+
+	// UnlabeledPartitionPolicy mirrors parti.Config.UnlabeledPartitionPolicy
+	// ("dedicated" or "shared"). Applied cluster-wide to every worker.
+	// Empty defers to parti.DefaultConfig()'s own default ("dedicated").
+	UnlabeledPartitionPolicy string `yaml:"unlabeled_partition_policy"`
+
+	// LabelSpillGrace mirrors parti.Config.LabelSpillGrace: how long a
+	// label's worker pool must be continuously empty before its
+	// partitions spill to the fallback ladder. Applied cluster-wide.
+	// Zero defers to parti.DefaultConfig()'s own default (60s).
+	LabelSpillGrace time.Duration `yaml:"label_spill_grace"`
 }
 
 // PerWorkerConfig configures per-worker StableID pool overrides. Each
@@ -320,6 +373,25 @@ type ChaosConfig struct {
 	// events are usually preferred; this is only for faults that must be
 	// active before the initial worker Start path.
 	Faults FaultsConfig `yaml:"faults"`
+
+	// ExpectLabelSpill, when true, arms the strict positive-proof gate
+	// asserting at least one partition actually spilled from a labeled
+	// pool to the unlabeled fallback (types.LabelMetrics.IncrementLabelSpill).
+	// Opt-in so ordinary scenarios with labeled partitions that never fully
+	// lose a pool aren't affected.
+	ExpectLabelSpill bool `yaml:"expect_label_spill"`
+
+	// ExpectLabelEmergencyCarveout, when true, arms the strict positive-
+	// proof gate asserting at least one emergency-carve-out claim
+	// (types.CalculatorMetrics.RecordEmergencyRebalance) occurred during
+	// the run. Opt-in so ordinary burst-kill scenarios aren't affected.
+	ExpectLabelEmergencyCarveout bool `yaml:"expect_label_emergency_carveout"`
+
+	// RelabelStormEventCount records how many label_heartbeat_takeover
+	// scheduled_events this scenario fires, so main.go's positive-proof
+	// gate can assert LabelRechecksRun stayed bounded (coalesced) rather
+	// than scaling linearly with event count. 0 disables the storm gate.
+	RelabelStormEventCount int `yaml:"relabel_storm_event_count"`
 }
 
 // FaultsConfig configures startup-armed fault injection.

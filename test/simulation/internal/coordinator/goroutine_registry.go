@@ -90,6 +90,31 @@ func (r *GoroutineRegistry) MarkInactive(id string) {
 	}
 }
 
+// MarkInactiveObj marks a goroutine inactive ONLY if the currently-registered
+// object for id is still obj — an incarnation guard for a worker goroutine
+// deactivating itself on exit.
+//
+// The bug this closes: on a crash+restart (Cancel → MarkInactive → Restart),
+// Restart re-registers a FRESH object for the same id and sets it Active=true.
+// The OLD goroutine's deferred cleanup then calls to deactivate id — but by
+// then the registry entry is the successor object. An unconditional
+// MarkInactive(id) here would flip the live successor to Active=false, making
+// it vanish from GetByType while it is still running and processing (observed
+// as a labeled worker reading empty labels / an unresolvable stable ID in the
+// label-takeover-churn scenario under -race). Guarding on obj identity means a
+// stale predecessor's cleanup is a no-op and only the current incarnation can
+// deactivate itself. The intentional chaos-side MarkInactive(id) in the
+// crash handler stays unconditional: it fires before Restart, when the current
+// object IS the one being crashed.
+func (r *GoroutineRegistry) MarkInactiveObj(id string, obj any) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if info, exists := r.goroutines[id]; exists && info.Obj == obj {
+		info.Active = false
+	}
+}
+
 // Restart calls the Start callback for the given goroutine ID if available and marks it active.
 // If no Start callback is set, this is a no-op.
 func (r *GoroutineRegistry) Restart(ctx context.Context, id string) {

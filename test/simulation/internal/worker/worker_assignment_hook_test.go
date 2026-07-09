@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -185,5 +186,49 @@ func TestHandleAssignmentChanged_CancellationDoesNotWedge(t *testing.T) {
 		// Pass — handler returned without wedging.
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("handleAssignmentChanged wedged after ctx cancellation")
+	}
+}
+
+// TestHandleAssignmentChanged_ConcurrentInvocationRace reproduces a data
+// race found empirically while running the label_relabel_storm scenario
+// under -race (see task-12-report.md). Root cause: Manager.invokeHook
+// (manager.go) dispatches every hook invocation on its own goroutine with
+// no cross-invocation serialization, and two independent watch sessions —
+// the direct assignment watcher and the debounced commit watcher
+// (manager_assignment.go) — can each fire OnAssignmentChanged around the
+// same instant, most commonly while a leader failover causes both
+// sessions to re-observe a change together. handleAssignmentChanged wrote
+// w.currentPartitions as a plain int with no synchronization, so two
+// concurrent invocations raced on the same memory address. Production
+// code is not at fault: fire-and-forget concurrent hook dispatch is
+// invokeHook's documented, intentional contract — the callback owns its
+// own thread-safety.
+//
+// Fails under `go test -race` before the atomic.Int32 fix (two
+// unsynchronized writes to currentPartitions); passes after. The
+// assertion is a sanity check that the final value is one of the
+// concurrently-written lengths (never torn/impossible) — the race
+// detector's own verdict is the load-bearing check.
+func TestHandleAssignmentChanged_ConcurrentInvocationRace(t *testing.T) {
+	w := &Worker{
+		id:  "test-worker",
+		ctx: context.Background(),
+	}
+
+	const goroutines = 50
+	const maxLen = 5
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := range goroutines {
+		go func() {
+			defer wg.Done()
+			newSet := make([]types.Partition, i%maxLen+1)
+			_ = w.handleAssignmentChanged(context.Background(), nil, newSet)
+		}()
+	}
+	wg.Wait()
+
+	if got := int(w.currentPartitions.Load()); got < 1 || got > maxLen {
+		t.Fatalf("currentPartitions = %d, want a value in [1,%d] (one of the concurrently-written lengths)", got, maxLen)
 	}
 }

@@ -15,6 +15,14 @@ import (
 type Collector struct {
 	// Protects cached assignment metrics reads/writes
 	assignMu sync.RWMutex
+	// Protects the manual histogram-statistics sum/count pairs and the
+	// cached system/worker gauges below, all written from one goroutine
+	// (the periodic system-metrics ticker / worker/consumer callbacks) and
+	// read from another (PrintReport's ticker). Found via -race under
+	// label_tight_takeover_churn.yaml (Task 10): this scenario's
+	// leader-flap chaos plus 6 concurrent workers is the first workload to
+	// exercise this collector with real concurrency under -race.
+	statsMu sync.Mutex
 	// Message counters (per-partition)
 	messagesSentTotal        *prometheus.CounterVec
 	messagesReceivedTotal    *prometheus.CounterVec
@@ -962,7 +970,9 @@ func (a resolverMetricsAdapter) IncReconcileRescue() {
 //   - count: Number of active workers
 func (c *Collector) SetWorkersActive(count int) {
 	c.workersActive.Set(float64(count))
+	c.statsMu.Lock()
 	c.cachedActiveWorkers = count
+	c.statsMu.Unlock()
 }
 
 // RecordPartitionsPerWorker records the partition count for a worker.
@@ -971,8 +981,10 @@ func (c *Collector) SetWorkersActive(count int) {
 //   - count: Number of partitions assigned to the worker
 func (c *Collector) RecordPartitionsPerWorker(count int) {
 	c.partitionsPerWorker.Observe(float64(count))
+	c.statsMu.Lock()
 	c.partitionsPerWorkerSum += float64(count)
 	c.partitionsPerWorkerCount++
+	c.statsMu.Unlock()
 }
 
 // RecordRebalanceDuration records a rebalancing operation duration.
@@ -981,8 +993,10 @@ func (c *Collector) RecordPartitionsPerWorker(count int) {
 //   - duration: Duration of the rebalancing operation
 func (c *Collector) RecordRebalanceDuration(duration time.Duration) {
 	c.workerRebalanceDuration.Observe(duration.Seconds())
+	c.statsMu.Lock()
 	c.rebalanceDurationSum += duration.Seconds()
 	c.rebalanceDurationCount++
+	c.statsMu.Unlock()
 }
 
 // RecordMessageProcessingDuration records message processing duration.
@@ -991,8 +1005,10 @@ func (c *Collector) RecordRebalanceDuration(duration time.Duration) {
 //   - duration: Processing duration
 func (c *Collector) RecordMessageProcessingDuration(duration time.Duration) {
 	c.messageProcessingDuration.Observe(duration.Seconds())
+	c.statsMu.Lock()
 	c.processingDurationSum += duration.Seconds()
 	c.processingDurationCount++
+	c.statsMu.Unlock()
 }
 
 // RecordProcessingError records a message processing error.
@@ -1025,8 +1041,10 @@ func (c *Collector) SetPartitionWeight(partitionID int, weight int64) {
 func (c *Collector) UpdateSystemMetrics(goroutines int, memoryBytes uint64) {
 	c.goroutinesActive.Set(float64(goroutines))
 	c.memoryUsageBytes.Set(float64(memoryBytes))
+	c.statsMu.Lock()
 	c.cachedGoroutines = goroutines
 	c.cachedMemoryBytes = memoryBytes
+	c.statsMu.Unlock()
 }
 
 // GetSystemMetrics returns current system metrics.
@@ -1035,6 +1053,8 @@ func (c *Collector) UpdateSystemMetrics(goroutines int, memoryBytes uint64) {
 //   - int: Number of active goroutines
 //   - float64: Memory usage in MiB
 func (c *Collector) GetSystemMetrics() (int, float64) {
+	c.statsMu.Lock()
+	defer c.statsMu.Unlock()
 	memoryMiB := float64(c.cachedMemoryBytes) / (1024 * 1024)
 	return c.cachedGoroutines, memoryMiB
 }
@@ -1044,6 +1064,8 @@ func (c *Collector) GetSystemMetrics() (int, float64) {
 // Returns:
 //   - int: Number of active workers
 func (c *Collector) GetActiveWorkers() int {
+	c.statsMu.Lock()
+	defer c.statsMu.Unlock()
 	return c.cachedActiveWorkers
 }
 
@@ -1056,6 +1078,8 @@ func (c *Collector) GetActiveWorkers() int {
 //
 // Note: These are manually tracked averages, updated with each observation.
 func (c *Collector) GetAggregatedMetrics() (avgPartitions float64, avgRebalance float64, avgLatency float64) {
+	c.statsMu.Lock()
+	defer c.statsMu.Unlock()
 	if c.partitionsPerWorkerCount > 0 {
 		avgPartitions = c.partitionsPerWorkerSum / float64(c.partitionsPerWorkerCount)
 	}

@@ -291,3 +291,18 @@ func (o *ProcessWorkerObserver) SetClaimLostObserved() {
 	}
 	o.claimLost.Store(true)
 }
+
+// WorkerLabels always returns nil in process mode. Process-mode label
+// plumbing is out of scope (no IPC frame carries labels today — see
+// LabelAffinityOracle's doc comment); this stub exists solely so
+// ProcessWorkerObserver continues to satisfy WorkerObserver after the
+// interface gained this method. LabelAffinityOracle skips process-mode
+// workers as a result (all-in-one mode only, matching this plan's scope).
+// Implements WorkerObserver.
+func (o *ProcessWorkerObserver) WorkerLabels() []string {
+	if o == nil {
+		return nil
+	}
+
+	return nil
+}

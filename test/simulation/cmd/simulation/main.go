@@ -31,19 +31,20 @@ import (
 
 // Globals for all-in-one dynamic scale control (minimize invasive changes).
 var (
-	aioNS             *nats.Conn
-	aioJS             jetstream.JetStream
-	aioEmbeddedServer *server.Server
-	aioCfg            *config.Config
-	aioCoord          *coordinator.Coordinator
-	aioMetrics        *metrics.Collector
-	aioCheckpoint     *coordinator.CheckpointManager
-	aioRegistry       *coordinator.GoroutineRegistry
-	aioWeights        []int64
-	aioScaleUpOnce    int
-	aioMinWorkers     int
-	aioMaxWorkers     int
-	aioKVFaults       *simKVFaultController
+	aioNS              *nats.Conn
+	aioJS              jetstream.JetStream
+	aioEmbeddedServer  *server.Server
+	aioCfg             *config.Config
+	aioCoord           *coordinator.Coordinator
+	aioMetrics         *metrics.Collector
+	aioCheckpoint      *coordinator.CheckpointManager
+	aioRegistry        *coordinator.GoroutineRegistry
+	aioWeights         []int64
+	aioPartitionLabels []string
+	aioScaleUpOnce     int
+	aioMinWorkers      int
+	aioMaxWorkers      int
+	aioKVFaults        *simKVFaultController
 
 	// procCfg holds the active config in process-orchestrator mode so chaos
 	// handlers can resolve per-worker StableID overrides without threading
@@ -533,11 +534,40 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 		cfg.Coordinator.SLO.CatchUpPercent,
 		cfg.Coordinator.SLO.AbsenceThreshold,
 	)
+	// Expand labeled_subsets into a flat per-partition label array. Computed
+	// here — earlier than the weights flattening below it mirrors — because
+	// EnableShutdownOracles (immediately below) needs it to construct the
+	// label-affinity oracle before coord.Start(). Saved for dynamic spawns too.
+	partitionLabels := cfg.Partitions.ExpandLabels()
+	aioPartitionLabels = partitionLabels
+
 	// Create goroutine registry for all-in-one mode chaos.
 	// Must be created BEFORE coord.Start so EnableShutdownOracles can attach
 	// the registry to the oracle watchers before the coordinator's goroutines start.
 	goroutineRegistry := coordinator.NewGoroutineRegistry()
-	coord.EnableShutdownOracles(goroutineRegistry)
+	labelAffinityPartitions := make(map[int]string, len(partitionLabels))
+	for i, label := range partitionLabels {
+		if label != "" {
+			labelAffinityPartitions[i] = label
+		}
+	}
+	// Resolve the same "0 means defer to parti's own default" semantic that
+	// worker.go's override-if-set wiring already applies to every worker's
+	// real partiCfg.LabelSpillGrace (Task 2) — cfg.Workers.LabelSpillGrace==0
+	// means "scenario didn't set it," NOT "zero tolerance" (that's a
+	// different, sim-config-level zero than parti.Config.LabelSpillGrace's
+	// own "0 spills immediately" semantic — see Task 6 review notes). If the
+	// oracle used the raw scenario-config zero directly, it would fire on
+	// any transient mismatch while the real managers underneath are actually
+	// running at parti's 60s default, a false-positive trap for any future
+	// scenario that leaves label_spill_grace unset. Every scenario THIS plan
+	// ships (Tasks 9-12) sets an explicit non-zero value, so this resolution
+	// is defense-in-depth, not something exercised by this plan's own tests.
+	effectiveLabelSpillGrace := cfg.Workers.LabelSpillGrace
+	if effectiveLabelSpillGrace == 0 {
+		effectiveLabelSpillGrace = parti.DefaultConfig().LabelSpillGrace
+	}
+	coord.EnableShutdownOracles(goroutineRegistry, labelAffinityPartitions, effectiveLabelSpillGrace)
 
 	go coord.Start(ctx)
 
@@ -692,6 +722,7 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 			},
 			PartitionCount:      cfg.Partitions.Count,
 			PartitionWeights:    weights,
+			PartitionLabels:     partitionLabels,
 			AssignmentStrategy:  cfg.Workers.AssignmentStrategy,
 			ProcessingDelayMin:  cfg.Workers.ProcessingDelay.Min,
 			ProcessingDelayMax:  cfg.Workers.ProcessingDelay.Max,
@@ -716,6 +747,8 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 			PartitionSource:             cfg.Workers.PartitionSource,
 			SourceBucket:                cfg.Workers.SourceBucket,
 			SourceReconcileInterval:     cfg.Workers.SourceReconcileInterval,
+			UnlabeledPartitionPolicy:    cfg.Workers.UnlabeledPartitionPolicy,
+			LabelSpillGrace:             cfg.Workers.LabelSpillGrace,
 			RevocationReportCh:          coord.GetRevocationReportsChannel(),
 			RevocationReportDropFn:      coord.IncRevocationReportDropped,
 		}
@@ -726,6 +759,11 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 			return fmt.Errorf("failed to create worker %d: %w", i, err)
 		}
 		w.SetNetworkControl(netCtrl)
+		// Pin the positive-proof collector so every crash+respawn of this sim
+		// worker ID reuses it (workerStart copies workerCfg): label-chaos
+		// counters that increment on whichever incarnation was leader at
+		// detection time then survive a subsequent respawn of that worker.
+		workerCfg.ChaosProof = w.ChaosProof()
 
 		// Create cancelable context for this worker
 		workerCtx, workerCancel := context.WithCancel(ctx)
@@ -759,13 +797,13 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 			go func(worker *worker.Worker, id string, wctx context.Context) {
 				if err := worker.Start(wctx); err != nil {
 					log.Printf("Failed to start worker %s: %v", id, err)
-					goroutineRegistry.MarkInactive(id)
+					goroutineRegistry.MarkInactiveObj(id, worker)
 					wcancel()
 					return
 				}
 				<-wctx.Done()
 				worker.Stop()
-				goroutineRegistry.MarkInactive(id)
+				goroutineRegistry.MarkInactiveObj(id, worker)
 			}(nw, workerID, wc)
 		}
 		goroutineRegistry.Register(workerID, coordinator.WorkerGoroutine, workerCancel, workerStart, w)
@@ -774,7 +812,7 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 		go func(worker *worker.Worker, id string, workerCtx context.Context) {
 			if err := worker.Start(workerCtx); err != nil {
 				log.Printf("Failed to start worker %s: %v", id, err)
-				goroutineRegistry.MarkInactive(id)
+				goroutineRegistry.MarkInactiveObj(id, worker)
 				return
 			}
 
@@ -784,8 +822,9 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 			// Give worker time to cleanup
 			worker.Stop()
 
-			// Worker stopped, mark as inactive
-			goroutineRegistry.MarkInactive(id)
+			// Worker stopped, mark as inactive (incarnation-guarded so a
+			// restart that already re-registered a successor is not clobbered)
+			goroutineRegistry.MarkInactiveObj(id, worker)
 		}(w, workerID, workerCtx)
 
 		// Small pacing delay between starting workers
@@ -1041,6 +1080,7 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 				inconclusive := tr.GetOwnershipInconclusiveCount()
 				_, unobservedPost := tr.GetOwnershipUnobservedCounts()
 				snapshotOverlaps := coord.GetSnapshotOverlapCount()
+				labelAffinityViol := coord.GetLabelAffinityViolations()
 				doubleLeaders := coord.GetDoubleLeaderObservations()
 				stateReconcileViol := coord.GetStateReconcileViolations()
 				expDegMissing := coord.GetExpectedDegradedMissing()
@@ -1098,18 +1138,69 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 						ldStrictViol++
 					}
 				}
+				// Label positive-proof strict gates (Gap 2+): scenario tasks
+				// fold their own ExpectLabel* checks into this shared counter
+				// rather than each declaring their own OR-condition clause.
+				var labelTakeoverStrictViol int
+				if scenarioHasLabelPoolSpill(cfg) {
+					labelSpills := sumWorkerLabelSpills(goroutineRegistry)
+					if labelSpills == 0 {
+						log.Print("[LabelSpill] STRICT GATE FAIL: label_spills=0 — scenario expects a label pool outage to spill but IncrementLabelSpill never fired")
+						labelTakeoverStrictViol++
+					}
+				}
+				// Label tight-takeover strict gate: only enforced when the
+				// scenario actually schedules label_heartbeat_takeover.
+				// Otherwise labelChangeTriggers==0 is normal and must not
+				// fail unrelated scenarios. labelTakeoverStrictViol is the
+				// shared counter declared above for the spill gate.
+				if scenarioHasLabelHeartbeatTakeover(cfg) {
+					labelChangeTriggers := sumWorkerLabelChangeTriggers(goroutineRegistry)
+					if labelChangeTriggers == 0 {
+						log.Print("[LabelTakeover] STRICT GATE FAIL: label_change_triggers=0 — scenario schedules label_heartbeat_takeover but the tight-takeover fingerprint-change branch never fired")
+						labelTakeoverStrictViol++
+					}
+				}
+				// Label emergency-carve-out strict gate: only enforced when
+				// the scenario opts in via chaos.expect_label_emergency_carveout
+				// (there is no dedicated chaos event to key off of — see
+				// scenarioHasLabelEmergencyCarveout). labelTakeoverStrictViol
+				// is the shared counter declared above for the spill/takeover
+				// gates.
+				if scenarioHasLabelEmergencyCarveout(cfg) {
+					emergencyClaims := sumWorkerEmergencyClaims(goroutineRegistry)
+					if emergencyClaims == 0 {
+						log.Print("[LabelEmergency] STRICT GATE FAIL: emergency_claims=0 — scenario expects an emergency carve-out but StateEmergency was never claimed")
+						labelTakeoverStrictViol++
+					}
+				}
+				// Label relabel-storm coalescing-bound strict gate: only
+				// enforced when the scenario opts in via
+				// chaos.relabel_storm_event_count (see
+				// scenarioHasLabelRelabelStorm). Unlike the spill/takeover
+				// gates above, this is not just "did it fire" but "did it
+				// stay bounded" — a decoalesced storm would make
+				// LabelRechecksRun scale linearly with event count instead
+				// of staying flat, a silent regression rather than a
+				// crash. labelTakeoverStrictViol is the shared counter
+				// declared above for the spill/takeover/emergency gates.
+				// Evaluated via a helper function (unlike its sibling
+				// gates) because its two-branch check pushed this call
+				// site's already-deep control nesting past revive's
+				// max-control-nesting threshold.
+				labelTakeoverStrictViol += checkLabelRelabelStormGate(cfg, goroutineRegistry)
 				claimLossGate := scenarioHasClaimLossChaos(cfg)
-				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || (claimLossGate && unexpClaimLost > 0) || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || (claimLossGate && claimLossOrderViol > 0) || producerResumeMissing > 0 || casStormPanics > 0 || handoffMaxAgeViol > 0 || orphanClaimDrift > 0 || storageTypeViol > 0 || electionReplicasViol > 0 || kvOpRateCeilingViol > 0 || revocationDropped > 0 || ldStrictViol > 0 {
+				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || labelAffinityViol > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || (claimLossGate && unexpClaimLost > 0) || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || (claimLossGate && claimLossOrderViol > 0) || producerResumeMissing > 0 || casStormPanics > 0 || handoffMaxAgeViol > 0 || orphanClaimDrift > 0 || storageTypeViol > 0 || electionReplicasViol > 0 || kvOpRateCeilingViol > 0 || revocationDropped > 0 || ldStrictViol > 0 || labelTakeoverStrictViol > 0 {
 					// Record error but proceed to ordered shutdown
-					invariantsErr = fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d long_disconnect_reassignment_inconclusive=%d long_disconnect_skipped=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d storage_type_violation=%d election_replicas_violation=%d kv_op_rate_ceiling_violation=%d revocation_report_dropped=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, ldReassignInconclusive, ldSkipped, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift, storageTypeViol, electionReplicasViol, kvOpRateCeilingViol, revocationDropped)
+					invariantsErr = fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d label_affinity_violations=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d long_disconnect_reassignment_inconclusive=%d long_disconnect_skipped=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d storage_type_violation=%d election_replicas_violation=%d kv_op_rate_ceiling_violation=%d revocation_report_dropped=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, labelAffinityViol, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, ldReassignInconclusive, ldSkipped, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift, storageTypeViol, electionReplicasViol, kvOpRateCeilingViol, revocationDropped)
 				}
 				if invariantsErr == nil && scenarioHasHandoffClaimWriteFault(cfg) && handoffClaimWriteFaultInjected() == 0 {
 					invariantsErr = errors.New("handoff_claim_write_fault_injected=0: scenario expected at least one claim write to fault")
 				}
 				if invariantsErr == nil {
-					log.Printf("Stability invariants passed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d long_disconnect_reassignment_inconclusive=%d long_disconnect_skipped=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d storage_type_violation=%d election_replicas_violation=%d kv_op_rate_ceiling_violation=%d revocation_report_dropped=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, ldReassignInconclusive, ldSkipped, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift, storageTypeViol, electionReplicasViol, kvOpRateCeilingViol, revocationDropped)
+					log.Printf("Stability invariants passed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d label_affinity_violations=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d long_disconnect_reassignment_inconclusive=%d long_disconnect_skipped=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d storage_type_violation=%d election_replicas_violation=%d kv_op_rate_ceiling_violation=%d revocation_report_dropped=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, labelAffinityViol, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, ldReassignInconclusive, ldSkipped, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift, storageTypeViol, electionReplicasViol, kvOpRateCeilingViol, revocationDropped)
 				} else {
 					log.Printf("Stability invariants failed: %v", invariantsErr)
 				}
@@ -1156,6 +1247,7 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 				inconclusive := tr.GetOwnershipInconclusiveCount()
 				_, unobservedPost := tr.GetOwnershipUnobservedCounts()
 				snapshotOverlaps := coord.GetSnapshotOverlapCount()
+				labelAffinityViol := coord.GetLabelAffinityViolations()
 				doubleLeaders := coord.GetDoubleLeaderObservations()
 				stateReconcileViol := coord.GetStateReconcileViolations()
 				expDegMissing := coord.GetExpectedDegradedMissing()
@@ -1213,10 +1305,61 @@ func runAllInOne(ctx context.Context, cfg *config.Config, cfgPath string, cooldo
 						ldStrictViol++
 					}
 				}
+				// Label positive-proof strict gates (Gap 2+): scenario tasks
+				// fold their own ExpectLabel* checks into this shared counter
+				// rather than each declaring their own OR-condition clause.
+				var labelTakeoverStrictViol int
+				if scenarioHasLabelPoolSpill(cfg) {
+					labelSpills := sumWorkerLabelSpills(goroutineRegistry)
+					if labelSpills == 0 {
+						log.Print("[LabelSpill] STRICT GATE FAIL: label_spills=0 — scenario expects a label pool outage to spill but IncrementLabelSpill never fired")
+						labelTakeoverStrictViol++
+					}
+				}
+				// Label tight-takeover strict gate: only enforced when the
+				// scenario actually schedules label_heartbeat_takeover.
+				// Otherwise labelChangeTriggers==0 is normal and must not
+				// fail unrelated scenarios. labelTakeoverStrictViol is the
+				// shared counter declared above for the spill gate.
+				if scenarioHasLabelHeartbeatTakeover(cfg) {
+					labelChangeTriggers := sumWorkerLabelChangeTriggers(goroutineRegistry)
+					if labelChangeTriggers == 0 {
+						log.Print("[LabelTakeover] STRICT GATE FAIL: label_change_triggers=0 — scenario schedules label_heartbeat_takeover but the tight-takeover fingerprint-change branch never fired")
+						labelTakeoverStrictViol++
+					}
+				}
+				// Label emergency-carve-out strict gate: only enforced when
+				// the scenario opts in via chaos.expect_label_emergency_carveout
+				// (there is no dedicated chaos event to key off of — see
+				// scenarioHasLabelEmergencyCarveout). labelTakeoverStrictViol
+				// is the shared counter declared above for the spill/takeover
+				// gates.
+				if scenarioHasLabelEmergencyCarveout(cfg) {
+					emergencyClaims := sumWorkerEmergencyClaims(goroutineRegistry)
+					if emergencyClaims == 0 {
+						log.Print("[LabelEmergency] STRICT GATE FAIL: emergency_claims=0 — scenario expects an emergency carve-out but StateEmergency was never claimed")
+						labelTakeoverStrictViol++
+					}
+				}
+				// Label relabel-storm coalescing-bound strict gate: only
+				// enforced when the scenario opts in via
+				// chaos.relabel_storm_event_count (see
+				// scenarioHasLabelRelabelStorm). Unlike the spill/takeover
+				// gates above, this is not just "did it fire" but "did it
+				// stay bounded" — a decoalesced storm would make
+				// LabelRechecksRun scale linearly with event count instead
+				// of staying flat, a silent regression rather than a
+				// crash. labelTakeoverStrictViol is the shared counter
+				// declared above for the spill/takeover/emergency gates.
+				// Evaluated via a helper function (unlike its sibling
+				// gates) because its two-branch check pushed this call
+				// site's already-deep control nesting past revive's
+				// max-control-nesting threshold.
+				labelTakeoverStrictViol += checkLabelRelabelStormGate(cfg, goroutineRegistry)
 				claimLossGate := scenarioHasClaimLossChaos(cfg)
-				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || (claimLossGate && unexpClaimLost > 0) || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || (claimLossGate && claimLossOrderViol > 0) || producerResumeMissing > 0 || casStormPanics > 0 || handoffMaxAgeViol > 0 || orphanClaimDrift > 0 || storageTypeViol > 0 || electionReplicasViol > 0 || kvOpRateCeilingViol > 0 || revocationDropped > 0 || ldStrictViol > 0 {
-					invariantsErr := fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d long_disconnect_reassignment_inconclusive=%d long_disconnect_skipped=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d storage_type_violation=%d election_replicas_violation=%d kv_op_rate_ceiling_violation=%d revocation_report_dropped=%d",
-						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, ldReassignInconclusive, ldSkipped, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift, storageTypeViol, electionReplicasViol, kvOpRateCeilingViol, revocationDropped)
+				if failures > 0 || late > 0 || lost > 0 || initialExc > 0 || takeoverExc > 0 || violations > 0 || inconclusive > 0 || unobservedPost > 0 || snapshotOverlaps > 0 || labelAffinityViol > 0 || doubleLeaders > 0 || stateReconcileViol > 0 || expDegMissing > 0 || (claimLossGate && unexpClaimLost > 0) || srcConvMissing > 0 || spuriousUnavail > 0 || ldReassignMissing > 0 || (claimLossGate && claimLossOrderViol > 0) || producerResumeMissing > 0 || casStormPanics > 0 || handoffMaxAgeViol > 0 || orphanClaimDrift > 0 || storageTypeViol > 0 || electionReplicasViol > 0 || kvOpRateCeilingViol > 0 || revocationDropped > 0 || ldStrictViol > 0 || labelTakeoverStrictViol > 0 {
+					invariantsErr := fmt.Errorf("stability invariants failed: audit_failures=%d late=%d lost=%d slow_start_initial=%d slow_start_takeover=%d ownership_violations=%d concurrent_owners=%d inconclusive=%d unobserved_post_chaos=%d snapshot_overlaps=%d label_affinity_violations=%d double_leaders=%d state_reconcile_violations=%d expected_degraded_observed=%d expected_degraded_missing=%d unexpected_claim_lost_shutdown=%d source_convergence_observed=%d source_convergence_missing=%d spurious_source_unavailable=%d long_disconnect_reassignment_observed=%d long_disconnect_reassignment_missing=%d long_disconnect_reassignment_inconclusive=%d long_disconnect_skipped=%d claim_loss_stop_ordering_violations=%d producer_resume_missing=%d assignment_cas_storm_unexpected_panic=%d handoff_bucket_maxage_violation=%d orphan_stable_claim_drift=%d storage_type_violation=%d election_replicas_violation=%d kv_op_rate_ceiling_violation=%d revocation_report_dropped=%d",
+						failures, late, lost, initialExc, takeoverExc, violations, concurrent, inconclusive, unobservedPost, snapshotOverlaps, labelAffinityViol, doubleLeaders, stateReconcileViol, expDegObserved, expDegMissing, unexpClaimLost, srcConvObserved, srcConvMissing, spuriousUnavail, ldReassignObserved, ldReassignMissing, ldReassignInconclusive, ldSkipped, claimLossOrderViol, producerResumeMissing, casStormPanics, handoffMaxAgeViol, orphanClaimDrift, storageTypeViol, electionReplicasViol, kvOpRateCeilingViol, revocationDropped)
 					// Emit the structured failure_report.json so CI artifacts
 					// include InconclusiveOwnerEvents / unobserved counters /
 					// FirstChaosEventAt — auditability that the new
@@ -1701,7 +1844,7 @@ func runProcessOrchestrator(ctx context.Context, cfg *config.Config, cfgPath str
 		coord.SetExpectedWorkers(cfg.Workers.Count)
 	}
 	registry := coordinator.NewGoroutineRegistry()
-	coord.EnableShutdownOracles(registry)
+	coord.EnableShutdownOracles(registry, nil, 0) // label affinity is all-in-one-only; process mode passes nil/0
 	go coord.Start(ctx)
 
 	// IPC smoke oracle (Phase 7a gating; Phase 7b reads its counter).
@@ -2045,7 +2188,8 @@ func handleChaosEvent(
 	case coordinator.BucketDeleteEvent, coordinator.BucketRecreateEvent, coordinator.BucketPeerTakeoverEvent,
 		coordinator.WatcherStallEvent, coordinator.StableIDClaimStealEvent,
 		coordinator.ProducerDisconnectEvent, coordinator.AssignmentCASStormEvent, coordinator.AssignmentBucketDeleteEvent,
-		coordinator.HandoffOrphanClaimWriteEvent, coordinator.KVUnavailableEvent, coordinator.HandoffClaimWriteFaultEvent:
+		coordinator.HandoffOrphanClaimWriteEvent, coordinator.KVUnavailableEvent, coordinator.HandoffClaimWriteFaultEvent,
+		coordinator.LabelHeartbeatTakeoverEvent:
 		// Process-mode dispatch is intentionally a log-and-skip per the
 		// plan's risk note (lines 386-388). Whole-bucket actions in
 		// process mode would need cross-process visibility into the
@@ -2073,7 +2217,7 @@ func handleGoroutineChaos( //nolint:cyclop,gocyclo,funlen,revive // dispatch gro
 	// Guard: skip worker-related events when no active workers
 	activeWorkers := registry.GetActiveCount(coordinator.WorkerGoroutine)
 	switch event {
-	case coordinator.WorkerCrashEvent, coordinator.WorkerRestartEvent, coordinator.LeaderFailureEvent, coordinator.ScaleDownEvent, coordinator.NetworkDisconnectEvent, coordinator.NetworkDisconnectLeaderEvent, coordinator.NetworkDisconnectLongEvent, coordinator.WorkerPauseEvent, coordinator.SlowConsumerEvent, coordinator.BucketPeerTakeoverEvent, coordinator.StableIDClaimStealEvent:
+	case coordinator.WorkerCrashEvent, coordinator.WorkerRestartEvent, coordinator.LeaderFailureEvent, coordinator.ScaleDownEvent, coordinator.NetworkDisconnectEvent, coordinator.NetworkDisconnectLeaderEvent, coordinator.NetworkDisconnectLongEvent, coordinator.WorkerPauseEvent, coordinator.SlowConsumerEvent, coordinator.BucketPeerTakeoverEvent, coordinator.StableIDClaimStealEvent, coordinator.LabelHeartbeatTakeoverEvent:
 		if activeWorkers == 0 {
 			log.Printf("[Chaos] Skipping %s: no active workers", event)
 			return
@@ -2265,6 +2409,11 @@ func handleGoroutineChaos( //nolint:cyclop,gocyclo,funlen,revive // dispatch gro
 		// kv.Put against the victim's stable-ID claim key.
 		target, _ := params["target_worker"].(string)
 		handleBucketPeerTakeover(ctx, registry, target)
+
+	case coordinator.LabelHeartbeatTakeoverEvent:
+		targetWorker, _ := params["target_worker"].(string)
+		newLabels := stringSliceFromParam(params["new_labels"])
+		handleLabelHeartbeatTakeover(ctx, registry, targetWorker, newLabels)
 
 	case coordinator.StableIDTinyPoolRespawnEvent:
 		// Phase 4: spawn a fresh all-in-one worker into the dead worker's
@@ -2475,6 +2624,22 @@ func applyWorkerOverrides(wcfg *worker.Config, scfg *config.Config, workerID str
 			}
 		}
 	}
+	// Per-worker label set, keyed identically to PerWorker.
+	//
+	// This function is also called from runWorker (process-orchestrator
+	// mode, main.go's process-mode worker construction), which does NOT
+	// wire PartitionLabels/UnlabeledPartitionPolicy/LabelSpillGrace into
+	// its worker.Config literal (label plumbing is all-in-one-mode only —
+	// see the sim label design). A scenario that sets workers.labels and
+	// runs in process mode would get WorkerLabels stamped here while every
+	// partition stays unlabeled and the policy/grace fields stay zero-value
+	// — a half-wired, inconsistent state. No current scenario does this
+	// (workers.labels is unused outside all-in-one-mode scenarios), so
+	// this is a latent risk, not an active bug: flag it before extending
+	// label support to process mode.
+	if labels, ok := scfg.Workers.Labels[workerID]; ok {
+		wcfg.WorkerLabels = labels
+	}
 }
 
 // spawnAllInOneWorker creates, registers, and starts a new worker goroutine with the given ID.
@@ -2516,6 +2681,7 @@ func spawnAllInOneWorker(parent context.Context, workerID string) bool {
 		},
 		PartitionCount:              aioCfg.Partitions.Count,
 		PartitionWeights:            aioWeights,
+		PartitionLabels:             aioPartitionLabels,
 		AssignmentStrategy:          aioCfg.Workers.AssignmentStrategy,
 		ProcessingDelayMin:          aioCfg.Workers.ProcessingDelay.Min,
 		ProcessingDelayMax:          aioCfg.Workers.ProcessingDelay.Max,
@@ -2539,6 +2705,8 @@ func spawnAllInOneWorker(parent context.Context, workerID string) bool {
 		PartitionSource:             aioCfg.Workers.PartitionSource,
 		SourceBucket:                aioCfg.Workers.SourceBucket,
 		SourceReconcileInterval:     aioCfg.Workers.SourceReconcileInterval,
+		UnlabeledPartitionPolicy:    aioCfg.Workers.UnlabeledPartitionPolicy,
+		LabelSpillGrace:             aioCfg.Workers.LabelSpillGrace,
 		RevocationReportCh:          aioCoord.GetRevocationReportsChannel(),
 		RevocationReportDropFn:      aioCoord.IncRevocationReportDropped,
 	}
@@ -2549,6 +2717,8 @@ func spawnAllInOneWorker(parent context.Context, workerID string) bool {
 		return false
 	}
 	w.SetNetworkControl(netCtrl)
+	// Pin the positive-proof collector across respawns (startFn copies wcfg).
+	wcfg.ChaosProof = w.ChaosProof()
 
 	wctx, wcancel := context.WithCancel(parent)
 	var startFn func(context.Context)
@@ -2578,25 +2748,25 @@ func spawnAllInOneWorker(parent context.Context, workerID string) bool {
 		go func(ww *worker.Worker, id string, c context.Context) {
 			if err := ww.Start(c); err != nil {
 				log.Printf("[ScaleUp] start error for %s: %v", id, err)
-				aioRegistry.MarkInactive(id)
+				aioRegistry.MarkInactiveObj(id, ww)
 				pcancel()
 				return
 			}
 			<-c.Done()
 			ww.Stop()
-			aioRegistry.MarkInactive(id)
+			aioRegistry.MarkInactiveObj(id, ww)
 		}(nw, workerID, pc)
 	}
 	aioRegistry.Register(workerID, coordinator.WorkerGoroutine, wcancel, startFn, w)
 	go func(ww *worker.Worker, id string, c context.Context) {
 		if err := ww.Start(c); err != nil {
 			log.Printf("[ScaleUp] start error for %s: %v", id, err)
-			aioRegistry.MarkInactive(id)
+			aioRegistry.MarkInactiveObj(id, ww)
 			return
 		}
 		<-c.Done()
 		ww.Stop()
-		aioRegistry.MarkInactive(id)
+		aioRegistry.MarkInactiveObj(id, ww)
 	}(w, workerID, wctx)
 
 	return true
@@ -3085,6 +3255,213 @@ func scenarioHasHandoffClaimWriteFault(cfg *config.Config) bool {
 	}
 
 	return scenarioHasChaosEvent(cfg, coordinator.HandoffClaimWriteFaultEvent)
+}
+
+// scenarioHasLabelPoolSpill reports whether the configured scenario expects
+// a labeled pool to fully empty and spill its partitions to the unlabeled
+// fallback (types.LabelMetrics.IncrementLabelSpill). Opt-in via
+// chaos.expect_label_spill so ordinary scenarios with labeled partitions
+// that never fully lose a pool aren't held to this stricter gate.
+func scenarioHasLabelPoolSpill(cfg *config.Config) bool {
+	return cfg.Chaos.ExpectLabelSpill
+}
+
+// scenarioHasLabelHeartbeatTakeover reports whether the scenario config
+// schedules at least one label_heartbeat_takeover event (random pool or
+// scheduled_events), gating the strict positive-proof assertion so
+// unrelated scenarios aren't affected.
+func scenarioHasLabelHeartbeatTakeover(cfg *config.Config) bool {
+	return scenarioHasChaosEvent(cfg, coordinator.LabelHeartbeatTakeoverEvent)
+}
+
+// scenarioHasLabelEmergencyCarveout reports whether the scenario config
+// opts into the strict emergency-carve-out positive-proof gate. Unlike
+// scenarioHasLabelHeartbeatTakeover, this is NOT inferred from a chaos
+// event name: there is no dedicated "emergency" event, since emergency is
+// a calculator-side reaction to enough simultaneous worker deaths rather
+// than a chaos primitive in its own right. Keyed off an explicit opt-in
+// config marker instead, so ordinary burst-kill scenarios that don't
+// intend to prove the emergency path aren't held to this stricter gate.
+func scenarioHasLabelEmergencyCarveout(cfg *config.Config) bool {
+	return cfg.Chaos.ExpectLabelEmergencyCarveout
+}
+
+// scenarioHasLabelRelabelStorm reports whether the scenario config opts
+// into the strict recheck-coalescing positive-proof gate. Like
+// scenarioHasLabelEmergencyCarveout, this is keyed off an explicit opt-in
+// counter (chaos.relabel_storm_event_count) rather than a chaos-event name
+// lookup, since the gate needs the scenario's own event count to compute
+// its coalescing ceiling, not just a yes/no signal.
+func scenarioHasLabelRelabelStorm(cfg *config.Config) bool {
+	return cfg.Chaos.RelabelStormEventCount > 0
+}
+
+// checkLabelRelabelStormGate evaluates the relabel-storm scenario's
+// coalescing-bound positive-proof gate: unlike the spill/takeover/
+// emergency gates ("did it fire at all"), this asserts the recheck count
+// stayed BOUNDED under a storm of triggers rather than growing without
+// limit (a stuck pendingLabelRecheck flag or a drain tick that keeps
+// re-firing after it should have cleared would be a silent regression,
+// not a crash). Returns 1 if the gate fails, 0 otherwise, for the caller
+// to accumulate into the shared labelTakeoverStrictViol counter. A no-op
+// (returns 0) unless the scenario opts in via
+// chaos.relabel_storm_event_count.
+//
+// Ceiling rationale (see the YAML comment for the full empirical trace):
+// an earlier draft of this gate assumed heavy coalescing would compress
+// the storm's 20 triggering events into a handful of actual reruns
+// (event_count/2 = 10 ceiling). Empirically that assumption was wrong FOR
+// THIS SCENARIO'S CADENCE: at 2s between events, each relabel's rebalance
+// completes well before the next one arrives, so there is rarely a
+// still-in-flight run for a new signal to coalesce against — the healthy,
+// stable baseline (5/5 local runs, label_spill topology fixed to avoid
+// the fleet-wide-empty-pool path) is 19 of 20 events producing their own
+// successful "label_recheck" rebalance. The gate's real value here is
+// proving the count does NOT keep growing during the ~40s of quiet after
+// the storm ends (it doesn't, across all empirical runs) and does not
+// multiply per-partition or per-tick. event_count*3/2 gives ~58%
+// headroom over the observed 19 while still catching a regression that
+// pushes back toward "more than one successful rerun per triggering
+// event" (observed at ~1.4x under the pre-fix topology that emptied the
+// vip-a pool on every flap — see the YAML comment).
+func checkLabelRelabelStormGate(cfg *config.Config, registry *coordinator.GoroutineRegistry) int {
+	if !scenarioHasLabelRelabelStorm(cfg) {
+		return 0
+	}
+	labelRechecksRun := sumWorkerLabelRechecksRun(registry)
+	ceiling := cfg.Chaos.RelabelStormEventCount * 3 / 2
+	switch {
+	case labelRechecksRun == 0:
+		log.Print("[LabelStorm] STRICT GATE FAIL: label_rechecks_run=0 — scenario storms label_heartbeat_takeover but no recheck ever actually ran")
+		return 1
+	case int(labelRechecksRun) > ceiling:
+		log.Printf("[LabelStorm] STRICT GATE FAIL: label_rechecks_run=%d exceeds coalescing ceiling=%d (event_count=%d) — pendingLabelRecheck coalescing appears to have decoalesced under storm load",
+			labelRechecksRun, ceiling, cfg.Chaos.RelabelStormEventCount)
+		return 1
+	}
+
+	return 0
+}
+
+// sumWorkerLabelSpills totals ChaosProofMetrics.LabelSpills() across every
+// worker goroutine ever registered, active or not.
+//
+// Deliberately GetAll() + manual type filter rather than
+// GetByType(WorkerGoroutine): GetByType only returns Active==true entries,
+// and the final-gate block that calls this runs AFTER the ordered-shutdown
+// wait loop has already driven every worker's Active flag to false —
+// GetByType would always observe zero workers there and silently zero out
+// the result regardless of what actually happened. GetAll() is immune to
+// that ordering and also picks up spills recorded by a worker that was
+// later crashed by this very scenario (e.g. the vip-a leader itself,
+// before a peer took over).
+func sumWorkerLabelSpills(registry *coordinator.GoroutineRegistry) int64 {
+	if registry == nil {
+		return 0
+	}
+	var total int64
+	for _, info := range registry.GetAll() {
+		if info.Type != coordinator.WorkerGoroutine {
+			continue
+		}
+		if w, ok := info.Obj.(*worker.Worker); ok {
+			total += w.ChaosProof().LabelSpills()
+		}
+	}
+
+	return total
+}
+
+// sumWorkerLabelChangeTriggers totals ChaosProofMetrics.LabelChangeTriggers()
+// across every worker goroutine ever registered, active or not. Mirrors
+// sumWorkerLabelSpills's GetAll()-over-GetByType(Active-only) choice for the
+// same two reasons: the final-gate block that calls this runs AFTER the
+// ordered-shutdown wait loop has already driven every worker's Active flag
+// to false (GetByType would always observe zero workers), and
+// LabelChangeTriggers increments on whichever worker's Calculator was the
+// CURRENT LEADER at the moment its WorkerMonitor observed the fingerprint
+// mismatch (calculator.go's SetOnLabelChange wiring) — not necessarily the
+// takeover target.
+//
+// GetAll() alone is NOT sufficient when concurrent leader-flap chaos
+// (leader_failure) crashes and respawns the very leader that detected a
+// change: Register replaces that id's entry with a fresh *worker.Worker, so
+// GetAll() would return a successor whose freshly-allocated collector reads 0
+// and the earlier count would be lost. The all-in-one construction pins the
+// collector across respawns (worker.Config.ChaosProof, set from the first
+// incarnation's ChaosProof()), so the successor keeps accumulating into the
+// same instance and GetAll() reads the preserved total.
+func sumWorkerLabelChangeTriggers(registry *coordinator.GoroutineRegistry) int64 {
+	if registry == nil {
+		return 0
+	}
+	var total int64
+	for _, info := range registry.GetAll() {
+		if info.Type != coordinator.WorkerGoroutine {
+			continue
+		}
+		if w, ok := info.Obj.(*worker.Worker); ok {
+			total += w.ChaosProof().LabelChangeTriggers()
+		}
+	}
+
+	return total
+}
+
+// sumWorkerEmergencyClaims totals ChaosProofMetrics.EmergencyClaims() across
+// every worker goroutine ever registered, active or not. Mirrors
+// sumWorkerLabelChangeTriggers's GetAll()-over-GetByType(Active-only) choice
+// for the same reasons: the gate blocks that call this run at (or after) the
+// ordered-shutdown wait loop where GetByType would observe zero active
+// workers, and RecordEmergencyRebalance increments on whichever worker's
+// Calculator was the CURRENT LEADER at the moment its EmergencyDetector
+// confirmed the disappeared workers — not necessarily one of the crashed
+// workers themselves. The same collector-pinning-across-respawns mechanism
+// (worker.Config.ChaosProof) keeps the count intact if the leader itself
+// later restarts.
+func sumWorkerEmergencyClaims(registry *coordinator.GoroutineRegistry) int64 {
+	if registry == nil {
+		return 0
+	}
+	var total int64
+	for _, info := range registry.GetAll() {
+		if info.Type != coordinator.WorkerGoroutine {
+			continue
+		}
+		if w, ok := info.Obj.(*worker.Worker); ok {
+			total += w.ChaosProof().EmergencyClaims()
+		}
+	}
+
+	return total
+}
+
+// sumWorkerLabelRechecksRun totals ChaosProofMetrics.LabelRechecksRun()
+// across every worker goroutine ever registered, active or not. Mirrors
+// sumWorkerEmergencyClaims's GetAll()-over-GetByType(Active-only) choice
+// for the same reason: the gate blocks that call this run at (or after)
+// the ordered-shutdown wait loop where GetByType would observe zero
+// active workers and silently zero out the result — the storm scenario's
+// coalescing-bound check would then spuriously read
+// labelRechecksRun==0 and trip the "no recheck ever ran" branch instead
+// of the intended "decoalesced" branch, on every run. Uses the same
+// collector-pinning-across-respawns mechanism (worker.Config.ChaosProof)
+// as its siblings if a worker restarts mid-run.
+func sumWorkerLabelRechecksRun(registry *coordinator.GoroutineRegistry) int64 {
+	if registry == nil {
+		return 0
+	}
+	var total int64
+	for _, info := range registry.GetAll() {
+		if info.Type != coordinator.WorkerGoroutine {
+			continue
+		}
+		if w, ok := info.Obj.(*worker.Worker); ok {
+			total += w.ChaosProof().LabelRechecksRun()
+		}
+	}
+
+	return total
 }
 
 // workerStateShutdownInt mirrors coordinator.workerStateShutdown (the int
