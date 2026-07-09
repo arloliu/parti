@@ -450,3 +450,57 @@ jobs:
             tmp/storage_*.log
             tmp/burst_*.log
             tmp/heartbeat_scan_flatness.log
+
+  # ---------------------------------------------------------------------------
+  # Label-assignment coverage (added 2026-07-09).
+  #
+  # Exercises the label-based (VIP) partition assignment feature under
+  # concurrent chaos: pool-outage spill, live heartbeat relabeling that
+  # races an in-flight rebalance/election, a multi-worker emergency
+  # carveout, and a relabel storm. Unlike its sibling per-pillar jobs
+  # above, this job builds the simulation binary with -race: developing
+  # this coverage found and fixed about half a dozen real, pre-existing
+  # concurrency bugs in the simulation harness itself, all invisible
+  # without the race detector, so the coverage is only meaningful with it
+  # on. Two of the four scenarios also drive random background chaos
+  # (leader failures / disconnects) alongside their fixed schedule, so
+  # some non-determinism is possible; per the policy above, raise the
+  # timeout or add retries only if a specific scenario demonstrates
+  # flakiness in CI.
+  # ---------------------------------------------------------------------------
+
+  sim-label-assignment:
+    runs-on: ubuntu-latest
+    # 4 scenarios: 90s + 3m + 2m30s + 90s = 8.5m raw scenario time. The
+    # -race build is slower to compile and its higher CPU/memory pressure
+    # can also slow scenario settle windows, so this pads further than
+    # sibling jobs' ~1.7x ratio.
+    timeout-minutes: 24
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Build Simulation
+        run: go build -race -o tmp/simulation ./test/simulation/cmd/simulation
+      - name: Run Label Assignment Scenarios
+        run: |
+          set -eo pipefail
+          for scn in label_pool_outage_spill label_tight_takeover_churn label_emergency_carveout label_relabel_storm; do
+            echo "::group::${scn}"
+            ./tmp/simulation \
+              --config "test/simulation/configs/${scn}.yaml" \
+              --stop-on-failure=false \
+              2>&1 | tee "tmp/${scn}.log"
+            echo "::endgroup::"
+          done
+      - name: Upload Failure Report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-label-assignment-failure
+          path: |
+            failure_report.json
+            tmp/label_*.log
