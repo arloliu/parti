@@ -1,0 +1,126 @@
+# Gap 5 — repeated label-flap storm, isolating fingerprint/coalescing
+# durability from the concurrent-rebalance racing gap 3 already covers.
+#
+# 20 label_heartbeat_takeover events on the same worker (worker-0) at 2s
+# intervals (well under any rebalance-settling window), no concurrent
+# leader-flap chaos. Proves:
+#   - fingerprint durability survives repeated flapping (not just the one
+#     restart the existing stress test covers)
+#   - pendingLabelRecheck stays BOUNDED under the storm: it does not keep
+#     growing after the storm ends, and does not multiply per-partition or
+#     per-tick (see EMPIRICAL FINDINGS below for what "bounded" turned out
+#     to mean here in practice).
+#
+# TOPOLOGY, READ BEFORE "fixing" this back to a single vip-a carrier:
+#
+# worker-1 also carries vip-a, permanently (never touched by chaos), so the
+# vip-a pool always has >= 1 live carrier even while worker-0 is flapped to
+# vip-b. The first draft of this scenario declared vip-a on worker-0 ALONE
+# — every flap to vip-b then emptied the vip-a pool FLEET-WIDE (worker-0
+# was the only carrier), which is Gap 2's pool-outage/spill mechanic
+# (already covered by label_pool_outage_spill.yaml), not Gap 5's isolated
+# fingerprint/coalescing mechanic this scenario targets. Empirically this
+# made every flap a "first observation of a disruptive condition" in
+# calculator.go's deriveRebalanceAssignments — each one independently
+# earning its own deferred-then-confirmed pair of successful
+# RecordRebalanceAttempt("label_recheck", true) calls (spec §8.3's
+# guaranteed-second-observation dance) — producing 28 recheck runs from 20
+# events (1.4x) instead of the isolated single-worker-relabel behavior the
+# scenario name promises. Giving vip-a a second, non-flapping carrier
+# (mirroring label_tight_takeover_churn.yaml's 6-worker/3-vip-a-carrier
+# ratio, scaled down) keeps every flap a benign roster change within an
+# already-populated pool.
+#
+# EMPIRICAL FINDINGS (5/5 local runs after the topology fix, identical
+# every time — see task-12-report.md for the full trace):
+#
+#   label_rechecks_run = 19 (of 20 events), stable with zero variance.
+#
+# This is NOT the "typically 1-3 per drain-tick window" heavy-coalescing
+# outcome an earlier draft of this comment predicted. At this scenario's
+# 2s event cadence, this small (4-worker, 16-partition) harness's
+# label_recheck rebalance completes well before the next event arrives —
+# there is essentially no still-in-flight run for a new signal to
+# coalesce against, so the healthy baseline is close to one successful
+# recheck PER triggering event, not a compressed handful. The gate's real
+# value is proving the count does not keep growing during the ~40s of
+# quiet after the last scheduled event (it doesn't, 5/5 runs) — a stuck
+# pendingLabelRecheck flag or a drain tick that re-fires after it should
+# have cleared would show up as growth there, not as a raw count near 20.
+# main.go's checkLabelRelabelStormGate ceiling is
+# relabel_storm_event_count * 3 / 2 (30 for this scenario): ~58% headroom
+# over the observed 19, while still catching a regression that pushes
+# back toward "more than one successful rerun per triggering event" (the
+# ~1.4x this scenario itself measured under the pre-fix topology above).
+
+simulation:
+  duration: 90s
+  mode: all-in-one
+
+nats:
+  mode: embedded
+
+partitions:
+  count: 16
+  message_rate_per_partition: 2
+  distribution: uniform
+  labeled_subsets:
+    - label: vip-a
+      start: 0
+      end: 4
+
+producers:
+  count: 1
+
+workers:
+  count: 4
+  assignment_strategy: WeightedConsistentHash
+  processing_delay:
+    min: 1ms
+    max: 5ms
+  ack_wait: 15s
+  unlabeled_partition_policy: shared
+  label_spill_grace: 8s
+  labels:
+    worker-0: [vip-a]
+    worker-1: [vip-a]
+
+chaos:
+  enabled: true
+  interval: "3600s-3601s"
+  events: []
+  min_workers: 3
+  relabel_storm_event_count: 20
+  scheduled_events:
+    - {at: 10s,  event: label_heartbeat_takeover, params: {target_worker: worker-0, new_labels: [vip-b]}}
+    - {at: 12s,  event: label_heartbeat_takeover, params: {target_worker: worker-0, new_labels: [vip-a]}}
+    - {at: 14s,  event: label_heartbeat_takeover, params: {target_worker: worker-0, new_labels: [vip-b]}}
+    - {at: 16s,  event: label_heartbeat_takeover, params: {target_worker: worker-0, new_labels: [vip-a]}}
+    - {at: 18s,  event: label_heartbeat_takeover, params: {target_worker: worker-0, new_labels: [vip-b]}}
+    - {at: 20s,  event: label_heartbeat_takeover, params: {target_worker: worker-0, new_labels: [vip-a]}}
+    - {at: 22s,  event: label_heartbeat_takeover, params: {target_worker: worker-0, new_labels: [vip-b]}}
+    - {at: 24s,  event: label_heartbeat_takeover, params: {target_worker: worker-0, new_labels: [vip-a]}}
+    - {at: 26s,  event: label_heartbeat_takeover, params: {target_worker: worker-0, new_labels: [vip-b]}}
+    - {at: 28s,  event: label_heartbeat_takeover, params: {target_worker: worker-0, new_labels: [vip-a]}}
+    - {at: 30s,  event: label_heartbeat_takeover, params: {target_worker: worker-0, new_labels: [vip-b]}}
+    - {at: 32s,  event: label_heartbeat_takeover, params: {target_worker: worker-0, new_labels: [vip-a]}}
+    - {at: 34s,  event: label_heartbeat_takeover, params: {target_worker: worker-0, new_labels: [vip-b]}}
+    - {at: 36s,  event: label_heartbeat_takeover, params: {target_worker: worker-0, new_labels: [vip-a]}}
+    - {at: 38s,  event: label_heartbeat_takeover, params: {target_worker: worker-0, new_labels: [vip-b]}}
+    - {at: 40s,  event: label_heartbeat_takeover, params: {target_worker: worker-0, new_labels: [vip-a]}}
+    - {at: 42s,  event: label_heartbeat_takeover, params: {target_worker: worker-0, new_labels: [vip-b]}}
+    - {at: 44s,  event: label_heartbeat_takeover, params: {target_worker: worker-0, new_labels: [vip-a]}}
+    - {at: 46s,  event: label_heartbeat_takeover, params: {target_worker: worker-0, new_labels: [vip-b]}}
+    - {at: 48s,  event: label_heartbeat_takeover, params: {target_worker: worker-0, new_labels: [vip-a]}}
+
+coordinator:
+  gap_aging: 45s
+  slo:
+    enable_catch_up: true
+    catch_up_deadline: 30s
+    catch_up_percent: 99
+    absence_threshold: 5s
+
+metrics:
+  prometheus:
+    enabled: false

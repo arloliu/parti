@@ -1,0 +1,101 @@
+# Gap 2 — label pool-outage park-then-spill under real chaos timing.
+#
+# 2 of 6 workers labeled "vip-a"; 20% of partitions carry that label.
+# Both vip-a workers are killed (no_restart) at t=20s/22s, leaving the
+# label's pool fully empty for the rest of the run. Asserts (via the
+# coordinator's final gate + LabelAffinityOracle):
+#   - the run completes with zero ownership_violations / snapshot_overlaps
+#     (standard invariants, unaffected by labels)
+#   - the strict positive-proof gate (chaos.expect_label_spill, wired in
+#     main.go) requires ChaosProofMetrics.LabelSpills() > 0 across the
+#     fleet: at least one partition actually spilled from the dead vip-a
+#     pool to the unlabeled/shared fallback. Empirically 100% reliable
+#     across every trial run — IncrementLabelSpill always fires once the
+#     pool is confirmed empty.
+#
+# label_spill_grace=8s keeps the run short while still exercising a real
+# park->spill transition (default production value is 60s; scenario
+# configs shorten timers the same way chaos_stableid_tiny_pool.yaml
+# shortens WorkerIDTTL).
+#
+# HISTORICAL NOTE (finding, now fixed — see task-9-report.md and
+# task-9b-report.md for the full investigation): tuning runs for this
+# scenario originally found the label_affinity_violations==0 assertion
+# flaky (~40-50% failure) regardless of label_spill_grace's value, with
+# every failure landing right at the grace boundary
+# (age=X.05s > grace=Xs). Root cause: LabelAffinityOracle.Check()
+# (test/simulation/internal/coordinator/oracles.go) originally compared
+# directly against label_spill_grace with no allowance for the shipped
+# label-assignment feature's own documented "rebalance / handoff" phase
+# (see docs/LABELS.md's worst-case-stall formula: heartbeat-TTL detection
+# + confirmation + LabelSpillGrace + rebalance/handoff) — the normal
+# debounce and two-phase handoff/processing-gate latency any reassignment
+# already pays before its effect is externally observable via
+# AssignmentReports. This was NOT a production bug (internal/assignment/
+# labels_state.go's 50ms scheduling-margin constant works exactly as
+# designed); the gap was in the oracle's threshold model. Fixed in Task 9b
+# by adding LabelAffinityOracle.labelAffinitySettleAllowance (2s, additive
+# on top of label_spill_grace) — verified 8/8 reliable across empirical
+# trials after the fix.
+
+simulation:
+  duration: 90s
+  mode: all-in-one
+
+nats:
+  mode: embedded
+
+partitions:
+  count: 20
+  message_rate_per_partition: 2
+  distribution: uniform
+  labeled_subsets:
+    - label: vip-a
+      start: 0
+      end: 4 # 20% of partitions
+
+producers:
+  count: 2
+
+workers:
+  count: 6
+  assignment_strategy: WeightedConsistentHash
+  processing_delay:
+    min: 1ms
+    max: 5ms
+  ack_wait: 20s
+  unlabeled_partition_policy: shared
+  label_spill_grace: 8s
+  labels:
+    worker-0: [vip-a]
+    worker-1: [vip-a]
+
+chaos:
+  enabled: true
+  interval: "3600s-3601s" # no random chaos; deterministic scheduled pair only
+  events: []
+  min_workers: 4
+  expect_label_spill: true
+  scheduled_events:
+    - at: 20s
+      event: worker_crash
+      params:
+        target_worker: worker-0
+        no_restart: true
+    - at: 22s
+      event: worker_crash
+      params:
+        target_worker: worker-1
+        no_restart: true
+
+coordinator:
+  gap_aging: 60s
+  slo:
+    enable_catch_up: true
+    catch_up_deadline: 45s
+    catch_up_percent: 99
+    absence_threshold: 5s
+
+metrics:
+  prometheus:
+    enabled: false
