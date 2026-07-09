@@ -1,0 +1,122 @@
+# Gap 3 (flagship) — concurrent label-change vs. in-flight rebalance/election.
+#
+# Repeatedly rewrites worker-2's live heartbeat entry with a different
+# label set (label_heartbeat_takeover) while background leader-flap chaos
+# (leader_failure / network_disconnect_leader, chaos_gate.yaml's pattern)
+# runs concurrently, so the relabel genuinely races an in-flight
+# rebalance/election rather than landing in a quiet window.
+#
+# Positive-proof gate (main.go scenarioHasLabelHeartbeatTakeover strict
+# check): label_change_triggers must be > 0, or the run fails even with
+# zero oracle violations — a primitive that silently missed the live key
+# must not pass by accident.
+#
+# The schedule's final event (165s) cures worker-2 back to its TRUE config
+# label (vip-a), mirroring every prior mismatch->cure pair (30s apart) in
+# this schedule. Without a trailing cure, the LAST mismatch (135s, vip-b)
+# has no scheduled event to trigger an immediate re-check, so clearing it
+# depends entirely on production's real spill/rebalance completing within
+# spillGrace+settleAllowance (30s) while concurrent leader-failure chaos is
+# also running — empirically this took 35-42s in 3/8 runs (Task 10d's
+# 8-run baseline against the original 5-event schedule), exceeding the
+# threshold and firing a spurious violation. Every OTHER mismatch in this
+# schedule is followed by a scheduled cure at the same 30s cadence and
+# never violated once across that same 8-run baseline (0/32 pair-instances)
+# — because LabelAffinityOracle.SetLiveLabelOverride (see oracles.go)
+# triggers an immediate re-check in the same critical section as the
+# override update, so a scheduled cure always resolves before any
+# unrelated Check() call can observe a stale, aged mismatch. Adding a 6th
+# event at the same cadence gives the final mismatch the identical
+# protection the other four already have, instead of relying on a real
+# production rebalance to win a race against concurrent chaos.
+#
+# Run under -race (see task-10-report.md for the exact build/run commands
+# and empirical trial results; task-10d-report.md for the trailing-cure
+# fix and its own empirical verification).
+
+simulation:
+  duration: 3m
+  mode: all-in-one
+
+nats:
+  mode: embedded
+
+partitions:
+  count: 24
+  message_rate_per_partition: 3
+  distribution: uniform
+  labeled_subsets:
+    - label: vip-a
+      start: 0
+      end: 6
+
+producers:
+  count: 2
+
+workers:
+  count: 6
+  assignment_strategy: WeightedConsistentHash
+  processing_delay:
+    min: 5ms
+    max: 20ms
+  ack_wait: 20s
+  unlabeled_partition_policy: shared
+  label_spill_grace: 10s
+  labels:
+    worker-0: [vip-a]
+    worker-1: [vip-a]
+    worker-2: [vip-a]
+
+chaos:
+  enabled: true
+  # Background leader-flap noise, chaos_gate.yaml's pattern.
+  interval: "15s-25s"
+  min_workers: 4
+  max_workers: 8
+  events:
+    - leader_failure
+    - network_disconnect_leader
+    - worker_pause
+  scheduled_events:
+    - at: 15s
+      event: label_heartbeat_takeover
+      params:
+        target_worker: worker-2
+        new_labels: [vip-b]
+    - at: 45s
+      event: label_heartbeat_takeover
+      params:
+        target_worker: worker-2
+        new_labels: [vip-a]
+    - at: 75s
+      event: label_heartbeat_takeover
+      params:
+        target_worker: worker-2
+        new_labels: [vip-b]
+    - at: 105s
+      event: label_heartbeat_takeover
+      params:
+        target_worker: worker-2
+        new_labels: [vip-a]
+    - at: 135s
+      event: label_heartbeat_takeover
+      params:
+        target_worker: worker-2
+        new_labels: [vip-b]
+    - at: 165s
+      event: label_heartbeat_takeover
+      params:
+        target_worker: worker-2
+        new_labels: [vip-a]
+
+coordinator:
+  gap_aging: 60s
+  slo:
+    enable_catch_up: true
+    catch_up_deadline: 45s
+    catch_up_percent: 99
+    absence_threshold: 5s
+
+metrics:
+  prometheus:
+    enabled: false
