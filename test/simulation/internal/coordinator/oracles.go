@@ -32,6 +32,12 @@ type WorkerObserver interface {
 	// watchClaimLostShutdowns to distinguish real claim-loss shutdowns
 	// from graceful Stop transitions (both terminate in StateShutdown).
 	ClaimLostObserved() bool
+	// WorkerLabels returns the worker's currently-configured label set (may
+	// be empty/nil). In all-in-one mode this reflects the live manager's
+	// resolved labels, which can change across a respawn under the same
+	// sim worker ID. In process mode this always returns nil (process-mode
+	// label plumbing is out of scope — see LabelAffinityOracle doc).
+	WorkerLabels() []string
 }
 
 // workerStateStable is the int value of parti.StateStable / types.StateStable.
@@ -223,6 +229,290 @@ func (c *SnapshotOverlapClassifier) Check(now time.Time) {
 // ViolationCount returns the total number of overlap violations detected.
 func (c *SnapshotOverlapClassifier) ViolationCount() int64 {
 	return c.violations.Load()
+}
+
+// ---------------------------------------------------------------------------
+// Label-affinity oracle
+// ---------------------------------------------------------------------------
+
+// LabelAffinityOracle fires when a labeled partition's current owner does
+// not carry that label for longer than spillGrace PLUS a settle allowance
+// (see labelAffinitySettleAllowance below) — EXCEPT when the required label
+// has zero live carriers anywhere in the fleet, in which case the mismatch
+// is the documented permanent terminal spill state and is exempt (see
+// checkLocked's doc comment for the full Task 11b rationale).
+// partitionLabels is static
+// (fixed at construction from the scenario's
+// config.PartitionsConfig.LabeledSubsets — partition labels never change at
+// runtime in this harness); worker labels ARE allowed to change at runtime
+// (a respawn under the same sim worker ID can carry a different config-time
+// label set), so worker labels are read live from the registry on every
+// Check(), not cached. A SEPARATE mechanism, liveLabelOverrides (see
+// SetLiveLabelOverride), covers the label_heartbeat_takeover chaos
+// primitive specifically: that primitive rewrites a worker's heartbeat KV
+// entry directly without touching its Manager/Config at all, so the
+// registry read alone can never observe it.
+//
+// Mirrors SnapshotOverlapClassifier's structure and locking discipline. It
+// diverges from SnapshotOverlapClassifier.Check on one point:
+// SnapshotOverlapClassifier compares directly against graceWindow with no
+// added slack, but LabelAffinityOracle adds labelAffinitySettleAllowance on
+// top of spillGrace, because docs/LABELS.md's own worst-case-stall formula
+// documents a distinct "rebalance / handoff" phase AFTER LabelSpillGrace
+// elapses — see labelAffinitySettleAllowance's doc comment.
+type LabelAffinityOracle struct {
+	mu sync.Mutex
+
+	partitionLabels map[int]string // partition -> required label; static
+	spillGrace      time.Duration
+	// settleAllowance is added to spillGrace before a park-window mismatch
+	// counts as a violation. Defaults to labelAffinitySettleAllowance;
+	// overridable only by tests in this package (via direct field
+	// assignment) so grace-window unit tests can run with a
+	// near-zero allowance instead of waiting out multiple real seconds.
+	settleAllowance time.Duration
+	registry        *GoroutineRegistry
+
+	partitionOwner map[int]string    // partition -> current owning worker ID
+	parkedSince    map[int]time.Time // partition -> when affinity was first observed missing
+	violations     atomic.Int64
+
+	// liveLabelOverrides holds the KV-published label set for worker IDs
+	// whose heartbeat entry was rewritten out-of-band by the
+	// label_heartbeat_takeover chaos primitive. See SetLiveLabelOverride.
+	liveLabelOverrides map[string][]string
+}
+
+// labelAffinitySettleAllowance is added to spillGrace before a park-window
+// mismatch counts as a violation. It accounts for the "rebalance / handoff"
+// phase docs/LABELS.md's worst-case-stall formula documents as a SEPARATE,
+// expected time component after LabelSpillGrace elapses — the normal
+// debounce and two-phase handoff / processing-gate latency any reassignment
+// already pays before its effect is externally observable via
+// AssignmentReports. This is NOT compensating for a production bug; it is
+// the oracle correctly modeling the shipped feature's own documented
+// contract, which was omitted in this oracle's first implementation (Task 6)
+// and caught by Task 9's flaky dry-runs (~40-50% failure, all with the
+// signature `age=X.05s > grace=Xs` — right at the boundary).
+//
+// Widened from 2s to 20s during Task 11's investigation
+// (label_emergency_carveout.yaml): a burst-kill large enough to plausibly
+// include the CURRENT LEADER can force a leader failover concurrently with
+// the labeled pool emptying. The new leader's calculator only gets its
+// first chance to observe (and start parking) the empty pool after its own
+// post-takeover stabilization window plus election overhead — Task 11's
+// investigation observed vip-a partitions unowned for 25-28s under a
+// concurrent leader failover, which elapses BEFORE LabelSpillGrace even
+// starts counting down for that pool. The original 2s only budgeted for
+// ordinary handoff/debounce latency on an already-stable leader, not a full
+// leader re-election. This is, again, not compensating for a production
+// bug: a brand-new leader legitimately cannot act on a topology it has not
+// yet observed.
+//
+// This is a single shared constant across every LabelAffinityOracle
+// instance, so widening it for Task 11's failover case also widens the
+// tolerance for every other scenario. It retroactively broke Task 10's
+// flagship scenario (label_tight_takeover_churn.yaml): that scenario's
+// last scheduled relabel event landed too close to the run's own shutdown
+// to leave enough buffer for the new, wider threshold to clear — fixed as
+// Task 10c (a scenario-YAML timing adjustment, not a further oracle
+// change). If a future scenario needs an even larger allowance, prefer
+// giving that scenario's own LabelAffinityOracle instance a per-instance
+// override (the settleAllowance field is already unexported-but-settable
+// within this package) over bumping this shared default again.
+const labelAffinitySettleAllowance = 20 * time.Second
+
+// NewLabelAffinityOracle constructs an oracle. partitionLabels is typically
+// built once from config.PartitionsConfig.ExpandLabels() filtered to non-""
+// entries. registry may be nil only in unit tests that manage worker
+// lifetimes without live goroutines.
+func NewLabelAffinityOracle(partitionLabels map[int]string, spillGrace time.Duration, registry *GoroutineRegistry) *LabelAffinityOracle {
+	return &LabelAffinityOracle{
+		partitionLabels:    partitionLabels,
+		spillGrace:         spillGrace,
+		settleAllowance:    labelAffinitySettleAllowance,
+		registry:           registry,
+		partitionOwner:     make(map[int]string),
+		parkedSince:        make(map[int]time.Time),
+		liveLabelOverrides: make(map[string][]string),
+	}
+}
+
+// IngestAssignment records workerID's latest full partition-ownership
+// snapshot. Replaces any prior ownership this worker held wholesale —
+// mirrors SnapshotOverlapClassifier.IngestAssignment's replace-not-merge
+// semantics. Safe to call from any goroutine.
+func (o *LabelAffinityOracle) IngestAssignment(workerID string, partitions []int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	for p, owner := range o.partitionOwner {
+		if owner == workerID {
+			delete(o.partitionOwner, p)
+		}
+	}
+	for _, p := range partitions {
+		o.partitionOwner[p] = workerID
+	}
+}
+
+// ForgetWorker drops all ownership entries attributed to workerID. Call when
+// a worker permanently stops so its stale ownership doesn't linger. Also
+// drops any liveLabelOverride recorded for workerID, so a later respawn
+// under the same sim ID starts from a clean (registry-derived) label read
+// rather than inheriting a stale KV-tamper record from a prior incarnation.
+func (o *LabelAffinityOracle) ForgetWorker(workerID string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for p, owner := range o.partitionOwner {
+		if owner == workerID {
+			delete(o.partitionOwner, p)
+		}
+	}
+	delete(o.liveLabelOverrides, workerID)
+}
+
+// SetLiveLabelOverride records workerID's CURRENT KV-published label set,
+// so Check() uses it in place of the registry-derived (Manager/Config)
+// labels WorkerObserver.WorkerLabels() would otherwise return for that
+// worker. The label_heartbeat_takeover chaos primitive rewrites a worker's
+// heartbeat KV entry directly, bypassing its own Manager/Config entirely
+// (deliberately — see label_chaos.go's handleLabelHeartbeatTakeover doc
+// comment); WorkerObserver.WorkerLabels() reflects the manager's own
+// resolved config and can never observe that out-of-band tamper. Without
+// this override, a partition legitimately routed by production to a
+// registry-config-unlabeled worker via a live heartbeat relabel would
+// present as a PERMANENT, unresolvable affinity mismatch to Check(): the
+// registry-derived label for that worker never changes, so the mismatch
+// can never clear no matter how long spillGrace+settleAllowance allows.
+//
+// Pass a nil or empty slice to model a revert to unlabeled.
+//
+// Also triggers an immediate re-check (using time.Now(), in the same
+// critical section as the override update) so a relabel that CURES a
+// previously-parked mismatch is observed right away instead of waiting for
+// the next unrelated Check() call. Without this, a relabel that cures a
+// mismatch WITHOUT also forcing a fresh partition assignment (no
+// AssignmentReport arrives to drive the normal Check() call path) would
+// leave the stale parkedSince clock running from the ORIGINAL mismatch
+// onset; a later Check() triggered by some unrelated event could then find
+// now.Sub(originalOnset) > threshold and fire a violation for a mismatch
+// that was actually cured long ago.
+func (o *LabelAffinityOracle) SetLiveLabelOverride(workerID string, labels []string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.liveLabelOverrides[workerID] = append([]string(nil), labels...)
+	o.checkLocked(time.Now())
+}
+
+// Check evaluates every labeled partition's current owner against that
+// owner's LIVE labels (read from the registry, not cached — see type doc),
+// with any recorded liveLabelOverrides (see SetLiveLabelOverride) taking
+// precedence over the registry read for the workers they name. A partition
+// whose owner lacks the required label enters a park window; if the
+// mismatch persists past spillGrace+settleAllowance, it counts as a
+// violation and the park window resets (mirrors SnapshotOverlapClassifier's
+// one-violation-per-grace-window-span semantics, not
+// one-violation-per-Check-call). The settleAllowance addition tolerates the
+// documented rebalance/handoff phase that follows spillGrace before a spill
+// decision becomes externally observable — see labelAffinitySettleAllowance.
+// A partition whose required label has zero live carriers fleet-wide is
+// exempt from violations entirely — see checkLocked's doc comment (Task 11b).
+func (o *LabelAffinityOracle) Check(now time.Time) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.checkLocked(now)
+}
+
+// checkLocked is Check's per-partition evaluation loop, factored out so
+// SetLiveLabelOverride can trigger an immediate re-check in the SAME
+// critical section as its override-map update (see SetLiveLabelOverride's
+// doc comment for why that matters). Caller MUST already hold o.mu.
+//
+// Fleet-wide-empty exemption (Task 11b): a labeled partition whose required
+// label has ZERO live carriers anywhere in the fleet is EXEMPT from
+// violations. Rationale — such a mismatch is not the avoidable kind the
+// oracle exists to catch (an eligible worker exists but isn't being used);
+// it is the CORRECT, PERMANENT terminal state docs/LABELS.md documents:
+// when every worker carrying a label has left the fleet, the label's
+// partitions legitimately spill to an unlabeled fallback worker and stay
+// there until a carrier rejoins. No worker anywhere can make such a
+// partition affine again, so the old "current owner carries the label" exit
+// condition can never be satisfied — without this exemption the oracle would
+// re-fire a violation every spillGrace+settleAllowance window for the rest of
+// the run (observed while re-verifying label_emergency_carveout.yaml, whose
+// design deliberately empties the vip-a pool fleet-wide). The exemption is
+// recomputed fresh from liveLabels on every call (NOT a sticky latch), so the
+// instant an eligible carrier reappears the mismatch becomes avoidable again
+// and is re-checked normally — with a fresh park window, because the exempt
+// branch clears parkedSince (see below). label_pool_outage_spill.yaml exhibits
+// the same fleet-wide-empty condition (both vip-a workers killed) and is
+// covered by the same exemption.
+func (o *LabelAffinityOracle) checkLocked(now time.Time) {
+	liveLabels := make(map[string][]string)
+	if o.registry != nil {
+		for _, info := range o.registry.GetByType(WorkerGoroutine) {
+			if wo, ok := info.Obj.(WorkerObserver); ok {
+				liveLabels[info.ID] = wo.WorkerLabels()
+			}
+		}
+	}
+	for workerID, override := range o.liveLabelOverrides {
+		liveLabels[workerID] = override
+	}
+
+	// Build the set of labels currently carried by at least one live worker
+	// (registry-derived plus any liveLabelOverrides), once per call rather
+	// than re-scanning per partition. A required label absent from this set
+	// has zero carriers fleet-wide and is exempt (see doc comment above).
+	labelHasCarrier := make(map[string]bool)
+	for _, labels := range liveLabels {
+		for _, l := range labels {
+			labelHasCarrier[l] = true
+		}
+	}
+
+	for partition, requiredLabel := range o.partitionLabels {
+		owner, hasOwner := o.partitionOwner[partition]
+		affine := hasOwner && slices.Contains(liveLabels[owner], requiredLabel)
+		if affine {
+			delete(o.parkedSince, partition)
+			continue
+		}
+
+		// Fleet-wide-empty exemption: no live worker carries requiredLabel,
+		// so this mismatch is the documented permanent terminal spill state,
+		// not an avoidable one. Treat it like the affine case — clear any
+		// park clock and skip. Clearing parkedSince (rather than leaving it
+		// running) means that if an eligible carrier later reappears, the
+		// park window restarts from that moment and the ensuing reassignment
+		// gets a full spillGrace+settleAllowance budget before any violation
+		// counts — avoiding a spurious violation fired off a stale clock the
+		// instant the pool becomes non-empty again.
+		if !labelHasCarrier[requiredLabel] {
+			delete(o.parkedSince, partition)
+			continue
+		}
+
+		since, wasParked := o.parkedSince[partition]
+		if !wasParked {
+			o.parkedSince[partition] = now
+			continue
+		}
+		threshold := o.spillGrace + o.settleAllowance
+		if now.Sub(since) > threshold {
+			log.Printf("[LabelAffinityOracle] VIOLATION partition=%d required=%s owner=%q ownerLabels=%v age=%v > grace=%v+settle=%v",
+				partition, requiredLabel, owner, liveLabels[owner], now.Sub(since).Truncate(time.Millisecond), o.spillGrace, o.settleAllowance)
+			o.violations.Add(1)
+			o.parkedSince[partition] = now
+		}
+	}
+}
+
+// ViolationCount returns the total number of label-affinity violations
+// detected.
+func (o *LabelAffinityOracle) ViolationCount() int64 {
+	return o.violations.Load()
 }
 
 // ---------------------------------------------------------------------------

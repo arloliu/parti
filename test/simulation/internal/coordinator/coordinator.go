@@ -29,14 +29,33 @@ type Coordinator struct {
 	dup DupTracer
 
 	// assignment tracking
-	assignmentsCh       chan AssignmentReport
-	stoppedWorkersCh    chan string // signals a worker goroutine has permanently stopped
-	startLatenciesCh    chan StartLatencyReport
-	workerAssignments   map[string]map[int]struct{}
+	assignmentsCh     chan AssignmentReport
+	stoppedWorkersCh  chan string // signals a worker goroutine has permanently stopped
+	startLatenciesCh  chan StartLatencyReport
+	workerAssignments map[string]map[int]struct{}
+	// workerAssignMu guards workerAssignments against the one cross-goroutine
+	// reader (startWorkerCatchUp, called from the received-messages goroutine
+	// via processCatchUpActivity). The assignment-drain goroutine
+	// (processAssignments / processWorkerAssignmentTracker) is the sole writer
+	// and always REPLACES a worker's inner set wholesale (never mutates a
+	// published inner map in place), so the reader may snapshot under RLock and
+	// use the result unlocked. Same-goroutine reads inside the writer skip the
+	// lock (identical discipline to prevOwnersMu). Added after -race (via
+	// label_tight_takeover_churn.yaml, Task 10b) caught startWorkerCatchUp
+	// reading workerAssignments unsynchronized against the writer's map assign.
+	workerAssignMu      sync.RWMutex
 	prevGlobalAssigned  map[int]struct{}
 	prevPartitionOwners map[int]string // partitionID -> workerID for previous snapshot
-	activeOwners        map[int]string // partitionID -> workerID based on actual processing reports
-	ownersMu            sync.RWMutex   // guards activeOwners
+	// prevOwnersMu guards prevPartitionOwners. processAssignments is the
+	// sole writer and always replaces the whole map (never mutates it in
+	// place after publishing), so the lock only needs to protect the
+	// pointer swap/read, not a deep copy. Added after -race (via
+	// label_tight_takeover_churn.yaml, Task 10) caught printOwnershipAudit
+	// (called from PrintReport's ticker goroutine) reading this field
+	// unsynchronized against processAssignments' own goroutine writing it.
+	prevOwnersMu sync.RWMutex
+	activeOwners map[int]string // partitionID -> workerID based on actual processing reports
+	ownersMu     sync.RWMutex   // guards activeOwners
 
 	// ownership-violation evidence: bounded slice of cross-worker same-seq
 	// observations. Surfaced verbatim in FailureReport.OwnershipViolations.
@@ -135,6 +154,7 @@ type Coordinator struct {
 	snapshotOverlap *SnapshotOverlapClassifier
 	leaderUniq      *LeaderUniquenessWatcher
 	stateReconcile  *StateReconcileWatcher
+	labelAffinity   *LabelAffinityOracle
 
 	// Phase 1: bucket-lifecycle chaos oracle. Lazy-initialized in
 	// EnableShutdownOracles so callers that already use Phase 0 oracles
@@ -390,11 +410,14 @@ func (c *Coordinator) MarkChaosStarted() {
 	}
 }
 
-// EnableShutdownOracles constructs the three foundation oracles (snapshot-overlap,
-// leader-uniqueness, state-reconcile) and attaches them to the coordinator.
-// Must be called BEFORE coord.Start(). Idempotent — subsequent calls are no-ops.
-// registry is the GoroutineRegistry that maps worker IDs to *worker.Worker objects.
-func (c *Coordinator) EnableShutdownOracles(registry *GoroutineRegistry) {
+// EnableShutdownOracles constructs the foundation oracles (snapshot-overlap,
+// leader-uniqueness, state-reconcile, label-affinity, ...) and attaches them
+// to the coordinator. Must be called BEFORE coord.Start(). Idempotent —
+// subsequent calls are no-ops. registry is the GoroutineRegistry that maps
+// worker IDs to *worker.Worker objects. partitionLabels/spillGrace configure
+// the label-affinity oracle; pass nil/0 when the scenario has no labeled
+// partitions (all-in-one-only — process mode always passes nil/0).
+func (c *Coordinator) EnableShutdownOracles(registry *GoroutineRegistry, partitionLabels map[int]string, spillGrace time.Duration) {
 	if c.snapshotOverlap != nil {
 		return
 	}
@@ -404,6 +427,7 @@ func (c *Coordinator) EnableShutdownOracles(registry *GoroutineRegistry) {
 	c.degradedReasonOracle = NewDegradedReasonOracle()
 	c.sourceConvergence = NewSourceConvergenceOracle()
 	c.claimLossOrdering = NewClaimLossOrderingOracle()
+	c.labelAffinity = NewLabelAffinityOracle(partitionLabels, spillGrace, registry)
 	// Install a state sampler so ObserveRevocation can distinguish a
 	// poll-cadence race (legitimate backfill) from a true Stop-before-
 	// revoke ordering bug. The sampler reads the same registry the
@@ -581,6 +605,25 @@ func (c *Coordinator) GetSnapshotOverlapCount() int64 {
 		return 0
 	}
 	return c.snapshotOverlap.ViolationCount()
+}
+
+// GetLabelAffinityViolations returns the total label-affinity violations
+// detected by the oracle. Returns 0 if EnableShutdownOracles was never
+// called or the scenario has no labeled partitions.
+func (c *Coordinator) GetLabelAffinityViolations() int64 {
+	if c.labelAffinity == nil {
+		return 0
+	}
+	return c.labelAffinity.ViolationCount()
+}
+
+// LabelAffinityOracle returns the oracle, or nil if EnableShutdownOracles
+// was never called or the scenario has no labeled partitions. Callers
+// (chaos dispatch handlers that rewrite a worker's heartbeat KV entry
+// directly, e.g. label_heartbeat_takeover) use this to register a live
+// label override via SetLiveLabelOverride.
+func (c *Coordinator) LabelAffinityOracle() *LabelAffinityOracle {
+	return c.labelAffinity
 }
 
 // GetDoubleLeaderObservations returns the total (pre-chaos) double-leader
@@ -877,8 +920,17 @@ func (c *Coordinator) startWorkerCatchUp(workerID string) {
 		c.catchMu.Unlock()
 		return
 	}
-	// Build partition backlog snapshot
-	assigned := c.workerAssignments[workerID]
+	// Build partition backlog snapshot. workerAssignments is owned by the
+	// assignment-drain goroutine; snapshot this worker's partition IDs under
+	// workerAssignMu (the writer replaces the inner set wholesale) so the
+	// per-partition tracker work below runs off a private copy, unlocked.
+	c.workerAssignMu.RLock()
+	assignedSet := c.workerAssignments[workerID]
+	assigned := make([]int, 0, len(assignedSet))
+	for pid := range assignedSet {
+		assigned = append(assigned, pid)
+	}
+	c.workerAssignMu.RUnlock()
 	rec := &workerRecoveryContext{
 		startedAt:     time.Now(),
 		deadline:      c.catchUpDeadline,
@@ -887,7 +939,7 @@ func (c *Coordinator) startWorkerCatchUp(workerID string) {
 	}
 	var totalBacklog int64
 	var oldestHoleAge time.Duration
-	for pid := range assigned {
+	for _, pid := range assigned {
 		sent, received := c.tracker.GetPartitionState(pid)
 		lag := sent - received
 		if lag > 0 {
@@ -1193,7 +1245,16 @@ func (c *Coordinator) SlowStartExceedances() (initial, takeover int) {
 
 // printOwnershipAudit compares active owners vs assigned owners and prints mismatch stats.
 func (c *Coordinator) printOwnershipAudit(activeSnapshot map[int]string) {
-	if len(c.prevPartitionOwners) == 0 || len(activeSnapshot) == 0 {
+	// Snapshot the map reference under lock rather than holding the lock
+	// for the whole function: processAssignments (the sole writer) always
+	// replaces the whole map rather than mutating it in place, so a local
+	// reference captured under RLock is safe to range over unlocked
+	// afterward — no other goroutine will ever mutate this specific map
+	// instance once published.
+	c.prevOwnersMu.RLock()
+	prevPartitionOwners := c.prevPartitionOwners
+	c.prevOwnersMu.RUnlock()
+	if len(prevPartitionOwners) == 0 || len(activeSnapshot) == 0 {
 		return
 	}
 	mismatches := 0
@@ -1205,7 +1266,7 @@ func (c *Coordinator) printOwnershipAudit(activeSnapshot map[int]string) {
 	}
 	samples := make([]sample, 0, 10)
 	for pid, active := range activeSnapshot {
-		if assigned, ok := c.prevPartitionOwners[pid]; ok {
+		if assigned, ok := prevPartitionOwners[pid]; ok {
 			checked++
 			if assigned == active {
 				aligned++
@@ -1729,7 +1790,9 @@ func (c *Coordinator) processWorkerAssignmentTracker(ctx context.Context) {
 			for _, p := range ar.Partitions {
 				set[p] = struct{}{}
 			}
+			c.workerAssignMu.Lock()
 			c.workerAssignments[ar.WorkerID] = set
+			c.workerAssignMu.Unlock()
 			c.rebuildOwnerSnapshotLocked()
 			// Forward to the Phase 4 ordering oracle so its assignment
 			// snapshot tracks live state (otherwise its
@@ -1762,10 +1825,15 @@ func (c *Coordinator) processAssignments(ctx context.Context) { //nolint:gocyclo
 			if _, had := c.workerAssignments[wid]; !had {
 				continue
 			}
+			c.workerAssignMu.Lock()
 			delete(c.workerAssignments, wid)
+			c.workerAssignMu.Unlock()
 			c.rebuildOwnerSnapshotLocked()
 			if c.snapshotOverlap != nil {
 				c.snapshotOverlap.ForgetWorker(wid)
+			}
+			if c.labelAffinity != nil {
+				c.labelAffinity.ForgetWorker(wid)
 			}
 			if c.baselineLocked && c.totalPartitions > 0 {
 				fresh := make(map[int]string, c.totalPartitions)
@@ -1776,7 +1844,9 @@ func (c *Coordinator) processAssignments(ctx context.Context) { //nolint:gocyclo
 						}
 					}
 				}
+				c.prevOwnersMu.Lock()
 				c.prevPartitionOwners = fresh
+				c.prevOwnersMu.Unlock()
 			}
 		case sl := <-c.startLatenciesCh:
 			// Classify by the caller-provided cohort flag. Earlier versions
@@ -1810,7 +1880,9 @@ func (c *Coordinator) processAssignments(ctx context.Context) { //nolint:gocyclo
 					set[p] = struct{}{}
 				}
 			}
+			c.workerAssignMu.Lock()
 			c.workerAssignments[ar.WorkerID] = set
+			c.workerAssignMu.Unlock()
 			c.rebuildOwnerSnapshotLocked()
 
 			// Phase 3: check long-disconnect reassignment expectations on
@@ -1821,6 +1893,10 @@ func (c *Coordinator) processAssignments(ctx context.Context) { //nolint:gocyclo
 			if c.snapshotOverlap != nil {
 				c.snapshotOverlap.IngestAssignment(ar.WorkerID, ar.Partitions)
 				c.snapshotOverlap.Check(time.Now())
+			}
+			if c.labelAffinity != nil {
+				c.labelAffinity.IngestAssignment(ar.WorkerID, ar.Partitions)
+				c.labelAffinity.Check(time.Now())
 			}
 			if c.stateReconcile != nil {
 				c.stateReconcile.RecordAssignment(ar.WorkerID, ar.Partitions, time.Now())
@@ -1860,7 +1936,10 @@ func (c *Coordinator) processAssignments(ctx context.Context) { //nolint:gocyclo
 					c.metricsCollector.SetLocalityRatio(1.0)
 				}
 				c.prevGlobalAssigned = global
+				c.prevOwnersMu.Lock()
 				c.prevPartitionOwners = make(map[int]string, len(global))
+				c.prevOwnersMu.Unlock()
+
 				continue
 			}
 
@@ -1878,7 +1957,9 @@ func (c *Coordinator) processAssignments(ctx context.Context) { //nolint:gocyclo
 				c.metricsCollector.SetUnassignedPartitions(0)
 				c.metricsCollector.SetLocalityRatio(1.0)
 				c.prevGlobalAssigned = global
+				c.prevOwnersMu.Lock()
 				c.prevPartitionOwners = make(map[int]string, len(global))
+				c.prevOwnersMu.Unlock()
 				continue
 			}
 			if needWaitForWorkers && time.Since(c.firstAssignmentAt) >= c.baselineLockTimeout {
@@ -1937,7 +2018,9 @@ func (c *Coordinator) processAssignments(ctx context.Context) { //nolint:gocyclo
 			}
 
 			c.prevGlobalAssigned = global
+			c.prevOwnersMu.Lock()
 			c.prevPartitionOwners = currentOwners
+			c.prevOwnersMu.Unlock()
 
 			// If recovering, check exit conditions: all partitions assigned & disorder depth zero.
 			if c.recoveryActive && unassigned == 0 && c.tracker.GetDisorderDepth() == 0 {

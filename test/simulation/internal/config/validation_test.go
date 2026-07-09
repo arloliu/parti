@@ -167,3 +167,210 @@ func TestValidate_AckWaitNonPositive_Rejects(t *testing.T) {
 		t.Fatalf("expected ack_wait validation error; got %v", err)
 	}
 }
+
+func TestValidateConfig_LabeledSubsetOutOfRange(t *testing.T) {
+	t.Parallel()
+	cfg := minimalValidConfig()
+	cfg.Partitions.Count = 10
+	cfg.Partitions.LabeledSubsets = []LabeledPartitionSubset{
+		{Label: "vip-a", Start: 8, End: 12}, // End exceeds Count
+	}
+	applyDefaults(cfg)
+	err := validateConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error for labeled_subsets range exceeding partitions.count")
+	}
+}
+
+func TestValidateConfig_LabeledSubsetInvalidRange(t *testing.T) {
+	t.Parallel()
+	cfg := minimalValidConfig()
+	cfg.Partitions.Count = 10
+	cfg.Partitions.LabeledSubsets = []LabeledPartitionSubset{
+		{Label: "vip-a", Start: 5, End: 3}, // Start >= End
+	}
+	applyDefaults(cfg)
+	err := validateConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error for labeled_subsets start >= end")
+	}
+}
+
+func TestValidateConfig_LabelsUnknownWorkerID(t *testing.T) {
+	t.Parallel()
+	cfg := minimalValidConfig()
+	cfg.Workers.Count = 3
+	cfg.Workers.Labels = map[string][]string{
+		"worker-9": {"vip-a"}, // out of range for Count=3 (worker-0..worker-2)
+	}
+	applyDefaults(cfg)
+	err := validateConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error for workers.labels referencing an out-of-range worker ID")
+	}
+}
+
+func TestValidateConfig_LabelsAndSubsets_Valid(t *testing.T) {
+	t.Parallel()
+	cfg := minimalValidConfig()
+	cfg.Workers.Count = 3
+	cfg.Workers.Labels = map[string][]string{"worker-0": {"vip-a"}}
+	cfg.Partitions.Count = 10
+	cfg.Partitions.LabeledSubsets = []LabeledPartitionSubset{{Label: "vip-a", Start: 0, End: 2}}
+	applyDefaults(cfg)
+	if err := validateConfig(cfg); err != nil {
+		t.Fatalf("expected valid config, got error: %v", err)
+	}
+}
+
+func TestPartitionsConfig_ExpandLabels(t *testing.T) {
+	t.Parallel()
+	pc := PartitionsConfig{
+		Count: 5,
+		LabeledSubsets: []LabeledPartitionSubset{
+			{Label: "vip-a", Start: 1, End: 3},
+		},
+	}
+	got := pc.ExpandLabels()
+	want := []string{"", "vip-a", "vip-a", "", ""}
+	if len(got) != len(want) {
+		t.Fatalf("length mismatch: got %d want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("index %d: got %q want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestValidateConfig_UnlabeledPartitionPolicy tests validation of the
+// unlabeled_partition_policy field.
+func TestValidateConfig_UnlabeledPartitionPolicy(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		policy  string
+		wantErr bool
+	}{
+		{"empty_string_passes", "", false},
+		{"dedicated_passes", "dedicated", false},
+		{"shared_passes", "shared", false},
+		{"invalid_bogus", "bogus", true},
+		{"invalid_random", "random", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := minimalValidConfig()
+			cfg.Workers.UnlabeledPartitionPolicy = tc.policy
+			applyDefaults(cfg)
+			err := validateConfig(cfg)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error for policy %q, got nil", tc.policy)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("expected no error for policy %q, got: %v", tc.policy, err)
+			}
+		})
+	}
+}
+
+// TestValidateConfig_LabelSpillGrace tests validation of the label_spill_grace field.
+func TestValidateConfig_LabelSpillGrace(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		grace   time.Duration
+		wantErr bool
+	}{
+		{"zero_passes", 0, false},
+		{"positive_passes", 5 * time.Second, false},
+		{"negative_fails", -1 * time.Second, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := minimalValidConfig()
+			cfg.Workers.LabelSpillGrace = tc.grace
+			applyDefaults(cfg)
+			err := validateConfig(cfg)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error for grace %s, got nil", tc.grace)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("expected no error for grace %s, got: %v", tc.grace, err)
+			}
+		})
+	}
+}
+
+// TestValidateConfig_LabeledSubsetsNonOverlapping tests that non-overlapping
+// ranges pass validation, including adjacent ranges (half-open ranges touching
+// at the boundary is NOT an overlap).
+func TestValidateConfig_LabeledSubsetsNonOverlapping(t *testing.T) {
+	t.Parallel()
+	cfg := minimalValidConfig()
+	cfg.Partitions.Count = 10
+	cfg.Partitions.LabeledSubsets = []LabeledPartitionSubset{
+		{Label: "vip-a", Start: 0, End: 5},
+		{Label: "vip-b", Start: 5, End: 8}, // Touching boundary, not overlapping
+	}
+	applyDefaults(cfg)
+	err := validateConfig(cfg)
+	if err != nil {
+		t.Fatalf("expected no error for non-overlapping adjacent ranges, got: %v", err)
+	}
+}
+
+// TestValidateConfig_LabeledSubsetsOverlapping tests that overlapping ranges
+// are rejected, regardless of whether the labels are the same or different.
+func TestValidateConfig_LabeledSubsetsOverlapping(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		subsets []LabeledPartitionSubset
+		wantErr bool
+	}{
+		{
+			"different_labels_overlap",
+			[]LabeledPartitionSubset{
+				{Label: "vip-a", Start: 0, End: 5},
+				{Label: "vip-b", Start: 3, End: 8}, // Overlaps with vip-a
+			},
+			true,
+		},
+		{
+			"same_label_overlap",
+			[]LabeledPartitionSubset{
+				{Label: "vip-a", Start: 0, End: 5},
+				{Label: "vip-a", Start: 3, End: 8}, // Overlaps with first vip-a
+			},
+			true,
+		},
+		{
+			"multiple_non_overlapping",
+			[]LabeledPartitionSubset{
+				{Label: "vip-a", Start: 0, End: 2},
+				{Label: "vip-b", Start: 2, End: 5},
+				{Label: "vip-c", Start: 5, End: 8},
+			},
+			false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := minimalValidConfig()
+			cfg.Partitions.Count = 10
+			cfg.Partitions.LabeledSubsets = tc.subsets
+			applyDefaults(cfg)
+			err := validateConfig(cfg)
+			if tc.wantErr && err == nil {
+				t.Fatal("expected error for overlapping ranges, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("expected no error, got: %v", err)
+			}
+		})
+	}
+}

@@ -73,6 +73,28 @@ const (
 	// (claimer.go:362-369), driving claimLostShutdown.
 	BucketPeerTakeoverEvent ChaosEvent = "bucket_peer_takeover"
 
+	// LabelHeartbeatTakeoverEvent directly rewrites a live worker's
+	// heartbeat KV entry with a different label set, preserving every
+	// other field (Timestamp refreshed to now). This deterministically
+	// exercises the "tight takeover" fingerprint-mismatch branch
+	// (internal/assignment/worker_monitor.go:checkLabelChange) — a
+	// heartbeat PUT landing on a STILL-LIVE key with different labels and
+	// no interceding DELETE. Modeled on BucketPeerTakeoverEvent's
+	// direct-KV-rewrite pattern applied to the heartbeat bucket instead of
+	// the stableid bucket. All-in-one mode only; process-mode dispatch
+	// logs and skips (no cross-process KV probe handle available there).
+	//
+	// Unlike a kill+respawn approach (investigated and rejected — the
+	// stableid stale-takeover path requires waiting past a staleness
+	// threshold that always exceeds the heartbeat key's own shorter TTL,
+	// so a respawn can never land on a still-live key), this primitive
+	// writes directly to the heartbeat bucket without touching the
+	// stableid claim or killing any worker process — the target worker
+	// keeps running, unaware its own heartbeat key was just overwritten by
+	// a "hostile" actor. This is deliberately the SAME shape of event a
+	// misbehaving or compromised peer could produce.
+	LabelHeartbeatTakeoverEvent ChaosEvent = "label_heartbeat_takeover"
+
 	// WatcherStallEvent simulates a stalled KV watcher on the partition
 	// source bucket WITHOUT dropping the NATS connection. Implementation:
 	// repeatedly deletes the ephemeral JetStream consumers backing the
@@ -419,6 +441,16 @@ func (cc *ChaosController) generateEventParams(event ChaosEvent) map[string]any 
 		// Default target_worker "random" — handler picks a live worker.
 		params["target_worker"] = "random"
 
+	case LabelHeartbeatTakeoverEvent:
+		// Default target_worker "random" — handler picks the first live
+		// labeled worker. new_labels defaults to a distinct singleton set
+		// so a random-cadence fire still produces a genuine
+		// fingerprint mismatch against a typical labeled worker; scenarios
+		// (e.g. label_tight_takeover_churn.yaml) override both via the YAML
+		// scheduled_events params.
+		params["target_worker"] = "random"
+		params["new_labels"] = []string{"vip-takeover"}
+
 	case StableIDTinyPoolRespawnEvent:
 		// Default target_role "" — scenario-driven via InjectEventNow.
 		// The handler will look up the role's WorkerID* overrides from
@@ -590,6 +622,8 @@ func (e ChaosEvent) String() string {
 		return "Bucket Recreate"
 	case BucketPeerTakeoverEvent:
 		return "Bucket Peer Takeover"
+	case LabelHeartbeatTakeoverEvent:
+		return "Label Heartbeat Takeover (tight-takeover fingerprint-mismatch branch)"
 	case StableIDClaimStealEvent:
 		return "StableID Claim Steal (alias of bucket_peer_takeover)"
 	case StableIDTinyPoolRespawnEvent:

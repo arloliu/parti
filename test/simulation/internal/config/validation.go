@@ -120,6 +120,11 @@ func validateConfig(cfg *Config) error { //nolint:cyclop,gocyclo
 		}
 	}
 
+	// Validate label topology (labels/label_spill_grace/labeled_subsets).
+	if err := validateLabelConfig(cfg); err != nil {
+		return err
+	}
+
 	// Validate coordinator
 	if cfg.Coordinator.ValidationWindow <= 0 {
 		return errors.New("validation window must be positive")
@@ -187,6 +192,57 @@ func validateConfig(cfg *Config) error { //nolint:cyclop,gocyclo
 		}
 		if cfg.Checkpoint.Path == "" {
 			return errors.New("checkpoint path cannot be empty")
+		}
+	}
+
+	return nil
+}
+
+// validateLabelConfig validates label-related configuration fields:
+// workers.unlabeled_partition_policy, workers.label_spill_grace,
+// workers.labels worker-ID references, and partitions.labeled_subsets
+// ranges and overlaps.
+func validateLabelConfig(cfg *Config) error {
+	if cfg.Workers.UnlabeledPartitionPolicy != "" &&
+		cfg.Workers.UnlabeledPartitionPolicy != "dedicated" && cfg.Workers.UnlabeledPartitionPolicy != "shared" {
+		return fmt.Errorf("invalid workers.unlabeled_partition_policy: %s (must be dedicated or shared)",
+			cfg.Workers.UnlabeledPartitionPolicy)
+	}
+	if cfg.Workers.LabelSpillGrace < 0 {
+		return errors.New("workers.label_spill_grace cannot be negative")
+	}
+	for workerID := range cfg.Workers.Labels {
+		idx := -1
+		if _, err := fmt.Sscanf(workerID, "worker-%d", &idx); err != nil || idx < 0 || idx >= cfg.Workers.Count {
+			return fmt.Errorf("workers.labels references unknown worker ID %q (cluster has workers.count=%d)",
+				workerID, cfg.Workers.Count)
+		}
+	}
+	for _, s := range cfg.Partitions.LabeledSubsets {
+		if s.Label == "" {
+			return errors.New("partitions.labeled_subsets entry has empty label")
+		}
+		if s.Start < 0 || s.End <= s.Start {
+			return fmt.Errorf("partitions.labeled_subsets entry for label %q has invalid range [%d, %d)",
+				s.Label, s.Start, s.End)
+		}
+		if s.End > cfg.Partitions.Count {
+			return fmt.Errorf("partitions.labeled_subsets entry for label %q range [%d, %d) exceeds partitions.count=%d",
+				s.Label, s.Start, s.End, cfg.Partitions.Count)
+		}
+	}
+
+	// Check for overlapping ranges among LabeledSubsets.
+	for i := 0; i < len(cfg.Partitions.LabeledSubsets); i++ {
+		for j := i + 1; j < len(cfg.Partitions.LabeledSubsets); j++ {
+			s1 := cfg.Partitions.LabeledSubsets[i]
+			s2 := cfg.Partitions.LabeledSubsets[j]
+			// Ranges [s1.Start, s1.End) and [s2.Start, s2.End) overlap if
+			// NOT (s1.End <= s2.Start OR s2.End <= s1.Start).
+			if s1.End > s2.Start && s2.End > s1.Start {
+				return fmt.Errorf("partitions.labeled_subsets entries for labels %q [%d, %d) and %q [%d, %d) overlap",
+					s1.Label, s1.Start, s1.End, s2.Label, s2.Start, s2.End)
+			}
 		}
 	}
 
