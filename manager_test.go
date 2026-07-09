@@ -121,6 +121,55 @@ func TestNewManager_RequiredParameters(t *testing.T) {
 	})
 }
 
+// TestManager_WorkerLabels verifies that WorkerLabels returns the label set
+// resolved at construction, normalized (sorted, deduplicated) by
+// cfg.Validate via normalizeWorkerLabels. No live NATS connection is needed
+// for this construction path — mirrors TestNewManager_NilSafety's helper
+// pattern (mock source/strategy + an unconnected jetstream.JetStream).
+func TestManager_WorkerLabels(t *testing.T) {
+	t.Parallel()
+
+	cfg := DefaultConfig()
+	cfg.WorkerLabels = []string{"vip-b", "vip-a"} // deliberately unsorted input
+
+	conn := &nats.Conn{}
+	js, _ := jetstream.New(conn)
+	src := &mockSource{}
+	assignStrat := &mockStrategy{}
+
+	mgr, err := NewManager(&cfg, js, src, assignStrat)
+	require.NoError(t, err)
+	require.NotNil(t, mgr)
+
+	got := mgr.WorkerLabels()
+	want := []string{"vip-a", "vip-b"} // normalizeWorkerLabels sorts
+	require.Equal(t, want, got)
+}
+
+// TestManager_WorkerLabels_WithOptionOverride verifies that WithWorkerLabels
+// takes priority over Config.WorkerLabels when both are set, and that the
+// option's labels are independently normalized (sorted, deduplicated) before
+// being exposed through WorkerLabels.
+func TestManager_WorkerLabels_WithOptionOverride(t *testing.T) {
+	t.Parallel()
+
+	cfg := DefaultConfig()
+	cfg.WorkerLabels = []string{"other"} // must be overridden by the option
+
+	conn := &nats.Conn{}
+	js, _ := jetstream.New(conn)
+	src := &mockSource{}
+	assignStrat := &mockStrategy{}
+
+	mgr, err := NewManager(&cfg, js, src, assignStrat, WithWorkerLabels("vip-b", "vip-a"))
+	require.NoError(t, err)
+	require.NotNil(t, mgr)
+
+	got := mgr.WorkerLabels()
+	want := []string{"vip-a", "vip-b"} // normalizeWorkerLabels sorts the option's labels
+	require.Equal(t, want, got)
+}
+
 // TestManager_SetCapability_AtomicBitmask verifies that SetCapability correctly
 // sets and clears individual bits in the capability bitmask, and that Capabilities
 // reflects the live value after each mutation.
