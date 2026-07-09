@@ -30,6 +30,9 @@ required.
   — configure a worker's label set; the option overrides the config field
   when both are set. Validated, sorted, and deduplicated at construction
   time (charset rules matching partition keys, 64-byte cap, 16 labels max).
+- **`Manager.WorkerLabels()`** — returns this worker's resolved (sorted,
+  deduplicated) label set. Each call returns a fresh clone, so the caller
+  may freely mutate the result without affecting manager state.
 - **`Config.UnlabeledPartitionPolicy`** (yaml `unlabeledPartitionPolicy`,
   default `"dedicated"`) — `"dedicated"` routes unlabeled partitions to
   unlabeled workers only (falling back to all workers when none are live);
