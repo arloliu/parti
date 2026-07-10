@@ -25,6 +25,7 @@
     - [Worker labels](#worker-labels)
     - [Assignment policy (fleet-uniform)](#assignment-policy-fleet-uniform)
   - [The VIP promotion workflow](#the-vip-promotion-workflow)
+    - [Validating at your API boundary](#validating-at-your-api-boundary)
   - [Assignment flow](#assignment-flow)
     - [Leader: one rebalance pass](#leader-one-rebalance-pass)
     - [Worker: applying a commit](#worker-applying-a-commit)
@@ -38,6 +39,7 @@
     - [Deployment topology](#deployment-topology)
     - [Rolling updates](#rolling-updates)
   - [What operators see](#what-operators-see)
+    - [Label observability without a metrics pipeline](#label-observability-without-a-metrics-pipeline)
   - [Gotchas](#gotchas)
 
 ---
@@ -188,12 +190,29 @@ deployment; assignment *policy* is not.
 | Field | Default | Description |
 |---|---|---|
 | `UnlabeledPartitionPolicy` | `"dedicated"` | `"dedicated"`: unlabeled partitions go to unlabeled workers only, falling back to all workers when no unlabeled worker is live. `"shared"`: unlabeled partitions go to any worker, labeled or not. |
-| `LabelSpillGrace` | `60s` | How long a label's worker pool must be continuously empty before its partitions spill to the fallback ladder. `0` spills immediately. |
+| `LabelSpillGrace` | `60s` | How long a label's worker pool must be continuously empty before its partitions spill to the fallback ladder. See the note below for reaching immediate spill. |
 
 ```yaml
 unlabeledPartitionPolicy: dedicated
 labelSpillGrace: 60s
 ```
+
+**Immediate spill (`0`) is set via the option, not the config field.**
+`LabelSpillGrace` is a non-pointer duration with a `60s` default, so an explicit
+`labelSpillGrace: 0` cannot be told apart from the zero value and is re-defaulted
+back to `60s`. To spill on the first rebalance that finds a pool empty, pass the
+functional option, which preserves the difference between unset and `0`:
+
+```go
+mgr, err := parti.NewManager(cfg, js, src, strategy,
+    parti.WithLabelSpillGrace(0)) // 0 ⇒ immediate spill; wins over Config.LabelSpillGrace
+```
+
+The option overrides `Config.LabelSpillGrace` (mirroring `WithWorkerLabels` vs
+`Config.WorkerLabels`) and rejects a negative duration at `NewManager` with an
+error wrapping `types.ErrInvalidConfig`. Prefer a grace well below the class's
+latency SLO over `0` unless instant spill is genuinely wanted — see
+[Parking and spill](#parking-and-spill).
 
 With zero labels anywhere in the fleet (no labeled partitions, no labeled
 workers), the whole pipeline degenerates to today's single
@@ -210,24 +229,83 @@ In production the partition list normally lives in the `source.NatsKV`
 source (see [Strategies & Sources](STRATEGIES.md#natskv-source)). Promoting
 or demoting a partition is a **full-list rewrite** through the existing
 update path — there is no targeted "patch one partition's label" API.
-`source.NatsKV.Modify` does a CAS-fenced read-modify-write, which is the
-natural fit:
+`source.NatsKV.Modify` does a CAS-fenced read-modify-write, and
+`types.MergeLabels` computes the relabeled list — keyed on `Partition.ID()`, it
+sets, clears, or leaves each partition's label alone without disturbing keys or
+weight, and preserves every label the incoming intents don't mention (so a
+weight-only projection can't silently demote a pool — see
+[rollout rule #2](#rollout-rules)).
+
+Validate the intents at your API boundary **before** calling `Modify`.
+`Modify`'s closure has signature `func([]Partition) []Partition` — it cannot
+return an error, so a rejection (a typo'd id, or an ambiguous `ID()` collision)
+must be surfaced out here, against the current list, where it is a 400-class
+caller error rather than a silent no-op that still CAS-writes:
 
 ```go
 // kv obtained as in the NatsKV Source guide (docs/STRATEGIES.md).
 src := source.NewNatsKV(kv, "partitions", logger)
 
-// Promote "tenant-acme" to the vip pool.
-err := src.Modify(ctx, func(partitions []types.Partition) []types.Partition {
-    for i := range partitions {
-        if partitions[i].ID() == "tenant-acme" {
-            partitions[i].Label = "vip"
-        }
+// Promote "tenant-acme" to vip and demote "tenant-legacy" to unlabeled.
+vip := "vip"
+intents := map[string]*string{
+    "tenant-acme":   &vip, // set
+    "tenant-legacy": nil,  // clear (back to unlabeled)
+}
+
+// 1. Reject bad intents at the boundary, before any write.
+current, err := src.List(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+if _, unmatched, mErr := types.MergeLabels(current, intents); mErr != nil {
+    log.Fatalf("ambiguous relabel: %v", mErr) // ID() collision → 400
+} else if len(unmatched) > 0 {
+    log.Fatalf("unknown partition ids: %v", unmatched) // typo → 404
+}
+
+// 2. Apply under CAS. Modify re-reads the authoritative list, so MergeLabels
+//    runs again on it; step 1 already rejected bad intents, and the closure
+//    returns the list untouched on the rare in-flight structural change rather
+//    than writing a partial result.
+err = src.Modify(ctx, func(partitions []types.Partition) []types.Partition {
+    merged, _, mErr := types.MergeLabels(partitions, intents)
+    if mErr != nil {
+        return partitions // safety: never write a nil/partial list
     }
-    return partitions
+    return merged
 })
 if err != nil {
     log.Fatal(err)
+}
+```
+
+`MergeLabels` **fails closed** on an `ID()` collision: `ID()` dash-joins a
+partition's keys and is not collision-safe, so an intent that matches more than
+one partition returns an error rather than guessing which to relabel. It does
+**not** validate label values — pair it with `ValidateLabel` at your boundary
+(next section).
+
+### Validating at your API boundary
+
+If you accept relabel or partition-list edits from an operator API, validate the
+inputs at that boundary so a bad request returns an actionable `InvalidArgument`
+naming the offender, instead of surfacing as a generic error from deep inside a
+write. The rules have one home in `types`, so there is no drift risk from
+mirroring them:
+
+```go
+// Reject a bad label value before it reaches MergeLabels / the write path.
+if err := types.ValidateLabel(newLabel); err != nil {
+    return fmt.Errorf("invalid label %q: %w", newLabel, err) // 400 at your API
+}
+
+// Reject a malformed full-list write (dup ids, bad keys, bad labels) up front.
+// ValidatePartitions runs the exact per-partition Validate + CanonicalID dup
+// check the write performs, so the boundary check predicts what the write
+// rejects — including which index/id collided.
+if err := types.ValidatePartitions(next); err != nil {
+    return fmt.Errorf("invalid partition set: %w", err)
 }
 ```
 
@@ -660,6 +738,61 @@ Grep for these log lines when diagnosing a labeled deployment:
 | `startup: current alias assignment is for a different incarnation; waiting for a label-correct assignment` | Warn | Same guard, at startup, on the legacy-alias path. |
 | `initial assignment deferred pending label observation confirmation` | Info | The leader's first rebalance after startup saw a disruptive label observation and is waiting for the automatic second (confirming) observation before acting. |
 | `label recheck requested` | Debug | The leader's label re-check timer or a label-change signal woke the rebalance path (with a `reason` field). Useful for confirming the grace-expiry or confirmation timers are actually firing. |
+
+### Label observability without a metrics pipeline
+
+You don't need a Prometheus (or other) `MetricsCollector` to see label state. A
+small in-memory collector that embeds `types.NopMetrics` and overrides only the
+`LabelMetrics` methods gives you a live snapshot to read from your own health
+endpoint. `NopMetrics` supplies no-ops for every other `MetricsCollector`
+method, so this is all the code:
+
+```go
+// labelSnapshot exposes parked counts / pool sizes / spill totals over your
+// own /healthz.
+type labelSnapshot struct {
+    types.NopMetrics // no-ops for the entire MetricsCollector surface
+    mu     sync.Mutex
+    parked map[string]int // per-label parked partitions (gauge)
+    pool   map[string]int // per-label eligible workers (gauge)
+    spills map[string]int // per-label cumulative spill events (counter)
+}
+
+func newLabelSnapshot() *labelSnapshot {
+    return &labelSnapshot{
+        parked: map[string]int{}, pool: map[string]int{}, spills: map[string]int{},
+    }
+}
+
+// Override the LabelMetrics methods you care about. The gauges are recomputed
+// every rebalance, and an absent label is zeroed in the same pass, so the maps
+// never go stale; IncrementLabelSpill is a monotonic counter, so accumulate it.
+// Every override takes the lock because these methods are called from the
+// manager's internal goroutines while your health handler reads concurrently.
+func (s *labelSnapshot) RecordParkedPartitions(label string, count int) {
+    s.mu.Lock(); defer s.mu.Unlock()
+    s.parked[label] = count
+}
+func (s *labelSnapshot) RecordLabelPoolSize(label string, workers int) {
+    s.mu.Lock(); defer s.mu.Unlock()
+    s.pool[label] = workers
+}
+func (s *labelSnapshot) IncrementLabelSpill(label string) {
+    s.mu.Lock(); defer s.mu.Unlock()
+    s.spills[label]++
+}
+
+// Wire it in, then read s under its lock from your health handler.
+snap := newLabelSnapshot()
+mgr, err := parti.NewManager(cfg, js, src, strategy, parti.WithMetrics(snap))
+```
+
+**Leader-only caveat.** These gauges are computed by the leader's calculator, so
+a per-pod collector shows data **only on the pod that is currently leader**;
+every follower's snapshot stays empty, and a leader that steps down zeroes the
+gauges it was reporting. Point operators at the leader's endpoint (or aggregate
+across pods and read whichever is non-empty) — "are any `vip` partitions parked
+right now?" is only answerable on the leader.
 
 ## Gotchas
 
