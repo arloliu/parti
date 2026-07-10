@@ -21,7 +21,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version: '1.26'
 
       - name: Build Simulation
         run: go build -o tmp/simulation ./test/simulation/cmd/simulation
@@ -75,7 +75,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version: '1.26'
       - name: Build Simulation
         run: go build -o tmp/simulation ./test/simulation/cmd/simulation
       - name: Run Network-Disconnect Simulation
@@ -124,7 +124,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version: '1.26'
       - name: Build Simulation
         run: go build -o tmp/simulation ./test/simulation/cmd/simulation
       - name: Run RoundRobin Chaos Simulation
@@ -173,7 +173,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version: '1.26'
       - name: Build Simulation
         run: go build -o tmp/simulation ./test/simulation/cmd/simulation
       - name: Run Gate-On Chaos Simulation
@@ -237,7 +237,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version: '1.26'
       - name: Build Simulation
         run: go build -o tmp/simulation ./test/simulation/cmd/simulation
       - name: Run Bucket Lifecycle Scenarios
@@ -274,7 +274,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version: '1.26'
       - name: Build Simulation
         run: go build -o tmp/simulation ./test/simulation/cmd/simulation
       - name: Run NATSKV Source Scenarios
@@ -310,7 +310,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version: '1.26'
       - name: Build Simulation
         run: go build -o tmp/simulation ./test/simulation/cmd/simulation
       - name: Run Claim-Loss & Long-Disconnect Scenarios
@@ -347,7 +347,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version: '1.26'
       - name: Build Simulation
         run: go build -o tmp/simulation ./test/simulation/cmd/simulation
       - name: Run Publisher & Handoff Scenarios
@@ -386,7 +386,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version: '1.26'
       - name: Build Simulation
         run: go build -o tmp/simulation ./test/simulation/cmd/simulation
       - name: Run Process-Mode Scenarios
@@ -423,7 +423,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version: '1.26'
       - name: Build Simulation
         run: go build -o tmp/simulation ./test/simulation/cmd/simulation
       - name: Run Storage & Burst Scenarios
@@ -482,7 +482,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version: '1.26'
       - name: Build Simulation
         run: go build -race -o tmp/simulation ./test/simulation/cmd/simulation
       - name: Run Label Assignment Scenarios

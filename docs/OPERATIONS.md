@@ -27,7 +27,7 @@
 
 | Component     | Requirement                          |
 |---------------|--------------------------------------|
-| Go            | 1.25 or later                        |
+| Go            | 1.26 or later                        |
 | NATS Server   | 2.10.0+ (2.12+ recommended at scale) |
 | Memory        | 50-100 MB per worker (typical)       |
 | Network       | Low-latency connection to NATS       |

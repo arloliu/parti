@@ -91,7 +91,7 @@ See [Architecture Guide](ARCHITECTURE.md) for detailed documentation.
 
 ### Prerequisites
 
-- **Go**: Version 1.25 or later
+- **Go**: Version 1.26 or later
 - **NATS Server**: Version 2.10.0+ with JetStream enabled (2.12+ recommended for large fleets — async metacontroller snapshots keep snapshot cost off the critical path)
 
 ### Installation

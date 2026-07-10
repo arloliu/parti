@@ -2186,5 +2186,5 @@ if err != nil {
 
 ### Go Version
 
-- Minimum: Go 1.25+
+- Minimum: Go 1.26+
 - Recommended: Latest stable Go version
