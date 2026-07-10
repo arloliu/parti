@@ -55,16 +55,31 @@ func (p Partition) Validate() error {
 		}
 	}
 
-	if p.Label != "" {
-		if len(p.Label) > 64 {
-			return fmt.Errorf("partition label exceeds 64 bytes: %q", p.Label)
-		}
-		if strings.Contains(p.Label, ".") {
-			return fmt.Errorf("partition label contains invalid character '.': %q", p.Label)
-		}
-		if strings.ContainsAny(p.Label, " \t\n\r") {
-			return fmt.Errorf("partition label contains whitespace: %q", p.Label)
-		}
+	return ValidateLabel(p.Label)
+}
+
+// ValidateLabel reports whether s is a valid partition or worker label,
+// returning a descriptive error when it is not. The empty string is valid (an
+// unlabeled partition); callers that forbid empty labels — such as the
+// worker-label set — must reject "" themselves before delegating here.
+//
+// Rules: at most 64 bytes, no '.', and no ASCII whitespace (" \t\n\r"). The
+// 64-byte limit is a byte length, not a rune count, matching the partition-key
+// rules; a multi-byte rune counts as its encoded byte length.
+//
+// ValidateLabel is the single home for the label charset/length rules:
+// Partition.Validate and the worker-label normalizer both delegate to it, so a
+// consumer can validate a label at its own API boundary with zero risk of the
+// rules drifting from the library.
+func ValidateLabel(s string) error {
+	if len(s) > 64 {
+		return fmt.Errorf("label exceeds 64 bytes: %q", s)
+	}
+	if strings.Contains(s, ".") {
+		return fmt.Errorf("label contains invalid character '.': %q", s)
+	}
+	if strings.ContainsAny(s, " \t\n\r") {
+		return fmt.Errorf("label contains whitespace: %q", s)
 	}
 
 	return nil

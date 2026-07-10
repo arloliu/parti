@@ -43,6 +43,50 @@ func TestPartitionLabel_Validate(t *testing.T) {
 	require.NoError(t, valid(strings.Repeat("x", 64)), "exactly 64 bytes ok")
 }
 
+func TestValidateLabel(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		label   string
+		wantErr bool
+	}{
+		{"empty is valid", "", false},
+		{"simple", "vip", false},
+		{"charset ok", "gpu-batch_2", false},
+		{"exactly 64 bytes", strings.Repeat("x", 64), false},
+		{"over 64 bytes", strings.Repeat("x", 65), true},
+		{"multibyte over 64 bytes", strings.Repeat("é", 33), true}, // 66 bytes, 33 runes
+		{"dot", "a.b", true},
+		{"space", "a b", true},
+		{"tab", "a\tb", true},
+		{"newline", "a\nb", true},
+		{"carriage return", "a\rb", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := types.ValidateLabel(tt.label)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+
+	// Partition.Validate delegates its label rules to ValidateLabel: a label
+	// that ValidateLabel rejects must also fail Partition.Validate, and the
+	// surfaced error must be the shared ValidateLabel error verbatim.
+	for _, bad := range []string{"a.b", "a b", strings.Repeat("x", 65)} {
+		want := types.ValidateLabel(bad)
+		require.Error(t, want)
+		got := types.Partition{Keys: []string{"k"}, Label: bad}.Validate()
+		require.EqualError(t, got, want.Error(),
+			"Partition.Validate must surface the ValidateLabel error for %q", bad)
+	}
+}
+
 func TestPartitionLabel_JSONRoundTrip(t *testing.T) {
 	t.Parallel()
 
