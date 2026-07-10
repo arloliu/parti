@@ -4,10 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/arloliu/fuda"
+	"github.com/arloliu/parti/v2/types"
 	"github.com/go-playground/validator/v10"
 )
 
@@ -639,14 +639,8 @@ func normalizeWorkerLabels(labels []string) ([]string, error) {
 		if l == "" {
 			return nil, errors.New("worker label cannot be empty")
 		}
-		if len(l) > 64 {
-			return nil, fmt.Errorf("worker label exceeds 64 bytes: %q", l)
-		}
-		if strings.Contains(l, ".") {
-			return nil, fmt.Errorf("worker label contains invalid character '.': %q", l)
-		}
-		if strings.ContainsAny(l, " \t\n\r") {
-			return nil, fmt.Errorf("worker label contains whitespace: %q", l)
+		if err := types.ValidateLabel(l); err != nil {
+			return nil, err
 		}
 		if _, dup := seen[l]; dup {
 			continue

@@ -1,11 +1,39 @@
 package parti
 
 import (
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/arloliu/parti/v2/types"
 	"github.com/stretchr/testify/require"
 )
+
+// TestWorkerAndPartitionLabelRulesAgree guards against the charset/length
+// rules drifting between Partition.Validate and normalizeWorkerLabels now that
+// both delegate to types.ValidateLabel. Every non-empty label that one path
+// rejects, the other must reject too (the empty string is excluded: it is
+// valid for a partition but forbidden for a worker label).
+func TestWorkerAndPartitionLabelRulesAgree(t *testing.T) {
+	t.Parallel()
+
+	cases := []string{
+		"vip",                   // valid on both
+		"gpu-batch_2",           // valid on both
+		"a.b",                   // dot
+		"a b",                   // space
+		"a\tb",                  // tab
+		strings.Repeat("x", 64), // exactly at cap, valid
+		strings.Repeat("x", 65), // over cap
+	}
+	for _, label := range cases {
+		partErr := types.Partition{Keys: []string{"k"}, Label: label}.Validate()
+		_, workerErr := normalizeWorkerLabels([]string{label})
+		require.Equal(t, partErr != nil, workerErr != nil,
+			"partition and worker label validity must agree for %q (partErr=%v workerErr=%v)",
+			label, partErr, workerErr)
+	}
+}
 
 func TestConfig_WorkerLabelsNormalization(t *testing.T) {
 	t.Parallel()
