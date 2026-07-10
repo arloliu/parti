@@ -11,6 +11,7 @@ every task, then read the files whose triggers match the work.
 - Add `700` only for hot paths, external input, credentials, auth, or network-facing code.
 - Add `800` only for non-trivial design, plan, or review-loop work.
 - Add `850` when sequencing a plan or implementation review loop (which reviewer to dispatch, when to stop, how to handle findings).
+- Add `900` when changing how errors are wrapped/classified/routed or when touching `Manager.Start`.
 - For tiny documentation-only edits, `000` plus the relevant docs or workflow rule is enough.
 
 ## Always
@@ -41,5 +42,8 @@ every task, then read the files whose triggers match the work.
 ## Before Plan, Design, or Review-Loop Work
 - **[800-design-and-review-loops.md](800-design-and-review-loops.md)** — Invariants, path enumeration, atomicity, review-loop discipline (how to think during a round).
 - **[850-review-loop-workflow.md](850-review-loop-workflow.md)** — Canonical reviewer sequence, stopping conditions, between-round triage, stage escalation (how to sequence the rounds).
+
+## Before Error-Classification or Manager.Start Changes
+- **[900-cross-feature-contracts.md](900-cross-feature-contracts.md)** — Load-bearing contracts (bucket-loss degrade, claim-takeover routing, OnDegraded once-per-entry, async Start) with the regression tests that pin them.
 
 For broad or ambiguous tasks, read all rule files before editing.

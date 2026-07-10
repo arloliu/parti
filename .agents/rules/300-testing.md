@@ -41,6 +41,22 @@ func TestOneThing(t *testing.T) {
 }
 ```
 
+## Concurrency Stress Tests for Monitor Goroutines
+When adding a monitor goroutine on a ticker (e.g. `monitorBucketEpochs`,
+`monitorAssignmentChanges`, source `reconciler`, envelope retry loops), add a
+focused concurrency stress test under `test/integration/<package>/`:
+
+- Start a small real cluster (embedded NATS, 2-3 worker managers).
+- Configure the monitor at aggressive cadence (e.g. `OperationTimeout=10ms`).
+- Drive concurrent KV traffic against the buckets the monitor probes for ~5s.
+- Assert no race-detector triggers (`go test -race ...`).
+
+Rationale: unit tests exercise the monitor in isolation and cannot surface races
+between it and production paths that share nats.go's cached `*stream` state — a
+green unit suite has passed while the live-cluster suite tripped `-race`. Use
+`test/integration/manager/manager_epoch_monitor_concurrency_test.go` as the
+template.
+
 ## Running Tests
 Use the `Makefile` targets listed in
 [500-validation-and-workflow.md](500-validation-and-workflow.md). Common gates
