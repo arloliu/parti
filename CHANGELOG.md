@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v2.9.1] - 2026-07-10
+
+Label follow-up APIs that remove the workaround code label consumers were
+writing against v2.9.0: a validator so callers can reject a bad label at their
+own API boundary, a label-preserving write primitive, a batch validator, an
+embeddable no-op metrics base, and a way to actually reach immediate spill. All
+additive except one intentional error-text change (below); with zero labels
+anywhere in the fleet, assignment output is unchanged from every prior release.
+
+### Added
+
+- **`types.ValidateLabel(s string) error`** — validates a single partition or
+  worker label against the library's own rules (at most 64 bytes, no `.`, no
+  ASCII whitespace; the empty string is valid). `Partition.Validate` and the
+  worker-label normalizer now delegate to it, so a consumer can validate a label
+  at its own API boundary with zero risk of the rules drifting.
+- **`types.ValidatePartitions(ps []types.Partition) error`** — runs the exact
+  per-partition `Validate` plus `CanonicalID` duplicate check the `source.NatsKV`
+  write path performs (same first-error order and messages), so a consumer can
+  reject a malformed batch at its boundary with a precise message instead of a
+  generic error from inside a write.
+- **`types.MergeLabels(current, intents) ([]types.Partition, []string, error)`**
+  — a label-preserving write primitive keyed on `Partition.ID()`: a `nil` intent
+  clears a label, a non-`nil` intent sets it, an absent id is left unchanged, and
+  every unmentioned label is preserved. Hand the result to `source.Modify`
+  instead of hand-rolling an inherit/set/clear CAS closure. Returns the unmatched
+  ids (so a caller can reject a typo'd id) and **fails closed** on an `ID()`
+  collision rather than guessing which partition to relabel.
+- **`types.NopMetrics`** — an exported composite no-op satisfying the full
+  `types.MetricsCollector` and its optional `types.LabelMetrics` extension. Embed
+  it and override only the methods you care about (e.g. the label gauges for a
+  health endpoint) instead of stubbing the whole eight-interface surface.
+- **`parti.WithLabelSpillGrace(d time.Duration)`** — overrides
+  `Config.LabelSpillGrace`, and is the only way to reach immediate spill
+  (`d == 0`): the non-pointer config field silently re-defaults an explicit `0`
+  to `60s`. The option wins over the config field (mirroring `WithWorkerLabels`)
+  and rejects a negative duration at `NewManager` with an error wrapping
+  `types.ErrInvalidConfig`.
+
+### Changed
+
+- **Label validation error text is now uniform.** The partition-label and
+  worker-label validators previously produced different messages (`partition
+  label ...` vs `worker label ...`); both now surface `types.ValidateLabel`'s
+  canonical `label ...` wording. This is an error-**text** change only — no API
+  or behavior change, no change to which labels are accepted or rejected. Code
+  that matched on the old per-caller prefixes should match on the shared text.
+
+### Docs
+
+- `docs/LABELS.md`: the VIP promotion workflow now uses `MergeLabels`; a new
+  "Validating at your API boundary" note covers `ValidateLabel` /
+  `ValidatePartitions`; a "Label observability without a metrics pipeline"
+  subsection shows an in-memory collector embedding `types.NopMetrics` with the
+  leader-only caveat spelled out; and the spill-grace section documents reaching
+  immediate spill via `WithLabelSpillGrace`.
+
 ## [v2.9.0] - 2026-07-08
 
 Label-based partition assignment: pin a subset of partitions to a dedicated
