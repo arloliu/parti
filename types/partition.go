@@ -85,6 +85,36 @@ func ValidateLabel(s string) error {
 	return nil
 }
 
+// ValidatePartitions checks a whole partition set the way the NatsKV write path
+// does, returning the first problem found so a caller can reject a malformed
+// batch at its own API boundary — with a precise message naming the offending
+// index and colliding id — instead of letting it surface as a generic error
+// from deep inside a write.
+//
+// It makes a single left-to-right pass: at each index it runs Partition.Validate
+// and then checks that partition's CanonicalID against the ids already seen. The
+// order matters — an earlier duplicate outranks a later invalid partition — and
+// it mirrors the write path byte for byte, so the boundary check predicts
+// exactly what the write will reject. Duplicate detection keys on CanonicalID
+// (not ID), because that is what the write path dedupes on.
+//
+// ValidatePartitions neither mutates nor dedupes ps; it only validates.
+func ValidatePartitions(ps []Partition) error {
+	seen := make(map[string]struct{}, len(ps))
+	for i, p := range ps {
+		if err := p.Validate(); err != nil {
+			return fmt.Errorf("invalid partition at index %d: %w", i, err)
+		}
+		cid := p.CanonicalID()
+		if _, dup := seen[cid]; dup {
+			return fmt.Errorf("duplicate partition at index %d (canonical_id=%q)", i, cid)
+		}
+		seen[cid] = struct{}{}
+	}
+
+	return nil
+}
+
 // SubjectKey returns the canonical subject identifier for the partition formed by
 // joining the Keys with a dot ("."). This is used for subject templating and
 // JetStream FilterSubjects construction.

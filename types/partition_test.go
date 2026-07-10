@@ -205,6 +205,111 @@ func BenchmarkPartitionHashID(b *testing.B) {
 }
 
 // BenchmarkPartitionIDJoinHash measures strings.Join then HashString for comparison.
+func TestValidatePartitions(t *testing.T) {
+	t.Parallel()
+
+	t.Run("valid set", func(t *testing.T) {
+		t.Parallel()
+		ps := []Partition{
+			{Keys: []string{"a"}},
+			{Keys: []string{"b"}, Label: "vip"},
+			{Keys: []string{"c", "d"}},
+		}
+		require.NoError(t, ValidatePartitions(ps))
+	})
+
+	t.Run("empty and nil", func(t *testing.T) {
+		t.Parallel()
+		require.NoError(t, ValidatePartitions(nil))
+		require.NoError(t, ValidatePartitions([]Partition{}))
+	})
+
+	t.Run("invalid partition names index", func(t *testing.T) {
+		t.Parallel()
+		ps := []Partition{
+			{Keys: []string{"ok"}},
+			{Keys: []string{"bad.key"}},
+		}
+		err := ValidatePartitions(ps)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "invalid partition at index 1")
+	})
+
+	t.Run("empty-key partition", func(t *testing.T) {
+		t.Parallel()
+		err := ValidatePartitions([]Partition{{Keys: nil}})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "invalid partition at index 0")
+	})
+
+	t.Run("bad label delegates to ValidateLabel", func(t *testing.T) {
+		t.Parallel()
+		err := ValidatePartitions([]Partition{{Keys: []string{"a"}, Label: "has space"}})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "invalid partition at index 0")
+		require.Contains(t, err.Error(), "label contains whitespace")
+	})
+
+	t.Run("duplicate CanonicalID names the id", func(t *testing.T) {
+		t.Parallel()
+		ps := []Partition{
+			{Keys: []string{"a"}},
+			{Keys: []string{"a"}}, // same CanonicalID
+		}
+		err := ValidatePartitions(ps)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "duplicate partition at index 1")
+		require.Contains(t, err.Error(), ps[0].CanonicalID())
+	})
+
+	t.Run("dedupe keys on CanonicalID not ID", func(t *testing.T) {
+		t.Parallel()
+		// The ID()-collision pair ("a-b-c" both) has distinct CanonicalIDs, so
+		// it is NOT a duplicate: ValidatePartitions must accept it, matching the
+		// write path's CanonicalID dedupe.
+		ps := []Partition{
+			{Keys: []string{"a-b", "c"}},
+			{Keys: []string{"a", "b-c"}},
+		}
+		require.Equal(t, ps[0].ID(), ps[1].ID())
+		require.NoError(t, ValidatePartitions(ps))
+	})
+
+	t.Run("mixed failure: earlier duplicate outranks later invalid", func(t *testing.T) {
+		t.Parallel()
+		// index 0 valid, index 1 duplicates it, index 2 is invalid. The single
+		// left-to-right pass must return the duplicate at index 1 and never
+		// reach the invalid at index 2. A two-pass (validate-all-then-detect)
+		// shape would flip this to the index-2 invalid error.
+		ps := []Partition{
+			{Keys: []string{"a"}},
+			{Keys: []string{"a"}},       // duplicate at index 1
+			{Keys: []string{"bad.key"}}, // invalid at index 2
+		}
+		err := ValidatePartitions(ps)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "duplicate partition at index 1")
+		require.NotContains(t, err.Error(), "index 2")
+	})
+
+	t.Run("same index: Validate runs before the duplicate check", func(t *testing.T) {
+		t.Parallel()
+		// index 1 has the same CanonicalID as index 0 (labels are ID-blind) AND
+		// an invalid label. The single pass must run Validate() first at index 1
+		// and report the invalid label, not the duplicate — pinning per-index
+		// ordering, not just cross-index ordering.
+		ps := []Partition{
+			{Keys: []string{"a"}},
+			{Keys: []string{"a"}, Label: "bad label"}, // dup CanonicalID + invalid label
+		}
+		err := ValidatePartitions(ps)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "invalid partition at index 1")
+		require.Contains(t, err.Error(), "label contains whitespace")
+		require.NotContains(t, err.Error(), "duplicate")
+	})
+}
+
 func BenchmarkPartitionIDJoinHash(b *testing.B) {
 	parts := []Partition{
 		{Keys: []string{"topic", "p", "0"}},

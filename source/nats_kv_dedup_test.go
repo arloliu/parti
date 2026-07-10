@@ -12,6 +12,39 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestValidateAndDedupe_ErrorSurface is a golden-diff of the write path's
+// validation error strings. validateAndDedupe now delegates to
+// types.ValidatePartitions; these assertions pin the exact messages a caller
+// of Update/Modify sees so the delegation cannot silently change the surface.
+func TestValidateAndDedupe_ErrorSurface(t *testing.T) {
+	t.Parallel()
+
+	t.Run("valid set deep-copies keys", func(t *testing.T) {
+		t.Parallel()
+		in := []types.Partition{{Keys: []string{"a"}, Weight: 3, Label: "vip"}}
+		out, err := validateAndDedupe(in)
+		require.NoError(t, err)
+		require.Len(t, out, 1)
+		require.Equal(t, in[0], out[0])
+		// Mutating the input Keys must not affect the returned copy.
+		in[0].Keys[0] = "mutated"
+		require.Equal(t, "a", out[0].Keys[0], "returned Keys must not alias the input")
+	})
+
+	t.Run("invalid partition", func(t *testing.T) {
+		t.Parallel()
+		_, err := validateAndDedupe([]types.Partition{{Keys: []string{"ok"}}, {Keys: []string{"bad.key"}}})
+		require.EqualError(t, err,
+			`invalid partition at index 1: partition key at index 0 contains invalid character '.' (dots are reserved separators): "bad.key"`)
+	})
+
+	t.Run("duplicate CanonicalID", func(t *testing.T) {
+		t.Parallel()
+		_, err := validateAndDedupe([]types.Partition{{Keys: []string{"same"}}, {Keys: []string{"same"}}})
+		require.EqualError(t, err, `duplicate partition at index 1 (canonical_id="4:same")`)
+	})
+}
+
 // TestNatsKV_Watch_StaleEventIgnored is a deterministic reproducer for the
 // CI flake in TestNatsKV_Watch_Deduplication: under load, a watcher event
 // for an earlier KV revision can drain from watcher.Updates() *after* a
