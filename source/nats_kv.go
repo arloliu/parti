@@ -1310,22 +1310,21 @@ func partitionsEqual(a, b []types.Partition) bool {
 // alias the returned data — this protects the encode→KV-write window against
 // concurrent caller mutations.
 func validateAndDedupe(partitions []types.Partition) ([]types.Partition, error) {
-	seen := make(map[string]struct{}, len(partitions))
-	result := make([]types.Partition, 0, len(partitions))
+	// types.ValidatePartitions runs the exact per-partition Validate + CanonicalID
+	// duplicate check (same first-error order and message strings) that this
+	// function used inline, so callers see an identical error surface.
+	if err := types.ValidatePartitions(partitions); err != nil {
+		return nil, err
+	}
+
+	// The set is now known valid and duplicate-free; deep-copy each partition's
+	// Keys so callers cannot alias the returned data during the encode→write window.
+	result := make([]types.Partition, len(partitions))
 	for i, p := range partitions {
-		if err := p.Validate(); err != nil {
-			return nil, fmt.Errorf("invalid partition at index %d: %w", i, err)
-		}
-		cid := p.CanonicalID()
-		if _, dup := seen[cid]; dup {
-			return nil, fmt.Errorf("duplicate partition at index %d (canonical_id=%q)", i, cid)
-		}
-		seen[cid] = struct{}{}
-		// Deep-copy Keys to protect the encode→write window against caller mutation.
 		cp := p // struct-value copy preserves Weight, Label, and future fields
 		cp.Keys = make([]string, len(p.Keys))
 		copy(cp.Keys, p.Keys)
-		result = append(result, cp)
+		result[i] = cp
 	}
 
 	return result, nil
