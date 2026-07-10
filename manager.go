@@ -436,6 +436,20 @@ func NewManager(cfg *Config, js jetstream.JetStream, source PartitionSource, str
 		opt(options)
 	}
 
+	// WithLabelSpillGrace overrides Config.LabelSpillGrace (already defaulted by
+	// SetDefaults above). Applied here — after the options loop, before cfg is
+	// copied into the Manager — so the copy carries the override, and so an
+	// explicit 0 (immediate spill) survives instead of being re-defaulted to
+	// 60s. The negative guard mirrors the config field's gte=0 validation, which
+	// the option path bypasses because Option cannot return an error.
+	if options.labelSpillGrace != nil {
+		if *options.labelSpillGrace < 0 {
+			return nil, fmt.Errorf("WithLabelSpillGrace: %w: must be >= 0, got %s",
+				types.ErrInvalidConfig, *options.labelSpillGrace)
+		}
+		cfg.LabelSpillGrace = *options.labelSpillGrace // may be 0 ⇒ immediate spill
+	}
+
 	metricsCollector := options.metrics
 	if metricsCollector == nil {
 		metricsCollector = metrics.NewNop()

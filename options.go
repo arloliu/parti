@@ -1,6 +1,9 @@
 package parti
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Option configures a Manager with optional dependencies.
 type Option func(*managerOptions)
@@ -20,6 +23,13 @@ type managerOptions struct {
 	// NewManager, because Option cannot return an error.
 	workerLabels    []string
 	workerLabelsSet bool
+
+	// labelSpillGrace carries the value supplied via WithLabelSpillGrace. A nil
+	// pointer means "unset" (use Config.LabelSpillGrace / the 60s default); a
+	// non-nil pointer overrides it, including an explicit 0 that the config
+	// field cannot express. Validated in NewManager, because Option cannot
+	// return an error.
+	labelSpillGrace *time.Duration
 }
 
 // WithElectionAgent sets a custom election agent.
@@ -124,6 +134,32 @@ func WithWorkerLabels(labels ...string) Option {
 	return func(o *managerOptions) {
 		o.workerLabels = labels
 		o.workerLabelsSet = true
+	}
+}
+
+// WithLabelSpillGrace sets how long a label's worker pool must be continuously
+// empty before its partitions spill to unlabeled fallback workers, overriding
+// Config.LabelSpillGrace.
+//
+// Use this to reach an immediate spill (d == 0): Config.LabelSpillGrace is a
+// non-pointer duration with a 60s default, so an explicit 0 in the config is
+// silently re-defaulted to 60s and cannot be configured. This option preserves
+// the difference between "unset" and "0", so WithLabelSpillGrace(0) yields a
+// grace of 0 (spill on the first rebalance that finds the pool empty).
+//
+// The option wins over Config.LabelSpillGrace, mirroring the WithWorkerLabels
+// vs Config.WorkerLabels precedence. A negative duration causes NewManager to
+// return an error wrapping types.ErrInvalidConfig, matching the config field's
+// gte=0 rule.
+//
+// Parameters:
+//   - d: Spill grace duration (>= 0; 0 means immediate spill)
+//
+// Returns:
+//   - Option: Functional option for NewManager
+func WithLabelSpillGrace(d time.Duration) Option {
+	return func(o *managerOptions) {
+		o.labelSpillGrace = &d
 	}
 }
 

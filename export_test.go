@@ -1,8 +1,18 @@
 package parti
 
 import (
+	"time"
+
 	"github.com/arloliu/parti/v2/internal/assignment"
 )
+
+// LabelSpillGraceForTest returns the Manager's resolved (post-option) copy of
+// Config.LabelSpillGrace — the value startCalculator passes to the calculator.
+// Exposed via export_test.go so cross-package tests can assert the
+// WithLabelSpillGrace override without making the config copy public.
+func LabelSpillGraceForTest(m *Manager) time.Duration {
+	return m.cfg.LabelSpillGrace
+}
 
 // CalculatorForTest returns the Manager's internal *assignment.Calculator
 // when one is wired (i.e., the manager is the leader and startCalculator
