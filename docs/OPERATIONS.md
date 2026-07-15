@@ -1003,6 +1003,79 @@ cfg := &parti.Config{
 
 See [Configuration Guide](CONFIGURATION.md) for all options.
 
+### Source Reconcile Cadence (Leadership Probe)
+
+**Default:** off. Without a probe, `source.NatsKV`'s reconcile loop polls at
+the fixed `WithReconcileInterval` cadence (default 30s) — on every worker,
+leader and followers alike.
+
+Every worker running the `NatsKV` source runs its own reconcile loop, and
+each tick fetches the full partition table from KV. On a `W`-worker fleet
+that's `W` KV fetches per interval, and the traffic scales with fleet size,
+not with how often the partition table actually changes.
+`source.WithLeadershipProbe(fn func() bool)` splits the cadence: the
+**leader** stays on the fast 30s tick (it's what feeds rebalancing), and
+**followers** drop to a 5min tick. That's roughly a 10x cut in steady-state
+reconcile-read traffic for `W-1` of `W` workers. Wire it on any multi-worker
+fleet using the `NatsKV` source — the larger `W` is, the more it saves.
+
+#### Wiring: the construction-order trap
+
+`source.NewNatsKV` is called before `parti.NewManager` — the source is an
+argument to `NewManager`, so it must already exist. That means the probe
+closure can't reference the `*parti.Manager` it needs to call `IsLeader()`
+on, because the `Manager` doesn't exist yet at the point the closure is
+written. Resolve it with a late-bound variable: declare `mgr` first, close
+over the pointer, and assign it after `NewManager` returns.
+
+```go
+// mgr doesn't exist yet, but the probe closure needs to read it once it
+// does. Declare it up front and close over the pointer.
+var mgr *parti.Manager
+
+src := source.NewNatsKV(kv, "partitions", logger,
+    source.WithLeadershipProbe(func() bool {
+        return mgr != nil && mgr.IsLeader()
+    }),
+)
+
+var err error
+mgr, err = parti.NewManager(cfg, js, src, hashStrategy)
+if err != nil {
+    log.Fatal(err)
+}
+
+if err := mgr.Start(ctx); err != nil {
+    log.Fatal(err)
+}
+```
+
+The `mgr != nil` guard is defensive: in the standard `NewManager` →
+`mgr.Start(ctx)` sequence above, `mgr` is already assigned by the time
+`Start` runs the reconcile loop (`source.Start` is called from inside
+`Manager.Start`, not from `NewManager`), so the probe never actually
+observes a nil `mgr`. Keep the guard anyway — it's what protects a custom
+setup that starts the source through some other path before the `Manager`
+is assigned.
+
+#### Behavior notes
+
+- `fn` is called on **every** reconcile tick, from the reconcile goroutine —
+  it must be **goroutine-safe** and **cheap** (`Manager.IsLeader()` is a
+  lock-free bool read, which is why it's a good fit).
+- A `nil` probe (the default — just omit the option) keeps the fixed
+  `WithReconcileInterval` cadence for every worker.
+- If both `WithLeadershipProbe` and `WithReconcileInterval` are set, the
+  probe wins: `WithReconcileInterval` is ignored once a probe is set.
+
+#### What to expect
+
+There's no dedicated Parti metric or log line for the active reconcile
+interval. Confirm the split is working by watching KV request volume against
+the partitions bucket from the NATS side (`nats server report jetstream` or
+your monitoring endpoint, see [Debug Commands](#debug-commands)) — follower
+fetch rate should drop from ~1/30s to ~1/5min per worker shortly after
+election settles, while the leader stays on the fast cadence.
 
 ---
 
