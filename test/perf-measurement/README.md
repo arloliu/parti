@@ -216,9 +216,12 @@ scripts/capture-iostat.sh \
 
 ### capture-jsz.sh (NATS server stats, 3c)
 
-Polls `/jsz?streams=true&consumers=true` and `/varz` for each NATS
-monitoring endpoint every 5 seconds. Requires `curl` and `jq`. Aborts
-immediately on any curl failure.
+Polls `/jsz?streams=true` (deliberately NOT `consumers=true` — per-consumer
+detail blows the curl timeout at scale; see the script header) and `/varz`
+for each NATS monitoring endpoint every 5 seconds. Requires `curl` and `jq`.
+A failed poll is logged and skipped; the capture exits non-zero only if
+every `/jsz` poll failed. Opt-in per-consumer/raft detail from the
+meta-leader is available via `--jsz-detail` (written to `<output>.detail`).
 
 Output format (ndjson, one object per line):
 ```json
