@@ -288,6 +288,140 @@ func TestWorkerMonitor_GetHeartbeatsFor(t *testing.T) {
 	require.Len(t, errs, 2)
 }
 
+// TestWorkerMonitor_GetHeartbeats_PerKeyGetBoundedByPassDeadline is the bug
+// reproducer: GetHeartbeats' per-key Get must be bounded by the pass
+// deadline (opCtx) — the same bound that already guards the Keys() scan —
+// not by the raw, longer-lived caller ctx (1s here vs opCtx's ~100ms).
+//
+// The primary assertion is order-robust and free of wall-clock arithmetic:
+// the ctx deadline the fake observed on its Get call must be STRICTLY
+// earlier than the outer ctx's own deadline. Pre-fix code passed the raw
+// caller ctx through to Get, so the observed deadline would EQUAL the
+// outer one — the strict inequality is exactly the bug signal, with no
+// scheduler sensitivity. A single key whose Get blocks until the pass
+// deadline expires is a whole-pass abort: GetHeartbeats must return a
+// wrapped context.DeadlineExceeded rather than silently swallowing the
+// trailing-key timeout.
+func TestWorkerMonitor_GetHeartbeats_PerKeyGetBoundedByPassDeadline(t *testing.T) {
+	t.Parallel()
+
+	kv := &fakeKV{keys: []string{"worker.w1"}, getBlocking: true}
+	fakeTTL := 200 * time.Millisecond // opCtx deadline = hbTTL/2 = 100ms
+	monitor := NewWorkerMonitor(kv, "worker", fakeTTL, nil, logging.NewNop())
+
+	// Outer ctx deadline (1s) is deliberately far above the pass deadline
+	// (~100ms) so a Get bound to the wrong context is distinguishable.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	outerDeadline, ok := ctx.Deadline()
+	require.True(t, ok, "outer ctx must carry a deadline for the comparison below")
+
+	_, err := monitor.GetHeartbeats(ctx)
+
+	require.Error(t, err,
+		"a trailing per-key timeout must abort the whole pass, not be swallowed")
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	deadlines := kv.GetDeadlines()
+	require.Len(t, deadlines, 1, "exactly one Get call for the single key")
+	require.False(t, deadlines[0].IsZero(), "the ctx passed to Get must carry a deadline")
+
+	// Order-robust primary signal: the pass-bounded opCtx deadline is
+	// strictly earlier than the outer ctx's. A Get handed the raw caller
+	// ctx would observe a deadline EQUAL to outerDeadline.
+	require.True(t, deadlines[0].Before(outerDeadline),
+		"Get's ctx deadline (%v) must be strictly earlier than the outer ctx deadline (%v): "+
+			"the per-key Get must be bounded by the pass deadline (hbTTL/2), not the caller's ctx",
+		deadlines[0], outerDeadline)
+}
+
+// TestWorkerMonitor_GetHeartbeats_AbortsOnExpiredPassDeadline proves the
+// whole-pass-abort contract end to end, including partial-result
+// preservation: key1's Get resolves immediately with a valid, decodable
+// heartbeat; key2's Get blocks until the pass deadline (opCtx) expires;
+// key3 is present in the key list but must never be attempted, since the
+// next iteration's top-of-loop opCtx.Err() guard must short-circuit first.
+// Asserts: the returned map contains exactly key1's decoded heartbeat, the
+// error is non-nil and wraps context.DeadlineExceeded, and key3's Get was
+// never called.
+func TestWorkerMonitor_GetHeartbeats_AbortsOnExpiredPassDeadline(t *testing.T) {
+	t.Parallel()
+
+	key1HB := types.Heartbeat{WorkerID: "key1", SchemaVersion: 1, Timestamp: time.Now().UTC()}
+	key1Bytes, err := jsonMarshal(key1HB)
+	require.NoError(t, err)
+
+	kv := &fakeKV{
+		keys: []string{"worker.key1", "worker.key2", "worker.key3"},
+		getScript: map[string]func(ctx context.Context) (jetstream.KeyValueEntry, error){
+			//nolint:unparam // signature must match getScript's shared func type
+			"worker.key1": func(_ context.Context) (jetstream.KeyValueEntry, error) {
+				return &fakeKVEntry{key: "worker.key1", op: jetstream.KeyValuePut, value: key1Bytes}, nil
+			},
+			//nolint:unparam // signature must match getScript's shared func type
+			"worker.key2": func(ctx context.Context) (jetstream.KeyValueEntry, error) {
+				return nil, blockUntilDone(ctx)
+			},
+			"worker.key3": func(context.Context) (jetstream.KeyValueEntry, error) {
+				// Must never be reached: the top-of-loop opCtx.Err() guard
+				// must abort the pass before key3's iteration calls Get.
+				return nil, errors.New("worker.key3 Get must never be attempted")
+			},
+		},
+	}
+	fakeTTL := 200 * time.Millisecond // opCtx deadline = hbTTL/2 = 100ms
+	monitor := NewWorkerMonitor(kv, "worker", fakeTTL, nil, logging.NewNop())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	hbs, err := monitor.GetHeartbeats(ctx)
+
+	require.Error(t, err, "an expired pass deadline mid-scan must abort with a non-nil error")
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	require.Len(t, hbs, 1, "key1's successful Get before the abort must be preserved")
+	gotKey1, ok := hbs["key1"]
+	require.True(t, ok, "key1's decoded heartbeat must be present in the partial result")
+	require.Equal(t, key1HB.WorkerID, gotKey1.WorkerID)
+	require.Equal(t, key1HB.SchemaVersion, gotKey1.SchemaVersion)
+
+	calls := kv.GetCalls()
+	require.Equal(t, []string{"worker.key1", "worker.key2"}, calls,
+		"key3's Get must never be attempted after the pass deadline expired")
+}
+
+// TestWorkerMonitor_GetHeartbeats_ExpiredEmptyScanAborts pins the
+// ErrNoKeysFound arm of the whole-pass-abort contract: nats.go Keys()
+// surfaces a context that closes before yielding any entry as its no-keys
+// error, so a Keys call that consumed the entire pass deadline and then
+// reported "no keys found" must NOT be accepted as an authoritative empty
+// worker set — GetHeartbeats must return the wrapped
+// context.DeadlineExceeded abort error instead of empty-success.
+func TestWorkerMonitor_GetHeartbeats_ExpiredEmptyScanAborts(t *testing.T) {
+	t.Parallel()
+
+	kv := &fakeKV{keysScript: func(ctx context.Context) ([]string, error) {
+		// Reproduce nats.go's exact surface: consume the pass deadline,
+		// then report no-keys rather than the ctx error.
+		<-ctx.Done()
+
+		return nil, jetstream.ErrNoKeysFound
+	}}
+	fakeTTL := 200 * time.Millisecond // opCtx deadline = hbTTL/2 = 100ms
+	monitor := NewWorkerMonitor(kv, "worker", fakeTTL, nil, logging.NewNop())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	hbs, err := monitor.GetHeartbeats(ctx)
+
+	require.Error(t, err,
+		"an empty scan whose pass deadline already expired must abort, not return empty-success")
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Empty(t, hbs)
+}
+
 func TestWorkerMonitor_GetActiveWorkers_EmptyPrefix(t *testing.T) {
 	t.Parallel()
 	_, nc := partitest.StartEmbeddedNATS(t)
@@ -519,11 +653,41 @@ type fakeKV struct {
 	currentWatcher *fakeKeyWatcher
 	// keysBlocking, when true, causes Keys to block until ctx.Done().
 	keysBlocking bool
+	// keysScript, when non-nil, fully replaces Keys' behavior (consulted
+	// before keysBlocking). Lets tests reproduce nats.go's exact expired-
+	// scan surface: a Keys call that consumes the pass deadline and then
+	// returns the no-keys error rather than the ctx error (see
+	// TestWorkerMonitor_GetHeartbeats_ExpiredEmptyScanAborts).
+	keysScript func(ctx context.Context) ([]string, error)
 	// keys is the server-side truth returned by Keys when keysBlocking is
 	// false. The zero value (nil) preserves the pre-existing behavior of
 	// every test that does not call SetKeys: Keys returns (nil, nil), which
 	// GetActiveWorkers treats as an empty worker set.
 	keys []string
+	// getBlocking, when true, causes Get to block until the ctx it is
+	// called with is Done(), then return that ctx's error — proving which
+	// context a per-key Get is actually bounded by. Tests that use it give
+	// the OUTER ctx a real but generous deadline, well above the pass
+	// deadline (hbTTL/2), so a Get bound to the wrong context shows up as
+	// elapsed time or an outer-deadline error rather than a test hang (see
+	// TestWorkerMonitor_GetHeartbeats_PerKeyGetBoundedByPassDeadline and
+	// TestWorkerMonitor_GetHeartbeats_AbortsOnExpiredPassDeadline).
+	getBlocking bool
+	// getScript, when non-nil, is consulted before the getBlocking branch:
+	// a per-key function controlling exactly what that key's Get call does
+	// (block, return a scripted entry, return an error, etc). Keys absent
+	// from the map fall through to the getBlocking/default behavior. Lets
+	// tests script one key to resolve immediately and another to block
+	// until its context expires, deterministically proving both the
+	// partial-result and abort halves of the whole-pass-abort contract.
+	getScript map[string]func(ctx context.Context) (jetstream.KeyValueEntry, error)
+	// getDeadlines records, per Get call, whether the passed ctx carried a
+	// deadline and what it was — proving which context (pass-bounded opCtx
+	// vs the raw outer ctx) a per-key Get actually received.
+	getDeadlines []time.Time
+	// getCalls records every key a Get call was made for, in order — used
+	// to prove a key was never attempted after an earlier abort.
+	getCalls []string
 }
 
 // SetKeys configures the key list returned by a subsequent (non-blocking)
@@ -564,10 +728,20 @@ func (f *fakeKV) Watch(_ context.Context, _ string, _ ...jetstream.WatchOpt) (je
 	return w, nil
 }
 
+// blockUntilDone blocks until ctx is done and returns its error — shared by
+// fakeKV's *Blocking branches to prove which context bounds a given call.
+func blockUntilDone(ctx context.Context) error {
+	<-ctx.Done()
+
+	return ctx.Err()
+}
+
 func (f *fakeKV) Keys(ctx context.Context, _ ...jetstream.WatchOpt) ([]string, error) {
+	if f.keysScript != nil {
+		return f.keysScript(ctx)
+	}
 	if f.keysBlocking {
-		<-ctx.Done()
-		return nil, ctx.Err()
+		return nil, blockUntilDone(ctx)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -588,8 +762,45 @@ func (f *fakeKV) Update(_ context.Context, _ string, _ []byte, _ uint64) (uint64
 }
 func (f *fakeKV) Delete(_ context.Context, _ string, _ ...jetstream.KVDeleteOpt) error { return nil }
 func (f *fakeKV) Purge(_ context.Context, _ string, _ ...jetstream.KVDeleteOpt) error  { return nil }
-func (f *fakeKV) Get(_ context.Context, _ string) (jetstream.KeyValueEntry, error) {
+func (f *fakeKV) Get(ctx context.Context, key string) (jetstream.KeyValueEntry, error) {
+	f.mu.Lock()
+	f.getCalls = append(f.getCalls, key)
+	if deadline, ok := ctx.Deadline(); ok {
+		f.getDeadlines = append(f.getDeadlines, deadline)
+	} else {
+		f.getDeadlines = append(f.getDeadlines, time.Time{})
+	}
+	script := f.getScript
+	f.mu.Unlock()
+
+	if script != nil {
+		if fn, ok := script[key]; ok {
+			return fn(ctx)
+		}
+	}
+
+	if f.getBlocking {
+		return nil, blockUntilDone(ctx)
+	}
+
 	return nil, jetstream.ErrKeyNotFound
+}
+
+// GetCalls returns a snapshot of the keys Get was called for, in order.
+func (f *fakeKV) GetCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return append([]string(nil), f.getCalls...)
+}
+
+// GetDeadlines returns a snapshot of the per-call ctx deadlines observed by
+// Get. A zero time.Time means that call's ctx carried no deadline.
+func (f *fakeKV) GetDeadlines() []time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return append([]time.Time(nil), f.getDeadlines...)
 }
 func (f *fakeKV) GetRevision(_ context.Context, _ string, _ uint64) (jetstream.KeyValueEntry, error) {
 	return nil, jetstream.ErrKeyNotFound
