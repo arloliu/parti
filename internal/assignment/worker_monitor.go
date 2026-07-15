@@ -351,9 +351,24 @@ func (m *WorkerMonitor) GetActiveWorkers(ctx context.Context) ([]string, error) 
 // Workers whose payload fails to decode are silently omitted — a malformed
 // heartbeat is logged at debug level but does not fail the entire scan.
 //
+// Every per-key Get is bounded by the same pass deadline (opCtx) that
+// guards the Keys() scan — mirroring GetHeartbeatsFor's per-iteration
+// opCtx.Err() guard — so a single wedged Get cannot hang the whole pass
+// past that deadline. Once the deadline has expired anywhere in the pass,
+// the pass aborts and returns the partial map collected so far alongside a
+// wrapped error. That includes an empty Keys() scan: nats.go surfaces a
+// context that closes before any entry is yielded as its no-keys error, so
+// an empty result is accepted as an authoritative empty worker set only
+// while the pass deadline is still live — an expired empty scan aborts
+// with the wrapped error instead.
+//
 // Returns:
-//   - map[string]types.Heartbeat: Decoded heartbeats, keyed by worker ID
-//   - error: Non-nil only on KV access failure that prevents listing keys
+//   - map[string]types.Heartbeat: Decoded heartbeats collected before any
+//     abort, keyed by worker ID
+//   - error: Non-nil on KV access failure that prevents listing keys, or
+//     when the pass deadline expires at any point in the pass — including
+//     an empty Keys() scan whose deadline had already expired (partial map
+//     still returned on mid-scan aborts)
 func (m *WorkerMonitor) GetHeartbeats(ctx context.Context) (map[string]types.Heartbeat, error) {
 	opCtx, cancel := m.boundedOpCtx(ctx)
 	defer cancel()
@@ -361,6 +376,13 @@ func (m *WorkerMonitor) GetHeartbeats(ctx context.Context) (map[string]types.Hea
 	keys, err := m.heartbeatKV.Keys(opCtx)
 	if err != nil {
 		if types.IsNoKeysFoundError(err) {
+			// nats.go Keys() returns its no-keys error when the context
+			// closes before yielding entries, so an EXPIRED empty scan must
+			// not masquerade as an authoritative empty worker set.
+			if cerr := opCtx.Err(); cerr != nil {
+				return nil, fmt.Errorf("heartbeat fetch aborted: %w", cerr)
+			}
+
 			return map[string]types.Heartbeat{}, nil
 		}
 
@@ -369,13 +391,16 @@ func (m *WorkerMonitor) GetHeartbeats(ctx context.Context) (map[string]types.Hea
 
 	out := make(map[string]types.Heartbeat, len(keys))
 	for _, key := range keys {
+		if err := opCtx.Err(); err != nil {
+			return out, fmt.Errorf("heartbeat fetch aborted: %w", err)
+		}
 		// Use the same prefix-strip rule as GetActiveWorkers.
 		if len(key) <= len(m.hbPrefix)+1 || key[:len(m.hbPrefix)] != m.hbPrefix {
 			continue
 		}
 		workerID := key[len(m.hbPrefix)+1:]
 
-		entry, gerr := m.heartbeatKV.Get(ctx, key)
+		entry, gerr := m.heartbeatKV.Get(opCtx, key)
 		if gerr != nil {
 			m.logger.Debug("heartbeat get failed during scan", "key", key, "error", gerr)
 			continue
@@ -386,6 +411,10 @@ func (m *WorkerMonitor) GetHeartbeats(ctx context.Context) (map[string]types.Hea
 			continue
 		}
 		out[workerID] = hb
+	}
+
+	if err := opCtx.Err(); err != nil {
+		return out, fmt.Errorf("heartbeat fetch aborted: %w", err)
 	}
 
 	return out, nil
