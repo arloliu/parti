@@ -2,10 +2,10 @@ module github.com/arloliu/parti/test/perf-measurement
 
 go 1.25.0
 
-// During the IOPS investigation the harness depends on the parent parti module
-// living two directories up in this worktree. Phase 5's M1.11 (HEAD comparison)
-// flips this replace to a tagged v2.3.0 pin; until then the local replace keeps
-// the harness building against whatever revision is checked out.
+// The harness always builds against the parent parti module living two
+// directories up in this working tree. To measure a released parti version,
+// check out its tag in the parent repo and rebuild — do not swap this
+// replace for a version pin.
 replace github.com/arloliu/parti/v2 => ../..
 
 require (
