@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"sync"
 	"syscall"
@@ -89,6 +90,10 @@ func parseFlags(args []string) (Options, error) {
 		maxAckPending = fs.Int("max-ack-pending", 1000, "consumer MaxAckPending (§7)")
 		ackWait       = fs.Duration("ack-wait", 30*time.Second, "consumer AckWait (§7)")
 		startupBudget = fs.Duration("startup-budget", 0, "WaitStable budget; 0 ⇒ max(60s, N·60ms) (§9)")
+
+		pprofAddr            = fs.String("pprof-addr", "", "bind address for the net/http/pprof debug listener (e.g. 127.0.0.1:6060); empty disables it (default)")
+		blockProfileRate     = fs.Int("block-profile-rate", 0, "runtime.SetBlockProfileRate; 0 disables block profiling (default; zero steady-state overhead)")
+		mutexProfileFraction = fs.Int("mutex-profile-fraction", 0, "runtime.SetMutexProfileFraction; 0 disables mutex profiling (default; zero steady-state overhead)")
 	)
 
 	if err := fs.Parse(args); err != nil {
@@ -140,6 +145,9 @@ func parseFlags(args []string) (Options, error) {
 		MaxAckPending:         *maxAckPending,
 		AckWait:               *ackWait,
 		StartupBudget:         *startupBudget,
+		PprofAddr:             *pprofAddr,
+		BlockProfileRate:      *blockProfileRate,
+		MutexProfileFraction:  *mutexProfileFraction,
 	}, nil
 }
 
@@ -178,6 +186,24 @@ func Run(ctx context.Context, o Options, errLog io.Writer) error {
 	// cluster gate, and the manifest all agree (§9).
 	if o.StartupBudget <= 0 {
 		o.StartupBudget = defaultStartupBudget(o.N)
+	}
+
+	// Step 0b: profiling. Both knobs are opt-in and default to fully off
+	// (rate/fraction 0, listener address ""), so a normal harness run pays
+	// zero profiling overhead; a measurement session flips them on for a
+	// single capture run via --pprof-addr / --block-profile-rate /
+	// --mutex-profile-fraction. Set unconditionally — passing 0 is the
+	// same as never calling these, so there is no branch needed to keep
+	// the off case a true no-op.
+	runtime.SetBlockProfileRate(o.BlockProfileRate)
+	runtime.SetMutexProfileFraction(o.MutexProfileFraction)
+	leaderTracker := NewLeaderTracker()
+	if o.PprofAddr != "" {
+		pprofSrv, perr := StartPprofListener(ctx, o.PprofAddr, leaderTracker)
+		if perr != nil {
+			return fmt.Errorf("start pprof listener: %w", perr)
+		}
+		defer shutdownPprofListener(pprofSrv)
 	}
 
 	// Step 1: setup NATS + wrapper. The setup wrapper is intentionally
@@ -237,7 +263,7 @@ func Run(ctx context.Context, o Options, errLog io.Writer) error {
 	}
 
 	for i := range o.Workers {
-		w, werr := StartWorker(ctx, i, o, cfg)
+		w, werr := StartWorker(ctx, i, o, cfg, leaderTracker)
 		if werr != nil {
 			cleanup()
 			return fmt.Errorf("start workers: %w", werr)
