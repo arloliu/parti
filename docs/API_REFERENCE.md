@@ -1670,6 +1670,15 @@ err := src.RemovePartitions(ctx,
 
 ---
 
+**Options:** `WithReconcileInterval`, `WithLeadershipProbe`, and
+`WithUpdateRetries` configure the reconcile loop. For wiring
+`WithLeadershipProbe` — splits leader/follower reconcile cadence, ~10x less
+KV read traffic on multi-worker fleets, plus the construction-order
+resolution it needs — see [Source Reconcile Cadence](OPERATIONS.md#source-reconcile-cadence-leadership-probe)
+in the Operations Guide.
+
+---
+
 ## Consumer Package
 
 Package `github.com/arloliu/parti/v2/consumer` provides unified JetStream consumer types for partitioned workloads. This package replaces the legacy `subscription` and `partition` packages.
