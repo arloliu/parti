@@ -25,11 +25,17 @@ with no concurrent workloads.
 | At least 20 GiB free disk on the results volume | 190 runs × ~100 MiB capture artifacts = ~19 GiB. |
 | No other disk-intensive workloads during capture | Cgroup-vs-iostat cross-check fails loudly on noisy hosts (§R4 of the plan). |
 
-### Software versions (pinned in go.mod)
+### Software versions
+
+`go.mod` pins nothing for parti: line 9 is a permanent
+`replace github.com/arloliu/parti/v2 => ../..`, so the harness always builds
+against whatever revision of the parent module is checked out in this
+working tree. To measure a specific parti release, `git checkout <tag>` in
+the parent repo (two directories up, i.e. `cd ../..`) and rebuild the
+harness — do not edit `go.mod` or add a version-tag replace.
 
 ```
-github.com/arloliu/parti/v2  v2.3.0     # campaign baseline; M1.11 swaps this
-nats-server                  v2.12.6    # via PERF_RIG_NATS_IMAGE=nats:2.12.6
+nats-server   v2.12.6    # via PERF_RIG_NATS_IMAGE=nats:2.12.6
 ```
 
 ### Build the harness binary once before starting
@@ -514,6 +520,16 @@ bash scripts/run-matrix.sh \
 ---
 
 ## 6. M1.11 HEAD comparison (manual pin-swap)
+
+**Historical note:** `go.mod` has always used a local
+`replace github.com/arloliu/parti/v2 => ../..` (see §1) — there was never a
+released-version pin for this procedure to swap away from or restore. The
+steps below never matched `go.mod` reality and are retained only as a
+historical record of the M1.11 measurement session. To compare a released
+baseline against HEAD today, `git checkout <tag>` in the parent repo for the
+baseline build and `git checkout <head-ref>` for the HEAD build — the local
+replace picks up whichever revision is checked out automatically, so no
+`go.mod` edits are needed either way.
 
 M1.11 compares the v2.3.0 baseline against a HEAD build of parti.
 `run-matrix.sh` **always refuses M1.11 automatically** — the pin-swap must be
