@@ -150,9 +150,9 @@ func TestNP1_LiveBucketRecreate_MustNotReturnToStable(t *testing.T) {
 	require.NoError(t, err)
 
 	// Window long enough that a heal-then-redegrade flap can manifest if it
-	// exists: a couple of recovery ticks, an epoch-fence poll (OperationTimeout),
-	// and an election cycle. Size the outer context to comfortably contain
-	// startup + all four phases.
+	// exists: a couple of recovery ticks, an epoch-fence poll
+	// (BucketEpochProbeInterval), and an election cycle. Size the outer
+	// context to comfortably contain startup + all four phases.
 	ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
 	defer cancel()
 
@@ -214,9 +214,9 @@ func TestNP1_LiveBucketRecreate_MustNotReturnToStable(t *testing.T) {
 	t.Logf("phase 3: operator recreated 4 empty buckets at %s", recreatedAt.Format(time.RFC3339Nano))
 
 	// Phase 4: observe a window long enough for a heal-then-redegrade flap to
-	// manifest if it exists — >= 3*OperationTimeout (epoch-fence ticks) plus a
-	// couple of recovery ticks and an election cycle.
-	observeWindow := 3*cfg.OperationTimeout +
+	// manifest if it exists — >= 3*BucketEpochProbeInterval (epoch-fence
+	// ticks) plus a couple of recovery ticks and an election cycle.
+	observeWindow := 3*cfg.BucketEpochProbeInterval +
 		2*cfg.DegradedBehavior.RecoveryGracePeriod +
 		cfg.ElectionTimeout
 	if observeWindow < 35*time.Second {

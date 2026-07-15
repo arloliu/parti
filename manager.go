@@ -450,6 +450,18 @@ func NewManager(cfg *Config, js jetstream.JetStream, source PartitionSource, str
 		cfg.LabelSpillGrace = *options.labelSpillGrace // may be 0 ⇒ immediate spill
 	}
 
+	// WithBucketEpochProbeInterval overrides Config.BucketEpochProbeInterval
+	// (already defaulted by SetDefaults above). The guard mirrors the config
+	// field's gt=0 validation, which the option path bypasses because Option
+	// cannot return an error.
+	if options.bucketEpochProbeIntervalSet {
+		if options.bucketEpochProbeInterval <= 0 {
+			return nil, fmt.Errorf("WithBucketEpochProbeInterval: %w: must be > 0, got %s",
+				types.ErrInvalidConfig, options.bucketEpochProbeInterval)
+		}
+		cfg.BucketEpochProbeInterval = options.bucketEpochProbeInterval
+	}
+
 	metricsCollector := options.metrics
 	if metricsCollector == nil {
 		metricsCollector = metrics.NewNop()

@@ -944,10 +944,11 @@ type Config struct {
     RestartDetectionRatio float64       // NO-OP (orphaned, pending removal); historically classified restarts (default: 0.5)
 
     // Timeouts
-    OperationTimeout time.Duration // Timeout for KV operations (default: 10s)
-    ElectionTimeout  time.Duration // Timeout for leader election (default: 10s)
-    StartupTimeout   time.Duration // Timeout for manager startup (default: 60s)
-    ShutdownTimeout  time.Duration // Timeout for graceful shutdown (default: 10s)
+    OperationTimeout         time.Duration // Timeout for KV operations (default: 10s)
+    BucketEpochProbeInterval time.Duration // Bucket-epoch fence probe cadence, independent of OperationTimeout (default: 10s)
+    ElectionTimeout          time.Duration // Timeout for leader election (default: 10s)
+    StartupTimeout           time.Duration // Timeout for manager startup (default: 60s)
+    ShutdownTimeout          time.Duration // Timeout for graceful shutdown (default: 10s)
 
     // Assignment Configuration
     RebalanceCooldown time.Duration // Min time between rebalances (default: 10s)
@@ -2156,6 +2157,31 @@ logger, _ := zap.NewProduction()
 js, _ := jetstream.New(nc)
 mgr, err := parti.NewManager(cfg, js, src, strategy,
     parti.WithLogger(logger.Sugar()),
+)
+if err != nil {
+    log.Fatal(err)
+}
+```
+
+---
+
+### WithBucketEpochProbeInterval
+
+Overrides `Config.BucketEpochProbeInterval`, the polling cadence for the
+bucket-epoch fence (independent of `OperationTimeout`, which continues to
+bound only each individual probe's deadline). Deployments that tuned
+`OperationTimeout` and relied on the old coupled cadence should set this
+explicitly to their previous `OperationTimeout` value.
+
+```go
+func WithBucketEpochProbeInterval(d time.Duration) Option
+```
+
+**Example**:
+```go
+js, _ := jetstream.New(nc)
+mgr, err := parti.NewManager(cfg, js, src, strategy,
+    parti.WithBucketEpochProbeInterval(3*time.Second),
 )
 if err != nil {
     log.Fatal(err)

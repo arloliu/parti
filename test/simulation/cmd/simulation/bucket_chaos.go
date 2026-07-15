@@ -119,9 +119,11 @@ func isProbeBucketUnavailable(err error) bool {
 //
 // Invariant INV1 (plan lines 336-344): after delete on parti-stableid,
 // every running worker emits a WorkerDegradedReport with Reason matching
-// "bucket-unavailable:" OR "bucket-recreated:parti-stableid" within
-// 3 × OperationTimeout. No worker should reach Shutdown via
-// claimLostShutdown in this window.
+// "bucket-unavailable:" OR "bucket-recreated:parti-stableid". The
+// bucket-recreated arm rides the epoch fence, whose cadence is
+// BucketEpochProbeInterval (not OperationTimeout); the oracle window
+// registered below is 2 × WorkerIDTTL, wide enough for either arm. No
+// worker should reach Shutdown via claimLostShutdown in this window.
 func handleBucketDelete(ctx context.Context, bucket string) {
 	js, err := freshJS()
 	if err != nil {
@@ -196,12 +198,12 @@ func handleBucketDelete(ctx context.Context, bucket string) {
 // handleBucketRecreate deletes a bucket then immediately re-creates it via
 // kvutil.EnsureKVBucket. This is the "epoch fence" trigger: the backing
 // stream's Created timestamp will be fresh, and monitorBucketEpochs (one
-// tick = OperationTimeout) will compare it to the cached value and call
-// enterDegraded("bucket-recreated:<bucket>").
+// tick = BucketEpochProbeInterval) will compare it to the cached value and
+// call enterDegraded("bucket-recreated:<bucket>").
 //
 // Invariant INV3 (plan lines 354-359): after recreate of parti-assignment,
 // at least one worker enters degraded with Reason exactly
-// "bucket-recreated:parti-assignment" within 2 × OperationTimeout.
+// "bucket-recreated:parti-assignment" within 2 × BucketEpochProbeInterval.
 func handleBucketRecreate(ctx context.Context, bucket string) {
 	js, err := freshJS()
 	if err != nil {
@@ -221,8 +223,8 @@ func handleBucketRecreate(ctx context.Context, bucket string) {
 	if aioCoord != nil {
 		if o := aioCoord.DegradedReasonOracle(); o != nil {
 			pc := parti.DefaultConfig()
-			// Plan INV3 specified 2 × OperationTimeout (=20s), which is
-			// the epoch-fence ticker cadence. That suffices to OBSERVE
+			// Plan INV3 specified 2 × BucketEpochProbeInterval (=20s),
+			// which is the epoch-fence ticker cadence. That suffices to OBSERVE
 			// a single transition, but if the scenario fires multiple
 			// chaos events the OnDegraded hook only re-fires on
 			// transitions out-of and back-into degraded. To keep this
