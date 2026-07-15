@@ -92,6 +92,11 @@ type Options struct {
 	MaxAckPending int           // consumer MaxAckPending (§7)
 	AckWait       time.Duration // consumer AckWait (§7)
 	StartupBudget time.Duration // WaitState/WaitStableAll budget (§9; 0 ⇒ max(60s, N·60ms))
+
+	// --- profiling (rig readiness) ---
+	PprofAddr            string // bind address for the net/http/pprof debug listener; "" disables it (default: disabled)
+	BlockProfileRate     int    // runtime.SetBlockProfileRate; 0 disables block profiling (default)
+	MutexProfileFraction int    // runtime.SetMutexProfileFraction; 0 disables mutex profiling (default)
 }
 
 // PartitionSourceBucket is the JetStream-KV bucket the harness creates
@@ -442,6 +447,12 @@ type WorkerHandle struct {
 // harness Options, wires the configured consumer mode, and calls
 // Start.
 //
+// lt, if non-nil, is fed by this worker's OnLeadershipChanged hook so
+// the pprof listener's /leader endpoint (see pprof.go) can report
+// which in-process worker currently holds parti leadership. Pass nil
+// to skip leadership tracking (e.g. in tests that don't run a pprof
+// listener).
+//
 // The caller is responsible for invoking the returned WorkerHandle's
 // Stop method.
 func StartWorker(
@@ -449,6 +460,7 @@ func StartWorker(
 	idx int,
 	o Options,
 	cfg parti.Config,
+	lt *LeaderTracker,
 ) (*WorkerHandle, error) {
 	nc, err := ConnectNATS(o.NATSURLs)
 	if err != nil {
@@ -488,6 +500,12 @@ func StartWorker(
 			}
 			return nil
 		},
+	}
+	if lt != nil {
+		hooks.OnLeadershipChanged = func(_ context.Context, isLeader bool) error {
+			lt.Record(idx, isLeader)
+			return nil
+		}
 	}
 
 	opts := []parti.Option{parti.WithHooks(hooks)}

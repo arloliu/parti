@@ -28,8 +28,10 @@
 #     docker compose --profile r3 up -d                            # M2.C tuning
 #   docker compose --profile r5 up -d                              # 5-node cluster
 #
-# Only nats-1 exposes host ports (4222 client, 8222 monitoring) so the
-# harness can connect via a single URL (nats://localhost:4222).
+# Only nats-1 exposes host ports (4222 client, 8222 monitoring, 6060
+# profiling) so the harness can connect via a single URL
+# (nats://localhost:4222) and capture scripts can reach server-side
+# CPU/heap/goroutine profiles at http://localhost:6060/debug/pprof/.
 
 services:
   nats-1:
@@ -43,6 +45,7 @@ services:
     ports:
       - "4222:4222"   # client port — only nats-1 is exposed to the host
       - "8222:8222"   # monitoring port
+      - "6060:6060"   # profiling port (prof_port; net/http/pprof)
     volumes:
       - ${PERF_RIG_NATS_CONFIG:-./nats-server.conf}:/etc/nats/nats-server.conf:ro
       - ${PERF_RIG_DIR:-./data}/perf-nats-1:/data
