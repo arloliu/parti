@@ -29,8 +29,8 @@ import (
 // Root cause this probe pins (do NOT fix here, just prove):
 //   - checkBucketEpochs (manager_setup.go:684-690) compares the live stream
 //     Created against the cached ep.created but NEVER re-captures ep.created
-//     after firing. So every subsequent epoch tick (OperationTimeout cadence)
-//     re-enters Degraded with reason "bucket-recreated:<heartbeat>".
+//     after firing. So every subsequent epoch tick (BucketEpochProbeInterval
+//     cadence) re-enters Degraded with reason "bucket-recreated:<heartbeat>".
 //   - attemptRecoveryFromDegraded (manager_degraded.go:376-416) runs on the
 //     connection monitor (1s) once the connection has been up for ExitThreshold.
 //     It refreshes assignment from the STILL-INTACT assignment bucket, the
@@ -52,8 +52,9 @@ func TestNP2EpochFence_NonAssignmentRecreate_DegradedDoesNotFlap(t *testing.T) {
 
 	t.Parallel()
 
-	// ~5 epoch ticks (OperationTimeout=1s) plus headroom for the recovery loop
-	// to fight back. The whole probe fits comfortably under this bound.
+	// ~5 epoch ticks (BucketEpochProbeInterval=1s) plus headroom for the
+	// recovery loop to fight back. The whole probe fits comfortably under
+	// this bound.
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -65,9 +66,13 @@ func TestNP2EpochFence_NonAssignmentRecreate_DegradedDoesNotFlap(t *testing.T) {
 
 	cfg := testutil.IntegrationTestConfig()
 	// Fast epoch tick so the fence fires several times within the observation
-	// window; OperationTimeout is the monitorBucketEpochs cadence. The
-	// non-strict OperationTimeout <= ElectionTimeout/3 boundary holds
-	// (ElectionTimeout=3s).
+	// window; BucketEpochProbeInterval is the monitorBucketEpochs cadence
+	// (decoupled from OperationTimeout, which continues to bound only each
+	// individual probe's deadline). OperationTimeout is kept at the same
+	// value too, so the non-strict OperationTimeout <= ElectionTimeout/3
+	// boundary still holds (ElectionTimeout=3s) and no unrelated startup
+	// warning fires.
+	cfg.BucketEpochProbeInterval = 1 * time.Second
 	cfg.OperationTimeout = 1 * time.Second
 	// Recover quickly so the flap is observable within the window: the recovery
 	// loop attempts exitDegraded after ExitThreshold of healthy connection.
@@ -168,8 +173,9 @@ func TestNP2EpochFence_NonAssignmentRecreate_DegradedDoesNotFlap(t *testing.T) {
 		6*time.Second, 100*time.Millisecond,
 		"epoch fence never fired for the recreated heartbeat bucket — the probe is vacuous")
 
-	// Observe the full window (>= 5 epoch ticks at OperationTimeout=1s) so the
-	// recovery loop has ample opportunity to fight the fence back to Stable.
+	// Observe the full window (>= 5 epoch ticks at BucketEpochProbeInterval=1s)
+	// so the recovery loop has ample opportunity to fight the fence back to
+	// Stable.
 	time.Sleep(10 * time.Second)
 
 	// Snapshot the final counts as evidence before asserting.

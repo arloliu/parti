@@ -518,7 +518,7 @@ func makeBucket(t *testing.T, js jetstream.JetStream, name string) jetstream.Key
 // backing stream and assert checkBucketEpochs trips degraded mode
 // with the expected reason. The test drives checkBucketEpochs
 // directly so the assertion is deterministic (no polling on the
-// production OperationTimeout tick).
+// production BucketEpochProbeInterval tick).
 func TestManager_F1_BucketRecreate_TripsDegraded(t *testing.T) {
 	t.Parallel()
 	_, nc := partitest.StartEmbeddedNATS(t)

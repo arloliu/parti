@@ -673,18 +673,38 @@ func (m *Manager) captureBucketEpoch(ctx context.Context, bucket string, kv jets
 	m.bucketEpochs[bucket] = bucketEpoch{kv: probeKV, created: created}
 }
 
+// resolveBucketEpochProbeInterval returns the effective bucket-epoch fence
+// ticker interval for a configured Config.BucketEpochProbeInterval value,
+// defensively falling back to 10s for a non-positive input (e.g. a
+// directly-constructed Config in tests, or an operator misconfiguration
+// that somehow slipped past cfg.Validate's gt=0 rule).
+//
+// Split out as a small pure function — rather than inlined in
+// monitorBucketEpochs — so the interval-selection logic (and its
+// decoupling from OperationTimeout) is directly unit-testable without
+// driving the ticker loop itself.
+func resolveBucketEpochProbeInterval(configured time.Duration) time.Duration {
+	if configured > 0 {
+		return configured
+	}
+
+	return 10 * time.Second
+}
+
 // monitorBucketEpochs polls each Parti-owned bucket's stream-Created
 // timestamp on a periodic ticker. A mismatch against the cached value
 // means the bucket was wiped and recreated under us; we enter degraded
 // mode with reason "bucket-recreated:<bucket>" so the readiness probe
 // can rotate the pod and start re-provisions the missing buckets.
 //
-// The poll interval is OperationTimeout (defaults to 10s; the same knob
-// that bounds the ensure-bucket calls at Start). A stream-info read that
-// itself fails is not degraded-mode worthy — the connection monitor,
-// source-hook, and generic kvErrorCount paths handle connectivity
-// errors. The epoch fence is solely concerned with the wipe-and-recreate
-// case where the operation succeeds but returns a different Created.
+// The poll interval is Config.BucketEpochProbeInterval (defaults to 10s;
+// see that field's doc for the cadence-vs-deadline split from
+// OperationTimeout, which still bounds each probe). A
+// stream-info read that itself fails is not degraded-mode worthy — the
+// connection monitor, source-hook, and generic kvErrorCount paths handle
+// connectivity errors. The epoch fence is solely concerned with the
+// wipe-and-recreate case where the operation succeeds but returns a
+// different Created.
 //
 // Exits when m.ctx is cancelled. Started by Start after the five Parti-
 // owned buckets have been captured.
@@ -692,10 +712,7 @@ func (m *Manager) monitorBucketEpochs(ctx context.Context) {
 	if len(m.bucketEpochs) == 0 {
 		return
 	}
-	interval := m.cfg.OperationTimeout
-	if interval <= 0 {
-		interval = 10 * time.Second
-	}
+	interval := resolveBucketEpochProbeInterval(m.cfg.BucketEpochProbeInterval)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 

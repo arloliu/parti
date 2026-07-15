@@ -221,6 +221,7 @@ func TestDefaultConfig(t *testing.T) {
 	require.Equal(t, 10*time.Second, cfg.PlannedScaleWindow)
 	require.Equal(t, 0.5, cfg.RestartDetectionRatio)
 	require.Equal(t, 10*time.Second, cfg.OperationTimeout)
+	require.Equal(t, 10*time.Second, cfg.BucketEpochProbeInterval)
 	require.Equal(t, 10*time.Second, cfg.ElectionTimeout)
 	require.Equal(t, 60*time.Second, cfg.StartupTimeout)
 	require.Equal(t, 10*time.Second, cfg.ShutdownTimeout)
@@ -236,24 +237,27 @@ func TestSetDefaults(t *testing.T) {
 		require.Equal(t, 999, cfg.WorkerIDMax)
 		require.Equal(t, 75*time.Second, cfg.WorkerIDTTL)
 		require.Equal(t, 10*time.Second, cfg.RebalanceCooldown)
+		require.Equal(t, 10*time.Second, cfg.BucketEpochProbeInterval,
+			"unset BucketEpochProbeInterval defaults to 10s, preserving the prior OperationTimeout-coupled behavior")
 	})
 
 	t.Run("preserves custom values", func(t *testing.T) {
 		cfg := Config{
-			WorkerIDPrefix:        "custom",
-			WorkerIDMin:           10,
-			WorkerIDMax:           200,
-			WorkerIDTTL:           60 * time.Second,
-			HeartbeatInterval:     5 * time.Second,
-			HeartbeatTTL:          15 * time.Second,
-			ColdStartWindow:       45 * time.Second,
-			PlannedScaleWindow:    20 * time.Second,
-			RestartDetectionRatio: 0.7,
-			OperationTimeout:      20 * time.Second,
-			ElectionTimeout:       10 * time.Second,
-			StartupTimeout:        60 * time.Second,
-			ShutdownTimeout:       20 * time.Second,
-			RebalanceCooldown:     15 * time.Second,
+			WorkerIDPrefix:           "custom",
+			WorkerIDMin:              10,
+			WorkerIDMax:              200,
+			WorkerIDTTL:              60 * time.Second,
+			HeartbeatInterval:        5 * time.Second,
+			HeartbeatTTL:             15 * time.Second,
+			ColdStartWindow:          45 * time.Second,
+			PlannedScaleWindow:       20 * time.Second,
+			RestartDetectionRatio:    0.7,
+			OperationTimeout:         20 * time.Second,
+			BucketEpochProbeInterval: 90 * time.Second,
+			ElectionTimeout:          10 * time.Second,
+			StartupTimeout:           60 * time.Second,
+			ShutdownTimeout:          20 * time.Second,
+			RebalanceCooldown:        15 * time.Second,
 		}
 		require.NoError(t, SetDefaults(&cfg))
 
@@ -268,6 +272,8 @@ func TestSetDefaults(t *testing.T) {
 		require.Equal(t, 20*time.Second, cfg.PlannedScaleWindow)
 		require.Equal(t, 0.7, cfg.RestartDetectionRatio)
 		require.Equal(t, 20*time.Second, cfg.OperationTimeout)
+		require.Equal(t, 90*time.Second, cfg.BucketEpochProbeInterval,
+			"a custom BucketEpochProbeInterval, distinct from OperationTimeout, must survive SetDefaults unchanged")
 		require.Equal(t, 10*time.Second, cfg.ElectionTimeout)
 		require.Equal(t, 60*time.Second, cfg.StartupTimeout)
 		require.Equal(t, 20*time.Second, cfg.ShutdownTimeout)

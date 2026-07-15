@@ -47,7 +47,10 @@ When adding a monitor goroutine on a ticker (e.g. `monitorBucketEpochs`,
 focused concurrency stress test under `test/integration/<package>/`:
 
 - Start a small real cluster (embedded NATS, 2-3 worker managers).
-- Configure the monitor at aggressive cadence (e.g. `OperationTimeout=10ms`).
+- Configure the monitor at aggressive cadence via the knob that drives its
+  ticker (e.g. `BucketEpochProbeInterval=10ms` for `monitorBucketEpochs`;
+  `OperationTimeout` only bounds per-operation deadlines, not the epoch-fence
+  cadence).
 - Drive concurrent KV traffic against the buckets the monitor probes for ~5s.
 - Assert no race-detector triggers (`go test -race ...`).
 

@@ -471,6 +471,21 @@ type Config struct {
 	// Recommended: 10 seconds.
 	OperationTimeout time.Duration `yaml:"operationTimeout" default:"10s" validate:"gt=0"`
 
+	// BucketEpochProbeInterval is how often the bucket-epoch fence (see
+	// monitorBucketEpochs) polls each Parti-owned KV bucket for a
+	// wipe-and-recreate event. This was previously coupled to
+	// OperationTimeout — the same knob that bounds every individual KV
+	// operation's deadline — so changing one unintentionally changed the
+	// other. This field decouples the probe cadence from that deadline.
+	// Default 10s preserves the prior default behavior for deployments
+	// that left OperationTimeout at its own 10s default; deployments that
+	// TUNED OperationTimeout and relied on the old coupled cadence must set
+	// this field to their previous OperationTimeout value to preserve it.
+	// The per-probe deadline is still OperationTimeout (see
+	// probeBucketCreated); this field controls only how often a probe pass
+	// runs.
+	BucketEpochProbeInterval time.Duration `yaml:"bucketEpochProbeInterval" default:"10s" validate:"gt=0"`
+
 	// ElectionTimeout is the maximum time to wait for leader election to complete.
 	// Also drives leader lease renewal frequency (ElectionTimeout/3). Longer values
 	// reduce KV write load at the cost of slower failover detection.

@@ -31,9 +31,10 @@ import (
 // This test reproduces the race condition the fix prevents:
 //
 //   - Start a real 3-worker cluster with embedded NATS
-//   - Set OperationTimeout=50ms so the epoch monitor runs at high
-//     frequency (default is 10s; the per-spec docs explicitly call out
-//     OperationTimeout as the ticker cadence)
+//   - Set BucketEpochProbeInterval=50ms so the epoch monitor runs at high
+//     frequency (default is 10s). BucketEpochProbeInterval — not
+//     OperationTimeout — is the epoch-fence ticker cadence; OperationTimeout
+//     only bounds the deadline of each individual probe.
 //   - Drive ~5 seconds of normal cluster activity (heartbeats every
 //     500ms, leader election renewals, assignment publishes)
 //   - Assert no race-detector trigger via t.Failed() after Stop
@@ -61,12 +62,12 @@ func TestEpochMonitor_NoRaceUnderConcurrentKVTraffic(t *testing.T) {
 	nc, cleanup := testutil.StartEmbeddedNATS(t)
 	defer cleanup()
 
-	// Aggressive OperationTimeout drives the epoch monitor at ~50ms
+	// Aggressive BucketEpochProbeInterval drives the epoch monitor at ~50ms
 	// cadence (vs default 10s). The point is to maximise the number of
 	// kv.Status calls per second so the race window is exercised many
 	// times during the test's runtime.
 	cfg := testutil.IntegrationTestConfig()
-	cfg.OperationTimeout = 50 * time.Millisecond
+	cfg.BucketEpochProbeInterval = 50 * time.Millisecond
 
 	partitions := testutil.CreateTestPartitions(10)
 	src := source.NewStatic(partitions)

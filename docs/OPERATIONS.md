@@ -745,6 +745,28 @@ OperationTimeout <= ElectionTimeout / 3
 At the default pair (both 10s) the warning fires; in production
 prefer something like `OperationTimeout=3s, ElectionTimeout=10s`.
 
+### BucketEpochProbeInterval
+
+The bucket-epoch fence (see [Election Bucket Storage
+Migration](#election-bucket-storage-migration) above) polls each
+Parti-owned KV bucket's stream-Created timestamp on a periodic ticker to
+detect a wipe-and-recreate event. The polling cadence is
+`BucketEpochProbeInterval` (default `10s`) — a separate knob from
+`OperationTimeout`, which continues to bound only the deadline of each
+individual probe. Previously these were the same knob, so tuning
+`OperationTimeout` down (e.g. per the guidance above) also sped up or
+slowed down epoch-fence polling as a side effect. Lower
+`BucketEpochProbeInterval` for faster wipe-and-recreate detection at the
+cost of more frequent KV status reads; the default (`10s`) matches
+`OperationTimeout`'s own default, so deployments that left
+`OperationTimeout` at its default need no changes. Deployments that TUNED
+`OperationTimeout` (e.g. to `3s`, per the guidance above) and relied on the
+old coupled cadence must explicitly set `BucketEpochProbeInterval` to
+their previous `OperationTimeout` value to preserve the old probe cadence
+— left unset, their fence cadence silently changes from that tuned value
+to the new independent `10s` default. Set it via
+`Config.BucketEpochProbeInterval` or `parti.WithBucketEpochProbeInterval`.
+
 ### NATS Cluster Maintenance
 
 When performing NATS maintenance:

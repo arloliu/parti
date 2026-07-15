@@ -612,8 +612,9 @@ func (m *Manager) attemptRecoveryFromDegraded() {
 // is outstanding (terminal Degraded => restart/rotation, docs/OPERATIONS.md).
 //
 // This is a LIVE re-probe (not a latch) so there is no pre-arm window: the
-// epoch-fence monitor ticks every OperationTimeout (10s) while recovery ticks
-// every 1s, so a latch could arm after a faster recovery had already exited.
+// epoch-fence monitor ticks every BucketEpochProbeInterval (10s default)
+// while recovery ticks every 1s, so a latch could arm after a faster
+// recovery had already exited.
 //
 // Probe errors are NOT actionable and are skipped (mirroring checkBucketEpochs'
 // continue-on-error): only a successful read with a DIFFERENT Created is a

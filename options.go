@@ -30,6 +30,18 @@ type managerOptions struct {
 	// field cannot express. Validated in NewManager, because Option cannot
 	// return an error.
 	labelSpillGrace *time.Duration
+
+	// bucketEpochProbeInterval carries the value supplied via
+	// WithBucketEpochProbeInterval; bucketEpochProbeIntervalSet distinguishes
+	// "option provided" from "unset" so the option can override
+	// Config.BucketEpochProbeInterval (already defaulted by SetDefaults).
+	// Unlike labelSpillGrace, 0 has no distinct meaning for this field
+	// (validated gt=0, matching OperationTimeout), so a bool flag is
+	// sufficient — no pointer indirection is needed to preserve an
+	// "explicit 0" case. Validated in NewManager, because Option cannot
+	// return an error.
+	bucketEpochProbeInterval    time.Duration
+	bucketEpochProbeIntervalSet bool
 }
 
 // WithElectionAgent sets a custom election agent.
@@ -160,6 +172,27 @@ func WithWorkerLabels(labels ...string) Option {
 func WithLabelSpillGrace(d time.Duration) Option {
 	return func(o *managerOptions) {
 		o.labelSpillGrace = &d
+	}
+}
+
+// WithBucketEpochProbeInterval sets how often the bucket-epoch fence probes
+// each Parti-owned KV bucket for a wipe-and-recreate event, overriding
+// Config.BucketEpochProbeInterval — see that field's doc for the full
+// cadence-vs-deadline rationale (OperationTimeout still bounds each
+// individual probe).
+//
+// A non-positive duration causes NewManager to return an error wrapping
+// types.ErrInvalidConfig, matching the config field's gt=0 rule.
+//
+// Parameters:
+//   - d: Probe interval (> 0)
+//
+// Returns:
+//   - Option: Functional option for NewManager
+func WithBucketEpochProbeInterval(d time.Duration) Option {
+	return func(o *managerOptions) {
+		o.bucketEpochProbeInterval = d
+		o.bucketEpochProbeIntervalSet = true
 	}
 }
 
