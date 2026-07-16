@@ -1897,7 +1897,9 @@ func (m *Manager) invokeAssignmentChangedHooks(_ /* workerID */ string, oldAssig
 // scheduleApplyRetry stages a failed assignment for a bounded
 // exponential-backoff retry. Multiple failures coalesce to the
 // highest-Version target via stashedApplyRetry. Only one retry goroutine
-// is active at a time; subsequent calls update the stash and return.
+// is active at a time; subsequent calls update the stash and activate
+// (a no-op CAS) so the running loop's ownership-handoff re-check (see
+// activateApplyRetryLoop) is what actually picks the new target up.
 //
 // The retry initial backoff is 1s, doubling up to 30s with ±20% jitter.
 // On retry success the goroutine self-terminates.
@@ -1918,13 +1920,45 @@ func (m *Manager) scheduleApplyRetry(newAssignment Assignment) {
 		}
 	}
 
-	// Only one retry loop at a time.
+	m.activateApplyRetryLoop()
+}
+
+// activateApplyRetryLoop CASes applyRetryActive false->true and, on success,
+// spawns the retry loop goroutine. A losing caller returns immediately,
+// trusting the already-running loop (or its ownership-handoff re-check
+// below) to observe its stash.
+//
+// Lost-wakeup fix: the loop's empty-stash observation and the deferred flag
+// clear below are NOT atomic. A producer can stash a value AND lose this
+// function's activation CAS (the flag is still true) in the window between
+// the loop's last empty-stash check and the flag actually clearing —
+// stranding that value with no loop running to pick it up, unboundedly
+// (reconcile cannot re-deliver a same-Version/higher-LeaderRevision target
+// past the version gate). The deferred ownership-handoff re-check closes
+// this: after clearing the flag it re-checks the stash and re-activates if
+// a racing producer lost. The re-activation CAS is idempotent against a
+// producer that instead won the race itself, so at most one loop ends up
+// running.
+//
+// The ctx guard is mandatory. Without it, a non-empty stash at shutdown
+// (m.ctx.Done()) makes the exiting loop and its respawn ping-pong forever:
+// each respawned loop immediately hits its own ctx.Done() select case and
+// re-triggers the same handoff. With the guard, shutdown strands the stash
+// instead — acceptable, since shutdown is terminal and nothing will ever
+// drain it anyway; without the guard, the race behavior above is otherwise
+// unchanged.
+func (m *Manager) activateApplyRetryLoop() {
 	if !m.applyRetryActive.CompareAndSwap(false, true) {
 		return
 	}
 
 	m.wg.Go(func() {
-		defer m.applyRetryActive.Store(false)
+		defer func() {
+			m.applyRetryActive.Store(false)
+			if m.ctx.Err() == nil && m.stashedApplyRetry.Load() != nil {
+				m.activateApplyRetryLoop()
+			}
+		}()
 		backoff := time.Second
 		const maxBackoff = 30 * time.Second
 		for {
@@ -1939,6 +1973,10 @@ func (m *Manager) scheduleApplyRetry(newAssignment Assignment) {
 
 			pending := m.stashedApplyRetry.Swap(nil)
 			if pending == nil {
+				if hook := m.testHookRetryLoopEmptyObserved; hook != nil {
+					hook()
+				}
+
 				return
 			}
 			prev := m.CurrentAssignment()
@@ -1955,6 +1993,10 @@ func (m *Manager) scheduleApplyRetry(newAssignment Assignment) {
 			}
 			// Success — drain any newer stash that arrived during the apply.
 			if again := m.stashedApplyRetry.Load(); again == nil {
+				if hook := m.testHookRetryLoopEmptyObserved; hook != nil {
+					hook()
+				}
+
 				return
 			}
 			backoff = time.Second // reset for the next attempt
@@ -1991,7 +2033,21 @@ func (m *Manager) scheduleApplyRetry(newAssignment Assignment) {
 func (m *Manager) scheduleCommitFetchRetry(commit *types.AssignmentCommit) {
 	m.stashFetchRetryCandidate(commit)
 
-	// Only one fetch-retry loop at a time.
+	m.activateFetchRetryLoop()
+}
+
+// activateFetchRetryLoop CASes fetchRetryActive false->true and, on success,
+// spawns the retry loop goroutine. A losing caller returns immediately,
+// trusting the already-running loop (or its ownership-handoff re-check
+// below) to observe its stash.
+//
+// Shares scheduleApplyRetry/activateApplyRetryLoop's lost-wakeup fix and
+// rationale verbatim (see activateApplyRetryLoop's Godoc): the deferred
+// cleanup re-checks stashedFetchRetry after clearing fetchRetryActive and
+// re-activates if a racing producer's scheduleCommitFetchRetry lost the
+// activation CAS in the exit window, guarded by m.ctx.Err() == nil to avoid
+// a shutdown-time respawn ping-pong.
+func (m *Manager) activateFetchRetryLoop() {
 	if !m.fetchRetryActive.CompareAndSwap(false, true) {
 		return
 	}
@@ -1999,7 +2055,12 @@ func (m *Manager) scheduleCommitFetchRetry(commit *types.AssignmentCommit) {
 	workerID := m.WorkerID()
 
 	m.wg.Go(func() {
-		defer m.fetchRetryActive.Store(false)
+		defer func() {
+			m.fetchRetryActive.Store(false)
+			if m.ctx.Err() == nil && m.stashedFetchRetry.Load() != nil {
+				m.activateFetchRetryLoop()
+			}
+		}()
 		backoff := time.Second
 		const maxBackoff = 30 * time.Second
 		for {
@@ -2013,6 +2074,10 @@ func (m *Manager) scheduleCommitFetchRetry(commit *types.AssignmentCommit) {
 
 			pending := m.stashedFetchRetry.Swap(nil)
 			if pending == nil {
+				if hook := m.testHookRetryLoopEmptyObserved; hook != nil {
+					hook()
+				}
+
 				return
 			}
 
@@ -2082,6 +2147,10 @@ func (m *Manager) scheduleCommitFetchRetry(commit *types.AssignmentCommit) {
 			// this attempt was running (mirrors scheduleApplyRetry's
 			// success-drain).
 			if again := m.stashedFetchRetry.Load(); again == nil {
+				if hook := m.testHookRetryLoopEmptyObserved; hook != nil {
+					hook()
+				}
+
 				return
 			}
 			backoff = time.Second
