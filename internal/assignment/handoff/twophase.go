@@ -12,8 +12,26 @@ import (
 	"github.com/arloliu/parti/v2/internal/natsutil"
 	"github.com/arloliu/parti/v2/internal/ratelimit"
 	"github.com/arloliu/parti/v2/types"
+	"github.com/nats-io/nats.go/jetstream"
 	"golang.org/x/sync/errgroup"
 )
+
+// followerBackstopTarget caps the GATING-INDUCED slowdown for a
+// non-authority worker: its ticker cadence is never gated below
+// max(SweepInterval, ~followerBackstopTarget). It is NOT an absolute
+// healing-latency bound — SweepInterval has no upper bound, and a large
+// configured interval slows leaders and followers alike exactly as it
+// does today; the gate adds at most this factor on top.
+const followerBackstopTarget = 5 * time.Minute
+
+// reapDeleteTimeout bounds the reap arm's conditioned KV delete. The
+// ticker sweep otherwise runs on the manager-lifetime context, so
+// without this bound a degraded store could hold authMu (and therefore
+// block authority sampling) for an unbounded request timeout. With it,
+// the worst case is: a tick fires during a stalled delete, blocks in
+// sampleAuthority for at most this long, then proceeds — samples are
+// delayed, never lost.
+const reapDeleteTimeout = 5 * time.Second
 
 // twoPhaseCoordinator implements a prepare/commit protocol using KV-backed claims.
 // It supports optional observability delays (for tests/demos) and opportunistic
@@ -34,14 +52,60 @@ type twoPhaseCoordinator struct {
 	lastSweep time.Time
 	started   atomic.Bool
 
-	// orphanAbsentSince records, per claim key, when the sweep first observed
-	// the partition absent from a vouched LivePartitions set. Entries clear
-	// when the partition reappears, when the claim is reaped, when the claim
-	// key stops being listed, or wholesale on an unvouched pass. Guarded by
-	// sweepMu (single-flight sweep = single writer). In-memory only: a
-	// restart or leadership change restarts the grace clock, which is the
-	// conservative direction.
-	orphanAbsentSince map[string]time.Time
+	// authMu serializes three critical sections that together implement
+	// the sweep-authority generation fence: (1) sampleAuthority's
+	// sample+record of SweepAuthority, (2) resolveLiveSet's vouch
+	// snapshot {vouchNow, passGen}, taken (or the generation bumped)
+	// every time LivePartitions is resolved, and (3) maybeReapOrphan's
+	// final generation check plus its conditioned Delete. Lock ordering
+	// is sweepMu -> authMu for every sweep-path acquisition;
+	// sampleAuthority (the ticker's per-tick sample) takes authMu alone.
+	// Never the reverse — and SweepAuthority itself must never call back
+	// into the coordinator (that would be exactly the reverse-order
+	// cycle).
+	authMu sync.Mutex
+	// unvouchedGen is a GENERATION, not a timestamp, guarded by authMu.
+	// It advances once per: (a) a recorded false SweepAuthority sample;
+	// (b) an unvouched vouch attempt (resolveLiveSet's liveOK=false);
+	// (c) an ambiguous reap-delete outcome (self-poison) — this third
+	// cause advances the generation even under nil SweepAuthority, so
+	// nil authority does not make the reap arm's discard path
+	// permanently unreachable: a retained clock whose delete outcome is
+	// unknown must re-earn a fresh vouched grace regardless of whether
+	// SweepAuthority is configured.
+	unvouchedGen uint64
+	// backstopDue latches a due backstop tick whose pass was NOT
+	// admitted (TryLock lost to a concurrent sweep, or the in-pass
+	// interval throttle absorbed it because an Apply-origin sweep ran
+	// recently): every subsequent tick retries until one ticker pass is
+	// admitted. Touched only by the ticker goroutine (Start's single
+	// background loop) — no lock needed.
+	backstopDue bool
+	// testHookAfterVouchSnapshot, when non-nil, is invoked immediately
+	// after resolveLiveSet's vouch snapshot and before the first claim
+	// decision — in BOTH the full-pass and cached-pass bodies. TEST-ONLY:
+	// always nil in production. Lets a test park a pass between the
+	// vouch snapshot and its first reap decision to deterministically
+	// race a false sample against it.
+	testHookAfterVouchSnapshot func()
+
+	// orphanAbsentSince records, per claim key, the vouch snapshot in
+	// effect when the sweep first observed the partition absent from a
+	// vouched LivePartitions set: since = the pass's vouchNow (not
+	// pass-start now — strictly conservative, never seeds earlier than
+	// today's behavior) and gen = the pass's unvouchedGen snapshot,
+	// fencing the eventual reap decision against any false-authority
+	// sample or ambiguous delete outcome recorded after the clock was
+	// seeded. Entries clear when the partition reappears, when the claim
+	// is reaped, when the claim key stops being listed, wholesale on an
+	// unvouched pass, or on a fence mismatch at reap time (discard —
+	// never re-seeded from a stale timestamp within the same pass; only
+	// a later freshly vouched pass seeds a replacement). Guarded by
+	// sweepMu (single-flight sweep = single writer) for map access; the
+	// `gen` comparison additionally reads authMu-guarded unvouchedGen.
+	// In-memory only: a restart or leadership change restarts the grace
+	// clock, which is the conservative direction.
+	orphanAbsentSince map[string]orphanClock
 
 	// Sweep scan-gate state, all guarded by sweepMu like every other
 	// sweep field. sweepCache holds the (claim, revision) view of the
@@ -100,10 +164,67 @@ type cachedClaim struct {
 	rev   uint64
 }
 
+// orphanClock is one absence-clock entry: the vouch snapshot the clock
+// was seeded from (see orphanAbsentSince).
+type orphanClock struct {
+	since time.Time
+	gen   uint64
+}
+
+// vouchSnapshot is the {vouchNow, passGen} pair resolveLiveSet takes,
+// under authMu, when LivePartitions vouches for the live set (liveOK ==
+// true). Every absence clock seeded during the pass carries this
+// snapshot, so a reap decision can later fence itself against any
+// unvouched observation recorded after the vouch.
+type vouchSnapshot struct {
+	now time.Time
+	gen uint64
+}
+
+// backstopEveryFor derives the follower backstop's tick period from the
+// (already-normalized, guaranteed positive) sweep interval: FLOOR
+// division, floored at 1 (a no-op — the follower keeps the configured
+// full cadence — once the interval alone already exceeds
+// followerBackstopTarget). Extracted as a pure function so the boundary
+// table (§4.8) is directly unit-testable.
+func backstopEveryFor(interval time.Duration) int {
+	return max(1, int(followerBackstopTarget/interval))
+}
+
+// sampleAuthority is the ONLY path by which a ticker fire observes
+// SweepAuthority. Sample and record are one authMu critical section, so
+// a false sample can never exist "observed but not yet recorded" while a
+// concurrent reap fences its decision against unvouchedGen. A nil
+// SweepAuthority short-circuits to authorized == true without touching
+// the generation — nil-authority ticker cadence, scan-gate behavior, and
+// the reconcile arms stay byte-for-byte today's.
+func (t *twoPhaseCoordinator) sampleAuthority() bool {
+	t.authMu.Lock()
+	defer t.authMu.Unlock()
+	authorized := t.cfg.SweepAuthority == nil || t.cfg.SweepAuthority()
+	if !authorized {
+		t.unvouchedGen++
+	}
+
+	return authorized
+}
+
 // Start launches a background goroutine that sweeps stale claims at SweepInterval.
 //
 // This ensures stale/expired claims are cleaned up even in idle systems where
-// Apply is rarely called. The goroutine exits when ctx is cancelled.
+// Apply is rarely called. The goroutine exits when ctx is cancelled (or, in
+// tests, when an injected SweepTicks channel is closed).
+//
+// Every tick samples sweep authority (sampleAuthority). An authorized
+// (leader) worker sweeps at the full configured cadence, byte-for-byte
+// today's behavior. A non-authorized worker only attempts a pass on
+// backstop ticks — every backstopEvery-th tick, phase-staggered by
+// SweepPhaseSeed across the fleet — unless a previous due tick's pass was
+// not admitted (backstopDue latch), in which case every subsequent tick
+// retries until one pass is admitted. This bounds ticker-driven healing
+// on non-authority workers to roughly (backstopEvery+1) x SweepInterval
+// even when no worker holds authority, while a healthy leader keeps
+// today's full cadence.
 //
 // Start is idempotent: calling it more than once has no effect.
 func (t *twoPhaseCoordinator) Start(ctx context.Context) {
@@ -113,15 +234,45 @@ func (t *twoPhaseCoordinator) Start(ctx context.Context) {
 	if !t.started.CompareAndSwap(false, true) {
 		return // already started
 	}
+
+	// backstopEveryFor always returns >= 1 (max(1, ...)), so this
+	// narrowing to uint64 never wraps; computed once here so the
+	// modulo check inside the goroutine needs no repeated conversion.
+	backstopEvery := uint64(backstopEveryFor(t.cfg.SweepInterval)) //nolint:gosec // G115: backstopEveryFor >= 1 always
+	phase := t.cfg.SweepPhaseSeed % backstopEvery
+
 	go func() {
-		ticker := time.NewTicker(t.cfg.SweepInterval)
-		defer ticker.Stop()
+		tickSrc := t.cfg.SweepTicks
+		if tickSrc == nil {
+			ticker := time.NewTicker(t.cfg.SweepInterval)
+			defer ticker.Stop()
+			tickSrc = ticker.C
+		}
+
+		var tick uint64 // coordinator-lifetime monotonic; never reset on authority flaps
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
-				t.maybeSweepClaims(ctx, sweepOriginTicker)
+			case _, ok := <-tickSrc:
+				if !ok {
+					return // closed injected channel: clean test teardown
+				}
+				tick++
+				authorized := t.sampleAuthority()
+				if !authorized {
+					if (tick+phase)%backstopEvery != 0 && !t.backstopDue {
+						continue // follower off-cycle: no probe, no KV I/O
+					}
+					t.backstopDue = true
+				}
+				admitted := t.maybeSweepClaims(ctx, sweepOriginTicker)
+				if admitted {
+					t.backstopDue = false
+				}
+				if t.cfg.SweepObserver != nil {
+					t.cfg.SweepObserver(sweepOriginTicker, authorized, admitted)
+				}
 			}
 		}
 	}()
@@ -131,8 +282,13 @@ func (t *twoPhaseCoordinator) Start(ctx context.Context) {
 // Steps: prepare -> (optional delay) -> apply consumer -> commit -> (optional delay) -> stabilize.
 func (t *twoPhaseCoordinator) Apply(ctx context.Context, workerID string, previous, next types.Assignment) error {
 	// Opportunistic sweep of expired/non-stable claims; skip metrics as requested.
-	// Runs before any early returns to maximize cleanup.
-	t.maybeSweepClaims(ctx, sweepOriginApply)
+	// Runs before any early returns to maximize cleanup. Apply-origin sweeps
+	// are never gated by sweep authority (untouched, every worker): the
+	// authorized value reported to the observer is a constant true marker.
+	admitted := t.maybeSweepClaims(ctx, sweepOriginApply)
+	if t.cfg.SweepObserver != nil {
+		t.cfg.SweepObserver(sweepOriginApply, true, admitted)
+	}
 
 	inst := newInstrumenter(t.cfg.Metrics)
 
@@ -550,18 +706,26 @@ func (t *twoPhaseCoordinator) stabilizePhase(ctx context.Context, workerID strin
 // work keeps firing at today's cadence on an idle bucket. Apply-origin
 // passes never use the gate (no probe, no confirm wait, no gate-state
 // mutation): the manager's apply pipeline is byte-for-byte unchanged.
-func (t *twoPhaseCoordinator) maybeSweepClaims(ctx context.Context, origin sweepOrigin) {
+//
+// Returns admitted: false on the Store == nil, TryLock-miss, and
+// interval-throttle returns; true from the moment the interval throttle
+// is consumed (lastSweep advanced) — even if the body then aborts on
+// probe failure (fail-open full pass runs, per today's contract) or on
+// context cancellation mid-probe (only reachable at shutdown). This
+// "admitted = throttle consumed" definition matches the throttle
+// semantics that already gate the next pass.
+func (t *twoPhaseCoordinator) maybeSweepClaims(ctx context.Context, origin sweepOrigin) (admitted bool) {
 	if t.cfg.Store == nil {
-		return
+		return false
 	}
 	if !t.sweepMu.TryLock() {
-		return // another sweep is mid-body; this opportunistic pass skips
+		return false // another sweep is mid-body; this opportunistic pass skips
 	}
 	defer t.sweepMu.Unlock()
 
 	now := t.cfg.Now()
 	if t.cfg.SweepInterval > 0 && !t.lastSweep.IsZero() && now.Sub(t.lastSweep) < t.cfg.SweepInterval {
-		return
+		return false
 	}
 	t.lastSweep = now
 
@@ -573,7 +737,7 @@ func (t *twoPhaseCoordinator) maybeSweepClaims(ctx context.Context, origin sweep
 	if origin != sweepOriginTicker || t.prober == nil {
 		t.sweepPass(ctx, now, nil)
 
-		return
+		return true
 	}
 
 	pos, ok, reason := t.sweepProbe(ctx)
@@ -587,13 +751,13 @@ func (t *twoPhaseCoordinator) maybeSweepClaims(ctx context.Context, origin sweep
 			// blocks. ctx cancellation aborts the pass with gate state
 			// untouched.
 			if !t.sweepConfirmWait(ctx) {
-				return
+				return true
 			}
 			pos2, ok2, reason2 := t.sweepProbe(ctx)
 			if ok2 && pos2.Same(t.sweepCachePos) {
 				t.sweepCachedPass(ctx, now)
 
-				return
+				return true
 			}
 			pos, ok = pos2, ok2
 			reason = reason2
@@ -621,6 +785,8 @@ func (t *twoPhaseCoordinator) maybeSweepClaims(ctx context.Context, origin sweep
 		)
 	}
 	t.sweepSkipsSinceFull = 0
+
+	return true
 }
 
 // sweepProbe takes one stream-position probe under the fail-open and
@@ -686,24 +852,45 @@ func (t *twoPhaseCoordinator) sweepConfirmWait(ctx context.Context) bool {
 // unreached; a later pass could then reap using the ORIGINAL absence
 // timestamp instead of requiring a fresh grace measured from the
 // SECOND disappearance. maybeReapOrphan's in-set clear stays as
-// defense in depth for the common case. Runs under sweepMu, called by
-// both the full-pass and cached-pass bodies.
-func (t *twoPhaseCoordinator) resolveLiveSet(ctx context.Context) (map[string]struct{}, bool) {
+// defense in depth for the common case.
+//
+// liveOK=true additionally takes — under authMu, as one atomic snapshot
+// alongside the clock clear above — {vouchNow: cfg.Now(), passGen:
+// unvouchedGen} and returns it as vouch. Every clock seeded during this
+// pass carries this snapshot: since = vouchNow (strictly conservative vs
+// pass-start now — never seeds earlier than today's behavior), and gen
+// fences the eventual reap decision against any unvouched observation
+// recorded after this instant. liveOK=false additionally increments
+// unvouchedGen under authMu (self-poison: an unvouched pass invalidates
+// every clock, matching its wholesale clear above).
+//
+// Runs under sweepMu, called by both the full-pass and cached-pass
+// bodies.
+func (t *twoPhaseCoordinator) resolveLiveSet(ctx context.Context) (live map[string]struct{}, liveOK bool, vouch vouchSnapshot) {
 	if t.cfg.OrphanGrace <= 0 || t.cfg.LivePartitions == nil {
-		return nil, false
+		return nil, false, vouchSnapshot{}
 	}
-	live, liveOK := t.cfg.LivePartitions(ctx)
+	live, liveOK = t.cfg.LivePartitions(ctx)
 	if !liveOK {
 		clear(t.orphanAbsentSince)
-	} else {
-		for pid := range t.orphanAbsentSince {
-			if _, ok := live[pid]; ok {
-				delete(t.orphanAbsentSince, pid)
-			}
+		t.authMu.Lock()
+		t.unvouchedGen++
+		t.authMu.Unlock()
+
+		return live, false, vouchSnapshot{}
+	}
+
+	for pid := range t.orphanAbsentSince {
+		if _, ok := live[pid]; ok {
+			delete(t.orphanAbsentSince, pid)
 		}
 	}
 
-	return live, liveOK
+	t.authMu.Lock()
+	vouch = vouchSnapshot{now: t.cfg.Now(), gen: t.unvouchedGen}
+	t.authMu.Unlock()
+
+	return live, true, vouch
 }
 
 // sweepClaim runs the per-claim sweep decision arms shared by full and
@@ -718,6 +905,7 @@ func (t *twoPhaseCoordinator) sweepClaim(
 	live map[string]struct{},
 	liveOK bool,
 	now time.Time,
+	vouch vouchSnapshot,
 ) {
 	// Cheap pre-filter: skip a CAS write attempt when this claim needs
 	// no reconcile (the common case for already-stable claims).
@@ -736,7 +924,7 @@ func (t *twoPhaseCoordinator) sweepClaim(
 	}
 
 	if liveOK {
-		t.maybeReapOrphan(ctx, pid, cur, rev, live, now)
+		t.maybeReapOrphan(ctx, pid, cur, rev, live, now, vouch)
 	}
 }
 
@@ -775,7 +963,10 @@ func (t *twoPhaseCoordinator) sweepPass(ctx context.Context, now time.Time, latc
 		t.cfg.Metrics.SetClaimStoreSize(len(keys))
 	}
 
-	live, liveOK := t.resolveLiveSet(ctx)
+	live, liveOK, vouch := t.resolveLiveSet(ctx)
+	if t.testHookAfterVouchSnapshot != nil {
+		t.testHookAfterVouchSnapshot()
+	}
 
 	var cache map[string]cachedClaim
 	if latch != nil {
@@ -796,7 +987,7 @@ func (t *twoPhaseCoordinator) sweepPass(ctx context.Context, now time.Time, latc
 		if cache != nil {
 			cache[pid] = cachedClaim{claim: cur, rev: rev}
 		}
-		t.sweepClaim(ctx, pid, cur, rev, live, liveOK, now)
+		t.sweepClaim(ctx, pid, cur, rev, live, liveOK, now, vouch)
 	}
 
 	if liveOK {
@@ -846,10 +1037,13 @@ func (t *twoPhaseCoordinator) sweepCachedPass(ctx context.Context, now time.Time
 		t.cfg.Metrics.SetClaimStoreSize(len(t.sweepCache))
 	}
 
-	live, liveOK := t.resolveLiveSet(ctx)
+	live, liveOK, vouch := t.resolveLiveSet(ctx)
+	if t.testHookAfterVouchSnapshot != nil {
+		t.testHookAfterVouchSnapshot()
+	}
 
 	for pid, cc := range t.sweepCache {
-		t.sweepClaim(ctx, pid, cc.claim, cc.rev, live, liveOK, now)
+		t.sweepClaim(ctx, pid, cc.claim, cc.rev, live, liveOK, now, vouch)
 	}
 
 	// The cached key set IS the current bucket key set (the gate proved
@@ -871,11 +1065,32 @@ func (t *twoPhaseCoordinator) sweepCachedPass(ctx context.Context, now time.Time
 //   - in the set → clear any absence clock, keep;
 //   - not stable, or a pending owner recorded → keep (in-flight handoffs are
 //     the existing sweep arms' job, never the reaper's);
-//   - first vouched absence → start the clock, keep;
-//   - absent for >= OrphanGrace → compare-and-delete at the revision this
-//     pass read. A lost CAS means the claim transitioned concurrently (e.g.
-//     the partition was re-added and prepared) — the reaper yields and the
-//     next pass re-evaluates from a fresh read.
+//   - first vouched absence → start the clock (seeded from vouch, not
+//     pass-start now), keep;
+//   - absent for >= OrphanGrace → the fenced decide-and-delete below.
+//
+// Fenced decide-and-delete: once grace has elapsed, the clock's gen is
+// compared against the current unvouchedGen under authMu. A mismatch
+// means an unvouched observation (false sample, unvouched vouch attempt,
+// or an earlier ambiguous delete) was recorded after this clock's vouch:
+// the window is invalid, so the clock is DISCARDED (deleted, not
+// re-seeded from any stale timestamp) and the pass returns without
+// reaping — only a later freshly vouched pass may seed a replacement
+// from its own snapshot. On a generation match, the conditioned delete
+// runs with a bounded reapDeleteTimeout (the ticker sweep otherwise runs
+// on the manager-lifetime context) while still holding authMu, and its
+// outcome is classified:
+//
+//   - nil: DEFINITIVE application — clear the clock;
+//   - jetstream.ErrKeyExists / ErrKeyNotFound: DEFINITIVE non-application
+//     — the server answered (revision moved / key already gone); keep
+//     the claim and clock, exactly as today's expected-loser skip;
+//   - anything else: AMBIGUOUS — the delete request was already sent and
+//     a context expiry only stops the client-side wait; the server may
+//     still apply it later. Keep the claim and clock AND self-poison the
+//     generation (unvouchedGen++) so every clock seeded before this
+//     instant discards at its next fence — conservative whether or not
+//     the delete eventually applies.
 func (t *twoPhaseCoordinator) maybeReapOrphan(
 	ctx context.Context,
 	pid string,
@@ -883,9 +1098,11 @@ func (t *twoPhaseCoordinator) maybeReapOrphan(
 	rev uint64,
 	live map[string]struct{},
 	now time.Time,
+	vouch vouchSnapshot,
 ) {
 	// Runs under sweepMu (single-flight sweep) — the sole writer of
-	// orphanAbsentSince, so no further locking is needed here.
+	// orphanAbsentSince, so no further locking is needed here except for
+	// the authMu-guarded generation fence below.
 	if _, ok := live[pid]; ok {
 		delete(t.orphanAbsentSince, pid)
 
@@ -895,33 +1112,61 @@ func (t *twoPhaseCoordinator) maybeReapOrphan(
 	if cur.State != ClaimStateStable || cur.PendingOwner != "" {
 		return
 	}
-	since, seen := t.orphanAbsentSince[pid]
+	clock, seen := t.orphanAbsentSince[pid]
 	if !seen {
-		t.orphanAbsentSince[pid] = now
+		t.orphanAbsentSince[pid] = orphanClock{since: vouch.now, gen: vouch.gen}
 
 		return
 	}
-	if now.Sub(since) < t.cfg.OrphanGrace {
+	if now.Sub(clock.since) < t.cfg.OrphanGrace {
 		return
 	}
 
-	if err := t.cfg.Store.Delete(ctx, pid, rev); err != nil {
-		// Revision conflict or transient KV failure: keep the claim and the
-		// clock; a genuine orphan is re-attempted next pass, a re-added
-		// partition clears via the in-set branch above.
+	t.authMu.Lock()
+	if clock.gen != t.unvouchedGen {
+		delete(t.orphanAbsentSince, pid)
+		t.authMu.Unlock()
 		if t.cfg.Logger != nil {
-			t.cfg.Logger.Debug("orphan claim reap skipped",
-				"partition_id", pid, "error", err)
+			t.cfg.Logger.Debug("orphan claim reap discarded: stale generation",
+				"partition_id", pid)
 		}
 
 		return
 	}
-	delete(t.orphanAbsentSince, pid)
+
+	delCtx, cancel := context.WithTimeout(ctx, reapDeleteTimeout)
+	delErr := t.cfg.Store.Delete(delCtx, pid, rev)
+	cancel()
+
+	switch {
+	case delErr == nil:
+		delete(t.orphanAbsentSince, pid)
+	case errors.Is(delErr, jetstream.ErrKeyExists), errors.Is(delErr, jetstream.ErrKeyNotFound):
+		// Definitive non-application: revision conflict or the key is
+		// already gone. Keep the claim and the clock; a genuine orphan is
+		// re-attempted next pass, a re-added partition clears via the
+		// in-set branch above. No self-poison — the outcome is certain.
+	default:
+		// Ambiguous outcome: self-poison so no local bookkeeping can
+		// extend a grace window across it.
+		t.unvouchedGen++
+	}
+	t.authMu.Unlock()
+
+	if delErr != nil {
+		if t.cfg.Logger != nil {
+			t.cfg.Logger.Debug("orphan claim reap skipped",
+				"partition_id", pid, "error", delErr)
+		}
+
+		return
+	}
+
 	if t.cfg.Logger != nil {
 		t.cfg.Logger.Info("reaped orphan claim",
 			"partition_id", pid,
 			"owner", cur.Owner,
-			"absent_for", now.Sub(since).String(),
+			"absent_for", now.Sub(clock.since).String(),
 		)
 	}
 }

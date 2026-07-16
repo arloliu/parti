@@ -3,6 +3,7 @@ package parti
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"time"
 
 	"github.com/arloliu/parti/v2/internal/assignment/handoff"
@@ -240,6 +241,16 @@ func (m *Manager) setupHandoff(startupCtx context.Context, js jetstream.JetStrea
 		// See livePartitionSet and orphanClaimGrace (manager_handoff.go).
 		LivePartitions: m.livePartitionSet,
 		OrphanGrace:    orphanClaimGrace,
+		// Leader-gated ticker claim sweep: SweepAuthority reads the same
+		// atomic leadership flag livePartitionSet gates on, non-blocking
+		// and without taking any manager lock (same shape as the
+		// leader-aware LivePartitions supplier and the
+		// source.WithLeadershipProbe precedent). SweepPhaseSeed staggers
+		// non-leader backstop ticks across the fleet by the worker's
+		// claimed stable ID, already available at this point in Start
+		// (Step 1, before this Step 1.6 handoff setup).
+		SweepAuthority: func() bool { return m.isLeader.Load() },
+		SweepPhaseSeed: fnv1a64(m.WorkerID()),
 	}, true)
 
 	// Hygiene + resumable detection
@@ -253,6 +264,16 @@ func (m *Manager) setupHandoff(startupCtx context.Context, js jetstream.JetStrea
 	}
 
 	return nil
+}
+
+// fnv1a64 hashes s with 64-bit FNV-1a, used to derive the handoff
+// coordinator's SweepPhaseSeed from the worker's claimed stable ID so
+// non-leader ticker backstops stagger across the fleet instead of
+// thundering together on the same tick.
+func fnv1a64(s string) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(s)) // hash.Hash64.Write never returns an error
+	return h.Sum64()
 }
 
 // ensureKVBucket creates or opens a KV bucket with the specified TTL and storage type.
