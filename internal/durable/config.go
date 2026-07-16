@@ -8,6 +8,7 @@ import (
 	"github.com/arloliu/fuda"
 	"github.com/arloliu/parti/v2/internal/logging"
 	"github.com/arloliu/parti/v2/internal/metrics"
+	"github.com/arloliu/parti/v2/internal/natsutil"
 	"github.com/arloliu/parti/v2/internal/ratelimit"
 	"github.com/arloliu/parti/v2/internal/recovery"
 	"github.com/arloliu/parti/v2/types"
@@ -247,6 +248,18 @@ type WorkerConsumerConfig struct {
 	// Default: DefaultFetchTimeout (5s).
 	FetchTimeout time.Duration `default:"5s" validate:"gt=0"`
 
+	// PullHeartbeatCap optionally bounds the derived nats.go PullHeartbeat
+	// value. The heartbeat is normally FetchTimeout/2, clamped to nats.go's
+	// PullHeartbeat validity range [500ms, 30s]; when PullHeartbeatCap > 0
+	// the derived heartbeat is further capped to this value. This bounds
+	// missed-heartbeat (ErrNoHeartbeat) detection latency — which fires at
+	// roughly 2x the heartbeat and is how a deleted durable consumer is
+	// detected (see defaultIterFactory) — independent of how high
+	// FetchTimeout is raised to reduce idle pull-request churn. 0 (default)
+	// disables the cap. See consumer.WithPullHeartbeatCap for the validated
+	// public entry point ([500ms, 30s] when nonzero).
+	PullHeartbeatCap time.Duration `validate:"gte=0"`
+
 	// MaxWaiting caps outstanding pull requests for each per-subject durable.
 	// Default: DefaultMaxWaiting (2).
 	MaxWaiting int `default:"2" validate:"gt=0"`
@@ -393,6 +406,31 @@ func validateStreamMissingHookStrategy(hookConfigured bool, strategy RecoveryStr
 	}
 }
 
+// validatePullHeartbeatCap enforces nats.go's PullHeartbeat validity range
+// [500ms, 30s] (jetstream_options.go configureConsume/configureMessages,
+// nats.go v1.52.0) on a nonzero PullHeartbeatCap. Zero is always accepted:
+// it means "no cap", not "zero heartbeat".
+//
+// This closes the internal door around package consumer's identically-named
+// validatePullHeartbeatCap: WorkerConsumerConfig and BroadcastConsumerConfig
+// can be constructed directly (bypassing the public consumer.* option
+// surface), and without this check a PullHeartbeatCap outside the range
+// passed the struct-tag `gte=0` floor, reached natsutil.DerivePullHeartbeat,
+// and produced a value nats.go rejects at iterator creation — the
+// restart/warn loop the cap knob exists to fix.
+func validatePullHeartbeatCap(heartbeatCap time.Duration) error {
+	if heartbeatCap == 0 {
+		return nil
+	}
+	if heartbeatCap < natsutil.MinPullHeartbeat || heartbeatCap > natsutil.MaxPullHeartbeat {
+		return fmt.Errorf(
+			"durable: PullHeartbeatCap must be 0 (disabled) or within [500ms, 30s] (nats.go PullHeartbeat range), got %v",
+			heartbeatCap)
+	}
+
+	return nil
+}
+
 // DefaultWorkerConsumerConfig returns a WorkerConsumerConfig with sensible defaults.
 // Note: Required fields (StreamName, ConsumerPrefix, SubjectTemplate) must still be set by the user.
 func DefaultWorkerConsumerConfig() WorkerConsumerConfig {
@@ -474,6 +512,9 @@ func (c *WorkerConsumerConfig) Validate() error {
 	}
 	if err := validateSubjectTemplate(c.SubjectTemplate, true); err != nil {
 		return fmt.Errorf("subject template is invalid: %w", err)
+	}
+	if err := validatePullHeartbeatCap(c.PullHeartbeatCap); err != nil {
+		return err
 	}
 
 	return validateStreamMissingHookStrategy(c.StreamMissingHook != nil, c.RecoveryStrategy)

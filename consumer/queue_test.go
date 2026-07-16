@@ -167,6 +167,34 @@ func TestQueueConfig_Validate_WrapsErrInvalidConfig(t *testing.T) {
 				return cfg.Validate()
 			},
 		},
+		{
+			name: "PullHeartbeatCap below 500ms floor",
+			fn: func() error {
+				cfg := QueueConfig{
+					StreamName:    "TEST",
+					ConsumerName:  "ok",
+					FilterSubject: "events.>",
+					CommonConfig:  CommonConfig{PullHeartbeatCap: 499 * time.Millisecond},
+				}
+				_ = cfg.SetDefaults()
+
+				return cfg.Validate()
+			},
+		},
+		{
+			name: "PullHeartbeatCap above 30s ceiling",
+			fn: func() error {
+				cfg := QueueConfig{
+					StreamName:    "TEST",
+					ConsumerName:  "ok",
+					FilterSubject: "events.>",
+					CommonConfig:  CommonConfig{PullHeartbeatCap: 31 * time.Second},
+				}
+				_ = cfg.SetDefaults()
+
+				return cfg.Validate()
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -175,6 +203,23 @@ func TestQueueConfig_Validate_WrapsErrInvalidConfig(t *testing.T) {
 			require.Error(t, err)
 			require.True(t, errors.Is(err, ErrInvalidConfig),
 				"expected errors.Is(err, ErrInvalidConfig), got: %v", err)
+		})
+	}
+}
+
+// TestQueueConfig_Validate_PullHeartbeatCap_Accepted pins the accept side of
+// the boundary: unset (0) and every valid nonzero cap must pass.
+func TestQueueConfig_Validate_PullHeartbeatCap_Accepted(t *testing.T) {
+	for _, heartbeatCap := range []time.Duration{0, 500 * time.Millisecond, 2 * time.Second, 30 * time.Second} {
+		t.Run(heartbeatCap.String(), func(t *testing.T) {
+			cfg := QueueConfig{
+				StreamName:    "TEST",
+				ConsumerName:  "ok",
+				FilterSubject: "events.>",
+				CommonConfig:  CommonConfig{PullHeartbeatCap: heartbeatCap},
+			}
+			_ = cfg.SetDefaults()
+			require.NoError(t, cfg.Validate())
 		})
 	}
 }
@@ -794,4 +839,58 @@ func TestQueue_RecoverySnapshot_CarriesConsumerOptions(t *testing.T) {
 
 	require.False(t, qDefault.consumerConfig.MemoryStorage)
 	require.Equal(t, 0, qDefault.consumerConfig.Replicas)
+}
+
+// TestQueue_FetchTimeoutAbove60s_IteratorCreationSucceeds proves the derived
+// pull heartbeat for a raised FetchTimeout stays within nats.go's PullHeartbeat
+// validity range.
+//
+// Before the derivation was given an explicit ceiling, the heartbeat was
+// always expiry/2 with no upper bound. nats.go v1.52.0 rejects an explicit
+// PullHeartbeat outside [500ms, 30s] (jetstream_options.go configureMessages)
+// with ErrInvalidOption, so any FetchTimeout above 60s derived a heartbeat
+// above 30s and iterator creation failed on every attempt — the pull loop
+// then spun in a restart/warn cycle forever with no terminal signal.
+//
+// This calls the real iterator factory directly (bypassing the async pull
+// loop's retry/backoff, which would otherwise hide the failure behind an
+// infinite warn-and-retry cycle) against a live NATS consumer, so it exercises
+// the exact nats.go validation path a production pull loop would hit.
+func TestQueue_FetchTimeoutAbove60s_IteratorCreationSucceeds(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	t.Cleanup(cancel)
+
+	_, nc := partitesting.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	_, err = js.CreateStream(ctx, jetstream.StreamConfig{
+		Name:      "QUEUE_HB90",
+		Subjects:  []string{"hb90.>"},
+		Retention: jetstream.LimitsPolicy,
+		Storage:   jetstream.MemoryStorage,
+		MaxMsgs:   -1,
+	})
+	require.NoError(t, err)
+
+	handler := MessageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error { return nil })
+
+	q, err := NewQueue(js, "QUEUE_HB90", "hb90-workers", "hb90.>", handler,
+		WithFetchTimeout(90*time.Second),
+	)
+	require.NoError(t, err)
+
+	cons, err := q.ensureConsumer(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = js.DeleteConsumer(ctx, "QUEUE_HB90", "hb90-workers") })
+
+	iter, err := q.iterFactory(cons, q.config.BatchSize, q.config.FetchTimeout)
+	require.NoError(t, err,
+		"iterator creation must succeed with FetchTimeout > 60s once the derived "+
+			"heartbeat is bounded to nats.go's 30s PullHeartbeat maximum")
+	iter.Stop()
 }

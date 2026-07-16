@@ -137,6 +137,36 @@ func TestStaticConfig_Validate_WrapsErrInvalidConfig(t *testing.T) {
 			},
 		},
 		{
+			name: "PullHeartbeatCap below 500ms floor",
+			fn: func() error {
+				cfg := StaticConfig{
+					StreamName:     "S",
+					ConsumerName:   "c",
+					SubjectPattern: "s.{{partition}}",
+					NumPartitions:  2,
+					CommonConfig:   CommonConfig{PullHeartbeatCap: 499 * time.Millisecond},
+				}
+				_ = cfg.SetDefaults()
+
+				return cfg.Validate()
+			},
+		},
+		{
+			name: "PullHeartbeatCap above 30s ceiling",
+			fn: func() error {
+				cfg := StaticConfig{
+					StreamName:     "S",
+					ConsumerName:   "c",
+					SubjectPattern: "s.{{partition}}",
+					NumPartitions:  2,
+					CommonConfig:   CommonConfig{PullHeartbeatCap: 31 * time.Second},
+				}
+				_ = cfg.SetDefaults()
+
+				return cfg.Validate()
+			},
+		},
+		{
 			name: "invalid subject pattern (crosses ipartition boundary)",
 			fn: func() error {
 				// Pattern with an unrecognized placeholder: the error originates in

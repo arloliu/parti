@@ -9,6 +9,7 @@ import (
 	"github.com/arloliu/parti/v2/internal/durable"
 	"github.com/arloliu/parti/v2/internal/logging"
 	"github.com/arloliu/parti/v2/internal/metrics"
+	"github.com/arloliu/parti/v2/internal/natsutil"
 	"github.com/arloliu/parti/v2/internal/partutil"
 	"github.com/arloliu/parti/v2/partition"
 	"github.com/arloliu/parti/v2/types"
@@ -41,6 +42,16 @@ type ConsumerConfig struct {
 
 	// FetchTimeout is the maximum time to wait for messages in each pull.
 	FetchTimeout time.Duration `default:"5s"`
+
+	// PullHeartbeatCap optionally bounds the derived nats.go PullHeartbeat
+	// value. The heartbeat is normally FetchTimeout/2, clamped to nats.go's
+	// PullHeartbeat validity range [500ms, 30s]; when PullHeartbeatCap > 0
+	// the derived heartbeat is further capped to this value. This bounds
+	// missed-heartbeat (ErrNoHeartbeat) detection latency independent of how
+	// high FetchTimeout is raised to reduce idle pull-request churn. 0
+	// (default) disables the cap. See consumer.WithPullHeartbeatCap for the
+	// validated public entry point ([500ms, 30s] when nonzero).
+	PullHeartbeatCap time.Duration
 
 	// MaxWaiting is the maximum number of outstanding pull requests allowed.
 	// Default: 2.
@@ -158,6 +169,9 @@ func (cfg *ConsumerConfig) Validate() error {
 	if cfg.AckPolicy == jetstream.AckNonePolicy {
 		cfg.AckPolicy = jetstream.AckExplicitPolicy
 	}
+	if err := validatePullHeartbeatCap(cfg.PullHeartbeatCap); err != nil {
+		return err
+	}
 
 	// Validate DispatchByKey requires {{key}} in SubjectPattern
 	if cfg.DispatchByKey != nil && *cfg.DispatchByKey {
@@ -178,6 +192,26 @@ func (cfg *ConsumerConfig) Validate() error {
 	}
 	if cfg.Metrics == nil {
 		cfg.Metrics = metrics.NewNop()
+	}
+
+	return nil
+}
+
+// validatePullHeartbeatCap enforces nats.go's PullHeartbeat validity range
+// [500ms, 30s] (jetstream_options.go configureConsume/configureMessages,
+// nats.go v1.52.0) on a nonzero PullHeartbeatCap. Zero is always accepted:
+// it means "no cap", not "zero heartbeat". Mirrors the identically-named
+// helpers in packages durable and consumer; duplicated rather than shared
+// because those helpers are unexported and ipartition constructs its
+// ConsumerConfig independently of both.
+func validatePullHeartbeatCap(heartbeatCap time.Duration) error {
+	if heartbeatCap == 0 {
+		return nil
+	}
+	if heartbeatCap < natsutil.MinPullHeartbeat || heartbeatCap > natsutil.MaxPullHeartbeat {
+		return fmt.Errorf(
+			"ipartition: PullHeartbeatCap must be 0 (disabled) or within [500ms, 30s] (nats.go PullHeartbeat range), got %v",
+			heartbeatCap)
 	}
 
 	return nil

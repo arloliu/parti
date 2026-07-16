@@ -152,6 +152,7 @@ func NewStatic(
 			MaxDeliver:        o.maxDeliver,
 			BatchSize:         o.batchSize,
 			FetchTimeout:      o.fetchTimeout,
+			PullHeartbeatCap:  o.pullHeartbeatCap,
 			MaxWaiting:        o.maxWaiting,
 			MaxAckPending:     o.maxAckPending,
 			InactiveThreshold: o.inactiveThreshold,
@@ -186,6 +187,7 @@ func NewStatic(
 		Partition:         cfg.Partition,
 		BatchSize:         cfg.BatchSize,
 		FetchTimeout:      cfg.FetchTimeout,
+		PullHeartbeatCap:  cfg.PullHeartbeatCap,
 		ManualAck:         cfg.ManualAck,
 		MaxDeliver:        cfg.MaxDeliver,
 		Logger:            cfg.Logger,
@@ -303,6 +305,10 @@ func (c *StaticConfig) Validate() error {
 	}
 
 	if err := validateFetchTimeoutFloor(c.FetchTimeout); err != nil {
+		return err
+	}
+
+	if err := validatePullHeartbeatCap(c.PullHeartbeatCap); err != nil {
 		return err
 	}
 

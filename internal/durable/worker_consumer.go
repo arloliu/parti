@@ -14,6 +14,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/arloliu/parti/v2/internal/dynamicbuild"
+	"github.com/arloliu/parti/v2/internal/natsutil"
 	"github.com/arloliu/parti/v2/internal/ratelimit"
 	"github.com/arloliu/parti/v2/jsutil"
 	"github.com/arloliu/parti/v2/kvutil"
@@ -124,7 +125,7 @@ func NewWorkerConsumer(js jetstream.JetStream, cfg WorkerConsumerConfig, fn func
 		logger:          cfg.Logger,
 		handler:         handler,
 		subjects:        make(map[string]*partitionConsumer, 64),
-		iterFactory:     defaultIterFactory,
+		iterFactory:     makeDefaultIterFactory(cfg.PullHeartbeatCap),
 		subjectTemplate: tmpl,
 		partitionPrefix: prefix,
 		partitionSuffix: suffix,
@@ -762,14 +763,23 @@ func (wc *WorkerConsumer) shouldSuppressPull(partitionID string) (bool, string) 
 	return false, ""
 }
 
-// defaultIterFactory provides the default messages iterator factory.
-// PullHeartbeat is set to expiry/2 (min 100ms) so that ErrNoHeartbeat
-// fires reliably when the consumer is deleted — enabling Path B detection.
-func defaultIterFactory(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error) {
-	heartbeat := max(expiry/2, 100*time.Millisecond)
-	return cons.Messages(
-		jetstream.PullMaxMessages(batch),
-		jetstream.PullExpiry(expiry),
-		jetstream.PullHeartbeat(heartbeat),
-	)
+// makeDefaultIterFactory returns the default messages iterator factory, with
+// PullHeartbeat derived by natsutil.DerivePullHeartbeat from the expiry
+// passed at call time and heartbeatCap fixed at construction time.
+func makeDefaultIterFactory(heartbeatCap time.Duration) func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error) {
+	return func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error) {
+		heartbeat := natsutil.DerivePullHeartbeat(expiry, heartbeatCap)
+
+		return cons.Messages(
+			jetstream.PullMaxMessages(batch),
+			jetstream.PullExpiry(expiry),
+			jetstream.PullHeartbeat(heartbeat),
+		)
+	}
 }
+
+// defaultIterFactory is the uncapped default iterator factory (equivalent to
+// makeDefaultIterFactory(0)), kept as a package-level value for call sites
+// that construct a WorkerConsumer or BroadcastConsumer literal directly
+// without a PullHeartbeatCap.
+var defaultIterFactory = makeDefaultIterFactory(0)

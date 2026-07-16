@@ -93,6 +93,16 @@ type BroadcastConsumerConfig struct {
 	// Default: 5s.
 	FetchTimeout time.Duration `default:"5s" validate:"gt=0"`
 
+	// PullHeartbeatCap optionally bounds the derived nats.go PullHeartbeat
+	// value. The heartbeat is normally FetchTimeout/2, clamped to nats.go's
+	// PullHeartbeat validity range [500ms, 30s]; when PullHeartbeatCap > 0
+	// the derived heartbeat is further capped to this value. This bounds
+	// missed-heartbeat (ErrNoHeartbeat) detection latency independent of how
+	// high FetchTimeout is raised to reduce idle pull-request churn. 0
+	// (default) disables the cap. See consumer.WithPullHeartbeatCap for the
+	// validated public entry point ([500ms, 30s] when nonzero).
+	PullHeartbeatCap time.Duration `validate:"gte=0"`
+
 	// MaxWaiting caps outstanding pull requests for the durable consumer.
 	// Default: 2.
 	MaxWaiting int `default:"2" validate:"gt=0"`
@@ -197,5 +207,5 @@ func (c *BroadcastConsumerConfig) Validate() error {
 		return fmt.Errorf("wildcard filter is invalid: %w", err)
 	}
 
-	return nil
+	return validatePullHeartbeatCap(c.PullHeartbeatCap)
 }

@@ -170,3 +170,24 @@ func TestCommonConfig_FetchTimeout_FloorIsOneSecond(t *testing.T) {
 	cfg = CommonConfig{FetchTimeout: time.Second}
 	require.NoError(t, cfg.Validate(), "FetchTimeout == 1s is the boundary and must pass")
 }
+
+// TestCommonConfig_PullHeartbeatCap_Bounds pins CommonConfig.Validate's
+// PullHeartbeatCap boundary directly (the shared home every consumer type's
+// Validate ultimately mirrors): 0 always passes, [500ms, 30s] passes, and
+// anything outside that nonzero range fails.
+func TestCommonConfig_PullHeartbeatCap_Bounds(t *testing.T) {
+	cfg := CommonConfig{FetchTimeout: time.Second, PullHeartbeatCap: 0}
+	require.NoError(t, cfg.Validate(), "0 (disabled) must pass")
+
+	cfg = CommonConfig{FetchTimeout: time.Second, PullHeartbeatCap: 499 * time.Millisecond}
+	require.Error(t, cfg.Validate(), "PullHeartbeatCap below the 500ms nats.go PullHeartbeat floor must fail validation")
+
+	cfg = CommonConfig{FetchTimeout: time.Second, PullHeartbeatCap: 500 * time.Millisecond}
+	require.NoError(t, cfg.Validate(), "PullHeartbeatCap == 500ms is the boundary and must pass")
+
+	cfg = CommonConfig{FetchTimeout: time.Second, PullHeartbeatCap: 30 * time.Second}
+	require.NoError(t, cfg.Validate(), "PullHeartbeatCap == 30s is the boundary and must pass")
+
+	cfg = CommonConfig{FetchTimeout: time.Second, PullHeartbeatCap: 31 * time.Second}
+	require.Error(t, cfg.Validate(), "PullHeartbeatCap above the 30s nats.go PullHeartbeat ceiling must fail validation")
+}

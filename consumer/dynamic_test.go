@@ -124,6 +124,66 @@ func TestDynamic_ConsumerOptions_AppliedToLiveConsumer(t *testing.T) {
 	require.True(t, found, "no per-partition consumer was created under the dynopt_worker prefix")
 }
 
+// TestDynamic_FetchTimeoutAbove60s_ReceivesMessages proves the
+// WithFetchTimeout/PullHeartbeatCap wiring reaches the live pull loop
+// end-to-end for Dynamic: before the derived heartbeat was bounded to
+// nats.go's 30s PullHeartbeat maximum, FetchTimeout above 60s made every
+// iterator-creation attempt fail and no message was ever delivered.
+func TestDynamic_FetchTimeoutAbove60s_ReceivesMessages(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+
+	_, nc := partitest.StartEmbeddedNATS(t)
+
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+
+	streamName := "DYN_HB90"
+	_, err = js.CreateStream(ctx, jetstream.StreamConfig{
+		Name:     streamName,
+		Subjects: []string{"dynhb90.>"},
+	})
+	require.NoError(t, err)
+
+	processed := make(chan struct{}, 1)
+	handler := consumer.MessageHandlerFunc(func(_ context.Context, _ jetstream.Msg) error {
+		select {
+		case processed <- struct{}{}:
+		default:
+		}
+
+		return nil
+	})
+
+	dyn, err := consumer.NewDynamic(
+		js,
+		streamName,
+		"dynhb90_worker",
+		"dynhb90.{{.PartitionID}}",
+		handler,
+		consumer.WithFetchTimeout(90*time.Second),
+		consumer.WithPullHeartbeatCap(2*time.Second),
+	)
+	require.NoError(t, err)
+	defer func() { _ = dyn.Stop(ctx) }()
+
+	err = dyn.Update(ctx, "worker-0", []types.Partition{{Keys: []string{"p0"}}})
+	require.NoError(t, err)
+
+	_, err = js.Publish(ctx, "dynhb90.p0", []byte("test"))
+	require.NoError(t, err)
+
+	select {
+	case <-processed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for message processing; iterator creation likely rejected by nats.go (heartbeat above 30s ceiling)")
+	}
+}
+
 // TestDynamicConfig_Validate_WrapsErrInvalidConfig verifies that every
 // validation failure in NewDynamic / DynamicConfig.Validate is reachable
 // via errors.Is(err, consumer.ErrInvalidConfig).
@@ -172,6 +232,34 @@ func TestDynamicConfig_Validate_WrapsErrInvalidConfig(t *testing.T) {
 					StreamName:      "S",
 					ConsumerPrefix:  "bad prefix!",
 					SubjectTemplate: "s.{{partition}}",
+				}
+				_ = cfg.SetDefaults()
+
+				return cfg.Validate()
+			},
+		},
+		{
+			name: "PullHeartbeatCap below 500ms floor",
+			fn: func() error {
+				cfg := consumer.DynamicConfig{
+					StreamName:      "S",
+					ConsumerPrefix:  "pfx",
+					SubjectTemplate: "s.{{partition}}",
+					CommonConfig:    consumer.CommonConfig{PullHeartbeatCap: 499 * time.Millisecond},
+				}
+				_ = cfg.SetDefaults()
+
+				return cfg.Validate()
+			},
+		},
+		{
+			name: "PullHeartbeatCap above 30s ceiling",
+			fn: func() error {
+				cfg := consumer.DynamicConfig{
+					StreamName:      "S",
+					ConsumerPrefix:  "pfx",
+					SubjectTemplate: "s.{{partition}}",
+					CommonConfig:    consumer.CommonConfig{PullHeartbeatCap: 31 * time.Second},
 				}
 				_ = cfg.SetDefaults()
 
