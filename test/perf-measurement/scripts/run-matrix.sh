@@ -498,6 +498,14 @@ fi
 mkdir -p "$RESULTS_DIR"
 SCHEDULE_FILE="${RESULTS_DIR}/schedule.tsv"
 
+# A schedule is pre-registered evidence — never silently clobber one left
+# by an earlier invocation into the same RESULTS_DIR; move it aside first.
+if [[ -f "$SCHEDULE_FILE" ]]; then
+    backup="${SCHEDULE_FILE}.$(date -u +%Y%m%dT%H%M%SZ).bak"
+    mv "$SCHEDULE_FILE" "$backup"
+    echo "run-matrix.sh: existing schedule.tsv preserved as ${backup}" >&2
+fi
+
 {
     echo "# run-matrix.sh  seed=${SEED}  reps=${REPS}  total_runs=${TOTAL_RUNS}"
     echo "# generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
