@@ -10,8 +10,11 @@ import (
 	"slices"
 )
 
-// JSZSample is one snapshot of a single stream's cumulative
-// (messages, bytes) at one jsz poll tick.
+// JSZSample is one snapshot of a single stream's cumulative write
+// count (Msgs) and current byte footprint (Bytes) at one jsz poll
+// tick. Msgs is sourced from the stream's `last_seq` (see
+// jszStreamState), NOT its `messages` (live count) — see that type's
+// godoc for why the distinction matters.
 type JSZSample struct {
 	TUnixNs int64
 	Stream  string
@@ -38,9 +41,27 @@ type jszLine struct {
 }
 
 // jszStreamState is the per-stream message/byte state in a /jsz body.
+//
+// Messages is the stream's LIVE message count after retention limits
+// are applied — for a parti KV bucket (History=1, MaxMsgsPerSubject=1)
+// this settles at the key population (e.g. one key per worker for the
+// heartbeat bucket) and stops changing once the cluster is steady,
+// even though the bucket keeps being overwritten at its configured
+// cadence: each Put on an existing key evicts the prior revision, so
+// live count is flat. Using Messages to derive a write-rate therefore
+// silently reports 0 for any KV bucket whose key set has stabilized —
+// this was the root cause of the empty stream_msgs_*/stream_bytes_*
+// columns observed in early campaign runs (results/s1-e1, s2-e8).
+//
+// LastSeq is the cumulative count of every message ever appended to
+// the stream, including ones since evicted by a per-subject retention
+// limit — it keeps climbing under the exact same in-place-overwrite
+// traffic that leaves Messages flat, and is the correct source for a
+// write-rate metric. See ParseJSZ / JSZSample.
 type jszStreamState struct {
 	Messages uint64 `json:"messages"`
 	Bytes    uint64 `json:"bytes"`
+	LastSeq  uint64 `json:"last_seq"`
 }
 
 // jszStreamDetail is one stream entry under an account's stream_detail.
@@ -190,8 +211,9 @@ func parseJSZReader(r io.Reader) ([]JSZSample, error) {
 				out = append(out, JSZSample{
 					TUnixNs: l.TUnixNs,
 					Stream:  sd.Name,
-					Msgs:    sd.State.Messages,
-					Bytes:   sd.State.Bytes,
+					// last_seq, not messages — see jszStreamState godoc.
+					Msgs:  sd.State.LastSeq,
+					Bytes: sd.State.Bytes,
 				})
 			}
 		}

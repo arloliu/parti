@@ -115,8 +115,14 @@ func (f fixtureSpec) materialize(t *testing.T, dir string) {
 					streamJSON.WriteString(",")
 				}
 				first = false
-				fmt.Fprintf(&streamJSON, `{"name":"%s","state":{"messages":%d,"bytes":%d}}`,
-					name, sp.msgsPer5s*uint64(p), sp.bytesPer5s*uint64(p))
+				// last_seq is set equal to the cumulative messages count:
+				// the fixture models a stream with no per-subject
+				// retention eviction, so live count and cumulative
+				// sequence number grow together (unlike a real parti KV
+				// bucket under History=1 — see jszStreamState godoc).
+				// ParseJSZ reads last_seq (not messages) for JSZSample.Msgs.
+				fmt.Fprintf(&streamJSON, `{"name":"%s","state":{"messages":%d,"bytes":%d,"last_seq":%d}}`,
+					name, sp.msgsPer5s*uint64(p), sp.bytesPer5s*uint64(p), sp.msgsPer5s*uint64(p))
 			}
 			streamJSON.WriteString(`]`)
 			fmt.Fprintf(&b, `{"t_unix_ns":%d,"node":"localhost:8222","endpoint":"jsz","body":{"account_details":[{"stream_detail":%s}]}}`+"\n",
