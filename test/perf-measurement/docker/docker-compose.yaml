@@ -28,10 +28,17 @@
 #     docker compose --profile r3 up -d                            # M2.C tuning
 #   docker compose --profile r5 up -d                              # 5-node cluster
 #
-# Only nats-1 exposes host ports (4222 client, 8222 monitoring, 6060
-# profiling) so the harness can connect via a single URL
-# (nats://localhost:4222) and capture scripts can reach server-side
-# CPU/heap/goroutine profiles at http://localhost:6060/debug/pprof/.
+# Only nats-1 exposes the client port (4222) so the harness always
+# connects via a single URL (nats://localhost:4222), and only nats-1
+# exposes the profiling port (6060) for server-side CPU/heap/goroutine
+# profiles at http://localhost:6060/debug/pprof/.
+#
+# Monitoring ports (8222) ARE exposed on every node (nats-1..nats-5, one
+# distinct host port each) so capture-jsz.sh's --jsz-detail meta-leader
+# poll can reach whichever node currently holds JetStream meta-leadership
+# — meta-leadership can move to any node, and a detail poll aimed only at
+# nats-1 silently returns nothing once leadership moves off it. See
+# scripts/capture-jsz.sh header + scripts/run-matrix.sh NATS_MONITOR_R3/R5.
 
 services:
   nats-1:
@@ -61,6 +68,8 @@ services:
     command: ["-c", "/etc/nats/nats-server.conf"]
     environment:
       - SERVER_NAME=nats-2
+    ports:
+      - "8223:8222"   # monitoring port (meta-leader detail capture; see nats-1 note above)
     volumes:
       - ${PERF_RIG_NATS_CONFIG:-./nats-server.conf}:/etc/nats/nats-server.conf:ro
       - ${PERF_RIG_DIR:-./data}/perf-nats-2:/data
@@ -76,6 +85,8 @@ services:
     command: ["-c", "/etc/nats/nats-server.conf"]
     environment:
       - SERVER_NAME=nats-3
+    ports:
+      - "8224:8222"   # monitoring port (meta-leader detail capture; see nats-1 note above)
     volumes:
       - ${PERF_RIG_NATS_CONFIG:-./nats-server.conf}:/etc/nats/nats-server.conf:ro
       - ${PERF_RIG_DIR:-./data}/perf-nats-3:/data
@@ -91,6 +102,8 @@ services:
     command: ["-c", "/etc/nats/nats-server.conf"]
     environment:
       - SERVER_NAME=nats-4
+    ports:
+      - "8225:8222"   # monitoring port (meta-leader detail capture; see nats-1 note above)
     volumes:
       - ${PERF_RIG_NATS_CONFIG:-./nats-server.conf}:/etc/nats/nats-server.conf:ro
       - ${PERF_RIG_DIR:-./data}/perf-nats-4:/data
@@ -106,6 +119,8 @@ services:
     command: ["-c", "/etc/nats/nats-server.conf"]
     environment:
       - SERVER_NAME=nats-5
+    ports:
+      - "8226:8222"   # monitoring port (meta-leader detail capture; see nats-1 note above)
     volumes:
       - ${PERF_RIG_NATS_CONFIG:-./nats-server.conf}:/etc/nats/nats-server.conf:ro
       - ${PERF_RIG_DIR:-./data}/perf-nats-5:/data
