@@ -124,6 +124,22 @@ _def_cell M1.10 5 "2000" "--two-phase=true --consumer-mode=dynamic --replicas=5"
 # M1.11 HEAD comparison — requires a manual go.mod pin swap; always refused.
 _def_cell M1.11 3 "2000" "" "false" "true"
 
+# E1   Idle re-baseline — production arm (two-phase ON, consumer memory
+#      storage, R=3, file data stream), worker count coupled to N per
+#      diagonal cell (10/512, 50/2000, 100/10000).
+_def_cell E1.a  3 "512"   "--two-phase=true --consumer-mode=dynamic --consumer-memory-storage --workers=10"
+_def_cell E1.b  3 "2000"  "--two-phase=true --consumer-mode=dynamic --consumer-memory-storage --workers=50"
+_def_cell E1.c  3 "10000" "--two-phase=true --consumer-mode=dynamic --consumer-memory-storage --workers=100"
+
+# E8   Sweep W-fold scaling isolation — fixed P=2000, W swept. NOTE: the
+#      measured steady-state forced-full sweep period is ~19-33 min (S2-E8,
+#      2026-07-16), not the nominal 10 min — 900s idle windows may catch
+#      few periodic passes; rate inference must lean on the continuous
+#      probe component or longer windows.
+_def_cell E8.a  3 "2000"  "--two-phase=true --consumer-mode=dynamic --consumer-memory-storage --workers=10"
+_def_cell E8.b  3 "2000"  "--two-phase=true --consumer-mode=dynamic --consumer-memory-storage --workers=50"
+_def_cell E8.c  3 "2000"  "--two-phase=true --consumer-mode=dynamic --consumer-memory-storage --workers=100"
+
 # ---------------------------------------------------------------------------
 # Plan 02 — NATS server-side tuning cells (M2.x).
 #
@@ -516,11 +532,18 @@ start_captures() {
     CAPTURE_PIDS+=($!)
     CAPTURE_NAMES+=("iostat")
 
-    # jsz/varz — NATS server stats.
+    # jsz/varz — NATS server stats. PERF_RIG_JSZ_DETAIL=1 additionally
+    # captures meta-leader consumer/raft detail to jsz.raw.detail (see
+    # capture-jsz.sh --jsz-detail; off by default).
+    local jsz_extra=()
+    if [[ "${PERF_RIG_JSZ_DETAIL:-0}" == "1" ]]; then
+        jsz_extra+=(--jsz-detail)
+    fi
     bash "${SCRIPT_DIR}/capture-jsz.sh" \
         --output "${run_dir}/jsz.raw" \
         --duration "$duration" \
-        --nats-nodes "$NATS_MONITOR_R3" &
+        --nats-nodes "$NATS_MONITOR_R3" \
+        "${jsz_extra[@]}" &
     CAPTURE_PIDS+=($!)
     CAPTURE_NAMES+=("jsz")
 
