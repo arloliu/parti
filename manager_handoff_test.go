@@ -478,3 +478,72 @@ func TestLivePartitionSet(t *testing.T) {
 		require.Nil(t, set)
 	})
 }
+
+// TestManagerHandoff_HealthyLeaderHealsStaleClaimWithinSweepInterval pins
+// design §4.11's manager-level healthy-leader companion to the
+// handoff-package §4.10 no-leader proof
+// (TestSweepAuthorityLive_NoLeaderHealingWithinI2Bound): with a real,
+// single-worker Manager — which becomes leader synchronously by the time
+// Start returns, a lone worker always winning election — a stale claim
+// (an expired-TTL prepare, planted directly into the handoff bucket,
+// bypassing the manager/coordinator entirely) heals to stable within
+// ~SweepInterval via the ticker sweep's full (leader, unauthorized-gating
+// never applies) cadence, exactly today's pre-gating behavior. This is
+// the regression pin the leader-gated backstop cadence must not weaken.
+func TestManagerHandoff_HealthyLeaderHealsStaleClaimWithinSweepInterval(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+
+	_, nc := partitest.StartEmbeddedNATS(t)
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const bucket = "healthy-leader-heals-stale-claim"
+
+	cfg := twoPhaseHandoffConfig(bucket)
+	// Short, explicit sweep interval: twoPhaseHandoffConfig leaves
+	// Handoff.SweepInterval at zero, which coordinator.New coerces to the
+	// 30s production default (see TestHandoffConflictStress's identical
+	// note) — too slow for a "heals within ~SweepInterval" test bound.
+	cfg.Handoff.SweepInterval = 1 * time.Second
+
+	mgr, err := NewManager(&cfg, js, source.NewStatic([]Partition{{Keys: []string{"p-0"}}}), strategy.NewConsistentHash())
+	require.NoError(t, err)
+	require.NoError(t, mgr.Start(ctx))
+	t.Cleanup(func() { _ = mgr.Stop(context.Background()) })
+
+	require.True(t, mgr.IsLeader(), "a lone worker must become leader synchronously on Start")
+
+	kv, err := js.KeyValue(ctx, bucket)
+	require.NoError(t, err)
+	store := handoff.NewNATSClaimStore(kv, "claims/")
+
+	// A stuck, TTL-expired prepare for a partition the manager's own
+	// source never lists — nothing but the coordinator's reconcile arm
+	// (independent of LivePartitions/leadership) can ever touch it.
+	stuck := handoff.Claim{
+		PartitionID:  "p-stuck",
+		Owner:        "worker-A",
+		PendingOwner: "worker-B",
+		State:        handoff.ClaimStatePrepare,
+		Epoch:        1,
+		LastUpdated:  time.Now().UTC().Add(-time.Hour),
+		TTLSeconds:   1, // long since expired relative to LastUpdated
+	}
+	_, err = store.PutIfEpoch(ctx, "p-stuck", 0, stuck)
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		got, rev, gerr := store.Get(ctx, "p-stuck")
+		if gerr != nil || rev == 0 {
+			return false
+		}
+
+		return got.State == handoff.ClaimStateStable && got.PendingOwner == ""
+	}, 3*cfg.Handoff.SweepInterval, 50*time.Millisecond,
+		"a stale claim must heal to stable within ~SweepInterval when a healthy leader exists")
+}

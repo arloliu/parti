@@ -156,6 +156,43 @@ type Config struct {
 	// no-op; the revision-CAS delete additionally guarantees any concurrent
 	// claim transition wins over the reaper. <= 0 disables orphan reaping.
 	OrphanGrace time.Duration
+	// SweepAuthority reports whether this worker currently holds sweep
+	// authority (in practice: parti leadership). Ticker-origin sweeps run
+	// at full cadence only when it returns true; other workers drop to
+	// the backstop cadence (see twophase.go's ticker loop). nil = every
+	// worker keeps today's full ticker cadence (fail-open default; direct
+	// constructions and tests are unchanged).
+	//
+	// CONTRACT: invoked ONLY from sampleAuthority WHILE HOLDING the
+	// coordinator's internal authMu — it must be cheap and non-blocking
+	// (the manager wires a closure over an atomic election flag), and it
+	// MUST NOT call back into the coordinator (that would be a lock
+	// cycle: sampleAuthority already holds authMu).
+	SweepAuthority func() bool
+	// SweepPhaseSeed staggers follower backstop ticks across a fleet. The
+	// manager wires fnv1a64(stableWorkerID) — hash/fnv's 64-bit FNV-1a
+	// over the worker's claimed stable ID, available before coordinator
+	// construction. The coordinator reduces it internally:
+	// phase = SweepPhaseSeed % backstopEvery. 0 (default) = phase 0;
+	// direct constructions and tests are unchanged.
+	SweepPhaseSeed uint64
+	// SweepTicks, when non-nil, replaces the internal time.NewTicker as
+	// the ticker-fire source (Start consumes this channel instead of
+	// creating a ticker). TEST-ONLY seam: production wiring never sets
+	// it. The loop uses the two-value receive — `_, ok := <-tickSrc; if
+	// !ok { return }` — so a CLOSED injected channel terminates the
+	// goroutine cleanly (test teardown) instead of hot-looping on zero
+	// values. Together with Now this makes every ticker cadence contract
+	// deterministic.
+	SweepTicks <-chan time.Time
+	// SweepObserver, when non-nil, is invoked by maybeSweepClaims's
+	// CALLERS (the ticker loop and Apply) with each attempt's origin,
+	// the authority observation for ticker-origin attempts (constant
+	// true for Apply-origin), and the returned admitted value —
+	// therefore always OUTSIDE sweepMu and authMu. Ticker and Apply
+	// attempts run concurrently, so the observer MUST be goroutine-safe
+	// and non-blocking. TEST-ONLY seam; not a metrics-interface change.
+	SweepObserver func(origin sweepOrigin, authorized, admitted bool)
 }
 
 // New returns a Coordinator implementation.
@@ -196,7 +233,7 @@ func New(cfg Config, enableTwoPhase bool) Coordinator {
 	if enableTwoPhase {
 		coord := &twoPhaseCoordinator{
 			cfg:               cfg,
-			orphanAbsentSince: make(map[string]time.Time),
+			orphanAbsentSince: make(map[string]orphanClock),
 			sweepConfirmGap:   natsutil.ScanGateDefaultConfirmGap,
 			sweepMaxSkips:     natsutil.ScanGateMaxSkippedPasses,
 		}
