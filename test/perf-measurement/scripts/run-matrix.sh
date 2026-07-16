@@ -156,6 +156,18 @@ _def_cell E1.a  3 "512"   "--two-phase=true --consumer-mode=dynamic --consumer-m
 _def_cell E1.b  3 "2000"  "--two-phase=true --consumer-mode=dynamic --consumer-memory-storage --workers=50"
 _def_cell E1.c  3 "10000" "--two-phase=true --consumer-mode=dynamic --consumer-memory-storage --workers=100"
 
+# E2   Pull-floor ablation — Cell 100/10000 (W=100, P=10000), idle + load
+#      (X=200 msg/s), --fetch-timeout 5s vs 30s, --batch-size 1 (pinned
+#      default, passed explicitly for self-documentation). See
+#      docs/research/load-overhead-research-and-pprof-plan-v1.md §5 E2.
+#      Load arms add --load --per-worker-rate=2 (k=2, W=100 ⇒ aggregate
+#      X = k·W = 200 msg/s) on the same production diagonal cell as
+#      E1.c/E8.c/E4.c.
+_def_cell E2.1  3 "10000" "--two-phase=true --consumer-mode=dynamic --consumer-memory-storage --workers=100 --fetch-timeout=5s --batch-size=1"
+_def_cell E2.2  3 "10000" "--two-phase=true --consumer-mode=dynamic --consumer-memory-storage --workers=100 --fetch-timeout=30s --batch-size=1"
+_def_cell E2.3  3 "10000" "--two-phase=true --consumer-mode=dynamic --consumer-memory-storage --workers=100 --fetch-timeout=5s --batch-size=1 --load --per-worker-rate=2"
+_def_cell E2.4  3 "10000" "--two-phase=true --consumer-mode=dynamic --consumer-memory-storage --workers=100 --fetch-timeout=30s --batch-size=1 --load --per-worker-rate=2"
+
 # E8   Sweep W-fold scaling isolation — fixed P=2000, W swept. NOTE: the
 #      measured steady-state forced-full sweep period is ~19-33 min (S2-E8,
 #      2026-07-16), not the nominal 10 min — 900s idle windows may catch
@@ -164,6 +176,23 @@ _def_cell E1.c  3 "10000" "--two-phase=true --consumer-mode=dynamic --consumer-m
 _def_cell E8.a  3 "2000"  "--two-phase=true --consumer-mode=dynamic --consumer-memory-storage --workers=10"
 _def_cell E8.b  3 "2000"  "--two-phase=true --consumer-mode=dynamic --consumer-memory-storage --workers=50"
 _def_cell E8.c  3 "2000"  "--two-phase=true --consumer-mode=dynamic --consumer-memory-storage --workers=100"
+
+# E4   Rebalance burst anatomy — production arm, diagonal cells, plus the
+#      rig-only churn schedule (cmd/harness --churn-worker-idx/--churn-waves/
+#      --churn-plateau/--churn-converge-timeout — see cmd/harness/churn.go):
+#      kill the LAST worker index -> wait convergence -> re-add -> wait
+#      convergence, x3 waves, after an idle plateau. --churn-worker-idx is
+#      workers-1 for each cell (a fixed, reproducible target across waves).
+#      NOTE: these cells are documented here for the matrix's cell-catalogue
+#      convention, but the S3 measurement session drove them through the
+#      dedicated scripts/run-e4.sh, not this file's run_one loop — run_one
+#      has no hook for E5's mid-run pprof-capture choreography (idle-window
+#      profile before wave 1, wave profile during wave 2; see run-e4.sh's
+#      header comment). Running these flags through run_one directly would
+#      execute the churn schedule but skip the E5 profile captures.
+_def_cell E4.a  3 "512"   "--two-phase=true --consumer-mode=dynamic --consumer-memory-storage --workers=10 --churn-worker-idx=9 --churn-waves=3 --churn-plateau=60s --churn-converge-timeout=90s"
+_def_cell E4.b  3 "2000"  "--two-phase=true --consumer-mode=dynamic --consumer-memory-storage --workers=50 --churn-worker-idx=49 --churn-waves=3 --churn-plateau=90s --churn-converge-timeout=150s"
+_def_cell E4.c  3 "10000" "--two-phase=true --consumer-mode=dynamic --consumer-memory-storage --workers=100 --churn-worker-idx=99 --churn-waves=3 --churn-plateau=90s --churn-converge-timeout=180s"
 
 # ---------------------------------------------------------------------------
 # Plan 02 — NATS server-side tuning cells (M2.x).
@@ -566,6 +595,20 @@ start_captures() {
         --containers "$containers" &
     CAPTURE_PIDS+=($!)
     CAPTURE_NAMES+=("cgroup-io")
+
+    # cgroup-cpumem — per-container CPU cores + RSS (needed by CPU-delta
+    # cells, e.g. E2's pull-floor ablation; see internal/aggregate's
+    # ParseCgroupCPUMem/CPUMemDeltas and cmd/fitmodel's cellCPUMem for the
+    # established extraction convention). Same container list as cgroup-io.
+    # Not in verify_captures' mandatory-file list — a failure here still
+    # surfaces via CAPTURE_RCS (capture-failed.txt), matching how
+    # run-armb-matrix.sh treats this same capture.
+    bash "${SCRIPT_DIR}/capture-cgroup-cpumem.sh" \
+        --output "${run_dir}/cgroup_cpumem.raw" \
+        --duration "$duration" \
+        --containers "$containers" &
+    CAPTURE_PIDS+=($!)
+    CAPTURE_NAMES+=("cgroup-cpumem")
 
     # iostat — secondary cross-check.
     bash "${SCRIPT_DIR}/capture-iostat.sh" \
