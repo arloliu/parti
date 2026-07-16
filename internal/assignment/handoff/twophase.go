@@ -278,8 +278,57 @@ func (t *twoPhaseCoordinator) Start(ctx context.Context) {
 	}()
 }
 
+// transitionVersionAdjacent reports whether next is the immediate version
+// successor of previous (previous.Version+1 == next.Version). Adjacency
+// detects VERSION GAPS ONLY — it is necessary for trusting the prepare
+// diff, but it is NOT an authoritative or claim-level continuity proof:
+// equal-Version authority divergence and stale cross-worker claim mutation
+// (the deferred fence project's shapes) are invisible to it. No future
+// walk restriction may treat adjacency==true as authorization on its own.
+//
+// Any gap (a coalesced or missed intermediate version — the routine case,
+// since debounce coalescing, warm restart, and the apply/fetch stashes are
+// designed gap sources, not rare ones), equality (same-Version redelivery
+// with possibly different content — the alias-vs-commit shape), or
+// regression is treated as UNPROVEN and fails open.
+//
+// The equality/regression arms are defense in depth, not a claimed
+// production-reachable path: production dispatch drops same-or-stale
+// Version deliveries before they ever reach Apply (manager_assignment.go
+// alias and commit handlers, ~lines 1070-1085), so in practice only the gap
+// shape is exercised. See Apply's doc comment for what this check does and
+// does not repair.
+func transitionVersionAdjacent(previous, next types.Assignment) bool {
+	return previous.Version+1 == next.Version
+}
+
 // Apply performs the multi-phase handoff application for the worker's new assignment.
 // Steps: prepare -> (optional delay) -> apply consumer -> commit -> (optional delay) -> stabilize.
+//
+// Fail-open on unproven continuity (PARTIAL repair). previous is not
+// necessarily next's direct predecessor — production callers diff against
+// the worker's last COMMITTED assignment, which a coalesced retry/stash can
+// leave more than one version behind next. When
+// transitionVersionAdjacent(previous, next) is false, Apply treats previous
+// as empty for the prepare phase only (commit and stabilize already walk
+// all of next unconditionally and are untouched): prepare then re-evaluates
+// every partition in next, so a foreign stable claim is re-recorded as
+// PendingOwner and a missing claim is recreated via NewInitialClaim, both
+// carried to stable by the unchanged commit/stabilize phases.
+//
+// Scope: this heals missed-version (gap) discontinuities only — including
+// both of the round-1 counterexamples (A regains a partition coalesced
+// through an intermediate owner; a reaped claim is recreated after a missed
+// removal/re-add). It is NOT an end-to-end continuity proof. Two shapes
+// stay open, tracked as findings, not covered here: (a) equal-Version
+// authority changes (an alias and a commit can expose different content at
+// the same Version; a publisher's CAS-loss recovery can also emit two
+// different assignments at the same Version) never reach a full Apply,
+// because production dispatch drops <=-Version deliveries before Apply is
+// even called; (b) claims carry no assignment Version/commit identity, so a
+// stale cross-worker retry can still mutate a claim behind an adjacent,
+// locally-continuous transition. Both require the deferred claim-level
+// commit-identity fence project.
 func (t *twoPhaseCoordinator) Apply(ctx context.Context, workerID string, previous, next types.Assignment) error {
 	// Opportunistic sweep of expired/non-stable claims; skip metrics as requested.
 	// Runs before any early returns to maximize cleanup. Apply-origin sweeps
@@ -292,8 +341,25 @@ func (t *twoPhaseCoordinator) Apply(ctx context.Context, workerID string, previo
 
 	inst := newInstrumenter(t.cfg.Metrics)
 
+	// Prepare diffs against previous only when continuity is proven; on any
+	// gap/equality/regression, previous is treated as empty so prepare
+	// walks all of next (see the fail-open doc above). Commit and stabilize
+	// are unconditionally full-next walks already and are untouched.
+	preparePrevious := previous
+	if !transitionVersionAdjacent(previous, next) {
+		preparePrevious = types.Assignment{}
+		if t.cfg.Logger != nil {
+			t.cfg.Logger.Debug("handoff_discontinuous_apply",
+				"worker_id", workerID,
+				"previous_version", previous.Version,
+				"next_version", next.Version,
+				"partitions", len(next.Partitions),
+			)
+		}
+	}
+
 	// Phase: prepare - write/update claims for partitions being added.
-	if err := inst.phase("prepare", func() error { return t.preparePhase(ctx, workerID, previous, next) }); err != nil {
+	if err := inst.phase("prepare", func() error { return t.preparePhase(ctx, workerID, preparePrevious, next) }); err != nil {
 		inst.finish(err)
 		return err
 	}

@@ -460,6 +460,64 @@ func TestCommitSupersedesForStash(t *testing.T) {
 	}
 }
 
+// TestCommitHandler_EqualVersionDifferentContent_DoesNotReachApply pins a
+// KNOWN-OPEN hazard that internal/assignment/handoff's version-adjacency
+// fail-open cannot see: the commit handler's case (a) no-op
+// (`commit.Version <= cur.Version` in handleCommitValueOnce) fires on
+// Version alone, with no check on content, before Apply is ever called.
+// A second commit at the SAME Version as the last applied one, carrying
+// DIFFERENT partition content, is silently dropped by that comparison —
+// so the coordinator's own equal-Version fail-open
+// (transitionVersionAdjacent's equality arm,
+// internal/assignment/handoff/twophase.go) is production-unreachable
+// through this path.
+//
+// This is documented current behavior; the equal-Version authority-
+// divergence hazard (an alias and a commit can expose different content at
+// the same Version; a publisher's CAS-loss recovery can also emit two
+// different assignments at the same Version) is deferred to the
+// claim-level commit-identity fence project — see
+// tmp/diff-restricted-walks_v2_review.md, "Equal-Version authority changes
+// never reach the proposed fail-open".
+func TestCommitHandler_EqualVersionDifferentContent_DoesNotReachApply(t *testing.T) {
+	t.Parallel()
+	m, fc, _ := newFetchRetryTestManager(t)
+	wid := m.WorkerID()
+
+	// First commit at V5 with content X: applies normally through the
+	// commit-watcher entry point.
+	partsX := []types.Partition{{Keys: []string{"alpha"}}}
+	refX := publishCommitPayload(t, m.assignmentKV, partsX)
+	commitX := &types.AssignmentCommit{
+		Version: 5, LeaderRevision: 10, Workers: []string{wid},
+		Payloads: map[string]types.AssignmentPayloadRef{wid: refX},
+	}
+	m.handleCommitValue(commitX)
+
+	require.Equal(t, int64(1), fc.applyCount.Load(), "setup: the first commit must apply")
+	require.Equal(t, int64(5), m.CurrentAssignment().Version, "setup: worker must be at V5")
+	require.Equal(t, types.PartitionSetDigest(partsX), types.PartitionSetDigest(m.CurrentAssignment().Partitions),
+		"setup: applied content must be X")
+
+	// Second commit at the SAME Version 5 with DIFFERENT content Y,
+	// delivered through the same entry point the watcher path uses.
+	partsY := []types.Partition{{Keys: []string{"beta"}}}
+	refY := publishCommitPayload(t, m.assignmentKV, partsY)
+	commitY := &types.AssignmentCommit{
+		Version: 5, LeaderRevision: 11, Workers: []string{wid},
+		Payloads: map[string]types.AssignmentPayloadRef{wid: refY},
+	}
+	m.handleCommitValue(commitY)
+
+	require.Equal(t, int64(1), fc.applyCount.Load(),
+		"documented current behavior: an equal-Version delivery is dropped by the "+
+			"commit.Version <= cur.Version no-op case before it ever reaches Apply, "+
+			"regardless of differing content")
+	require.Equal(t, int64(5), m.CurrentAssignment().Version)
+	require.Equal(t, types.PartitionSetDigest(partsX), types.PartitionSetDigest(m.CurrentAssignment().Partitions),
+		"the applied assignment content must be unchanged by the dropped equal-Version delivery")
+}
+
 // ============================================================================
 // Reproducer: shared accepted-target fence across the fetch-retry and
 // apply-retry loops.
