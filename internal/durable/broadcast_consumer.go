@@ -124,7 +124,7 @@ func NewBroadcastConsumer(js jetstream.JetStream, cfg BroadcastConsumerConfig, f
 		handler:          handler,
 		consumerID:       consumerID,
 		consumerIDSource: consumerIDSource,
-		iterFactory:      defaultIterFactory,
+		iterFactory:      makeDefaultIterFactory(cfg.PullHeartbeatCap),
 		loopDone:         make(chan struct{}),
 		rng:              newRetryRNG(cfg.Retry.Seed),
 		recovery: recovery.NewController(recovery.ControllerConfig{

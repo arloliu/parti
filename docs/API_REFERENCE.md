@@ -1935,6 +1935,7 @@ c, _ := consumer.NewQueue(js, "stream", "consumer", "subject.>", handler,
 | `WithMaxDeliver(n)`              | Max redelivery attempts                        |
 | `WithMaxAckPending(n)`           | Max unacked messages                           |
 | `WithFetchTimeout(duration)`     | Max wait when pulling batch                    |
+| `WithPullHeartbeatCap(duration)` | Bound deleted-consumer detection latency when `FetchTimeout` is raised (default `0`=disabled; nonzero must be in `[500ms, 30s]` or construction fails with `ErrInvalidConfig`) |
 | `WithManualAck(bool)`            | Disable auto-acknowledgement                   |
 | `WithInactiveThreshold(duration)`| Consumer cleanup threshold                     |
 | `WithRecoveryStrategy(strategy)` | Auto-recovery on unexpected consumer deletion  |

@@ -377,6 +377,7 @@ func NewDynamic(
 			MaxDeliver:        o.maxDeliver,
 			BatchSize:         o.batchSize,
 			FetchTimeout:      o.fetchTimeout,
+			PullHeartbeatCap:  o.pullHeartbeatCap,
 			MaxWaiting:        o.maxWaiting,
 			MaxAckPending:     o.maxAckPending,
 			InactiveThreshold: o.inactiveThreshold,
@@ -436,6 +437,7 @@ func NewDynamic(
 		MaxDeliver:                  cfg.MaxDeliver,
 		BatchSize:                   cfg.BatchSize,
 		FetchTimeout:                cfg.FetchTimeout,
+		PullHeartbeatCap:            cfg.PullHeartbeatCap,
 		MaxWaiting:                  cfg.MaxWaiting,
 		MaxAckPending:               cfg.MaxAckPending,
 		InactiveThreshold:           cfg.InactiveThreshold,
@@ -715,6 +717,10 @@ func (c *DynamicConfig) Validate() error {
 	}
 
 	if err := validateFetchTimeoutFloor(c.FetchTimeout); err != nil {
+		return err
+	}
+
+	if err := validatePullHeartbeatCap(c.PullHeartbeatCap); err != nil {
 		return err
 	}
 

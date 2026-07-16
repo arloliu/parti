@@ -13,6 +13,7 @@ import (
 
 	"github.com/arloliu/parti/v2/internal/logging"
 	"github.com/arloliu/parti/v2/internal/metrics"
+	"github.com/arloliu/parti/v2/internal/natsutil"
 	"github.com/arloliu/parti/v2/internal/recovery"
 	"github.com/arloliu/parti/v2/jsutil"
 	"github.com/arloliu/parti/v2/types"
@@ -169,6 +170,10 @@ func (c *QueueConfig) Validate() error {
 		return err
 	}
 
+	if err := validatePullHeartbeatCap(c.PullHeartbeatCap); err != nil {
+		return err
+	}
+
 	if !jsutil.IsValidConsumerName(c.ConsumerName) {
 		return fmt.Errorf("%w: consumer name %q contains invalid characters (allowed: a-z, A-Z, 0-9, -, _)", ErrInvalidConfig, c.ConsumerName)
 	}
@@ -222,6 +227,7 @@ func NewQueue(
 			MaxDeliver:        o.maxDeliver,
 			BatchSize:         o.batchSize,
 			FetchTimeout:      o.fetchTimeout,
+			PullHeartbeatCap:  o.pullHeartbeatCap,
 			MaxWaiting:        o.maxWaiting,
 			MaxAckPending:     o.maxAckPending,
 			InactiveThreshold: o.inactiveThreshold,
@@ -244,7 +250,7 @@ func NewQueue(
 
 	iterFactory := cfg.IteratorFactory
 	if iterFactory == nil {
-		iterFactory = defaultIterFactory
+		iterFactory = makeDefaultIterFactory(cfg.PullHeartbeatCap)
 	}
 
 	return &Queue{
@@ -265,14 +271,19 @@ func NewQueue(
 	}, nil
 }
 
-// defaultIterFactory creates a messages iterator with heartbeat and expiry.
-func defaultIterFactory(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error) {
-	heartbeat := max(expiry/2, 100*time.Millisecond)
-	return cons.Messages(
-		jetstream.PullMaxMessages(batch),
-		jetstream.PullExpiry(expiry),
-		jetstream.PullHeartbeat(heartbeat),
-	)
+// makeDefaultIterFactory returns the default messages iterator factory, with
+// PullHeartbeat derived by natsutil.DerivePullHeartbeat from the expiry
+// passed at call time and heartbeatCap fixed at construction time.
+func makeDefaultIterFactory(heartbeatCap time.Duration) func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error) {
+	return func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error) {
+		heartbeat := natsutil.DerivePullHeartbeat(expiry, heartbeatCap)
+
+		return cons.Messages(
+			jetstream.PullMaxMessages(batch),
+			jetstream.PullExpiry(expiry),
+			jetstream.PullHeartbeat(heartbeat),
+		)
+	}
 }
 
 // Start begins consuming messages.

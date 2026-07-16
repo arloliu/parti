@@ -8,6 +8,7 @@ import (
 	"github.com/arloliu/fuda"
 	"github.com/arloliu/parti/v2/internal/logging"
 	"github.com/arloliu/parti/v2/internal/metrics"
+	"github.com/arloliu/parti/v2/internal/natsutil"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -75,6 +76,25 @@ type CommonConfig struct {
 	//
 	// Default: 5s.
 	FetchTimeout time.Duration `default:"5s" validate:"gt=0"`
+
+	// PullHeartbeatCap optionally bounds the derived nats.go PullHeartbeat
+	// value used by the consumer's pull loop. The heartbeat is normally
+	// FetchTimeout/2, clamped to nats.go's PullHeartbeat validity range
+	// [500ms, 30s]; when PullHeartbeatCap > 0 the derived heartbeat is
+	// further capped to this value.
+	//
+	// The heartbeat drives missed-heartbeat detection: nats.go's
+	// ErrNoHeartbeat fires at roughly 2x the heartbeat, which is how a
+	// deleted durable consumer is detected. Raising FetchTimeout to reduce
+	// idle pull-request churn also raises the derived heartbeat and
+	// therefore that detection latency; this cap bounds it independent of
+	// FetchTimeout.
+	//
+	// 0 (default) disables the cap: the heartbeat stays FetchTimeout/2,
+	// capped only at 30s. A nonzero value outside [500ms, 30s] (nats.go's
+	// PullHeartbeat bounds) is rejected at construction with
+	// ErrInvalidConfig. See [WithPullHeartbeatCap].
+	PullHeartbeatCap time.Duration `validate:"gte=0"`
 
 	// MaxWaiting is the maximum number of outstanding pull requests allowed.
 	//
@@ -175,7 +195,11 @@ func (c *CommonConfig) Validate() error {
 		return err
 	}
 
-	return validateFetchTimeoutFloor(c.FetchTimeout)
+	if err := validateFetchTimeoutFloor(c.FetchTimeout); err != nil {
+		return err
+	}
+
+	return validatePullHeartbeatCap(c.PullHeartbeatCap)
 }
 
 // validateFetchTimeoutFloor enforces NATS's 1s PullExpiry minimum. Each
@@ -186,6 +210,24 @@ func (c *CommonConfig) Validate() error {
 func validateFetchTimeoutFloor(ft time.Duration) error {
 	if ft < time.Second {
 		return fmt.Errorf("%w: FetchTimeout must be at least 1s (NATS PullExpiry floor), got %v", ErrInvalidConfig, ft)
+	}
+
+	return nil
+}
+
+// validatePullHeartbeatCap enforces nats.go's PullHeartbeat validity range
+// [500ms, 30s] (jetstream_options.go configureConsume/configureMessages,
+// nats.go v1.52.0) on a nonzero PullHeartbeatCap. Zero is always accepted:
+// it means "no cap", not "zero heartbeat". Each consumer config's Validate
+// calls this directly, mirroring validateFetchTimeoutFloor above.
+func validatePullHeartbeatCap(heartbeatCap time.Duration) error {
+	if heartbeatCap == 0 {
+		return nil
+	}
+	if heartbeatCap < natsutil.MinPullHeartbeat || heartbeatCap > natsutil.MaxPullHeartbeat {
+		return fmt.Errorf(
+			"%w: PullHeartbeatCap must be 0 (disabled) or within [500ms, 30s] (nats.go PullHeartbeat range), got %v",
+			ErrInvalidConfig, heartbeatCap)
 	}
 
 	return nil

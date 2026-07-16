@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/arloliu/parti/v2/internal/natsutil"
 	"github.com/arloliu/parti/v2/internal/partutil"
 	"github.com/arloliu/parti/v2/internal/recovery"
 	"github.com/arloliu/parti/v2/jsutil"
@@ -300,7 +301,7 @@ func (c *JSConsumer) run(ctx context.Context) {
 			return
 		}
 
-		heartbeat := max(c.config.FetchTimeout/2, 100*time.Millisecond)
+		heartbeat := natsutil.DerivePullHeartbeat(c.config.FetchTimeout, c.config.PullHeartbeatCap)
 
 		iter, err := cons.Messages(
 			jetstream.PullMaxMessages(c.config.BatchSize),

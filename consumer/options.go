@@ -157,6 +157,7 @@ type options struct {
 	maxDeliver        int
 	batchSize         int
 	fetchTimeout      time.Duration
+	pullHeartbeatCap  time.Duration
 	maxWaiting        int
 	maxAckPending     int
 	inactiveThreshold time.Duration
@@ -377,6 +378,27 @@ func WithFetchTimeout(d time.Duration) Option {
 		if d > 0 {
 			o.fetchTimeout = d
 		}
+	})
+}
+
+// WithPullHeartbeatCap bounds the derived nats.go PullHeartbeat value used by
+// the consumer's pull loop. The heartbeat is normally FetchTimeout/2, clamped
+// to nats.go's PullHeartbeat validity range [500ms, 30s]; when d > 0, the
+// derived heartbeat is further capped to d.
+//
+// The heartbeat drives missed-heartbeat detection: nats.go's ErrNoHeartbeat
+// fires at roughly 2x the heartbeat, which is how a deleted durable consumer
+// is detected. Raising FetchTimeout to reduce idle pull-request churn also
+// raises the derived heartbeat and therefore that detection latency; this
+// cap bounds it independent of FetchTimeout.
+//
+// 0 (default) disables the cap: the heartbeat stays FetchTimeout/2, capped
+// only at 30s — this is the behavior with the option unset. A nonzero d
+// outside [500ms, 30s] (nats.go's PullHeartbeat bounds) is rejected at
+// construction with ErrInvalidConfig.
+func WithPullHeartbeatCap(d time.Duration) Option {
+	return universalOpt(func(o *options) {
+		o.pullHeartbeatCap = d
 	})
 }
 

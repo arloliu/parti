@@ -67,6 +67,34 @@ func TestBroadcastConfig_Validate_WrapsErrInvalidConfig(t *testing.T) {
 				return cfg.Validate()
 			},
 		},
+		{
+			name: "PullHeartbeatCap below 500ms floor",
+			fn: func() error {
+				cfg := BroadcastConfig{
+					StreamName:     "S",
+					ConsumerPrefix: "pfx",
+					FilterSubject:  "s.>",
+					CommonConfig:   CommonConfig{PullHeartbeatCap: 499 * time.Millisecond},
+				}
+				_ = cfg.SetDefaults()
+
+				return cfg.Validate()
+			},
+		},
+		{
+			name: "PullHeartbeatCap above 30s ceiling",
+			fn: func() error {
+				cfg := BroadcastConfig{
+					StreamName:     "S",
+					ConsumerPrefix: "pfx",
+					FilterSubject:  "s.>",
+					CommonConfig:   CommonConfig{PullHeartbeatCap: 31 * time.Second},
+				}
+				_ = cfg.SetDefaults()
+
+				return cfg.Validate()
+			},
+		},
 	}
 
 	for _, tt := range tests {
