@@ -71,8 +71,9 @@ type AssignmentPayloadRef struct {
 	// Diagnostic / audit only. Never used for content identity.
 	SetDigest uint64 `json:"set_digest"`
 
-	// Revision is the KV revision of the payload key at the time of Create or
-	// Get. Diagnostic only.
+	// Revision is the KV revision of the payload key as written by this
+	// publish: the Create for a fresh payload, or the successful adoption
+	// CAS-touch (Update) when the payload already existed. Diagnostic only.
 	Revision uint64 `json:"revision"`
 }
 

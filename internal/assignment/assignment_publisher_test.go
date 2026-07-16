@@ -477,7 +477,10 @@ func TestPublisher_InlineSizeRegression_DoesNotApply(t *testing.T) {
 
 // TestPublisher_ErrKeyExists_VerifiedAndReused — pre-populate a payload key
 // with the exact bytes the publisher will produce; assert payloads_reused
-// increments, ref carries existing revision.
+// increments and the adoption CAS-touch advances the ref's revision past the
+// pre-existing one while leaving the stored content byte-identical (see
+// createOrAdoptPayload — the touch is the fencing token against a racing GC
+// delete).
 func TestPublisher_ErrKeyExists_VerifiedAndReused(t *testing.T) {
 	f := newPublisherFixture(t, "key-exists-reused")
 	ctx := context.Background()
@@ -507,7 +510,18 @@ func TestPublisher_ErrKeyExists_VerifiedAndReused(t *testing.T) {
 
 	c := f.readCommit(t, ctx)
 	require.Equal(t, key, c.Payloads["w1"].Key)
-	require.Equal(t, rev, c.Payloads["w1"].Revision, "ref must carry the pre-existing revision")
+	// The adoption touch (kv.Update at the verified revision) advances the
+	// key's revision; the ref must carry the POST-touch revision so the
+	// commit references the fenced state, not the pre-adoption one.
+	require.Greater(t, c.Payloads["w1"].Revision, rev,
+		"ref must carry the post-touch revision (adoption CAS-touch advances it)")
+	entry, gerr := f.assignmentKV.Get(ctx, key)
+	require.NoError(t, gerr)
+	require.Equal(t, c.Payloads["w1"].Revision, entry.Revision(),
+		"ref revision must match the live key's revision after the touch")
+	plain, derr := gzipDecompress(entry.Value())
+	require.NoError(t, derr)
+	require.Equal(t, canonical, plain, "touch must not change the stored content")
 }
 
 // TestPublisher_ErrKeyExists_HashMismatchSurfacesCollisionError — pre-populate
