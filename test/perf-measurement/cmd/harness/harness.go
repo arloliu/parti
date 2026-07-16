@@ -97,6 +97,13 @@ type Options struct {
 	PprofAddr            string // bind address for the net/http/pprof debug listener; "" disables it (default: disabled)
 	BlockProfileRate     int    // runtime.SetBlockProfileRate; 0 disables block profiling (default)
 	MutexProfileFraction int    // runtime.SetMutexProfileFraction; 0 disables mutex profiling (default)
+
+	// ReadyAddr is the bind address for the /ready readiness endpoint
+	// (see ready.go); "" disables it (default: disabled). run-matrix.sh
+	// sets this on every harness invocation so it can gate the external
+	// capture-window start on cluster steady-state instead of a fixed
+	// wall-clock offset.
+	ReadyAddr string
 }
 
 // PartitionSourceBucket is the JetStream-KV bucket the harness creates

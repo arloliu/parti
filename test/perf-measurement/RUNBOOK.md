@@ -443,6 +443,8 @@ Each run lands in `results/run-NNN-<cell>-N<N>-rep<r>/`:
 run-meta.yaml       pre-run sidecar (seed, position, cell, N, rep, flags)
 manifest.yaml       harness metadata; presence = CSV complete
 rpc_counts.csv      per-tick JetStream RPC counters
+harness.log         harness stdout+stderr (backgrounded; see "Capture-window
+                    readiness gate" below). Not written for M1.0 control runs.
 cgroup_io.raw       cgroup v2 io.stat (primary IOPS source)
 cgroup_cpumem.raw   cgroup v2 cpu.stat usage_usec + memory.current (NATS CPU/RSS; load mode)
 iostat.raw          host-level cross-check
@@ -453,6 +455,32 @@ aggregated.csv      produced by the aggregator after each run
 
 The campaign summary is written to `results/campaign-manifest.yaml`.
 
+### Capture-window readiness gate
+
+For every non-control cell, `run-matrix.sh` starts the harness binary in
+the background and does **not** start the external capture scripts
+(`cgroup_io.raw` / `iostat.raw` / `jsz.raw` / `node_exporter.prom`) until
+the harness signals steady-state — every worker has reached `StateStable`
+(workers provisioned, assignments settled). Before this fix, captures
+started on a fixed wall-clock offset regardless of cluster state; at
+N>=2000 the harness was often still provisioning at that point, so
+"idle steady-state" captures actually measured provisioning churn.
+
+The signal is the harness's `/ready` HTTP endpoint (`cmd/harness/ready.go`,
+enabled via `--ready-addr`, off by default outside `run-matrix.sh`):
+503 until `WaitStableAll` succeeds, 200 forever after. `run-matrix.sh`'s
+`wait_for_ready` polls it every 2 s, bounded by `--ready-timeout-secs`
+(default 1800 s — a ceiling, not a fixed wait; it returns the instant
+`/ready` reports 200). If the harness process exits on its own, or the
+timeout elapses, the run is aborted as FAILED with `failed.txt` written —
+captures are **never** started against an unready cluster. Capture
+*duration* is unchanged: once gated captures start, they still run for
+`--warmup-secs + --capture-secs`, matching the harness's own remaining
+lifecycle from that point (warmup -> capture -> exit).
+
+M1.0 control runs (no harness) are unaffected — there is no cluster to
+gate on, so captures start immediately as before.
+
 ### Failure artifacts
 
 If a run fails, the script writes one or more sentinel files alongside the
@@ -460,7 +488,7 @@ run artifacts:
 
 | File | Meaning |
 |---|---|
-| `failed.txt` | Harness binary exited non-zero. |
+| `failed.txt` | Harness binary exited non-zero, or the readiness gate failed (see `harness.log` and the "readiness gate" stderr line for which). |
 | `capture-failed.txt` | A mandatory capture file was missing or empty at run end. |
 | `aggregate-failed.txt` | The aggregator step exited non-zero. |
 
@@ -631,6 +659,7 @@ running `analyze.py`.
 | Aggregator divergence > 5 % | Host background I/O inflated iostat totals. | Ensure no concurrent disk-intensive workloads during capture. If persistent, set `--max-disagreement-pct 10` only for the affected run; flag it in `notes.md`. |
 | `MDE_slope ≥ 0.167` at Gate 3 | Rig too noisy to detect H1 signal. | Identify and eliminate host noise sources. Re-run M1.0. Do not proceed to the knob matrix until the gate passes. |
 | Harness `Run` returns "degraded" | A parti worker entered the degraded state during warmup. | Transient; re-run. If persistent, check NATS cluster health (`make reset`) and network stability. |
+| `failed.txt` says "readiness gate failed" | Cluster never reached `StateStable` within `--ready-timeout-secs` (default 1800s), or the harness process exited before signaling readiness. | Check `harness.log` in the run dir for the underlying cause (e.g. a `WaitStableAll` timeout). If N is large enough that provisioning legitimately needs longer than the default, raise `--ready-timeout-secs`. |
 
 ---
 

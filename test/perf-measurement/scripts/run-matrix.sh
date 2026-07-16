@@ -57,6 +57,24 @@ WARMUP_SECS=300     # 5 min
 CAPTURE_SECS=600    # 10 min
 CAPTURE_TOTAL=$(( WARMUP_SECS + CAPTURE_SECS ))
 
+# Readiness-gate timeout (seconds; Item 1 fix — see wait_for_ready and
+# start_captures below). This is a CEILING, not a fixed wait:
+# wait_for_ready returns the instant /ready reports 200, so a generous
+# default costs nothing on a fast cold-start (same philosophy as the
+# harness's own defaultStartupBudget in cmd/harness/harness.go). Default
+# covers the largest scheduled cell today (E1.c, N=10000 ->
+# defaultStartupBudget = max(120s, 10000*120ms) = 1200s) plus headroom
+# for process/NATS-connect overhead; raise it for a campaign with a
+# larger N or a slower host.
+READY_TIMEOUT_SECS=1800   # 30 min
+
+# Harness readiness endpoint (see cmd/harness/ready.go). Fixed: only one
+# harness process runs at a time (see cmd/harness/pprof.go's topology
+# note), so a single well-known port is sufficient. 6061 is chosen to
+# avoid colliding with the NATS cluster's host-mapped ports
+# (4222/6060/8222+ — see docker/docker-compose.yaml).
+READY_ADDR="127.0.0.1:6061"
+
 # ---------------------------------------------------------------------------
 # Cell definitions.
 #
@@ -199,6 +217,16 @@ Options:
                       §M1 matrix uses 300 s (the default).
   --capture-secs N    Per-run capture window in seconds (default: 600 = 10 min).
                       Tier 0 typically uses 60-120 s.
+  --ready-timeout-secs N
+                      Bounded wait (seconds) for the harness's /ready signal
+                      before a run is aborted as FAILED (default: 1800 = 30
+                      min). This gates when external captures (cgroup/iostat/
+                      jsz/node_exporter) start: run-matrix.sh never starts
+                      them until the cluster reports steady-state, so a run
+                      never silently captures provisioning churn as "idle".
+                      Raise this for cells with N well above 10000 (the
+                      harness's own defaultStartupBudget scales with N; see
+                      RUNBOOK.md).
   --results-dir PATH  Parent directory for per-run subdirs (default: results/).
   --dry-run           Print the full randomised schedule and exit without
                       running the rig.
@@ -233,6 +261,7 @@ while [[ $# -gt 0 ]]; do
         --n-values)    N_VALUES_ARG="$2"; shift 2 ;;
         --warmup-secs) WARMUP_SECS="$2"; shift 2 ;;
         --capture-secs) CAPTURE_SECS="$2"; shift 2 ;;
+        --ready-timeout-secs) READY_TIMEOUT_SECS="$2"; shift 2 ;;
         --reps)        REPS="$2";        shift 2 ;;
         --results-dir) RESULTS_DIR="$2"; shift 2 ;;
         --dry-run)     DRY_RUN=true;     shift ;;
@@ -256,6 +285,10 @@ if ! [[ "$WARMUP_SECS" =~ ^[0-9]+$ ]] || [[ "$WARMUP_SECS" -lt 5 ]]; then
 fi
 if ! [[ "$CAPTURE_SECS" =~ ^[0-9]+$ ]] || [[ "$CAPTURE_SECS" -lt 10 ]]; then
     echo "run-matrix.sh: --capture-secs must be an integer >= 10, got: $CAPTURE_SECS" >&2
+    exit 1
+fi
+if ! [[ "$READY_TIMEOUT_SECS" =~ ^[0-9]+$ ]] || [[ "$READY_TIMEOUT_SECS" -lt 10 ]]; then
+    echo "run-matrix.sh: --ready-timeout-secs must be an integer >= 10, got: $READY_TIMEOUT_SECS" >&2
     exit 1
 fi
 # Recompute total now that user overrides have landed.
@@ -488,8 +521,8 @@ write_campaign_manifest "$CAMPAIGN_START" 0 "$TOTAL_RUNS"
 
 # ---------------------------------------------------------------------------
 # Track background capture PIDs; clean them up on signal or exit.
-# stop_captures / verify_captures live in _capture_lib.sh so the test
-# harness can source them independently.
+# stop_captures / verify_captures / wait_for_ready live in _capture_lib.sh
+# so the test harness can source them independently.
 # ---------------------------------------------------------------------------
 CAPTURE_PIDS=()
 CAPTURE_NAMES=()
@@ -572,6 +605,10 @@ start_captures() {
     fi
 }
 
+# wait_for_ready lives in _capture_lib.sh (sourced above) so the test
+# harness can drive it independently of the rest of this script — see
+# that file for its contract.
+
 # ---------------------------------------------------------------------------
 # run_one — execute a single scheduled entry.
 #
@@ -641,15 +678,17 @@ run_one() {
         return 1
     fi
 
-    # Start captures.
-    start_captures "$run_dir" "$replicas" "$CAPTURE_TOTAL"
-    echo "  captures started (PIDs: ${CAPTURE_PIDS[*]:-none})"
-
     local harness_rc=0
     local control_start=""
+    local readiness_failed=false
+    local harness_pid=""
 
     if [[ "$is_control" == "true" ]]; then
-        # M1.0 — no harness; just let captures run for the full window.
+        # M1.0 — no harness, so there is no cluster to gate on; captures
+        # start immediately and run for the full window, same as before
+        # the Item 1 fix.
+        start_captures "$run_dir" "$replicas" "$CAPTURE_TOTAL"
+        echo "  captures started (PIDs: ${CAPTURE_PIDS[*]:-none})"
         # Record start time now so the window is accurate even if stop
         # or verify takes extra time.
         control_start="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -657,8 +696,16 @@ run_one() {
         sleep "$CAPTURE_TOTAL" || true
         echo "  M1.0 capture window complete."
     else
-        # Run the harness binary.
-        echo "  running harness (--n=${n} ${flags})..."
+        # Run the harness binary in the background so its lifecycle
+        # (provisioning -> Stable -> warmup -> capture) can run concurrently
+        # with polling its readiness signal (Item 1 fix): external captures
+        # must not start until the cluster reports steady-state, never on a
+        # fixed wall-clock offset that can land inside provisioning at
+        # N>=2000. Duration semantics are unchanged — once captures start
+        # they still run for CAPTURE_TOTAL (warmup + capture), the same as
+        # the harness's own remaining lifecycle from this point.
+        local harness_log="${run_dir}/harness.log"
+        echo "  starting harness (--n=${n} ${flags}); waiting for readiness (timeout ${READY_TIMEOUT_SECS}s)..."
         PERF_RIG_RUN_INDEX="${pos}" \
         PERF_RIG_NATS_IMAGE="${PERF_RIG_NATS_IMAGE:-nats:2.12.6}" \
         PERF_RIG_NATS_IMAGE_DIGEST="${PERF_RIG_NATS_IMAGE_DIGEST:-}" \
@@ -667,17 +714,38 @@ run_one() {
                 --output-dir="$run_dir" \
                 --warmup="${WARMUP_SECS}s" \
                 --capture-window="${CAPTURE_SECS}s" \
+                --ready-addr="$READY_ADDR" \
                 $flags \
-            || harness_rc=$?
+                > "$harness_log" 2>&1 &
+        harness_pid=$!
 
+        if wait_for_ready "$READY_ADDR" "$READY_TIMEOUT_SECS" "$harness_pid"; then
+            echo "  cluster ready — starting captures..."
+            start_captures "$run_dir" "$replicas" "$CAPTURE_TOTAL"
+            echo "  captures started (PIDs: ${CAPTURE_PIDS[*]:-none})"
+        else
+            echo "  readiness gate FAILED — never starting captures against an unready cluster (see ${harness_log})" >&2
+            readiness_failed=true
+            kill "$harness_pid" 2>/dev/null || true
+        fi
+
+        wait "$harness_pid" 2>/dev/null || harness_rc=$?
         if [[ "$harness_rc" -ne 0 ]]; then
             echo "  harness exited with code ${harness_rc}" >&2
         fi
     fi
 
-    # Stop captures regardless of harness outcome.
+    # Stop captures regardless of harness outcome. Safe even when the
+    # readiness gate failed before start_captures ran: CAPTURE_PIDS is
+    # empty in that case and stop_captures is then a no-op.
     echo "  stopping captures..."
     stop_captures
+
+    if [[ "$readiness_failed" == "true" ]]; then
+        printf 'readiness gate failed (harness_rc=%d); see harness.log\n' "$harness_rc" > "${run_dir}/failed.txt"
+        echo "  run FAILED (readiness gate); continuing campaign."
+        return 1
+    fi
 
     if [[ "$harness_rc" -ne 0 ]]; then
         printf 'harness exit code %d\n' "$harness_rc" > "${run_dir}/failed.txt"

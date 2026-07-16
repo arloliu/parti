@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # _capture_lib.sh — Shared capture-lifecycle helpers for run-matrix.sh.
 #
-# Sourced by run-matrix.sh and by test/scripts/test-capture-failure.sh.
-# Do not execute directly.
+# Sourced by run-matrix.sh and by scripts/test-capture-failure.sh and
+# scripts/test-readiness-gate.sh. Do not execute directly.
 #
 # Globals exported (caller must declare these as arrays before sourcing):
 #   CAPTURE_PIDS  — PIDs of background capture processes.
@@ -62,4 +62,41 @@ verify_captures() {
         return 1
     fi
     return 0
+}
+
+# wait_for_ready READY_ADDR TIMEOUT_SECS HARNESS_PID — poll the harness's
+# /ready endpoint (cmd/harness/ready.go) every 2s until it reports 200,
+# the harness process exits on its own, or TIMEOUT_SECS elapses.
+#
+# This is run-matrix.sh's capture-window readiness gate (RUNBOOK.md
+# "Capture-window readiness gate"): run_one starts the harness in the
+# background and calls this BEFORE starting the external capture
+# scripts, so a capture window never starts while the cluster is still
+# provisioning (workers/assignments not yet settled) — a fixed
+# wall-clock capture start landed inside provisioning at N>=2000.
+#
+# Returns 0 once /ready reports 200. Returns 1 (with a stderr message)
+# if the harness process exits before becoming ready, or if
+# TIMEOUT_SECS elapses first — the caller must never start captures on
+# a non-zero return.
+wait_for_ready() {
+    local ready_addr="$1" timeout_secs="$2" harness_pid="$3"
+    local poll_interval=2
+    local waited=0
+
+    while true; do
+        if ! kill -0 "$harness_pid" 2>/dev/null; then
+            echo "  readiness gate: harness process (pid ${harness_pid}) exited before signaling readiness" >&2
+            return 1
+        fi
+        if curl -sf --max-time 2 "http://${ready_addr}/ready" >/dev/null 2>&1; then
+            return 0
+        fi
+        if [[ "$waited" -ge "$timeout_secs" ]]; then
+            echo "  readiness gate: timed out after ${timeout_secs}s waiting for http://${ready_addr}/ready" >&2
+            return 1
+        fi
+        sleep "$poll_interval"
+        waited=$(( waited + poll_interval ))
+    done
 }
