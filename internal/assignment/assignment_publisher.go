@@ -42,6 +42,19 @@ const (
 	aliasBarrierMaxJitter   = 50 * time.Millisecond
 )
 
+// Bounded retry budget for the payload adoption CAS-touch (step 4's
+// ErrKeyExists branch). A touch loss means a concurrent GC sweep's
+// revision-conditioned delete (commit_gc.go RunOnce) won the race against
+// this adoption's verify-back; the whole create-or-adopt step is retried
+// from scratch (see createOrAdoptPayload). This is the rare path — GC only
+// deletes payloads outside the retention window, so a same-instant adopt is
+// uncommon — so a small, fast budget is enough.
+const (
+	payloadAdoptMaxAttempts = 3
+	payloadAdoptBaseBackoff = 20 * time.Millisecond
+	payloadAdoptMaxJitter   = 20 * time.Millisecond
+)
+
 // LeaderCheckFunc is the contract for the publisher's pre-alias and post-alias
 // leadership fences (publish steps 5 and 7 of §3.5).
 //
@@ -63,6 +76,9 @@ type LeaderCheckFunc func(ctx context.Context, claimed uint64) error
 // On every Publish, the publisher:
 //  1. Writes content-addressable AssignmentPayload keys ("assignment._payload.<hex(sha256)>")
 //     via kv.Create with hash-verify on ErrKeyExists (immutable, dedupe-safe).
+//     An adopted (reused) key is CAS-touched to a fresh revision before the
+//     adoption is treated as final, fencing it against a racing GC delete
+//     (see createOrAdoptPayload).
 //  2. Reads heartbeats to classify legacy (CapAckV1=0) workers in the batch.
 //  3. Brackets the legacy alias barrier with two leadership rechecks
 //     (pre-alias and post-alias).
@@ -668,35 +684,9 @@ func (p *AssignmentPublisher) writePayloads(
 
 		setDigest := computeSetDigest(canonical)
 
-		rev, err := p.assignmentKV.Create(ctx, key, stored)
-		switch {
-		case err == nil:
-			p.metrics.IncrementPayloadsCreated()
-			p.metrics.ObservePayloadBytesWritten(len(stored))
-		case errors.Is(err, jetstream.ErrKeyExists):
-			// Verify-back: fetch the existing bytes, decompress, sha256, and
-			// compare with our hash. A mismatch is either a sha256 collision
-			// (extraordinary) or KV corruption.
-			entry, gerr := p.assignmentKV.Get(ctx, key)
-			if gerr != nil {
-				return nil, nil, fmt.Errorf("verify-back get worker=%s key=%s: %w", w, key, gerr)
-			}
-			plain, derr := gzipDecompress(entry.Value())
-			if derr != nil {
-				// Tolerate the case where some operator wrote uncompressed bytes
-				// (unlikely in production, but be defensive): treat the raw
-				// stored bytes as canonical and re-hash directly.
-				plain = entry.Value()
-			}
-			gotHash := sha256.Sum256(plain)
-			if !bytes.Equal(gotHash[:], hash[:]) {
-				return nil, nil, fmt.Errorf("%w: key=%s expected=%s got=%s",
-					types.ErrPayloadHashCollisionOrCorruption, key, hashHex, hex.EncodeToString(gotHash[:]))
-			}
-			p.metrics.IncrementPayloadsReused()
-			rev = entry.Revision()
-		default:
-			return nil, nil, fmt.Errorf("kv create payload worker=%s key=%s: %w", w, key, err)
+		rev, err := p.createOrAdoptPayload(ctx, key, hash[:], hashHex, stored)
+		if err != nil {
+			return nil, nil, fmt.Errorf("worker=%s: %w", w, err)
 		}
 
 		refs[w] = types.AssignmentPayloadRef{
@@ -709,6 +699,139 @@ func (p *AssignmentPublisher) writePayloads(
 	}
 
 	return refs, payloads, nil
+}
+
+// createOrAdoptPayload implements step 4's per-key write, closing the
+// payload-GC-vs-adoption race: GC's RunOnce (commit_gc.go) can classify a
+// payload key as an orphan and delete it based on a snapshot taken before
+// this adoption started, and the plain Create→ErrKeyExists→verify-back
+// sequence used to give GC nothing to condition on — the adopter's
+// verify-back and GC's delete were two independent operations racing on the
+// same key with no shared fencing token.
+//
+// The fix makes both sides condition on the payload key's own KV revision:
+//   - On ErrKeyExists (an existing key with matching content), this method
+//     CAS-touches the key — kv.Update with the SAME bytes at the revision
+//     just observed — before treating the adoption as final. The touch keeps
+//     the key's content identical but advances its revision AND writes a
+//     fresh entry, resetting the Created timestamp GC's age gate reads.
+//   - GC's delete arm conditions its Delete on the revision it observed
+//     (jetstream.LastRevision) instead of deleting unconditionally.
+//
+// The two pieces split the two GC-read-vs-touch orderings between them:
+//   - GC's age-gate Get happens BEFORE the touch: the touch advances the
+//     revision, so GC's conditioned delete is rejected (fencing, below).
+//   - GC's age-gate Get happens AFTER the touch: it observes a fresh entry
+//     younger than Retention, and the age gate skips the key — no delete is
+//     even attempted.
+//
+// Both orderings lean on the standing retention-lease assumption every
+// payload write (fresh Create included) already relies on: a publish
+// completes its commit CAS within Retention (default 24h) of writing the
+// key. A publish stalled longer than Retention between touch/Create and
+// commit can still lose the key to a later GC pass — that is the
+// pre-existing lease contract, not a window this fix introduces or widens.
+//
+// Whichever side's conditioned write reaches the server first wins:
+//   - If GC deletes first, this method's touch loses (nats.go maps the
+//     revision mismatch to jetstream.ErrKeyExists, the same sentinel Create
+//     returns for "key already exists" — see errors.go's shared
+//     JSErrCodeStreamWrongLastSequence mapping), and the whole
+//     create-or-adopt step is retried: the next Create attempt recreates the
+//     key since it is now genuinely absent.
+//   - If this method's touch lands first, GC's conditioned delete loses and
+//     the key survives — GC treats that as "an adopter won" and skips it
+//     (see commit_gc.go RunOnce).
+//
+// A publish therefore never commits a payload ref whose touch (or fresh
+// Create) did not succeed. The extra touch write only happens on the
+// ErrKeyExists (adoption) branch — one extra KV op per ADOPTED key per
+// publish; new payloads (the common case) pay nothing extra.
+//
+// Bounded by payloadAdoptMaxAttempts; exhausting the budget returns an error
+// that aborts the batch (the caller wraps it with worker context).
+func (p *AssignmentPublisher) createOrAdoptPayload(ctx context.Context, key string, hash []byte, hashHex string, stored []byte) (uint64, error) {
+	var lastErr error
+	for attempt := range payloadAdoptMaxAttempts {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+
+		rev, err := p.assignmentKV.Create(ctx, key, stored)
+		switch {
+		case err == nil:
+			p.metrics.IncrementPayloadsCreated()
+			p.metrics.ObservePayloadBytesWritten(len(stored))
+
+			return rev, nil
+
+		case errors.Is(err, jetstream.ErrKeyExists):
+			// Verify-back: fetch the existing bytes, decompress, sha256, and
+			// compare with our hash. A mismatch is either a sha256 collision
+			// (extraordinary) or KV corruption — not retryable.
+			entry, gerr := p.assignmentKV.Get(ctx, key)
+			if gerr != nil {
+				// The key existed a moment ago (Create lost) but is now
+				// unreadable — most likely a GC delete landed between our
+				// Create attempt and this Get. Retry the whole step: the
+				// next Create attempt either recreates the key (if the
+				// delete is durable) or observes a fresh adopter.
+				lastErr = fmt.Errorf("verify-back get key=%s: %w", key, gerr)
+				p.backoffPayloadAdoptRetry(ctx, attempt)
+
+				continue
+			}
+			plain, derr := gzipDecompress(entry.Value())
+			if derr != nil {
+				// Tolerate the case where some operator wrote uncompressed bytes
+				// (unlikely in production, but be defensive): treat the raw
+				// stored bytes as canonical and re-hash directly.
+				plain = entry.Value()
+			}
+			gotHash := sha256.Sum256(plain)
+			if !bytes.Equal(gotHash[:], hash) {
+				return 0, fmt.Errorf("%w: key=%s expected=%s got=%s",
+					types.ErrPayloadHashCollisionOrCorruption, key, hashHex, hex.EncodeToString(gotHash[:]))
+			}
+
+			// CAS-touch: write the SAME bytes back at the observed revision.
+			// This is the fencing token GC's conditioned delete competes
+			// against — see the method doc above.
+			newRev, uerr := p.assignmentKV.Update(ctx, key, entry.Value(), entry.Revision())
+			if uerr != nil {
+				if errors.Is(uerr, jetstream.ErrKeyExists) {
+					// Revision moved under us between verify-back and touch:
+					// a GC delete (or another adopter's touch) won. Our
+					// verify-back is now stale — retry the whole step.
+					lastErr = fmt.Errorf("adopt touch cas lost key=%s: %w", key, uerr)
+					p.backoffPayloadAdoptRetry(ctx, attempt)
+
+					continue
+				}
+
+				return 0, fmt.Errorf("adopt touch key=%s: %w", key, uerr)
+			}
+			p.metrics.IncrementPayloadsReused()
+
+			return newRev, nil
+
+		default:
+			return 0, fmt.Errorf("kv create payload key=%s: %w", key, err)
+		}
+	}
+
+	return 0, fmt.Errorf("payload adoption exhausted %d attempts key=%s: %w", payloadAdoptMaxAttempts, key, lastErr)
+}
+
+// backoffPayloadAdoptRetry waits a short jittered backoff between
+// createOrAdoptPayload retries, or returns early if ctx is cancelled.
+func (p *AssignmentPublisher) backoffPayloadAdoptRetry(ctx context.Context, attempt int) {
+	backoff := payloadAdoptBaseBackoff << attempt
+	jitter := jitterDuration(payloadAdoptMaxJitter)
+	select {
+	case <-ctx.Done():
+	case <-time.After(backoff + jitter):
+	}
 }
 
 // classifyLegacyWorkers reads each worker's heartbeat and returns the subset

@@ -89,10 +89,16 @@ type CommitGCConfig struct {
 //   - Non-live keys older than Retention are eligible for deletion. Failures
 //     are non-fatal and surface via the IncrementPayloadDeleteErrors metric.
 //
-// CommitGC is safe to call concurrently with Publisher.Publish: GC only writes
-// (deletes) keys it has classified as orphan; the publisher only writes keys
-// via kv.Create + verify-back, so a delete-vs-create race produces at most a
-// transient "verify failed" the publisher self-recovers from on the next pass.
+// CommitGC is safe to call concurrently with Publisher.Publish, including
+// across processes: GC's delete is conditioned on the payload key's revision
+// (jetstream.LastRevision) as observed immediately before the delete, and a
+// publish adopting an existing key (Create → ErrKeyExists → verify-back)
+// CAS-touches it to advance that same revision before treating the adoption
+// as final (see createOrAdoptPayload in assignment_publisher.go). Whichever
+// side's conditioned write reaches the server first wins deterministically:
+// a GC delete that lands first makes the adopter's touch fail and retry
+// (recreating the key), and an adopter's touch that lands first makes GC's
+// delete fail and the key survives.
 //
 // Example:
 //
@@ -293,26 +299,61 @@ func (g *CommitGC) RunOnce(ctx context.Context) error {
 		if g.cfg.Retention > 0 && now.Sub(entry.Created()) < g.cfg.Retention {
 			continue
 		}
-		// Re-check in-flight refs immediately before deleting: a publish
-		// that began AFTER the snapshot above and adopted this key via
-		// ErrKeyExists can have registered its ref in the publisher's set
-		// during the kv.Get above. The double-check closes the narrow race
-		// where step 4's verify-back happens between our snapshot and our
-		// delete.
+		// Re-check in-flight refs immediately before deleting: a
+		// same-process publish that began AFTER the snapshot above and
+		// adopted this key via ErrKeyExists can have registered its ref in
+		// the publisher's set by now. This is a best-effort fast path only
+		// — LiveRefs is process-local (invisible to a concurrent publisher
+		// in another process) and even same-process the ref is registered
+		// only after writePayloads returns, a window after the adopter's
+		// touch below has already landed. The conditioned Delete below is
+		// the actual correctness mechanism; this check just avoids the
+		// round trip for the common same-process case.
 		if g.liveRefs != nil {
 			stillLive := slices.Contains(g.liveRefs.LiveRefs(), k)
 			if stillLive {
 				continue
 			}
 		}
-		if err := kv.Delete(ctx, k); err != nil {
-			if errors.Is(err, jetstream.ErrKeyNotFound) {
+		// Conditioned delete: only remove the key if its revision still
+		// matches what we just observed above (entry.Revision()). This is
+		// the fencing token that closes the payload-GC-vs-adoption race —
+		// see createOrAdoptPayload's doc in assignment_publisher.go. If an
+		// adopter CAS-touched this key (Create→ErrKeyExists→verify-back→
+		// Update) anywhere between our Get above and this Delete, the
+		// revision no longer matches and the delete is rejected instead of
+		// silently destroying a payload a fresh commit now references. The
+		// opposite ordering — a touch landing BEFORE our Get above — is
+		// covered by the age gate, not by this condition: the touch writes a
+		// fresh entry, so the Get sees Created within Retention and skips
+		// the key entirely. Both halves assume a publish commits within
+		// Retention of its payload write (the standing retention lease;
+		// see createOrAdoptPayload's doc).
+		if err := kv.Delete(ctx, k, jetstream.LastRevision(entry.Revision())); err != nil {
+			switch {
+			case errors.Is(err, jetstream.ErrKeyNotFound):
+				// Key already gone — another GC pass (or a delete that
+				// otherwise raced ahead of us) got there first.
+				continue
+			case errors.Is(err, jetstream.ErrKeyExists):
+				// Revision-conditioned delete lost: nats.go maps a
+				// wrong-last-sequence rejection to the same sentinel Create
+				// uses for "key already exists" (both are
+				// JSErrCodeStreamWrongLastSequence). It proves only that the
+				// key's revision moved after our Get — most likely an
+				// adopter's CAS-touch, though any concurrent write to the
+				// key produces the same rejection. Either way the key is
+				// live again; skip it. Kept distinguishable from the
+				// already-deleted case above so debug logs can tell the two
+				// loser classifications apart.
+				g.logger.Debug("payload GC delete lost: revision moved after age-gate read", "key", k)
+				continue
+			default:
+				errs++
+				g.cfg.Metrics.IncrementPayloadDeleteErrors()
+				g.logger.Warn("payload GC delete failed (non-fatal)", "key", k, "error", err)
 				continue
 			}
-			errs++
-			g.cfg.Metrics.IncrementPayloadDeleteErrors()
-			g.logger.Warn("payload GC delete failed (non-fatal)", "key", k, "error", err)
-			continue
 		}
 		deletes++
 	}
