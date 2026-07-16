@@ -94,6 +94,8 @@ func parseFlags(args []string) (Options, error) {
 		pprofAddr            = fs.String("pprof-addr", "", "bind address for the net/http/pprof debug listener (e.g. 127.0.0.1:6060); empty disables it (default)")
 		blockProfileRate     = fs.Int("block-profile-rate", 0, "runtime.SetBlockProfileRate; 0 disables block profiling (default; zero steady-state overhead)")
 		mutexProfileFraction = fs.Int("mutex-profile-fraction", 0, "runtime.SetMutexProfileFraction; 0 disables mutex profiling (default; zero steady-state overhead)")
+
+		readyAddr = fs.String("ready-addr", "", "bind address for the /ready readiness endpoint (e.g. 127.0.0.1:6061); empty disables it (default). Polled by run-matrix.sh to gate the external capture-window start on cluster steady-state (workers Stable) instead of a fixed wall-clock offset.")
 	)
 
 	if err := fs.Parse(args); err != nil {
@@ -148,6 +150,7 @@ func parseFlags(args []string) (Options, error) {
 		PprofAddr:             *pprofAddr,
 		BlockProfileRate:      *blockProfileRate,
 		MutexProfileFraction:  *mutexProfileFraction,
+		ReadyAddr:             *readyAddr,
 	}, nil
 }
 
@@ -204,6 +207,18 @@ func Run(ctx context.Context, o Options, errLog io.Writer) error {
 			return fmt.Errorf("start pprof listener: %w", perr)
 		}
 		defer shutdownPprofListener(pprofSrv)
+	}
+
+	// Readiness listener starts early (before provisioning) so a poller
+	// sees 503 from t=0 rather than a connection-refused race; it flips
+	// to 200 once WaitStableAll succeeds below (Step 6).
+	readyTracker := NewReadyTracker()
+	if o.ReadyAddr != "" {
+		readySrv, rerr := StartReadyListener(ctx, o.ReadyAddr, readyTracker)
+		if rerr != nil {
+			return fmt.Errorf("start ready listener: %w", rerr)
+		}
+		defer shutdownReadyListener(readySrv)
 	}
 
 	// Step 1: setup NATS + wrapper. The setup wrapper is intentionally
@@ -279,6 +294,11 @@ func Run(ctx context.Context, o Options, errLog io.Writer) error {
 	if err := WaitStableAll(workers, o.StartupBudget); err != nil {
 		return fmt.Errorf("wait stable: %w", err)
 	}
+	// Flip readiness the instant the cluster reaches steady state — this
+	// is the exact signal run-matrix.sh's capture-window gate (Item 1)
+	// waits on, so it must fire as early as possible, before the
+	// queue-consumer / producer / warmup steps below.
+	readyTracker.SetReady()
 
 	// Step 6b: now that the cluster is Stable, start any Queue-mode consumers
 	// (StartWorker no longer does this, since it no longer blocks on Stable).
