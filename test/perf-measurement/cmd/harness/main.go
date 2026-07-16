@@ -96,10 +96,18 @@ func parseFlags(args []string) (Options, error) {
 		mutexProfileFraction = fs.Int("mutex-profile-fraction", 0, "runtime.SetMutexProfileFraction; 0 disables mutex profiling (default; zero steady-state overhead)")
 
 		readyAddr = fs.String("ready-addr", "", "bind address for the /ready readiness endpoint (e.g. 127.0.0.1:6061); empty disables it (default). Polled by run-matrix.sh to gate the external capture-window start on cluster steady-state (workers Stable) instead of a fixed wall-clock offset.")
+
+		churnWorkerIdx       = fs.Int("churn-worker-idx", -1, "rig-only E4 churn schedule: 0-based worker index to repeatedly kill/re-add during the capture window; -1 disables the schedule (default)")
+		churnWaves           = fs.Int("churn-waves", 3, "rig-only E4 churn schedule: number of kill->converge->re-add repetitions")
+		churnPlateau         = fs.Duration("churn-plateau", 90*time.Second, "rig-only E4 churn schedule: idle wait after capture-window start before wave 1's kill")
+		churnConvergeTimeout = fs.Duration("churn-converge-timeout", 120*time.Second, "rig-only E4 churn schedule: per-phase budget for the cluster to reach Stable after a kill or a re-add; a wave that exceeds this is logged as wave_failed and the schedule continues to the next wave")
 	)
 
 	if err := fs.Parse(args); err != nil {
 		return Options{}, err
+	}
+	if *churnWorkerIdx >= *workers {
+		return Options{}, fmt.Errorf("--churn-worker-idx=%d out of range for --workers=%d", *churnWorkerIdx, *workers)
 	}
 
 	kvSt, err := ParseStorage(*kvStorage)
@@ -151,6 +159,11 @@ func parseFlags(args []string) (Options, error) {
 		BlockProfileRate:      *blockProfileRate,
 		MutexProfileFraction:  *mutexProfileFraction,
 		ReadyAddr:             *readyAddr,
+
+		ChurnWorkerIdx:       *churnWorkerIdx,
+		ChurnWaves:           *churnWaves,
+		ChurnPlateau:         *churnPlateau,
+		ChurnConvergeTimeout: *churnConvergeTimeout,
 	}, nil
 }
 
@@ -360,6 +373,63 @@ func Run(ctx context.Context, o Options, errLog io.Writer) error {
 	ResetAll(workers)
 	captureStart := time.Now()
 
+	// Churn schedule (E4 rebalance-burst anatomy, rig-only — see
+	// churn.go). Disabled unless --churn-worker-idx >= 0 (default -1).
+	// The schedule runs as a background goroutine for the remainder of
+	// the capture window; churnCtx gives it a hard ceiling independent
+	// of the outer signal context so a stuck convergence wait cannot
+	// hang the harness process indefinitely. ws, when non-nil, is the
+	// live worker view the capture loop and the post-loop status checks
+	// below must read through instead of the plain `workers` slice,
+	// because the churn goroutine replaces one element (the
+	// killed-then-restarted worker's handle) concurrently with the
+	// capture loop's per-tick reads of the same slice.
+	var ws *workerSet
+	var churnWG sync.WaitGroup
+	churnCancel := func() {}
+	if o.ChurnWorkerIdx >= 0 {
+		ws = newWorkerSet(workers)
+		ceiling := o.ChurnPlateau + time.Duration(o.ChurnWaves)*2*o.ChurnConvergeTimeout + 2*time.Minute
+		var churnCtx context.Context
+		churnCtx, churnCancel = context.WithTimeout(ctx, ceiling)
+		churnWG.Add(1)
+		go func() {
+			defer churnWG.Done()
+			runChurnSchedule(churnCtx, o, cfg, ws, leaderTracker, errLog)
+		}()
+	}
+	defer churnCancel()
+
+	// captureWorkers returns the worker list the capture loop should
+	// read at this instant: the live churn-updated view when the
+	// schedule is active, otherwise the plain (never-mutated) workers
+	// slice.
+	captureWorkers := func() []*WorkerHandle {
+		if ws != nil {
+			return ws.Snapshot()
+		}
+
+		return workers
+	}
+
+	// statusWorkers returns the worker list the run-level degraded gate
+	// should evaluate: captureWorkers() minus the actively-churned
+	// index. The churned worker legitimately cycles through
+	// StateShutdown -> (new instance) -> StateStable as a deliberate
+	// part of the E4 experiment; churn-waves.csv (via runChurnSchedule's
+	// wave_failed notes) is the authoritative signal for whether ITS
+	// transitions converged in time. The run-level gate below still
+	// aborts the run on any UNEXPECTED degraded transition among every
+	// other worker.
+	statusWorkers := func() []*WorkerHandle {
+		cw := captureWorkers()
+		if o.ChurnWorkerIdx >= 0 {
+			return remainingWorkers(cw, o.ChurnWorkerIdx)
+		}
+
+		return cw
+	}
+
 	// Arm the in-window interval on every recorder and the producer at the
 	// real capture start, both in CLOCK_MONOTONIC, so delivery is compared
 	// against in-window sends (NOT total Sent, which spans warmup+capture).
@@ -413,7 +483,7 @@ func Run(ctx context.Context, o Options, errLog io.Writer) error {
 	// Emit an initial snapshot at t=0 of the capture window so
 	// downstream tooling can see a row even if the capture is
 	// truncated.
-	if err := writeSnapshot(w, time.Now(), workers); err != nil {
+	if err := writeSnapshot(w, time.Now(), captureWorkers()); err != nil {
 		return err
 	}
 
@@ -444,28 +514,43 @@ captureLoop:
 			// cannot commit the partial CSV the run produces no
 			// final CSV and we must not write a manifest either
 			// (artifact-completeness contract).
-			if serr := writeSnapshot(w, time.Now(), workers); serr != nil {
+			if serr := writeSnapshot(w, time.Now(), captureWorkers()); serr != nil {
 				fmt.Fprintf(errLog, "interrupt: final snapshot: %v\n", serr)
 			}
 			if cerr := commitCSV(); cerr != nil {
 				fmt.Fprintf(errLog, "interrupt: csv commit failed, no manifest written: %v\n", cerr)
 				return cerr
 			}
+			// Join the churn goroutine (no-op if it was never started)
+			// and refresh workers to the live view before cleanup runs
+			// so a re-added worker's manager/consumer is actually
+			// stopped, not leaked.
+			churnWG.Wait()
+			if ws != nil {
+				workers = ws.Snapshot()
+			}
 
 			return finishRun(o, cfg, workers, started, "interrupted", ctx.Err())
 		case t := <-ticker.C:
-			if err := writeSnapshot(w, t, workers); err != nil {
+			if err := writeSnapshot(w, t, captureWorkers()); err != nil {
 				return err
 			}
 			// Mid-run degraded gate: if any worker has logged a
 			// degraded transition or is no longer Stable, abort with
 			// status=degraded so the manifest accurately records the
-			// failure mode.
-			if status, derr := DecideRunStatus(workers); derr != nil {
+			// failure mode. statusWorkers() excludes the actively-churned
+			// worker (see its doc comment) so the deliberate E4
+			// kill/re-add cycle never trips this gate.
+			if status, derr := DecideRunStatus(statusWorkers()); derr != nil {
 				if cerr := commitCSV(); cerr != nil {
 					fmt.Fprintf(errLog, "degraded: csv commit failed, no manifest written: %v\n", cerr)
 					return cerr
 				}
+				churnWG.Wait()
+				if ws != nil {
+					workers = ws.Snapshot()
+				}
+
 				return finishRun(o, cfg, workers, started, status, derr)
 			}
 			if !t.Before(captureDeadline) {
@@ -474,8 +559,18 @@ captureLoop:
 		}
 	}
 
+	// Join the churn goroutine (no-op if it was never started) and
+	// refresh workers to the live (post-churn) view before every
+	// downstream step below — the final degraded check, latency
+	// collection, and the deferred cleanup() must all act on the
+	// currently-running handles, not the pre-churn ones.
+	churnWG.Wait()
+	if ws != nil {
+		workers = ws.Snapshot()
+	}
+
 	// Final post-capture degraded check, then commit CSV and manifest.
-	status, derr := DecideRunStatus(workers)
+	status, derr := DecideRunStatus(statusWorkers())
 
 	if o.Load {
 		// Drain: let in-flight in-window messages arrive before reading

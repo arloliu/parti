@@ -104,6 +104,23 @@ type Options struct {
 	// capture-window start on cluster steady-state instead of a fixed
 	// wall-clock offset.
 	ReadyAddr string
+
+	// --- E4 churn schedule (rig-only, see churn.go) ---
+
+	// ChurnWorkerIdx is the 0-based worker index the churn schedule
+	// repeatedly kills and re-adds during the capture window; -1
+	// disables the schedule entirely (default; zero overhead).
+	ChurnWorkerIdx int
+	// ChurnWaves is the number of kill->converge->re-add repetitions.
+	ChurnWaves int
+	// ChurnPlateau is the idle wait after the capture window opens
+	// before wave 1's kill, giving a clean idle-state tail for
+	// pre-wave comparison.
+	ChurnPlateau time.Duration
+	// ChurnConvergeTimeout bounds how long the schedule waits, per
+	// phase (post-kill and post-re-add), for the cluster to report
+	// Stable before logging that phase as failed and moving on.
+	ChurnConvergeTimeout time.Duration
 }
 
 // PartitionSourceBucket is the JetStream-KV bucket the harness creates
@@ -769,6 +786,10 @@ type ManifestOptions struct {
 	MaxAckPending         int     `yaml:"maxAckPending"`
 	AckWait               string  `yaml:"ackWait"`
 	StartupBudget         string  `yaml:"startupBudget"`
+	ChurnWorkerIdx        int     `yaml:"churnWorkerIdx"`
+	ChurnWaves            int     `yaml:"churnWaves"`
+	ChurnPlateau          string  `yaml:"churnPlateau"`
+	ChurnConvergeTimeout  string  `yaml:"churnConvergeTimeout"`
 }
 
 // ManifestStream records the storage class confirmed by
@@ -822,6 +843,10 @@ func buildManifestOptions(o Options) ManifestOptions {
 		MaxAckPending:         o.MaxAckPending,
 		AckWait:               o.AckWait.String(),
 		StartupBudget:         o.StartupBudget.String(),
+		ChurnWorkerIdx:        o.ChurnWorkerIdx,
+		ChurnWaves:            o.ChurnWaves,
+		ChurnPlateau:          o.ChurnPlateau.String(),
+		ChurnConvergeTimeout:  o.ChurnConvergeTimeout.String(),
 	}
 }
 
