@@ -41,9 +41,16 @@ fi
 CONTAINERS_R3="perf-nats-1,perf-nats-2,perf-nats-3"
 CONTAINERS_R5="perf-nats-1,perf-nats-2,perf-nats-3,perf-nats-4,perf-nats-5"
 
-# Monitoring endpoint for capture-jsz.sh.
-NATS_MONITOR_R3="localhost:8222"
-NATS_MONITOR_R5="localhost:8222"   # single ingress; route discovery handles the rest
+# Monitoring endpoints for capture-jsz.sh — one per cluster node, host
+# ports per docker/docker-compose.yaml (nats-1:8222, nats-2:8223, ...).
+# capture-jsz.sh polls every listed node each lean tick and, with
+# --jsz-detail, resolves whichever one currently reports itself as
+# JetStream meta-leader (meta-leadership can move to any node) for the
+# expensive per-consumer/raft detail poll. Passing only nats-1 here would
+# silently starve --jsz-detail of leader detail whenever leadership moves
+# off nats-1.
+NATS_MONITOR_R3="localhost:8222,localhost:8223,localhost:8224"
+NATS_MONITOR_R5="localhost:8222,localhost:8223,localhost:8224,localhost:8225,localhost:8226"
 
 # Warmup and capture window durations (seconds).
 WARMUP_SECS=300     # 5 min
@@ -506,11 +513,13 @@ start_captures() {
     CAPTURE_PIDS=()
     CAPTURE_NAMES=()
 
-    local containers
+    local containers nats_monitor
     if [[ "$replicas" -eq 5 ]]; then
         containers="$CONTAINERS_R5"
+        nats_monitor="$NATS_MONITOR_R5"
     else
         containers="$CONTAINERS_R3"
+        nats_monitor="$NATS_MONITOR_R3"
     fi
 
     # Mandatory capture prerequisites were validated by preflight; here
@@ -542,7 +551,7 @@ start_captures() {
     bash "${SCRIPT_DIR}/capture-jsz.sh" \
         --output "${run_dir}/jsz.raw" \
         --duration "$duration" \
-        --nats-nodes "$NATS_MONITOR_R3" \
+        --nats-nodes "$nats_monitor" \
         "${jsz_extra[@]}" &
     CAPTURE_PIDS+=($!)
     CAPTURE_NAMES+=("jsz")

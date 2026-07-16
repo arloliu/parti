@@ -37,6 +37,16 @@
 # corrupt an ndjson line in the primary capture. Detail lines carry endpoint
 # "jsz-detail" for self-description even though they never reach OUTPUT.
 #
+# Reachability requirement: this generalizes correctly only for nodes whose
+# monitoring port is reachable from wherever this script runs — meta-leadership
+# can land on any --nats-nodes entry, not just the first. run-matrix.sh's
+# NATS_MONITOR_R3/R5 pass every cluster node's host-mapped monitoring port
+# (see docker/docker-compose.yaml: nats-1:8222, nats-2:8223, nats-3:8224,
+# nats-4:8225, nats-5:8226) for exactly this reason. Passing a --nats-nodes
+# list that omits a node means detail silently goes missing (WARN, not fatal)
+# whenever leadership is on the omitted node — check the WARN rate in the
+# capture log before trusting a --jsz-detail run's coverage.
+#
 # Output format (one JSON object per line):
 #   {"t_unix_ns": <unix_ns>, "node": "<host:port>", "endpoint": "jsz|varz", "body": {...}}
 # With --jsz-detail, <OUTPUT>.detail additionally receives:
