@@ -676,7 +676,18 @@ func (t *twoPhaseCoordinator) sweepConfirmWait(ctx context.Context) bool {
 // absence clock: time spent unvouched is time this worker could not
 // verify continuous absence, so it must not count toward OrphanGrace —
 // otherwise a clock started before a long follower stint would reap
-// instantly on the first vouched pass after it. Runs under sweepMu.
+// instantly on the first vouched pass after it.
+//
+// liveOK=true clears the absence clock for every pid PRESENT in this
+// pass's live set, pass-level and independent of any later per-claim
+// read outcome. Without this, a claim that reappears in a vouched live
+// set on a pass whose per-key Get then fails would skip sweepClaim
+// entirely (see sweepPass), leaving maybeReapOrphan's own in-set clear
+// unreached; a later pass could then reap using the ORIGINAL absence
+// timestamp instead of requiring a fresh grace measured from the
+// SECOND disappearance. maybeReapOrphan's in-set clear stays as
+// defense in depth for the common case. Runs under sweepMu, called by
+// both the full-pass and cached-pass bodies.
 func (t *twoPhaseCoordinator) resolveLiveSet(ctx context.Context) (map[string]struct{}, bool) {
 	if t.cfg.OrphanGrace <= 0 || t.cfg.LivePartitions == nil {
 		return nil, false
@@ -684,6 +695,12 @@ func (t *twoPhaseCoordinator) resolveLiveSet(ctx context.Context) (map[string]st
 	live, liveOK := t.cfg.LivePartitions(ctx)
 	if !liveOK {
 		clear(t.orphanAbsentSince)
+	} else {
+		for pid := range t.orphanAbsentSince {
+			if _, ok := live[pid]; ok {
+				delete(t.orphanAbsentSince, pid)
+			}
+		}
 	}
 
 	return live, liveOK

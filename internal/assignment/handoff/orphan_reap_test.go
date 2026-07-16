@@ -289,6 +289,99 @@ func TestOrphanReap_RevisionConflictKeepsClaim(t *testing.T) {
 		"a lost delete CAS means the claim moved; the reaper must yield")
 }
 
+// errArmedGetFailure is the injected per-key read failure used to reproduce the
+// stale-absence-clock bug: a claim Get failing during a vouched reappearance
+// must not be the only path by which that pid's absence clock gets cleared.
+var errArmedGetFailure = errors.New("injected get failure")
+
+// getFailArmedStore fails the next Get for a designated partition ID once
+// arm() has been called, then reverts to passing through. Used to make a
+// single pass's per-key claim read fail for exactly one pid.
+type getFailArmedStore struct {
+	ClaimStore
+	mu     sync.Mutex
+	target string
+	armed  bool
+}
+
+func (g *getFailArmedStore) arm() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.armed = true
+}
+
+func (g *getFailArmedStore) Get(ctx context.Context, partitionID string) (Claim, uint64, error) {
+	g.mu.Lock()
+	if g.armed && partitionID == g.target {
+		g.armed = false
+		g.mu.Unlock()
+
+		return Claim{}, 0, errArmedGetFailure
+	}
+	g.mu.Unlock()
+
+	return g.ClaimStore.Get(ctx, partitionID)
+}
+
+// TestOrphanReap_ReappearanceClearsClockDespiteFailedRead pins round-3 P0-2
+// (tmp/leader-gated-sweep_v4_review.md): a stable claim's absence clock must
+// clear on any vouched pass where its pid is present in the live set, even
+// when that pass's per-key claim Get fails and sweepClaim is therefore
+// skipped for it. Before the fix, the ONLY clock-clear path lived inside
+// maybeReapOrphan's in-set branch, which a failed read never reaches, so a
+// later pass could reap using the ORIGINAL (pre-reappearance) seed instead
+// of requiring a fresh grace measured from the SECOND disappearance.
+//
+// p-gone is a co-resident claim that is never live, seeded on the same pass
+// as p-flap: it pins that the pass-level clear only deletes clocks for pids
+// actually present in that pass's live set, not the whole map (no
+// over-clearing) — it must still reap once ITS OWN grace elapses.
+func TestOrphanReap_ReappearanceClearsClockDespiteFailedRead(t *testing.T) {
+	t.Parallel()
+
+	h := newReapHarness(t, orphanTestGrace)
+	now := time.Now().UTC()
+	h.seed(stableClaim("p-flap", now))
+	h.seed(stableClaim("p-gone", now))
+	failing := &getFailArmedStore{ClaimStore: h.store, target: "p-flap"}
+	h.swapStore(t, failing)
+
+	// Both absent from the first pass: each gets an absence clock seeded at
+	// t0.
+	h.setLive()
+	h.sweep(t)
+
+	// p-flap reappears in the vouched live set, but its per-key claim read
+	// fails on this very pass: sweepClaim is skipped for it, so the fix's
+	// pass-level clear (independent of per-claim read success) is the only
+	// thing that can clear its clock here. p-gone stays absent and must be
+	// left untouched by this pass.
+	h.setLive("p-flap")
+	failing.arm()
+	h.sweep(t)
+
+	// p-flap disappears again. No sweep runs yet: whether its clock survived
+	// the reappearance pass is decided by the next vouched pass below.
+	h.setLive()
+
+	// Advance by EXACTLY grace measured from the ORIGINAL seed (t0) — enough
+	// for the pre-fix bug to reap p-flap on a stale clock, and the precise
+	// boundary at which p-gone's own reap must fire (the reap guard is
+	// strictly `< OrphanGrace`; an exact-grace advance pins that a `<=`
+	// regression would wrongly retain p-gone). The fix requires a FRESH
+	// grace for p-flap measured from the second disappearance, which this
+	// pass itself is the first vouched observation of.
+	h.advance(orphanTestGrace)
+	h.sweep(t)
+
+	require.True(t, h.claimExists(t, "p-flap"),
+		"a failed per-key read during a vouched reappearance must not leave a stale absence "+
+			"clock: the claim must survive until a FRESH grace elapses from the second disappearance")
+	require.False(t, h.claimExists(t, "p-gone"),
+		"a claim absent the whole time must still reap once its OWN grace elapses: the "+
+			"pass-level clear must not over-clear clocks for pids that never reappeared")
+}
+
 func TestOrphanReap_ZeroGraceDisables(t *testing.T) {
 	t.Parallel()
 
