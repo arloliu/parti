@@ -195,6 +195,35 @@ type Manager struct {
 	stashedApplyRetry atomic.Pointer[Assignment]
 	applyRetryActive  atomic.Bool
 
+	// stashedFetchRetry holds the most recent commit whose payload
+	// fetch/verification failed (buildAssignmentFromCommit ok=false), pending
+	// the scheduleCommitFetchRetry coalescing path. Independent of
+	// stashedApplyRetry: a fetch-stage failure has only the commit — no
+	// Assignment has been built yet — so it cannot reuse the Assignment-typed
+	// apply-retry stash. Once a retry attempt fetches the payload
+	// successfully it hands off to the normal apply pipeline, which owns
+	// stashedApplyRetry from that point if Apply itself then fails.
+	stashedFetchRetry atomic.Pointer[types.AssignmentCommit]
+	fetchRetryActive  atomic.Bool
+
+	// highestAcceptedTarget is the highest (Version, LeaderRevision) target
+	// ever ADMITTED by a delivery gate this session: the commit-path
+	// version/LR/dual-read gate in handleCommitValueOnce (raised BEFORE
+	// buildAssignmentFromCommit, so a payload-fetch failure still raises it)
+	// and the alias-path version gate in handleAssignmentEntry. It is
+	// independent of stashedApplyRetry/stashedFetchRetry: those two retry
+	// loops each hold their own in-flight target, and neither alone reflects
+	// what the other admitted. applyAssignmentWithPrevCore's pre-existing
+	// stale gate only drops a candidate behind CurrentAssignment (the last
+	// STORED snapshot); this fence additionally drops a candidate strictly
+	// behind the highest target ever admitted, closing the interleaving
+	// where a slow fetch-retry or apply-retry replays a target that a
+	// sibling retry loop's already-admitted target has since superseded.
+	// raiseAcceptedTarget (max-CAS) is the sole writer; nil means no
+	// delivery gate has admitted a target yet this session, so the fence
+	// check at the apply gate is skipped.
+	highestAcceptedTarget atomic.Pointer[acceptedTarget]
+
 	// committedAssignment holds the last assignment this worker successfully
 	// applied+acked (a successful handoffCoordinator.Apply through
 	// applyAssignmentWithPrevCore). Two roles: (1) the prev source for every
