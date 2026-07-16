@@ -354,6 +354,19 @@ type Manager struct {
 	// NOT set this field. Same concurrency contract as
 	// testHookHandleAssignment: set before spawning runCommitWatchSession.
 	testHookHandleCommitValue func(commit *types.AssignmentCommit)
+
+	// testHookRetryLoopEmptyObserved, when non-nil, is invoked synchronously
+	// by activateApplyRetryLoop/activateFetchRetryLoop immediately after a
+	// retry loop observes an empty stash and commits to exiting — at both
+	// exit sites (the pre-attempt pending==nil return and the post-apply
+	// drain-check return) in both loops — BEFORE the deferred ownership-
+	// handoff re-check runs. Lets a test deterministically land a producer's
+	// stash+activate-CAS inside the exit window the ownership-handoff
+	// re-check exists to close. Set ONLY by same-package tests before the
+	// relevant goroutine starts; production MUST leave this nil. See
+	// TestFetchRetry_LostWakeup_StashedDuringExitWindowIsRecovered and
+	// TestApplyRetry_LostWakeup_StashedDuringExitWindowIsRecovered.
+	testHookRetryLoopEmptyObserved func()
 }
 
 // assignmentCalculator defines the interface for partition assignment calculation.
