@@ -667,6 +667,14 @@ func (m *Manager) handleAssignmentEntry(workerID string, entry jetstream.KeyValu
 		return
 	}
 
+	// Admission point for the accepted-target fence: this alias's version
+	// gate has passed (the equivalent admission the commit path raises at,
+	// before its own build/apply). Raise even though the dual-read authority
+	// check below may still reject this alias in favor of the commit path —
+	// raiseAcceptedTarget only ever moves the fence forward, so a rejected
+	// alias can at most be a harmless no-op against an already-fresher fence.
+	m.raiseAcceptedTarget(newAssignment.Version, newAssignment.LeaderRevision)
+
 	// Record this as the most-recent legacy alias observation so the
 	// dual-read selector on the commit path can consult it.
 	aliasCopy := newAssignment
@@ -1050,7 +1058,7 @@ func (m *Manager) observeFleetSizeN(version int64, leaderRev uint64, n int) {
 //	(a) commit.Version <= cur.Version          → no-op, LSR = max(LSR, commit.LR)
 //	(b) commit.LR < LSR                        → drop, LSR unchanged, RecordStaleLeaderRejected
 //	(c) worker in Workers, payload checks pass → applyAssignment, LSR = max(LSR, commit.LR)
-//	(c) payload check fails                    → drop, LSR + pending unchanged, stage-specific metric
+//	(c) payload check fails                    → scheduleCommitFetchRetry, LSR unchanged, stage-specific metric
 //	(d) worker NOT in Workers                  → applyAssignment(empty), LSR = max(LSR, commit.LR)
 //	(e) pendingApplyInFlight                   → stash highest-version target, return
 func (m *Manager) handleCommitValue(commit *types.AssignmentCommit) {
@@ -1121,12 +1129,40 @@ func (m *Manager) handleCommitValueOnce(commit *types.AssignmentCommit) *types.A
 		}
 	}
 
+	// Admission point for the accepted-target fence: this commit has passed
+	// every gate above (version, stale-leader fence, dual-read authority,
+	// case (e) coalesce) and is about to be built/applied. Raise BEFORE
+	// buildAssignmentFromCommit so a payload-fetch failure still raises the
+	// fence — the fetch-retry loop this failure schedules must never let an
+	// older sibling target apply ahead of it once this one recovers.
+	m.raiseAcceptedTarget(commit.Version, commit.LeaderRevision)
+
 	newAssignment, ok := m.buildAssignmentFromCommit(commit, workerID)
 	if !ok {
-		// Payload verification failure: case (c) drop; lastSeen and stash
-		// unchanged. Clear pending-flag explicitly (no defer here so the
-		// drain check below sees a consistent flag state) and return.
+		// Payload fetch/verification failure: case (c) drop from the
+		// immediate pipeline. lastSeen unchanged. Clear pending-flag
+		// explicitly (no defer here so the drain check below sees a
+		// consistent flag state).
 		m.pendingApplyInFlight.Store(false)
+
+		// A newer commit may have arrived (and case (e)-stashed into
+		// stashedCommit) while this fetch was in flight. If so it
+		// supersedes the commit that just failed to fetch — hand it back to
+		// the outer drain loop for a fresh attempt instead of retrying the
+		// now-superseded commit.
+		if pending := m.stashedCommit.Swap(nil); pending != nil && commitSupersedesForStash(pending, commit) {
+			return pending
+		}
+
+		// This assignment-bearing commit must not be silently dropped —
+		// the watcher contract (§3.6/§4.4) guarantees delivery of every
+		// assignment-changing commit, and reconcile only ever re-delivers
+		// the CURRENT singleton commit, so a superseded version can never
+		// be recovered later on its own. Route the failure into the same
+		// bounded-backoff retry machinery an Apply failure uses, re-fetching
+		// the payload on each attempt.
+		m.scheduleCommitFetchRetry(commit)
+
 		return nil
 	}
 
@@ -1187,8 +1223,8 @@ func commitSupersedesAppliedForDrain(pending *types.AssignmentCommit, applied As
 
 // buildAssignmentFromCommit constructs the Assignment this worker must
 // apply for the given commit. Returns ok=false on payload-verification
-// failure (case (c) drop) — caller leaves lastSeen unchanged so the next
-// tick retries.
+// failure (case (c)) — the caller routes this into scheduleCommitFetchRetry
+// (leaving lastSeen unchanged) rather than dropping it.
 //
 // Case (c) ok: worker in Workers AND payload checks pass → return a fully
 // populated Assignment.
@@ -1327,6 +1363,47 @@ func isApplyResultStale(candidate, cur Assignment) bool {
 		return candidate.Version < cur.Version
 	}
 	return candidate.LeaderRevision < cur.LeaderRevision
+}
+
+// acceptedTarget is the (Version, LeaderRevision) coordinate of the highest
+// commit/alias target ever admitted by a delivery gate this session. See
+// Manager.highestAcceptedTarget's Godoc for the shared accepted-target fence
+// this feeds.
+type acceptedTarget struct {
+	Version        int64
+	LeaderRevision uint64
+}
+
+// raiseAcceptedTarget max-CASes m.highestAcceptedTarget to (v, lr) when it is
+// strictly (Version, LeaderRevision)-newer than the current fence. It reuses
+// isApplyResultStale itself (wrapping the bare coordinates into Assignment
+// values) rather than a separately-maintained comparison, so the fence and
+// the apply-gate check it feeds can never drift out of lex-order agreement —
+// including isApplyResultStale's V=0 handling, which matters for the
+// core-entry belt-and-braces call from applyAssignmentWithPrevCore (the
+// startup bootstrap path applies an explicit Assignment{}).
+//
+// A losing CAS retries against the winner's value; a candidate that is not
+// strictly newer than the current fence (older, equal, or racing against a
+// concurrent winner) is a no-op.
+func (m *Manager) raiseAcceptedTarget(v int64, lr uint64) {
+	target := Assignment{Version: v, LeaderRevision: lr}
+	for {
+		cur := m.highestAcceptedTarget.Load()
+		if cur != nil {
+			curAsCandidate := Assignment{Version: cur.Version, LeaderRevision: cur.LeaderRevision}
+			// cur is the fence's current value; it is only worth replacing
+			// when it is itself stale relative to the new target, i.e. the
+			// new target is strictly newer.
+			if !isApplyResultStale(curAsCandidate, target) {
+				return
+			}
+		}
+		next := &acceptedTarget{Version: v, LeaderRevision: lr}
+		if m.highestAcceptedTarget.CompareAndSwap(cur, next) {
+			return
+		}
+	}
 }
 
 // assignmentSupersedesForStash reports whether candidate should replace cur in
@@ -1594,6 +1671,41 @@ func (m *Manager) applyAssignmentWithPrevCore(oldAssignment, newAssignment Assig
 		return nil
 	}
 
+	// Accepted-target fence. The stale gate above only compares against
+	// CurrentAssignment (the last STORED snapshot); it does not see a
+	// sibling retry loop's already-admitted target. Two independent retry
+	// stashes (fetch-retry, apply-retry) can each hold a candidate that
+	// passes the stale gate against the stored snapshot yet is behind the
+	// highest (V, LR) target any delivery gate has admitted this session —
+	// e.g. V5's fetch recovers and replays after V6 was admitted (and
+	// itself apply-failed into the apply-retry stash): V5 > stored V4 so
+	// the stale gate alone would let it through. Drop here instead, BEFORE
+	// any coordinator-side effect. Candidate EQUAL to the fence passes (the
+	// legitimate retry of the newest admitted target).
+	if fence := m.highestAcceptedTarget.Load(); fence != nil {
+		fenceAssignment := Assignment{Version: fence.Version, LeaderRevision: fence.LeaderRevision}
+		if isApplyResultStale(newAssignment, fenceAssignment) {
+			m.applyStoreMu.Unlock()
+			m.metrics.RecordStaleSnapshotStoreDropped()
+			m.logger.Info("apply dropped by accepted-target fence",
+				"worker_id", workerID,
+				"candidate_version", newAssignment.Version,
+				"candidate_leader_revision", newAssignment.LeaderRevision,
+				"fence_version", fence.Version,
+				"fence_leader_revision", fence.LeaderRevision,
+			)
+
+			return nil
+		}
+	}
+
+	// Belt-and-braces: keep the fence monotone for core-entry callers that
+	// bypass the two delivery-handler admission points (handleCommitValueOnce,
+	// handleAssignmentEntry) — e.g. the initial-bootstrap path. Harmless here:
+	// the candidate has already cleared both gates above, so raising the
+	// fence to its own coordinates cannot retroactively drop it.
+	m.raiseAcceptedTarget(newAssignment.Version, newAssignment.LeaderRevision)
+
 	// Prev source = the last assignment this worker successfully applied+acked
 	// (committedAssignment), NOT the passed-in oldAssignment / CurrentAssignment().
 	// The snapshot can be advanced past a failed apply by the recovery refresh's
@@ -1848,6 +1960,151 @@ func (m *Manager) scheduleApplyRetry(newAssignment Assignment) {
 			backoff = time.Second // reset for the next attempt
 		}
 	})
+}
+
+// scheduleCommitFetchRetry stages a commit whose payload fetch/verification
+// failed (buildAssignmentFromCommit ok=false) for the same bounded
+// exponential-backoff retry scheduleApplyRetry uses for a failed Apply — the
+// identical 1s->30s ±20% jitter envelope, the same "one goroutine at a time"
+// interlock, and the same unbounded-until-success-or-shutdown behavior (no
+// new escalation policy). This closes the silent-elision gap where a
+// payload-fetch failure previously just cleared pendingApplyInFlight and
+// returned: an assignment-bearing commit is now never dropped without either
+// a later commit explicitly superseding it (below) or this retry loop
+// running until m.ctx is done.
+//
+// Multiple fetch failures coalesce to the highest-identity target via
+// commitSupersedesForStash — the SAME ordering the in-flight case (e) stash
+// (stashedCommit) and the commit-vs-commit comparisons already use, so a
+// newer commit arriving while a fetch retry is pending always wins.
+//
+// On a successful fetch this hands off to applyAssignmentWithPrevSkipJitter,
+// which owns the Apply stage from there: on Apply failure it calls
+// scheduleApplyRetry itself with the now-built Assignment, transferring
+// ownership to the Apply-retry loop; on success it stores directly. If a
+// fresher commit already applied through the normal (non-retry) path while
+// this loop was waiting, the isApplyResultStale gate inside
+// applyAssignmentWithPrevCore silently no-ops the now-stale attempt — the
+// same tolerance scheduleApplyRetry's own late-retry case already relies on
+// — so no double-apply or regression is possible even without explicit
+// cross-goroutine cancellation.
+func (m *Manager) scheduleCommitFetchRetry(commit *types.AssignmentCommit) {
+	m.stashFetchRetryCandidate(commit)
+
+	// Only one fetch-retry loop at a time.
+	if !m.fetchRetryActive.CompareAndSwap(false, true) {
+		return
+	}
+
+	workerID := m.WorkerID()
+
+	m.wg.Go(func() {
+		defer m.fetchRetryActive.Store(false)
+		backoff := time.Second
+		const maxBackoff = 30 * time.Second
+		for {
+			//nolint:gosec // jitter does not require crypto-secure random
+			jitter := time.Duration(float64(backoff) * 0.2 * (2*rand.Float64() - 1))
+			select {
+			case <-m.ctx.Done():
+				return
+			case <-time.After(backoff + jitter):
+			}
+
+			pending := m.stashedFetchRetry.Swap(nil)
+			if pending == nil {
+				return
+			}
+
+			// Fast path: skip the refetch entirely when a delivery gate has
+			// already admitted a strictly newer target than this stashed
+			// commit — the apply-time accepted-target fence would drop it
+			// anyway, so paying for a fetch (and possibly a successful one,
+			// for a payload nobody will ever apply) is pure waste.
+			if fence := m.highestAcceptedTarget.Load(); fence != nil {
+				pendingTarget := Assignment{Version: pending.Version, LeaderRevision: pending.LeaderRevision}
+				fenceTarget := Assignment{Version: fence.Version, LeaderRevision: fence.LeaderRevision}
+				if isApplyResultStale(pendingTarget, fenceTarget) {
+					// Same semantic family as the core apply-time fence drop:
+					// reuse RecordStaleSnapshotStoreDropped so this drop is
+					// observable identically regardless of which of the two
+					// gates catches it (a pre-existing caller may already be
+					// asserting on this metric for a target that happens to
+					// be caught here instead of at the core gate).
+					m.metrics.RecordStaleSnapshotStoreDropped()
+					m.logger.Debug("fetch-retry target dropped by accepted-target fence; skipping refetch",
+						"worker_id", workerID,
+						"candidate_version", pending.Version,
+						"candidate_leader_revision", pending.LeaderRevision,
+						"fence_version", fence.Version,
+						"fence_leader_revision", fence.LeaderRevision,
+					)
+
+					if again := m.stashedFetchRetry.Load(); again == nil {
+						return
+					}
+					backoff = time.Second
+
+					continue
+				}
+			}
+
+			newAssignment, ok := m.buildAssignmentFromCommit(pending, workerID)
+			if !ok {
+				// Still unfetchable: re-stash (coalescing against anything
+				// that arrived meanwhile) and keep going with a grown
+				// backoff. Recursing through scheduleCommitFetchRetry's own
+				// stash CAS mirrors how scheduleApplyRetry's core failure
+				// path re-stashes itself; the activate-CAS below it is a
+				// harmless no-op since this goroutine is already active.
+				m.stashFetchRetryCandidate(pending)
+				if backoff < maxBackoff {
+					backoff *= 2
+					if backoff > maxBackoff {
+						backoff = maxBackoff
+					}
+				}
+
+				continue
+			}
+
+			// Payload fetched: hand off to the normal apply pipeline (see
+			// Godoc above for how Apply-stage failure/success are owned
+			// from here). The returned error is already logged and
+			// retry-scheduled inside applyAssignmentWithPrevCore/
+			// rejectIfStaleIncarnation — nothing further to do with it here,
+			// matching handleCommitValueOnce's own `_ = m.applyAssignment(...)`
+			// discard convention for the same reason.
+			prev := m.CurrentAssignment()
+			_ = m.applyAssignmentWithPrevSkipJitter(prev, newAssignment)
+
+			// Drain any newer fetch-retry target that coalesced in while
+			// this attempt was running (mirrors scheduleApplyRetry's
+			// success-drain).
+			if again := m.stashedFetchRetry.Load(); again == nil {
+				return
+			}
+			backoff = time.Second
+		}
+	})
+}
+
+// stashFetchRetryCandidate coalesces commit into stashedFetchRetry using the
+// same commitSupersedesForStash ordering the in-flight case (e) stash
+// (stashedCommit) uses: keep the existing stash unless commit is strictly
+// newer in (Version, LeaderRevision) or differs at equal coordinates on
+// BatchDigest/source-revision.
+func (m *Manager) stashFetchRetryCandidate(commit *types.AssignmentCommit) {
+	for {
+		cur := m.stashedFetchRetry.Load()
+		if cur != nil && !commitSupersedesForStash(commit, cur) {
+			return
+		}
+		candidate := *commit
+		if m.stashedFetchRetry.CompareAndSwap(cur, &candidate) {
+			return
+		}
+	}
 }
 
 func (m *Manager) recordAssignmentMetrics(oldAssignment, newAssignment Assignment) {
