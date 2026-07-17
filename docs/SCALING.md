@@ -184,6 +184,34 @@ triggers lossless rebind.
   is at the JetStream floor; this buys footprint, not speed. See the "NATS-Side
   Cost" section in [OPERATIONS.md](OPERATIONS.md).
 
+### Tuning at high partition counts
+
+Each `Dynamic` partition consumer runs its own pull loop, and each loop re-issues
+an idle pull request every `FetchTimeout`. That re-issue traffic scales with the
+partition count and becomes the dominant **idle** server CPU cost at large P —
+it is a floor you pay even with zero messages flowing.
+
+- **Raise `WithFetchTimeout` to 30s at P ≳ 2000.** Measured on the v2.10 perf
+  rig (W=100, P=10,000, R=3): moving FetchTimeout from the 5s default to 30s cut
+  server CPU by **~0.77 cores idle / ~1.13 cores under load**, with P50 delivery
+  latency flat, P99 *improved*, and delivery ratio unaffected. Values above 60s
+  also work (the derived pull heartbeat is clamped to nats.go's 30s ceiling),
+  but 30s captured the bulk of the win in measurement.
+- **Pair it with `WithPullHeartbeatCap` to keep detection fast.** The pull
+  heartbeat is derived as `FetchTimeout/2` (capped at 30s), and the first
+  missed-heartbeat signal fires at roughly 2× the heartbeat. At
+  `FetchTimeout=30s` that stretches the first signal to ~30s. Setting
+  `WithPullHeartbeatCap(5*time.Second)` holds it at ~10s; confirmed recovery
+  follows after the burst threshold (default 3 consecutive misses) plus a
+  confirmation check — still several-fold faster than the uncapped
+  30s-heartbeat equivalent. Idle heartbeats are cheap server→client pushes, so
+  the cap costs far less than the pull re-issues you removed.
+- **Leader audit cadence tracks `HeartbeatTTL`.** The leader-side apply audit
+  runs once per `HeartbeatTTL` (not separately configurable); its cost scales
+  with worker count and is negligible at the measured scales (W ≤ 100). If you
+  raise `HeartbeatTTL` for other reasons, the audit stretches with it — no
+  separate tuning is needed or possible in 2.x.
+
 ---
 
 ## Proof
