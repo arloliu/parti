@@ -436,3 +436,30 @@ type LabelMetrics interface {
 	// case of no live workers at all.
 	IncrementUnlabeledFallback()
 }
+
+// AssignmentDivergenceMetricsRecorder is an optional capability a
+// [MetricsCollector] implementation may additionally satisfy to observe
+// equal-version authority divergence. The Manager type-asserts its configured
+// collector for this interface once at construction; a collector without it
+// loses nothing else.
+//
+// [NopMetrics] implements it, so collectors embedding the no-op satisfy the
+// capability automatically (as a no-op).
+type AssignmentDivergenceMetricsRecorder interface {
+	// IncEqualVersionDivergence counts an authority delivery (commit or
+	// legacy alias) observed at the worker's CURRENT assignment version
+	// whose content for this worker differs from what the worker holds.
+	// Dispatch drops equal-version deliveries before payload fetch, so a
+	// divergent one is silently ignored — this counter is the observable
+	// precondition of the deferred equal-version divergence hazard family
+	// (claim-level commit-identity fence design). Healthy redeliveries
+	// (reconcile re-reads, watcher replays, post-commit compat aliases)
+	// carry identical content and never increment; any sustained nonzero
+	// rate is a signal to investigate concurrent writers at the same
+	// assignment version.
+	//
+	// The label set is closed and low-cardinality:
+	//   - source: "commit" (commit-path delivery) or "alias" (legacy alias
+	//     delivery).
+	IncEqualVersionDivergence(source string)
+}

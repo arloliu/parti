@@ -474,11 +474,15 @@ func TestCommitSupersedesForStash(t *testing.T) {
 //
 // This is documented current behavior; the equal-Version authority-
 // divergence hazard (an alias and a commit can expose different content at
-// the same Version; a publisher's CAS-loss recovery can also emit two
-// different assignments at the same Version) is deferred to the
-// claim-level commit-identity fence project — see
-// tmp/diff-restricted-walks_v2_review.md, "Equal-Version authority changes
-// never reach the proposed fail-open".
+// the same Version) is deferred to the claim-level commit-identity fence
+// project (issue #74, design under docs/design/). The sibling emission
+// path — a publisher's CAS-loss recovery reusing an external winner's
+// Version — is CLOSED: the coherent reseed in
+// internal/assignment/assignment_publisher.go advances currentVersion
+// alongside lastCommitRev, so a recovered publisher's next proposal is
+// strictly beyond both observed Versions (pinned by
+// TestPublisher_CASLossReseed_*). Divergence deliveries that do occur are
+// counted by the equal-version divergence metric at this drop site.
 func TestCommitHandler_EqualVersionDifferentContent_DoesNotReachApply(t *testing.T) {
 	t.Parallel()
 	m, fc, _ := newFetchRetryTestManager(t)

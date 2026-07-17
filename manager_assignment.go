@@ -664,6 +664,9 @@ func (m *Manager) handleAssignmentEntry(workerID string, entry jetstream.KeyValu
 
 	oldAssignment := m.CurrentAssignment()
 	if oldAssignment.Version >= newAssignment.Version {
+		if oldAssignment.Version == newAssignment.Version {
+			m.noteEqualVersionAlias(&newAssignment, &oldAssignment)
+		}
 		return
 	}
 
@@ -699,6 +702,53 @@ func (m *Manager) handleAssignmentEntry(workerID string, entry jetstream.KeyValu
 	// leader revision (the worker has not committed to this leader's term).
 	_ = m.applyAssignment(newAssignment)
 	_ = workerID // workerID is retained for log/metric symmetry with the legacy signature
+}
+
+// noteEqualVersionCommit inspects a commit delivery dropped by case (a)'s
+// equal-version arm and records the equal-version divergence counter when the
+// commit's canonical partition SET for this worker differs from what the
+// worker holds (weight/label metadata changes are invisible by design — the
+// counter watches set divergence, the shape the deferred fence project
+// fences). Membership follows commit.Workers (the authoritative revocation
+// list, matching dispatch cases (c)/(d)); the per-worker comparison uses the
+// payload ref's SetDigest against the digest of the applied partitions —
+// both are types.PartitionSetDigest over canonical IDs, and this diagnostic
+// use is within the field's documented contract (never used for content
+// identity in correctness decisions). A worker revoked at its own version is
+// divergent when it still holds partitions; a member without a payload ref
+// is a malformed commit (dispatch classifies that separately) and is not
+// counted. Healthy redeliveries (reconcile re-reads, watcher replays) carry
+// identical content and never increment.
+func (m *Manager) noteEqualVersionCommit(commit *types.AssignmentCommit, cur *Assignment, workerID string) {
+	if m.divergenceMetrics == nil || commit.Version <= 0 {
+		return
+	}
+	var divergent bool
+	if slices.Contains(commit.Workers, workerID) {
+		ref, ok := commit.Payloads[workerID]
+		if !ok {
+			return
+		}
+		divergent = ref.SetDigest != types.PartitionSetDigest(cur.Partitions)
+	} else {
+		// Revoked at its own version: divergent iff it still holds partitions.
+		divergent = len(cur.Partitions) > 0
+	}
+	if divergent {
+		m.divergenceMetrics.IncEqualVersionDivergence("commit")
+	}
+}
+
+// noteEqualVersionAlias is noteEqualVersionCommit's legacy-alias sibling:
+// the alias carries this worker's partitions inline, so divergence is a
+// direct set-digest comparison against the held assignment.
+func (m *Manager) noteEqualVersionAlias(newAssignment, oldAssignment *Assignment) {
+	if m.divergenceMetrics == nil || newAssignment.Version <= 0 {
+		return
+	}
+	if types.PartitionSetDigest(newAssignment.Partitions) != types.PartitionSetDigest(oldAssignment.Partitions) {
+		m.divergenceMetrics.IncEqualVersionDivergence("alias")
+	}
 }
 
 // monitorCommitChanges watches the singleton "assignment._commit" key. On
@@ -1087,6 +1137,9 @@ func (m *Manager) handleCommitValueOnce(commit *types.AssignmentCommit) *types.A
 	// lastObservedCommit so the alias-side dual-read selector sees the
 	// freshest commit — case (a) is a legitimate observation, not a reject.
 	if commit.Version <= cur.Version {
+		if commit.Version == cur.Version {
+			m.noteEqualVersionCommit(commit, &cur, workerID)
+		}
 		commitCopy := *commit
 		m.lastObservedCommit.Store(&commitCopy)
 		m.updateLastSeenLeaderRevision(commit.LeaderRevision)
