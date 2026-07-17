@@ -130,6 +130,11 @@ type twoPhaseCoordinator struct {
 	// prober is cfg.Store's optional position-probe capability,
 	// type-asserted once by New; nil disables the gate.
 	prober bucketPosProber
+
+	// sweepMetrics is cfg.Metrics' optional claim-sweep observability
+	// capability, type-asserted once by New; nil means the recorder does
+	// not implement it and sweep passes go uncounted.
+	sweepMetrics types.HandoffSweepMetricsRecorder
 }
 
 // sweepOrigin tags who initiated a sweep pass. The scan gate is
@@ -142,6 +147,16 @@ const (
 	sweepOriginApply sweepOrigin = iota
 	sweepOriginTicker
 )
+
+// String returns the metrics label for the origin ("apply" | "ticker") —
+// the closed set documented on types.HandoffSweepMetricsRecorder.
+func (o sweepOrigin) String() string {
+	if o == sweepOriginApply {
+		return "apply"
+	}
+
+	return "ticker"
+}
 
 // bucketPosProber is an optional capability of a ClaimStore: reporting
 // the backing stream's position without creating a consumer. The sweep
@@ -802,6 +817,7 @@ func (t *twoPhaseCoordinator) maybeSweepClaims(ctx context.Context, origin sweep
 	// stale cache can never satisfy the next ticker probe).
 	if origin != sweepOriginTicker || t.prober == nil {
 		t.sweepPass(ctx, now, nil)
+		t.recordSweepPass(origin, "full", "ungated")
 
 		return true
 	}
@@ -822,6 +838,7 @@ func (t *twoPhaseCoordinator) maybeSweepClaims(ctx context.Context, origin sweep
 			pos2, ok2, reason2 := t.sweepProbe(ctx)
 			if ok2 && pos2.Same(t.sweepCachePos) {
 				t.sweepCachedPass(ctx, now)
+				t.recordSweepPass(origin, "cached", "")
 
 				return true
 			}
@@ -844,6 +861,9 @@ func (t *twoPhaseCoordinator) maybeSweepClaims(ctx context.Context, origin sweep
 		latch = &pos
 	}
 	t.sweepPass(ctx, now, latch)
+	// reason is always non-empty here: every path into this full-pass
+	// fallthrough set one (forced/mismatch/unlatched/probe failures).
+	t.recordSweepPass(origin, "full", reason)
 	if t.cfg.Logger != nil {
 		t.cfg.Logger.Debug("handoff sweep full pass",
 			"cached_passes_since_last_full", t.sweepSkipsSinceFull,
@@ -853,6 +873,14 @@ func (t *twoPhaseCoordinator) maybeSweepClaims(ctx context.Context, origin sweep
 	t.sweepSkipsSinceFull = 0
 
 	return true
+}
+
+// recordSweepPass emits one claim-sweep pass to the optional metrics
+// capability; a no-op when the configured recorder doesn't implement it.
+func (t *twoPhaseCoordinator) recordSweepPass(origin sweepOrigin, outcome, reason string) {
+	if t.sweepMetrics != nil {
+		t.sweepMetrics.IncClaimSweepPass(origin.String(), outcome, reason)
+	}
 }
 
 // sweepProbe takes one stream-position probe under the fail-open and

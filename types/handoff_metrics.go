@@ -50,7 +50,40 @@ type HandoffMetricsRecorder interface {
 	IncClaimStaleHandoffReset()
 }
 
-// NopHandoffMetricsRecorder is a no-op implementation of [HandoffMetricsRecorder].
+// HandoffSweepMetricsRecorder is an optional capability a
+// [HandoffMetricsRecorder] implementation may additionally satisfy to
+// receive claim-sweep pass observability. The handoff coordinator
+// type-asserts its configured recorder for this interface once at
+// construction; a recorder without it loses nothing else.
+//
+// [NopHandoffMetricsRecorder] implements it, so recorders embedding the
+// no-op satisfy the capability automatically (as no-ops).
+type HandoffSweepMetricsRecorder interface {
+	// IncClaimSweepPass counts one admitted claim-sweep pass. Non-admitted
+	// attempts (single-flight lock misses, interval throttling) and the
+	// shutdown-only confirm-wait abort emit nothing.
+	//
+	// All three label sets are closed and low-cardinality:
+	//   - origin: "apply" (opportunistic, from an assignment Apply) or
+	//     "ticker" (the periodic sweep loop).
+	//   - outcome: "full" (ListKeys + per-key reads) or "cached" (the
+	//     scan-gated pass over the cached claim view; ticker-only).
+	//   - reason: why a full pass ran; "" for cached passes. One of:
+	//     "ungated" (apply-origin, or the store has no position probe),
+	//     "unlatched" (no valid cache to skip against), "mismatch" (the
+	//     bucket position moved since the cache was latched), "forced"
+	//     (max consecutive cached passes reached — the backstop),
+	//     "probe_error", "unsafe_config", "no_probe_handle".
+	//
+	// Parameters:
+	//   - origin: Who initiated the pass.
+	//   - outcome: Whether the pass ran full or against the cached view.
+	//   - reason: Full-pass cause, "" for cached passes.
+	IncClaimSweepPass(origin, outcome, reason string)
+}
+
+// NopHandoffMetricsRecorder is a no-op implementation of [HandoffMetricsRecorder]
+// (and of the optional [HandoffSweepMetricsRecorder] capability).
 type NopHandoffMetricsRecorder struct{}
 
 func (NopHandoffMetricsRecorder) IncHandoffTotal(string)                     {}
@@ -60,3 +93,4 @@ func (NopHandoffMetricsRecorder) IncCASConflicts()                           {}
 func (NopHandoffMetricsRecorder) SetClaimStoreSize(int)                      {}
 func (NopHandoffMetricsRecorder) IncClaimStoreStale()                        {}
 func (NopHandoffMetricsRecorder) IncClaimStaleHandoffReset()                 {}
+func (NopHandoffMetricsRecorder) IncClaimSweepPass(string, string, string)   {}
