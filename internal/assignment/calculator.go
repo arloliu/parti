@@ -216,6 +216,23 @@ type Calculator struct {
 	// (called from rebalance under rebalanceMu) and zeroLabelGaugesOnStop
 	// (takes rebalanceMu itself) — no separate mutex needed.
 	prevMetricLabels map[string]bool
+
+	// labelReadModel is the retained pull-side counterpart of the
+	// recordLabelMetrics push pass: the per-label pool sizes and parked
+	// counts from the last successfully published rebalance, kept for
+	// Manager.LabelState. Written only post-publish (retainLabelReadModel)
+	// and cleared in Stop — leader-scoped, like the label gauges. nil until
+	// the first publish.
+	labelReadModel atomic.Pointer[LabelReadModel]
+}
+
+// LabelReadModel is the retained label snapshot behind Manager.LabelState:
+// per-label live pool sizes and parked partition counts from the last
+// successfully published rebalance. Keys carry exact parity with the
+// recordLabelMetrics gauge pass (topo.SortedLabels — labeled pools only).
+type LabelReadModel struct {
+	PoolSizes map[string]int
+	Parked    map[string]int
 }
 
 // cachedWorkerList bundles worker data with its timestamp for atomic operations.
@@ -574,6 +591,10 @@ func (c *Calculator) Stop(ctx context.Context) error {
 	// after the joins above so no rebalance can record concurrently or
 	// after the zeroing pass.
 	c.zeroLabelGaugesOnStop()
+
+	// Same leader-scoped lifecycle for the pull-side snapshot: a deposed or
+	// stopping leader must not keep serving stale label state.
+	c.labelReadModel.Store(nil)
 
 	return nil
 }
@@ -1882,6 +1903,43 @@ func (c *Calculator) recordLabelMetrics(res labelPipelineResult) {
 	}
 }
 
+// retainLabelReadModel stores the pull-side label snapshot for
+// Manager.LabelState from the pipeline result a rebalance just published.
+// Derivation matches recordLabelMetrics exactly (pool sizes from topo.Pools,
+// parked counts from res.parked by label, keys = topo.SortedLabels), but it
+// runs UNCONDITIONALLY — the pull accessor must work precisely when no
+// LabelMetrics collector is wired. Callers must only invoke this after a
+// successful publish, alongside recordLabelMetrics.
+func (c *Calculator) retainLabelReadModel(res labelPipelineResult) {
+	topo := res.topo
+	model := &LabelReadModel{
+		PoolSizes: make(map[string]int, len(topo.SortedLabels)),
+		Parked:    make(map[string]int, len(topo.SortedLabels)),
+	}
+	parkedCountByLabel := make(map[string]int, len(topo.SortedLabels))
+	for _, p := range res.parked {
+		parkedCountByLabel[p.Label]++
+	}
+	for _, l := range topo.SortedLabels {
+		model.PoolSizes[l] = len(topo.Pools[l])
+		model.Parked[l] = parkedCountByLabel[l]
+	}
+	c.labelReadModel.Store(model)
+}
+
+// LabelSnapshot returns copies of the retained label read model, or ok=false
+// when no rebalance has published since this calculator started. Lock-free;
+// safe concurrently with Stop (the caller may observe either the snapshot or
+// the cleared state, never a partial one).
+func (c *Calculator) LabelSnapshot() (pools, parked map[string]int, ok bool) {
+	model := c.labelReadModel.Load()
+	if model == nil {
+		return nil, nil, false
+	}
+
+	return maps.Clone(model.PoolSizes), maps.Clone(model.Parked), true
+}
+
 // zeroLabelGaugesOnStop closes out the leader-scoped gauge lifecycle (spec
 // §13): a deposed/stopping leader zeroes every per-label gauge it last
 // recorded so its own metrics export doesn't freeze at stale non-zero
@@ -2461,6 +2519,7 @@ func (c *Calculator) rebalance(ctx context.Context, lifecycle string) error {
 	// broad-failure/error aborts earlier in this function return before
 	// reaching here, so a rebalance that didn't publish records nothing.
 	c.recordLabelMetrics(pipeline)
+	c.retainLabelReadModel(pipeline)
 
 	// Arm/disarm the label re-check timer for any parked grace (Task 9
 	// provides the body; the stub is a no-op).
