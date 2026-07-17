@@ -741,11 +741,32 @@ Grep for these log lines when diagnosing a labeled deployment:
 
 ### Label observability without a metrics pipeline
 
-You don't need a Prometheus (or other) `MetricsCollector` to see label state. A
-small in-memory collector that embeds `types.NopMetrics` and overrides only the
-`LabelMetrics` methods gives you a live snapshot to read from your own health
-endpoint. `NopMetrics` supplies no-ops for every other `MetricsCollector`
-method, so this is all the code:
+You don't need a Prometheus (or other) `MetricsCollector` to see label state.
+
+**The zero-code option: `Manager.LabelState()`.** The manager retains the
+leader's last published per-label pool sizes and parked counts and serves
+them pull-style — no collector wiring at all:
+
+```go
+// In your health handler (on any pod; only the leader returns data):
+st := mgr.LabelState()
+if n := st.Parked["vip"]; n > 0 {
+    // vip partitions are parked right now — surface it.
+}
+```
+
+`LabelState()` is leader-only: non-leaders, a leader that hasn't published
+yet, and stopped managers return the zero value (nil maps) — check
+`mgr.IsLeader()` to tell "not the leader" apart from "leader with nothing
+labeled". Keys are exactly the labeled pools of the last published decision
+(a label with zero parked partitions is present with an explicit `0`), and
+the returned maps are copies the caller owns.
+
+**The collector option.** If you also want the label *counters* (spills,
+fallbacks) or push-style export, a small in-memory collector that embeds
+`types.NopMetrics` and overrides only the `LabelMetrics` methods gives you a
+live snapshot to read from your own health endpoint. `NopMetrics` supplies
+no-ops for every other `MetricsCollector` method, so this is all the code:
 
 ```go
 // labelSnapshot exposes parked counts / pool sizes / spill totals over your
@@ -787,11 +808,12 @@ snap := newLabelSnapshot()
 mgr, err := parti.NewManager(cfg, js, src, strategy, parti.WithMetrics(snap))
 ```
 
-**Leader-only caveat.** These gauges are computed by the leader's calculator, so
-a per-pod collector shows data **only on the pod that is currently leader**;
-every follower's snapshot stays empty, and a leader that steps down zeroes the
-gauges it was reporting. Point operators at the leader's endpoint (or aggregate
-across pods and read whichever is non-empty) — "are any `vip` partitions parked
+**Leader-only caveat.** Both options read the leader's calculator, so a
+per-pod collector (or a per-pod `LabelState()` call) shows data **only on the
+pod that is currently leader**; every follower's snapshot stays empty, and a
+leader that steps down zeroes the gauges it was reporting (and clears its
+`LabelState`). Point operators at the leader's endpoint (or aggregate across
+pods and read whichever is non-empty) — "are any `vip` partitions parked
 right now?" is only answerable on the leader.
 
 ## Gotchas

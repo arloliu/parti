@@ -225,6 +225,44 @@ if mgr.IsLeader() {
 
 ---
 
+#### LabelState
+
+Returns the leader-computed label-mode snapshot (per-label pool sizes and
+parked partition counts) from this node's last successfully published
+rebalance, pull-style — no `MetricsCollector` required.
+
+```go
+type LabelState struct {
+    PoolSizes map[string]int // label → live workers eligible for it
+    Parked    map[string]int // label → partitions currently parked
+}
+
+func (m *Manager) LabelState() LabelState
+```
+
+**Returns**:
+- `LabelState`: The snapshot; the zero value (nil maps) on non-leaders,
+  leaders that have not yet published, and stopped managers. Use
+  `IsLeader()` to disambiguate "not the leader" from "leader with nothing
+  labeled". Keys are exactly the labeled pools of the published decision;
+  a label with zero parked partitions is present with an explicit `0`.
+
+**Thread Safety**: Safe for concurrent use. The returned maps are fresh
+copies owned by the caller. The snapshot is point-in-time: a leadership
+transition strictly concurrent with the call may race it, but once
+`IsLeader()` reports false the accessor returns the zero value.
+
+**Example**:
+```go
+if n := mgr.LabelState().Parked["vip"]; n > 0 {
+    log.Printf("%d vip partitions are parked", n)
+}
+```
+
+See [Label observability without a metrics pipeline](LABELS.md#label-observability-without-a-metrics-pipeline).
+
+---
+
 #### CurrentAssignment
 
 Returns the current partition assignment.
