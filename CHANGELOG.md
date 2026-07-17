@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v2.10.1] - 2026-07-17
+
+A small additive follow-up clearing two deferred observability items. No
+assignment or routing behavior changes; no API is removed or changed
+incompatibly.
+
+### Added
+
+- **`Manager.LabelState()` + `parti.LabelState`** — pull-style label
+  observability for deployments without a `MetricsCollector`: the leader
+  retains its last published per-label pool sizes and parked partition
+  counts, and the accessor returns a copied snapshot ("are any `vip`
+  partitions parked right now?" from a health endpoint, zero collector
+  code). Leader-only lifecycle mirroring the push gauges: populated
+  strictly post-publish, cleared on leadership loss/stop. See "Label
+  observability without a metrics pipeline" in `docs/LABELS.md`.
+- **`types.HandoffSweepMetricsRecorder`** — optional capability interface a
+  `HandoffMetricsRecorder` may additionally implement to receive
+  `IncClaimSweepPass(origin, outcome, reason)` for every admitted claim
+  sweep that runs a pass body (origin `apply|ticker`, outcome `full|cached`,
+  and the closed
+  full-pass reason set incl. `mismatch`/`forced`). The bundled
+  `PrometheusRecorder` exports it as
+  `claim_sweep_passes_total{origin,outcome,reason}`. This is the
+  measurement precondition for the post-churn re-latch investigation
+  (issue #75): full-pass origins no longer need to be inferred from timing
+  signatures. Existing recorder implementations are unaffected;
+  `types.NopHandoffMetricsRecorder` gains a no-op `IncClaimSweepPass`.
+
 ## [v2.10.0] - 2026-07-17
 
 A hardening and load-overhead release driven by a measurement campaign against

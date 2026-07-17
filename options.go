@@ -203,6 +203,11 @@ func WithBucketEpochProbeInterval(d time.Duration) Option {
 // sweeper behavior. In production, leave unset to use the default no-op or a
 // future global wiring.
 //
+// A recorder that additionally implements the optional
+// [HandoffSweepMetricsRecorder] capability also receives per-origin
+// claim-sweep pass counts; the coordinator type-asserts for it, so a
+// recorder without the capability loses nothing else.
+//
 // Parameters:
 //   - mr: HandoffMetricsRecorder implementation
 //
