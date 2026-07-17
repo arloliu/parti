@@ -121,6 +121,19 @@ type Options struct {
 	// phase (post-kill and post-re-add), for the cluster to report
 	// Stable before logging that phase as failed and moving on.
 	ChurnConvergeTimeout time.Duration
+
+	// --- rig-only handoff-discontinuity capture (see handofflog.go) ---
+
+	// HandoffLogPath is the file path to capture parti's
+	// handoff_discontinuous_apply Debug events; "" disables capture
+	// entirely (default; zero overhead — no logger is wired into any
+	// worker's Manager options).
+	HandoffLogPath string
+	// HandoffLog is the constructed capture logger, built once in Run
+	// from HandoffLogPath and shared across every worker (including
+	// churn-re-added ones so no wave's events are missed). nil when
+	// HandoffLogPath is "".
+	HandoffLog types.Logger
 }
 
 // PartitionSourceBucket is the JetStream-KV bucket the harness creates
@@ -533,6 +546,9 @@ func StartWorker(
 	}
 
 	opts := []parti.Option{parti.WithHooks(hooks)}
+	if o.HandoffLog != nil {
+		opts = append(opts, parti.WithLogger(o.HandoffLog))
+	}
 
 	// Wire the consumer. Dynamic registers as the WorkerConsumerUpdater
 	// so the manager applies assignment changes to it; Queue runs
@@ -790,6 +806,7 @@ type ManifestOptions struct {
 	ChurnWaves            int     `yaml:"churnWaves"`
 	ChurnPlateau          string  `yaml:"churnPlateau"`
 	ChurnConvergeTimeout  string  `yaml:"churnConvergeTimeout"`
+	HandoffLogPath        string  `yaml:"handoffLogPath"`
 }
 
 // ManifestStream records the storage class confirmed by
@@ -847,6 +864,7 @@ func buildManifestOptions(o Options) ManifestOptions {
 		ChurnWaves:            o.ChurnWaves,
 		ChurnPlateau:          o.ChurnPlateau.String(),
 		ChurnConvergeTimeout:  o.ChurnConvergeTimeout.String(),
+		HandoffLogPath:        o.HandoffLogPath,
 	}
 }
 

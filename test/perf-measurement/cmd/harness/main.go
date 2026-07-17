@@ -101,6 +101,8 @@ func parseFlags(args []string) (Options, error) {
 		churnWaves           = fs.Int("churn-waves", 3, "rig-only E4 churn schedule: number of kill->converge->re-add repetitions")
 		churnPlateau         = fs.Duration("churn-plateau", 90*time.Second, "rig-only E4 churn schedule: idle wait after capture-window start before wave 1's kill")
 		churnConvergeTimeout = fs.Duration("churn-converge-timeout", 120*time.Second, "rig-only E4 churn schedule: per-phase budget for the cluster to reach Stable after a kill or a re-add; a wave that exceeds this is logged as wave_failed and the schedule continues to the next wave")
+
+		handoffLog = fs.String("handoff-log", "", "rig-only: file path to capture parti's handoff_discontinuous_apply Debug events (one line per event: RFC3339 timestamp + key=value fields — worker_id, previous_version, next_version, partitions); empty disables capture (default; zero overhead, no logger wired into any worker)")
 	)
 
 	if err := fs.Parse(args); err != nil {
@@ -164,6 +166,8 @@ func parseFlags(args []string) (Options, error) {
 		ChurnWaves:           *churnWaves,
 		ChurnPlateau:         *churnPlateau,
 		ChurnConvergeTimeout: *churnConvergeTimeout,
+
+		HandoffLogPath: *handoffLog,
 	}, nil
 }
 
@@ -232,6 +236,22 @@ func Run(ctx context.Context, o Options, errLog io.Writer) error {
 			return fmt.Errorf("start ready listener: %w", rerr)
 		}
 		defer shutdownReadyListener(readySrv)
+	}
+
+	// Step 0c: rig-only handoff-discontinuity capture (see
+	// handofflog.go). Disabled by default (empty path). When set, one
+	// shared handoffLogger instance is built here and stashed on o (a
+	// plain value from here on, same mutation pattern as
+	// o.StartupBudget above) so every StartWorker call below — including
+	// the churn schedule's re-add calls, which thread the same o through
+	// — wires it into that worker's Manager via parti.WithLogger.
+	if o.HandoffLogPath != "" {
+		hlog, herr := newHandoffLogger(o.HandoffLogPath)
+		if herr != nil {
+			return fmt.Errorf("open handoff log: %w", herr)
+		}
+		defer func() { _ = hlog.Close() }()
+		o.HandoffLog = hlog
 	}
 
 	// Step 1: setup NATS + wrapper. The setup wrapper is intentionally
