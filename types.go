@@ -36,8 +36,13 @@ type (
 	// capability a HandoffMetricsRecorder may additionally implement; see
 	// [types.HandoffSweepMetricsRecorder] for the label contract.
 	HandoffSweepMetricsRecorder = types.HandoffSweepMetricsRecorder
-	Logger                      = types.Logger
-	Hooks                       = types.Hooks
+	// AssignmentDivergenceMetricsRecorder is the optional equal-version
+	// divergence observability capability a MetricsCollector may
+	// additionally implement; see
+	// [types.AssignmentDivergenceMetricsRecorder] for the label contract.
+	AssignmentDivergenceMetricsRecorder = types.AssignmentDivergenceMetricsRecorder
+	Logger                              = types.Logger
+	Hooks                               = types.Hooks
 	// StreamMissingHook is the operator-supplied escalation invoked when
 	// the dynamic partition consumer's recovery flow detects the
 	// underlying JetStream stream is absent. See

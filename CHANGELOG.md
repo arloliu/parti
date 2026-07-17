@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v2.10.2] - 2026-07-17
+
+A small correctness + observability release closing the standalone slice of
+the deferred claim-level commit-identity fence project (issue #74). No
+routing or dispatch behavior changes; no API is removed or changed
+incompatibly.
+
+### Fixed
+
+- **Publisher CAS-loss recovery could reuse an external winner's Version** —
+  after losing the commit CAS to another leader's in-flight write, the
+  recovery path refreshed only the commit KV revision, not the live Version,
+  so the recovering leader's next publish could CAS-succeed at the SAME
+  Version the winner had already published — silently overwriting it
+  (workers drop equal-version deliveries at dispatch, so the overwrite was
+  invisible fleet-wide). The recovery now reseeds the publisher's whole
+  commit view coherently (revision, Version, cached commit, observation
+  instant — all four or none) from the live winner, so the next publish is
+  strictly beyond both observed Versions (`max(local, winner)+1`) and can
+  never reuse one. If the winner entry is unreadable or malformed,
+  the publisher fails closed: publishes abort before any payload/alias/CAS
+  write (existing `ErrCommitCASFailed` class; new
+  `IncrementBatchAborted("commit_reseed_pending")` reason) until the live
+  commit becomes readable. Ordinary clean leader takeovers were always safe;
+  this closes the CAS-loss counterexample.
+
+### Added
+
+- **`types.AssignmentDivergenceMetricsRecorder`** — optional capability
+  interface a `MetricsCollector` may additionally implement to receive
+  `IncEqualVersionDivergence(source)` (source `commit|alias`): an authority
+  delivery arrived at the worker's current assignment version carrying
+  DIFFERENT content for that worker. Dispatch drops equal-version deliveries
+  before payload fetch, so this counter is the observable precondition of
+  the deferred equal-version divergence hazard family — zero in healthy
+  operation (redeliveries carry identical content); sustained nonzero means
+  concurrent writers published different content at the same version and is
+  the trigger to revisit the fence design. `types.NopMetrics` gains a no-op
+  implementation, so collectors embedding it auto-satisfy; existing
+  collectors are unaffected.
+- **`docs/design/claim-commit-identity-fence.md`** — the converged
+  claim-level commit-identity fence design (7 external review rounds),
+  recorded as Proposed and deferred-by-decision, with the deferral rationale
+  and re-activation triggers in the preamble.
+
 ## [v2.10.1] - 2026-07-17
 
 A small additive follow-up clearing two deferred observability items. No

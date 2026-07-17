@@ -91,6 +91,11 @@ func WithHooks(hooks *Hooks) Option {
 
 // WithMetrics sets a metrics collector.
 //
+// A collector that additionally implements the optional
+// [AssignmentDivergenceMetricsRecorder] capability also receives
+// equal-version divergence counts; the manager type-asserts for it once at
+// construction, so a collector without the capability loses nothing else.
+//
 // Parameters:
 //   - metrics: MetricsCollector implementation
 //

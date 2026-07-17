@@ -700,6 +700,18 @@ type MetricsCollector interface {
 }
 ```
 
+**Optional capability — equal-version divergence** (`v2.10.2+`): a collector
+that additionally implements `AssignmentDivergenceMetricsRecorder` receives
+`IncEqualVersionDivergence(source)` whenever an authority delivery (commit or
+legacy alias, `source` label accordingly) arrives at the worker's current
+assignment version with different content for that worker. Dispatch drops
+equal-version deliveries before payload fetch, so this counter is the only
+visibility into such divergence; healthy redeliveries never increment it, and
+a sustained nonzero rate means concurrent writers published different content
+at the same version (see `docs/design/claim-commit-identity-fence.md`). The
+manager type-asserts once at construction; `types.NopMetrics` implements the
+capability, so collectors embedding it auto-satisfy.
+
 **New Degraded Mode Metrics**:
 
 #### RecordDegradedDuration
