@@ -95,15 +95,41 @@ func (p *PullConsumer) Stop() {
 	}
 }
 
+// minPullHeartbeat and maxPullHeartbeat mirror nats.go's PullHeartbeat
+// validity range [500ms, 30s] (jetstream_options.go configureConsume /
+// configureMessages, nats.go v1.52.0 — the same bounds the parent module
+// tracks as internal/natsutil.MinPullHeartbeat/MaxPullHeartbeat). This rig
+// is a separate Go module and deliberately does not import the parent
+// module's internal packages, so the constants are mirrored locally rather
+// than imported.
+const (
+	minPullHeartbeat = 500 * time.Millisecond
+	maxPullHeartbeat = 30 * time.Second
+)
+
+// boundedPullHeartbeat derives a PullHeartbeat from a pull expiry using the
+// same expiry/2-clamped-to-[500ms,30s] formula as the production
+// derivation, internal/natsutil.DerivePullHeartbeat — that function is the
+// source of truth; this is a local mirror of its formula only (this rig has
+// no PullHeartbeatCap knob, so there is no further-capping arm to mirror).
+// Without the 30s clamp, a FetchTimeout above 60s derives a heartbeat above
+// nats.go's ceiling, which nats.go rejects at iterator creation.
+func boundedPullHeartbeat(expiry time.Duration) time.Duration {
+	heartbeat := max(expiry/2, minPullHeartbeat)
+
+	return min(heartbeat, maxPullHeartbeat)
+}
+
 // CreatePullConsumers creates n durable pull consumers on the given stream,
 // each named `<prefix>-<NNNN>` (1-based, zero-padded), and starts a no-op
 // drain goroutine per consumer using `consumer.Messages()` with the given
 // fetch expiry. The drain goroutines discard messages — this is the M4.1
 // idle scenario where no messages flow.
 //
-// Heartbeat is set to expiry/2 (min 100ms), matching the parti durable
-// consumer convention so pull-iterator state-tracking behaves like
-// production.
+// Heartbeat is derived via boundedPullHeartbeat (expiry/2, clamped to
+// [500ms, 30s]), mirroring the clamped production derivation in
+// internal/natsutil.DerivePullHeartbeat so pull-iterator state-tracking
+// behaves like production.
 func CreatePullConsumers(ctx context.Context, stream jetstream.Stream, prefix string, n int, fetchTimeout time.Duration) ([]*PullConsumer, error) {
 	out := make([]*PullConsumer, 0, n)
 	for i := 1; i <= n; i++ {
@@ -126,7 +152,7 @@ func CreatePullConsumers(ctx context.Context, stream jetstream.Stream, prefix st
 		done := make(chan struct{})
 		pc := &PullConsumer{Name: name, Consumer: cons, cancel: cancel, done: done}
 
-		heartbeat := max(fetchTimeout/2, 100*time.Millisecond)
+		heartbeat := boundedPullHeartbeat(fetchTimeout)
 		it, err := cons.Messages(
 			jetstream.PullMaxMessages(1),
 			jetstream.PullExpiry(fetchTimeout),
