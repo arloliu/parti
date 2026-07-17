@@ -28,6 +28,7 @@ import (
 //   - claim_stale_handoff_reset_total
 //   - claim_write_throttled_total
 //   - claim_write_throttle_wait_seconds
+//   - claim_sweep_passes_total{origin,outcome,reason}
 //
 // These cover end-to-end outcomes, latency, and basic KV conflict/health.
 type PrometheusRecorder struct {
@@ -45,6 +46,7 @@ type PrometheusRecorder struct {
 	claimStaleHandoffReset prometheus.Counter
 	claimWriteThrottled    prometheus.Counter
 	claimWriteThrottleWait prometheus.Histogram
+	claimSweepPasses       *prometheus.CounterVec
 }
 
 // NewPrometheusRecorder creates a new recorder.
@@ -117,6 +119,12 @@ func (p *PrometheusRecorder) ensure() {
 			Help:      "Duration in seconds that claim-write attempts waited due to rate limiting.",
 			Buckets:   []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5},
 		})
+		p.claimSweepPasses = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: p.namespace,
+			Subsystem: "handoff",
+			Name:      "claim_sweep_passes_total",
+			Help:      "Admitted claim-sweep passes by origin (apply|ticker), outcome (full|cached), and full-pass reason.",
+		}, []string{"origin", "outcome", "reason"})
 
 		p.reg.MustRegister(
 			p.handoffTotal,
@@ -128,6 +136,7 @@ func (p *PrometheusRecorder) ensure() {
 			p.claimStaleHandoffReset,
 			p.claimWriteThrottled,
 			p.claimWriteThrottleWait,
+			p.claimSweepPasses,
 		)
 	})
 }
@@ -181,4 +190,12 @@ func (p *PrometheusRecorder) IncClaimWriteThrottled() {
 func (p *PrometheusRecorder) ObserveClaimWriteThrottleWait(seconds float64) {
 	p.ensure()
 	p.claimWriteThrottleWait.Observe(seconds)
+}
+
+// IncClaimSweepPass counts one admitted claim-sweep pass. It satisfies the
+// optional types.HandoffSweepMetricsRecorder capability the coordinator
+// type-asserts for; label sets are the closed ones documented there.
+func (p *PrometheusRecorder) IncClaimSweepPass(origin, outcome, reason string) {
+	p.ensure()
+	p.claimSweepPasses.WithLabelValues(origin, outcome, reason).Inc()
 }

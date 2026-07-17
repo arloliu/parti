@@ -240,6 +240,8 @@ func New(cfg Config, enableTwoPhase bool) Coordinator {
 		// Optional store capability: probing the backing stream position
 		// lets ticker sweeps skip provably-no-op ListKeys+Get storms.
 		coord.prober, _ = cfg.Store.(bucketPosProber)
+		// Optional recorder capability: per-origin sweep pass counters.
+		coord.sweepMetrics, _ = cfg.Metrics.(types.HandoffSweepMetricsRecorder)
 
 		return coord
 	}
