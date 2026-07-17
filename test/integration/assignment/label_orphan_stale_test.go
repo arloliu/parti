@@ -438,6 +438,23 @@ func TestGhostLabel_ParksThenSpills_NeverOrphans(t *testing.T) {
 		parkCommit.ParkedDigest, "parked digest must be the ghost partition")
 	require.True(t, checkCoverage(ctx, assignKV, parkCommit, withGhost).ok, "coverage during park")
 
+	// Pull-side parity (Manager.LabelState): the single worker is the leader,
+	// so its retained snapshot must agree with the published park commit —
+	// the ghost pool has no eligible workers and exactly one parked partition,
+	// and the unlabeled plain partitions are not keys. Eventually, not a
+	// one-shot read: the commit becomes externally observable inside the
+	// publish call, a few lines before the calculator retains the snapshot,
+	// so a read racing that gap would flake.
+	require.Eventually(t, func() bool {
+		st := plainWorker.LabelState()
+		// len==1 pins "ghost" as the ONLY key (unlabeled partitions are
+		// never keys), and the indexed reads pin the explicit-zero pool
+		// size and the single parked partition.
+		return len(st.PoolSizes) == 1 && st.PoolSizes["ghost"] == 0 &&
+			len(st.Parked) == 1 && st.Parked["ghost"] == 1
+	}, 10*time.Second, 100*time.Millisecond,
+		"LabelState must converge to the published park decision: ghost pool empty, one parked, labeled keys only")
+
 	// PHASE SPILL: after grace, with NO source/worker event, the re-check timer
 	// spills the ghost onto the fallback ladder (the unlabeled worker).
 	// ParkedCount==0 and the ghost is now in a payload.

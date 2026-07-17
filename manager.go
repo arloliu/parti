@@ -1050,6 +1050,64 @@ func (m *Manager) WorkerLabels() []string {
 	return slices.Clone(m.workerLabels)
 }
 
+// LabelState is a point-in-time, leader-computed snapshot of label-mode
+// observability state, exposed pull-style so deployments without a
+// MetricsCollector get baseline label visibility ("are any VIP partitions
+// parked right now?") from a health endpoint or log line. It complements,
+// and does not replace, the push [types.LabelMetrics] interface.
+type LabelState struct {
+	// PoolSizes maps each label present in the last published rebalance to
+	// the number of live workers eligible for it.
+	PoolSizes map[string]int
+
+	// Parked maps each such label to the number of partitions currently
+	// parked (intentionally left unassigned) for it.
+	Parked map[string]int
+}
+
+// LabelState returns the label snapshot from this node's last successfully
+// published rebalance. Leader-only: non-leaders, leaders that have not yet
+// published a rebalance, and stopped Managers return the zero value (nil
+// maps). Use [Manager.IsLeader] to disambiguate "not the leader" from
+// "leader with nothing labeled". The returned maps are fresh copies; the
+// caller owns them and may retain or mutate them freely.
+//
+// The snapshot is point-in-time: a leadership transition strictly concurrent
+// with the call may race it, but once the transition is observable
+// (IsLeader() reports false — the election loop flips the flag before any
+// calculator teardown begins), the accessor returns the zero value.
+//
+// Key-set parity with the push gauges: keys are exactly the labeled pools of
+// the published decision (the unlabeled general pool is never a key), and a
+// label with zero parked partitions is present with an explicit 0.
+//
+// Returns:
+//   - LabelState: The snapshot, or the zero value when this node has none.
+func (m *Manager) LabelState() LabelState {
+	// Leadership gate first: on deposition the election loop clears the
+	// flag BEFORE stopCalculator/calculator.Stop tear the snapshot down,
+	// so trusting the calculator handle alone would serve a deposed
+	// leader's stale state for the whole teardown window.
+	if !m.IsLeader() {
+		return LabelState{}
+	}
+
+	m.mu.RLock()
+	calc := m.calculator
+	m.mu.RUnlock()
+
+	c, ok := calc.(*assignment.Calculator)
+	if !ok {
+		return LabelState{}
+	}
+	pools, parked, ok := c.LabelSnapshot()
+	if !ok {
+		return LabelState{}
+	}
+
+	return LabelState{PoolSizes: pools, Parked: parked}
+}
+
 // CurrentAssignment returns the current partition assignment for this worker.
 //
 // The returned Assignment shares its Partitions backing array with the

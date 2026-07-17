@@ -2,11 +2,13 @@ package parti
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/arloliu/parti/v2/internal/assignment"
 	"github.com/arloliu/parti/v2/partitest"
 	"github.com/arloliu/parti/v2/source"
 	"github.com/arloliu/parti/v2/strategy"
@@ -168,6 +170,110 @@ func TestManager_WorkerLabels_WithOptionOverride(t *testing.T) {
 	got := mgr.WorkerLabels()
 	want := []string{"vip-a", "vip-b"} // normalizeWorkerLabels sorts the option's labels
 	require.Equal(t, want, got)
+}
+
+// TestManager_LabelState_NoCalculator verifies LabelState's zero-value
+// contract on every path that has no running calculator: a never-started
+// Manager (calculator not yet installed) and a Manager holding the Nop
+// placeholder (follower / post-stop state). Both must return the zero value
+// — nil maps, no error, no panic — since LabelState is leader-only.
+func TestManager_LabelState_NoCalculator(t *testing.T) {
+	t.Parallel()
+
+	t.Run("never started", func(t *testing.T) {
+		t.Parallel()
+		cfg := DefaultConfig()
+		conn := &nats.Conn{}
+		js, _ := jetstream.New(conn)
+		mgr, err := NewManager(&cfg, js, &mockSource{}, &mockStrategy{})
+		require.NoError(t, err)
+
+		st := mgr.LabelState()
+		require.Nil(t, st.PoolSizes)
+		require.Nil(t, st.Parked)
+	})
+
+	t.Run("nop calculator", func(t *testing.T) {
+		t.Parallel()
+		// Leadership set so the test reaches past the IsLeader gate and
+		// pins the calculator-handle fallback (follower/post-stop state).
+		m := &Manager{calculator: assignment.NewNopCalculator()}
+		m.isLeader.Store(true)
+
+		st := m.LabelState()
+		require.Nil(t, st.PoolSizes)
+		require.Nil(t, st.Parked)
+	})
+}
+
+// TestManager_LabelState_LeadershipGate pins the leader-only contract against
+// the deposed-leader teardown window: the election loop clears the leadership
+// flag BEFORE stopCalculator/calculator.Stop tear the snapshot down, so for
+// that whole window the installed calculator still holds live label state. A
+// non-leader Manager must return the zero value anyway — the accessor gates
+// on IsLeader() rather than trusting the calculator handle's lifecycle.
+func TestManager_LabelState_LeadershipGate(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	_, nc := partitest.StartEmbeddedNATS(t)
+	asgnKV := partitest.CreateJetStreamKV(t, nc, "mgr-labelstate-asgn")
+	hbKV := partitest.CreateJetStreamKV(t, nc, "mgr-labelstate-hb")
+
+	// One vip-labeled worker heartbeat + one vip partition: the published
+	// rebalance retains a non-empty label snapshot in the calculator.
+	hb := types.Heartbeat{
+		WorkerID:      "w0",
+		SchemaVersion: 1,
+		Capabilities:  types.CapAckV1,
+		Labels:        []string{"vip"},
+		Timestamp:     time.Now().UTC(),
+	}
+	hbData, err := json.Marshal(hb)
+	require.NoError(t, err)
+	_, err = hbKV.Put(ctx, "worker-hb.w0", hbData)
+	require.NoError(t, err)
+
+	calc, err := assignment.NewCalculator(&assignment.Config{
+		AssignmentKV:         asgnKV,
+		HeartbeatKV:          hbKV,
+		AssignmentPrefix:     "assignment",
+		Source:               source.NewStatic([]types.Partition{{Keys: []string{"v"}, Label: "vip"}}),
+		Strategy:             &mockStrategy{},
+		HeartbeatPrefix:      "worker-hb",
+		HeartbeatTTL:         30 * time.Second,
+		EmergencyGracePeriod: 1 * time.Second,
+		ColdStartWindow:      10 * time.Millisecond,
+		PlannedScaleWindow:   10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.NoError(t, calc.Start(ctx))
+	t.Cleanup(func() { _ = calc.Stop(context.Background()) })
+
+	require.Eventually(t, func() bool {
+		_, _, ok := calc.LabelSnapshot()
+		return ok
+	}, 5*time.Second, 25*time.Millisecond, "the initial rebalance must retain a label snapshot")
+
+	// The deposed-leader window: a real calculator with live state installed,
+	// leadership flag false. The accessor must serve the zero value.
+	m := &Manager{calculator: calc}
+	st := m.LabelState()
+	require.Nil(t, st.PoolSizes, "a non-leader must get the zero value even while the calculator still holds a snapshot")
+	require.Nil(t, st.Parked, "a non-leader must get the zero value even while the calculator still holds a snapshot")
+
+	// The same Manager as leader serves the snapshot.
+	m.isLeader.Store(true)
+	st = m.LabelState()
+	require.Equal(t, map[string]int{"vip": 1}, st.PoolSizes)
+	require.Equal(t, map[string]int{"vip": 0}, st.Parked)
+
+	// Deposed again: the flag flips first (manager_election clears it before
+	// any calculator teardown), and the accessor immediately returns zero.
+	m.isLeader.Store(false)
+	st = m.LabelState()
+	require.Nil(t, st.PoolSizes)
+	require.Nil(t, st.Parked)
 }
 
 // TestManager_SetCapability_AtomicBitmask verifies that SetCapability correctly
