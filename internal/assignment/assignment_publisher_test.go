@@ -50,6 +50,15 @@ func liveRevCheck(rev *atomic.Uint64) LeaderCheckFunc {
 
 func newPublisherFixture(t testing.TB, name string) *publisherFixture {
 	t.Helper()
+	return newPublisherFixtureWrapKV(t, name, nil)
+}
+
+// newPublisherFixtureWrapKV is newPublisherFixture with an optional decorator
+// around the assignment KV handed to the publisher. The fixture's own
+// assignmentKV field always holds the raw bucket so test Puts/Gets bypass any
+// injected faults. wrap == nil means no decoration.
+func newPublisherFixtureWrapKV(t testing.TB, name string, wrap func(jetstream.KeyValue) jetstream.KeyValue) *publisherFixture {
+	t.Helper()
 	_, nc := partitest.StartEmbeddedNATS(t)
 	akv := partitest.CreateJetStreamKV(t, nc, "asgn-"+name)
 	hkv := partitest.CreateJetStreamKV(t, nc, "hb-"+name)
@@ -67,8 +76,12 @@ func newPublisherFixture(t testing.TB, name string) *publisherFixture {
 		}
 		return nil
 	}
+	pubKV := akv
+	if wrap != nil {
+		pubKV = wrap(akv)
+	}
 	pub := NewAssignmentPublisher(PublisherConfig{
-		AssignmentKV:    akv,
+		AssignmentKV:    pubKV,
 		HeartbeatKV:     hkv,
 		Prefix:          "assignment",
 		HeartbeatPrefix: "heartbeat",
@@ -1137,6 +1150,14 @@ func TestPublisher_NonCASFailures_DoNotRefreshLastCommitRev(t *testing.T) {
 
 	require.Equal(t, revBefore, f.pub.LastCommitRev(),
 		"non-CAS failures must not refresh lastCommitRev")
+
+	// Negative space for the reseed latch: a non-CAS failure must not leave
+	// the publisher in reseed-pending — after leadership is restored the next
+	// publish must proceed normally instead of aborting fail-closed.
+	f.leaderRev.Store(1)
+	require.NoError(t, f.pub.Publish(ctx, input),
+		"a non-CAS failure must not latch reseed-pending")
+	require.EqualValues(t, 0, f.metrics.batchAbortedCount("commit_reseed_pending"))
 }
 
 // BenchmarkDiscoverHighestVersion_WithCommit measures the cold-start

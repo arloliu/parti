@@ -278,6 +278,9 @@ type PublisherMetrics interface {
 	//   - "leadership_lost_post_alias"
 	//   - "alias_barrier_failed"
 	//   - "commit_cas_failed"
+	//   - "commit_reseed_pending" (a prior commit CAS was lost to a winner
+	//     that is still unreadable or malformed; the publish failed closed
+	//     before any payload/alias/CAS write)
 	//   - "shutdown" (leader stopCh closed between rebalance start and commit CAS)
 	IncrementBatchAborted(reason string)
 

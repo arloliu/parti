@@ -134,6 +134,16 @@ type AssignmentPublisher struct {
 	// in that case). Set under p.mu.
 	lastCommitObservedAtMono time.Time
 
+	// commitReseedPending is latched when a commit CAS was lost to an
+	// external winner that could not be read back (transient Get failure)
+	// or did not unmarshal. While set, Publish fails closed at entry —
+	// before any payload/alias/CAS side effect — because the local
+	// currentVersion may equal a Version the winner already owns, and a
+	// blind retry would overwrite the winner at that reused Version. A
+	// successful reseed (reseedFromLiveCommitLocked) clears it. Set under
+	// p.mu.
+	commitReseedPending bool
+
 	lastRebalance time.Time
 
 	// now returns the current time; injectable so cooldown timing can be
@@ -359,6 +369,15 @@ func (p *AssignmentPublisher) Publish(ctx context.Context, in PublishInput) erro
 		return nil
 	}
 
+	// Fail-closed gate: a previous commit CAS was lost to a winner we could
+	// not read back, so currentVersion may equal a Version the winner
+	// already owns. Retry the reseed before ANY side effect (payload
+	// writes, aliases, CAS); if the live commit is still unreadable, abort
+	// under the same surrendered-batch error class the lost CAS produced.
+	if err := p.ensureCommitViewCurrentLocked(ctx); err != nil {
+		return err
+	}
+
 	// --- step 3 of §3.5: publish-time set-equality coverage check ---
 	if err := p.checkCoverage(in.SourcePartitions, in.Assignments, in.ParkedPartitions); err != nil {
 		p.metrics.IncrementBatchAborted("coverage_mismatch")
@@ -454,29 +473,9 @@ func (p *AssignmentPublisher) Publish(ctx context.Context, in PublishInput) erro
 	if err := p.abortIfShuttingDown(aliasWritten); err != nil {
 		return err
 	}
-	commitKey := p.keyPrefix + commitKeyName
-	var newCommitRev uint64
-	if p.lastCommitRev == 0 {
-		newCommitRev, err = p.assignmentKV.Create(ctx, commitKey, commitBytes)
-	} else {
-		newCommitRev, err = p.assignmentKV.Update(ctx, commitKey, commitBytes, p.lastCommitRev)
-	}
+	newCommitRev, err := p.casWriteCommitLocked(ctx, commitBytes)
 	if err != nil {
-		// CAS lost OR Create lost (another leader created the commit first).
-		// Either way: surrender. The lost batch's payload writes are inert;
-		// the legacy aliases written at step 6 are documented exposure.
-		p.metrics.IncrementCommitAborts()
-		p.metrics.IncrementBatchAborted("commit_cas_failed")
-		// Only count exposure when at least one alias actually landed.
-		if aliasWritten {
-			p.metrics.IncrementAliasVisibleUncommitted()
-		}
-		// ISSUE-001: when the failure is a true CAS conflict, refresh
-		// lastCommitRev from the live _commit so the next Publish can
-		// re-CAS. Transient KV errors short-circuit inside the helper.
-		p.refreshLastCommitRevAfterCASFailureLocked(ctx, err)
-
-		return fmt.Errorf("%w: %w", types.ErrCommitCASFailed, err)
+		return p.surrenderCommitCASLocked(ctx, err, aliasWritten)
 	}
 	// COMMIT POINT: from here on, this batch is the cluster's authoritative view.
 	p.lastCommitRev = newCommitRev
@@ -1257,37 +1256,131 @@ func (p *AssignmentPublisher) BootstrapLastCommit(ctx context.Context) error {
 	return nil
 }
 
-// refreshLastCommitRevAfterCASFailureLocked re-reads the live _commit KV
-// revision and updates p.lastCommitRev so the next Publish can re-CAS.
+// ensureCommitViewCurrentLocked is Publish's fail-closed entry gate. While
+// commitReseedPending is latched it retries the reseed; if the live commit
+// is still unreadable it aborts the publish under the same surrendered-batch
+// error class the lost CAS produced (ErrCommitCASFailed keeps caller routing
+// unchanged), recording the "commit_reseed_pending" abort reason. Caller
+// must hold p.mu.
+func (p *AssignmentPublisher) ensureCommitViewCurrentLocked(ctx context.Context) error {
+	if !p.commitReseedPending {
+		return nil
+	}
+	if err := p.reseedFromLiveCommitLocked(ctx); err != nil {
+		p.metrics.IncrementBatchAborted("commit_reseed_pending")
+		return fmt.Errorf("%w: commit reseed pending: %w", types.ErrCommitCASFailed, err)
+	}
+
+	return nil
+}
+
+// casWriteCommitLocked performs the step-9 CAS write against
+// "<prefix>._commit": Create when this publisher has never observed a commit
+// revision, Update fenced on lastCommitRev otherwise. Caller must hold p.mu.
+func (p *AssignmentPublisher) casWriteCommitLocked(ctx context.Context, commitBytes []byte) (uint64, error) {
+	commitKey := p.keyPrefix + commitKeyName
+	if p.lastCommitRev == 0 {
+		return p.assignmentKV.Create(ctx, commitKey, commitBytes)
+	}
+
+	return p.assignmentKV.Update(ctx, commitKey, commitBytes, p.lastCommitRev)
+}
+
+// surrenderCommitCASLocked is Publish's commit-CAS failure branch: CAS lost
+// OR Create lost (another leader created the commit first). Either way:
+// surrender. The lost batch's payload writes are inert; the legacy aliases
+// written at step 6 are documented exposure (counted only when one actually
+// landed). Returns the wrapped ErrCommitCASFailed for Publish to propagate.
+// Caller must hold p.mu.
+func (p *AssignmentPublisher) surrenderCommitCASLocked(ctx context.Context, writeErr error, aliasWritten bool) error {
+	p.metrics.IncrementCommitAborts()
+	p.metrics.IncrementBatchAborted("commit_cas_failed")
+	if aliasWritten {
+		p.metrics.IncrementAliasVisibleUncommitted()
+	}
+	// ISSUE-001: when the failure is a true CAS conflict, reseed the whole
+	// commit view (revision AND Version) from the live winner so the next
+	// Publish re-CASes beyond both observed Versions (max(local, winner)+1)
+	// instead of overwriting the winner at a reused Version. Transient KV
+	// errors short-circuit inside the helper.
+	p.reseedAfterCommitCASLossLocked(ctx, writeErr)
+
+	return fmt.Errorf("%w: %w", types.ErrCommitCASFailed, writeErr)
+}
+
+// reseedAfterCommitCASLossLocked re-synchronizes the publisher's commit view
+// with the live _commit entry after a lost commit CAS.
 //
 // Gated on writeErr being jetstream.ErrKeyExists — the sentinel NATS
 // JetStream returns for both Create (key already exists) and Update
 // (revision mismatch). Both indicate another writer beat us; any other
 // error class is a transient KV failure whose recovery is the existing
-// retry-on-next-rebalance-event path, and refreshing on transient errors
-// would skew lastCommitRev independently of currentVersion / lastCommit.
+// retry-on-next-rebalance-event path, and reseeding on transient errors
+// would skew the commit view without evidence of an external winner.
 //
 // Called from Publish's commit-write error branch — Publish already holds
 // p.mu, so this method MUST NOT acquire it (BootstrapLastCommit cannot be
 // reused here because it would deadlock on the same mutex).
 //
-// Best-effort: KV errors and missing entries leave lastCommitRev unchanged.
-// The next CAS failure triggers another refresh attempt; a Calculator
-// restart is the ultimate recovery path.
-func (p *AssignmentPublisher) refreshLastCommitRevAfterCASFailureLocked(ctx context.Context, writeErr error) {
+// A lost CAS proves an external winner exists, so the publisher's whole
+// commit view — not just lastCommitRev — is stale. Refreshing only the
+// revision would let the next Publish CAS-succeed while still proposing the
+// old currentVersion+1, overwriting the winner at a Version it already
+// published (workers drop equal-Version deliveries at dispatch, so the
+// overwrite would be invisible fleet-wide). Reseeding currentVersion too
+// makes the next proposal strictly beyond both the winner's and the
+// publisher's own last-observed Version (max(local, winner)+1). The reseed
+// latches commitReseedPending and clears it only when the full view has
+// been advanced coherently; while pending, Publish fails closed at entry.
+func (p *AssignmentPublisher) reseedAfterCommitCASLossLocked(ctx context.Context, writeErr error) {
 	if !errors.Is(writeErr, jetstream.ErrKeyExists) {
 		return
 	}
+	p.commitReseedPending = true
+	if err := p.reseedFromLiveCommitLocked(ctx); err != nil {
+		p.logger.Warn("post-CAS-loss reseed failed; publishes fail closed until the live commit is readable",
+			"error", err)
+	}
+}
+
+// reseedFromLiveCommitLocked reads the live _commit entry and advances
+// {lastCommitRev, currentVersion, lastCommit, lastCommitObservedAtMono}
+// together — all four or none. Advancing any subset (in particular the
+// revision without the Version) is exactly the version-reuse hazard the
+// reseed exists to close, so Get and unmarshal failures mutate nothing and
+// leave commitReseedPending latched. Caller must hold p.mu.
+//
+// Monotonic guards mirror BootstrapLastCommit: revision and Version only
+// move forward; the lastCommit cache and its observation instant are
+// replaced unconditionally (the live entry IS the live commit).
+func (p *AssignmentPublisher) reseedFromLiveCommitLocked(ctx context.Context) error {
 	commitKey := p.keyPrefix + commitKeyName
 	entry, err := p.assignmentKV.Get(ctx, commitKey)
 	if err != nil {
-		p.logger.Debug("post-CAS-failure refresh: could not read live _commit",
-			"key", commitKey, "error", err)
-		return
+		return fmt.Errorf("read live commit: %w", err)
+	}
+	var winner types.AssignmentCommit
+	if jerr := json.Unmarshal(entry.Value(), &winner); jerr != nil {
+		return fmt.Errorf("unmarshal live commit: %w", jerr)
 	}
 	if entry.Revision() > p.lastCommitRev {
 		p.lastCommitRev = entry.Revision()
 	}
+	if winner.Version > p.currentVersion {
+		p.currentVersion = winner.Version
+	}
+	winnerCopy := cloneAssignmentCommit(&winner)
+	p.lastCommit = &winnerCopy
+	// Local monotonic observation; see Publish step 9 for the rationale.
+	p.lastCommitObservedAtMono = time.Now()
+	p.commitReseedPending = false
+	p.logger.Info("publisher commit view reseeded from live winner",
+		"version", winner.Version,
+		"leader_revision", winner.LeaderRevision,
+		"commit_rev", entry.Revision(),
+	)
+
+	return nil
 }
 
 // LastRebalanceTime returns the time of the last successful commit.
