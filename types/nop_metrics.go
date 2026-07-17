@@ -262,3 +262,10 @@ func (NopMetrics) IncrementConsumerCreateThrottled() {}
 
 // ObserveConsumerCreateThrottleWait discards the throttle wait observation.
 func (NopMetrics) ObserveConsumerCreateThrottleWait(_ /* seconds */ float64) {}
+
+// AssignmentDivergenceMetricsRecorder implementation (optional capability):
+// implemented on the no-op so collectors embedding NopMetrics satisfy the
+// capability automatically.
+
+// IncEqualVersionDivergence discards the equal-version divergence counter.
+func (NopMetrics) IncEqualVersionDivergence(_ /* source */ string) {}

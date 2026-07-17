@@ -63,6 +63,12 @@ type Manager struct {
 	metrics       MetricsCollector
 	logger        Logger
 
+	// divergenceMetrics is the optional AssignmentDivergenceMetricsRecorder
+	// capability type-asserted from the configured metrics collector once at
+	// construction; nil when the collector does not implement it. Emission
+	// sites are nil-guarded.
+	divergenceMetrics types.AssignmentDivergenceMetricsRecorder
+
 	// workerLabels is this worker's resolved label set (WithWorkerLabels
 	// overrides Config.WorkerLabels). Normalized once in NewManager and
 	// immutable for the manager's lifetime; published in every heartbeat and
@@ -558,6 +564,7 @@ func NewManager(cfg *Config, js jetstream.JetStream, source PartitionSource, str
 		heartbeat:  heartbeat.NewNop(),
 		calculator: assignment.NewNopCalculator(),
 	}
+	m.divergenceMetrics, _ = metricsCollector.(types.AssignmentDivergenceMetricsRecorder)
 	m.state.Store(int32(StateInit))
 	m.workerID.Store("")
 	m.assignment.Store(Assignment{})
