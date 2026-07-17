@@ -7,6 +7,100 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v2.10.0] - 2026-07-17
+
+A hardening and load-overhead release driven by a measurement campaign against
+the perf rig (W≤100 workers, P≤10,000 partitions, R=3). Six pre-existing bugs
+found by the campaign's review discipline are fixed, the leader now gates
+periodic claim sweeps (removing the largest idle KV-read multiplier), and two
+new knobs let large deployments cut idle pull-loop CPU without giving up
+detection latency. All changes are additive or strictly-tightening; no public
+API is removed or changed incompatibly.
+
+### Added
+
+- **`parti.WithBucketEpochProbeInterval(d)` / `Config.BucketEpochProbeInterval`**
+  — configures the epoch-fence monitor's bucket-recreation probe period
+  (default 10s, previously hardcoded to OperationTimeout). Lower it for faster
+  bucket-swap detection or raise it to shave idle KV reads on very large fleets.
+- **`consumer.WithPullHeartbeatCap(d)` / `PullHeartbeatCap` on every consumer
+  config** — bounds the derived pull heartbeat (normally `FetchTimeout/2`)
+  independently of `FetchTimeout`, so raising `FetchTimeout` to cut idle
+  pull-request churn (measured: ~0.77 idle / ~1.13 loaded CPU cores saved at
+  P=10,000 going 5s→30s, with P99 delivery latency improved) no longer
+  stretches deleted-consumer detection. `0` (default) disables the cap; a
+  nonzero value must be within nats.go's `PullHeartbeat` validity range
+  [500ms, 30s]. See the new "Tuning at high partition counts" section in
+  `docs/SCALING.md`.
+- **Leader-gated claim sweeps** — the periodic (ticker-origin) claim sweep now
+  runs only on the leader, with followers keeping a phase-staggered ~5-minute
+  backstop so a wedged or absent leader can never leave expired claims
+  unswept. Apply-origin and startup sweeps are unchanged (every worker). At
+  W=100 this removes ~99% of steady-state sweep-driven KV reads. Orphan-claim
+  reaping is additionally fenced against stale leadership samples
+  (generation-checked, revision-conditioned deletes), so a deposed leader's
+  in-flight sweep can never delete a claim the new leader considers live.
+
+### Fixed
+
+- **Assignment continuity across coalesced versions** — the prepare phase
+  diffs against the worker's last *committed* assignment, and retry/stash
+  coalescing routinely leaves that more than one version behind the incoming
+  one. Across such a gap, a partition that transited another owner and
+  returned (A→B→A) looked unchanged and was silently skipped — leaving the
+  worker permanently gated off the partition — and a claim reaped during a
+  missed removal/re-add was never recreated. Any non-adjacent version
+  transition now fails open into a full prepare walk. This is an explicitly
+  partial repair: equal-Version authority divergence and cross-worker claim
+  staleness are documented open hazards (pinned by tests) deferred to a
+  claim-level commit-identity fence project.
+- **Assignment payload fetch failures are retried** — a commit whose payload
+  fetch or verification failed was silently dropped; the worker sat on its
+  stale assignment until the next unrelated commit. Fetch failures now enter
+  the same bounded-backoff retry loop an apply failure uses, coalescing to the
+  newest target.
+- **Shared accepted-target fence across the retry loops** — the apply-retry
+  and (new) fetch-retry loops each track their own in-flight target; without a
+  shared fence, a slow retry could apply a target that a sibling loop's newer
+  accepted target had superseded — with a removal-guard bypass and, combined
+  with the continuity fail-open, a cross-worker claim steal in the worst
+  interleaving. Both delivery gates now raise a monotonic highest-accepted
+  (Version, LeaderRevision) fence that the apply pipeline checks before any
+  coordinator work.
+- **Lost wakeup in the assignment retry loops** — a retry stashed in the
+  window between a retry loop's final empty-stash check and its exit flag
+  clearing was stranded forever. Both loops now re-check the stash after
+  deactivating and re-activate themselves (context-guarded to avoid a
+  shutdown-time respawn loop).
+- **Payload GC vs. adoption race** — the commit-payload garbage collector
+  could delete a payload that a concurrent publish was adopting (reusing),
+  producing a commit referencing purged data. Adoption now CAS-touches the
+  payload to a fresh revision before finalizing, and GC's delete is
+  revision-conditioned, so whichever side lands first wins deterministically
+  and the loser retries cleanly.
+- **Orphan-claim reaping grace across reappearance** — a claim owner that
+  disappeared, reappeared (re-vouched), then disappeared again kept its
+  original orphan clock, so the reaper could delete the claim without a full
+  fresh grace window. Reappearance now resets the clock.
+- **Heartbeat scan reads are deadline-bounded** — the worker monitor's
+  heartbeat scan could stall indefinitely on a degraded KV; per-key reads now
+  run under a per-pass deadline.
+- **`FetchTimeout` above 60s no longer breaks pull consumers** — the derived
+  pull heartbeat (`FetchTimeout/2`) had no ceiling, and nats.go rejects an
+  explicit heartbeat above 30s, so any `FetchTimeout > 60s` made every
+  iterator creation fail and the pull loop spin in a restart/warn cycle
+  forever. The derivation is now clamped to nats.go's [500ms, 30s] validity
+  range at every derivation site (all four consumer engines and the perf rig's
+  calibrate tool).
+
+### Documentation
+
+- New **"Tuning at high partition counts"** section in `docs/SCALING.md`:
+  measured FetchTimeout guidance, the PullHeartbeatCap pairing (first
+  missed-heartbeat signal vs confirmed burst-threshold recovery), and the
+  leader-audit cadence note.
+- `docs/API_REFERENCE.md` gains the `WithPullHeartbeatCap` row.
+
 ## [v2.9.1] - 2026-07-10
 
 Label follow-up APIs that remove the workaround code label consumers were
