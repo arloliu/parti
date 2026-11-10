@@ -12,9 +12,9 @@ require (
 	github.com/HdrHistogram/hdrhistogram-go v1.1.2
 	github.com/arloliu/parti/v2 v2.0.0-00010101000000-000000000000
 	github.com/nats-io/nats-server/v2 v2.14.2
-	github.com/nats-io/nats.go v1.52.0
+	github.com/nats-io/nats.go v1.55.0
 	github.com/stretchr/testify v1.11.1
-	golang.org/x/sys v0.47.0
+	golang.org/x/sys v0.48.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -30,7 +30,7 @@ require (
 	github.com/go-playground/validator/v10 v10.30.1 // indirect
 	github.com/google/go-tpm v0.9.8 // indirect
 	github.com/joho/godotenv v1.5.1 // indirect
-	github.com/klauspost/compress v1.18.6 // indirect
+	github.com/klauspost/compress v1.20.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/minio/highwayhash v1.0.4 // indirect
@@ -47,9 +47,9 @@ require (
 	github.com/zeebo/xxh3 v1.0.2 // indirect
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
 	go.yaml.in/yaml/v3 v3.0.3 // indirect
-	golang.org/x/crypto v0.54.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/crypto v0.57.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
+	golang.org/x/text v0.42.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/protobuf v1.36.10 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
