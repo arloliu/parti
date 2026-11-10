@@ -714,6 +714,11 @@ func WithIteratorEscalation(window time.Duration, threshold int) DynamicOption {
 
 // WithIteratorFactory sets a custom iterator factory (for testing).
 // Supported by: Queue, Broadcast, Dynamic.
+//
+// A custom factory chooses the pull options itself.
+// The default one requests the next batch only when the previous pull request is used up
+// (jetstream.PullThresholdMessages(1)); without it one iterator overlaps pull requests,
+// and the server drops those beyond MaxWaiting without a reply.
 func WithIteratorFactory(f func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error)) interface {
 	QueueOption
 	BroadcastOption

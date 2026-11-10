@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The minimum `github.com/nats-io/nats.go` version is now v1.55.0** (was v1.52.0).
+  Earlier versions can skip resetting a pull iterator's accounting after a reconnect,
+  which leaves the iterator waiting for a missed heartbeat.
+
+### Fixed
+
+- **Delivery could stall until a missed heartbeat with a `BatchSize` of more than a few messages** —
+  nats.go asks for more messages as soon as fewer than half a batch is outstanding,
+  so one pull iterator regularly had two or three pull requests waiting on the server at once.
+  nats-server drops a pull request without a reply when the consumer's `MaxWaiting` is reached,
+  and the default `MaxWaiting` is 2.
+  The client kept counting the dropped request as outstanding and did not ask again,
+  so no request was left on the server and new messages stayed in the stream
+  until the pull heartbeat was missed (twice the heartbeat interval),
+  repeating for as long as traffic continued.
+  Overlapping requests had a second cost on replicated consumers:
+  when one of them ended, the server forgot the reply inbox they share,
+  so after a consumer leader change the surviving request got no `409 Leadership Change`,
+  with the same stall.
+  `Dynamic`, `Static`, `Queue`, and `Broadcast` consumers now ask for the next batch
+  only when the previous request is used up (`PullThresholdMessages(1)`),
+  so each iterator normally has one pull request waiting.
+  Existing durable consumers need no change and `MaxWaiting` can stay as it is.
+  Between batches there is one request round trip with nothing buffered on the client.
+  A caller-supplied `WithIteratorFactory` is not changed; add the option there if needed.
+  A `Queue` durable shared by several instances still needs `MaxWaiting` of at least the instance count.
+  During a rolling upgrade a worker still on the older version can hold both `MaxWaiting` slots of a partition it is handing over;
+  the new owner then starts consuming only after its next missed heartbeat (twice the heartbeat interval).
+  This ends when the last older worker is gone.
+- **A missed pull heartbeat no longer tears down the pull iterator** —
+  every consumer type used to stop its iterator on a missed heartbeat, back off, and build a new one.
+  Stopping discards the messages the server has already delivered to the client.
+  Those came back only as redeliveries after `AckWait`,
+  and not at all once `MaxDeliver` was reached: with `MaxDeliver` 1 they were lost.
+  The backoff also left the consumer with no outstanding pull.
+  A missed heartbeat is a normal recovery signal:
+  the server can lose a waiting pull request without telling the client (see the entry above).
+  `Dynamic`, `Static`, `Queue`, and `Broadcast` consumers now keep the same iterator,
+  which re-issues the pull immediately, so nothing buffered is discarded and there is no backoff gap.
+  Detection of a deleted consumer or stream is unchanged:
+  every miss still feeds it, and the iterator is replaced as before
+  when the consumer is rebound or recreated, the stream is missing,
+  or, for `Dynamic`, pull gating is suppressing the partition.
+  The iterator-restart metric still counts every missed heartbeat, including those where the iterator is kept:
+  under the `heartbeat` reason, or `recovery_disabled` for `Static`, `Queue`, and `Broadcast` without a recovery strategy.
+  A kept miss no longer records a retry or backoff observation.
+
 ## [v2.10.2] - 2026-07-17
 
 A small correctness + observability release closing the standalone slice of

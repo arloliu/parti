@@ -347,8 +347,9 @@ type WorkerConsumerMetrics interface {
 	ObserveWorkerConsumerUpdateLatency(seconds float64)
 
 	// IncrementWorkerConsumerIteratorRestart increments iterator restart counts by reason (transient|heartbeat).
-	// For a per-partition (Dynamic) consumer the heartbeat reason counts every missed pull heartbeat,
-	// including a miss after which the iterator is kept rather than restarted.
+	// Every missed pull heartbeat is counted, including a miss after which the iterator is kept rather than restarted.
+	// It is counted under the heartbeat reason,
+	// or under recovery_disabled for Static, Queue and Broadcast consumers without a recovery strategy.
 	IncrementWorkerConsumerIteratorRestart(reason string)
 
 	// IncrementWorkerConsumerIteratorEscalation increments the counter when iterator failures

@@ -260,7 +260,8 @@ type WorkerConsumerConfig struct {
 	// public entry point ([500ms, 30s] when nonzero).
 	PullHeartbeatCap time.Duration `validate:"gte=0"`
 
-	// MaxWaiting caps outstanding pull requests for each per-subject durable.
+	// MaxWaiting caps the pull requests that can wait on each per-subject durable.
+	// Each owner keeps one waiting; a handoff briefly has two owners.
 	// Default: DefaultMaxWaiting (2).
 	MaxWaiting int `default:"2" validate:"gt=0"`
 

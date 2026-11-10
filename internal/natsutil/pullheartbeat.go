@@ -6,10 +6,10 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
-// MinPullHeartbeat and MaxPullHeartbeat are nats.go v1.52.0's validity bounds
+// MinPullHeartbeat and MaxPullHeartbeat are nats.go's validity bounds
 // for an explicit jetstream.PullHeartbeat option: configureConsume and
 // configureMessages both reject a value outside [500ms, 30s] with
-// ErrInvalidOption (jetstream_options.go), and pull.go separately rejects a
+// ErrInvalidOption (jetstream_options.go), and nats.go separately rejects a
 // heartbeat greater than half the expiry ("must be less than 50% of expiry").
 const (
 	MinPullHeartbeat = 500 * time.Millisecond

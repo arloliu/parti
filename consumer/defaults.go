@@ -32,8 +32,8 @@ const (
 	// processing. Increase for higher throughput at the cost of ordering.
 	DefaultMaxAckPending = 1
 
-	// DefaultMaxWaiting is the default maximum number of outstanding pull
-	// requests. Set conservatively to 2 to prevent thundering-herd issues
-	// when managing many partitions per worker.
+	// DefaultMaxWaiting is the default maximum number of pull requests that can
+	// wait on a durable consumer. Each consumer instance keeps one waiting,
+	// so 2 leaves room for the old and the new owner of a partition during a handoff.
 	DefaultMaxWaiting = 2
 )
