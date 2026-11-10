@@ -1,6 +1,10 @@
 package natsutil
 
-import "time"
+import (
+	"time"
+
+	"github.com/nats-io/nats.go/jetstream"
+)
 
 // MinPullHeartbeat and MaxPullHeartbeat are nats.go v1.52.0's validity bounds
 // for an explicit jetstream.PullHeartbeat option: configureConsume and
@@ -49,4 +53,29 @@ func DerivePullHeartbeat(expiry, heartbeatCap time.Duration) time.Duration {
 	}
 
 	return heartbeat
+}
+
+// PullMessagesOpts returns the options every parti pull iterator is created with.
+// PullHeartbeat is derived from expiry and heartbeatCap by [DerivePullHeartbeat].
+//
+// PullThresholdMessages(1) makes nats.go issue the next pull request
+// only once the previous one is used up,
+// so an iterator normally has at most one pull request waiting on the server.
+// With nats.go's default threshold (half the batch) one iterator overlaps
+// pull requests, and nats-server handles overlap badly in two ways:
+// a request that does not fit in the consumer's MaxWaiting is dropped without a reply,
+// and when one of two overlapping requests ends, the server forgets the inbox they share,
+// so after a consumer leader change the surviving request gets no "409 Leadership Change".
+// In both cases no request is left on the server while the client still expects messages,
+// so delivery stalls until the heartbeat is missed.
+//
+// A lost request or message can still leave the client waiting with nothing on the server;
+// the missed heartbeat remains the recovery for that.
+func PullMessagesOpts(batch int, expiry, heartbeatCap time.Duration) []jetstream.PullMessagesOpt {
+	return []jetstream.PullMessagesOpt{
+		jetstream.PullMaxMessages(batch),
+		jetstream.PullThresholdMessages(1),
+		jetstream.PullExpiry(expiry),
+		jetstream.PullHeartbeat(DerivePullHeartbeat(expiry, heartbeatCap)),
+	}
 }

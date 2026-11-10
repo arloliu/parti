@@ -271,18 +271,12 @@ func NewQueue(
 	}, nil
 }
 
-// makeDefaultIterFactory returns the default messages iterator factory, with
-// PullHeartbeat derived by natsutil.DerivePullHeartbeat from the expiry
+// makeDefaultIterFactory returns the default messages iterator factory.
+// Its options come from natsutil.PullMessagesOpts, with the expiry
 // passed at call time and heartbeatCap fixed at construction time.
 func makeDefaultIterFactory(heartbeatCap time.Duration) func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error) {
 	return func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error) {
-		heartbeat := natsutil.DerivePullHeartbeat(expiry, heartbeatCap)
-
-		return cons.Messages(
-			jetstream.PullMaxMessages(batch),
-			jetstream.PullExpiry(expiry),
-			jetstream.PullHeartbeat(heartbeat),
-		)
+		return cons.Messages(natsutil.PullMessagesOpts(batch, expiry, heartbeatCap)...)
 	}
 }
 

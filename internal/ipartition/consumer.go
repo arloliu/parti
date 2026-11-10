@@ -301,12 +301,8 @@ func (c *JSConsumer) run(ctx context.Context) {
 			return
 		}
 
-		heartbeat := natsutil.DerivePullHeartbeat(c.config.FetchTimeout, c.config.PullHeartbeatCap)
-
 		iter, err := cons.Messages(
-			jetstream.PullMaxMessages(c.config.BatchSize),
-			jetstream.PullExpiry(c.config.FetchTimeout),
-			jetstream.PullHeartbeat(heartbeat),
+			natsutil.PullMessagesOpts(c.config.BatchSize, c.config.FetchTimeout, c.config.PullHeartbeatCap)...,
 		)
 		if err != nil {
 			c.config.Metrics.IncrementWorkerConsumerIteratorRestart("transient")
