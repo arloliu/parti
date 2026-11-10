@@ -234,19 +234,28 @@ func (pc *partitionConsumer) Run(ctx context.Context, handler messageHandler) {
 			return
 		}
 
-		exit, iterErr := pc.processIterator(ctx, iter, handler)
-		if exit {
-			return
+		// Drive this iterator until it has been stopped.
+		// A missed heartbeat can leave it in service, so the loop re-enters it.
+		for {
+			exit, iterErr := pc.processIterator(ctx, iter, handler)
+			if exit {
+				return
+			}
+			if iterErr == nil {
+				// Healthy iteration completed —
+				// reset backoff so the next failure episode starts from Base rather than the grown window.
+				pc.retryPrev = 0
+				break
+			}
+			exit, keep := pc.handleIteratorFailure(ctx, iterErr, iter)
+			if exit {
+				return
+			}
+			if !keep {
+				break
+			}
 		}
-		if iterErr != nil && pc.handleIteratorFailure(ctx, iterErr) {
-			return
-		}
-		// Healthy iteration completed (no iterErr) — reset backoff so the next
-		// failure episode starts from Base rather than the grown window.
-		if iterErr == nil {
-			pc.retryPrev = 0
-		}
-		// loop continues to recreate iterator on next iteration
+		// outer loop continues to create a new iterator on next iteration
 	}
 }
 
@@ -294,7 +303,7 @@ func (pc *partitionConsumer) runIteratorEnvelope(
 			// failures and don't go through recovery.Classify). It surfaces a
 			// non-nil stream-not-found error only when ensureConsumer failed —
 			// the Site A signal that the underlying stream is gone.
-			escErr := pc.maybeEscalateIteratorFailures(workCtx)
+			_, escErr := pc.maybeEscalateIteratorFailures(workCtx)
 			if escErr != nil && natsutil.IsStreamNotFound(escErr) {
 				newIter, detourErr := pc.runStreamMissingDetour(workCtx, batch, expiry)
 				if detourErr != nil {
@@ -343,8 +352,21 @@ func (pc *partitionConsumer) runIteratorEnvelope(
 	return iter, nil
 }
 
-func (pc *partitionConsumer) handleIteratorFailure(ctx context.Context, iterErr error) bool {
-	pc.logger.Warn("iterator error", "subject", pc.subject, "error", iterErr)
+// handleIteratorFailure runs failure detection for an error returned by iter.
+//
+// Returns exit=true when the consume loop must end.
+// Returns keep=true when iter is still in service and the caller must keep driving it,
+// which happens only for a missed heartbeat (see keepIteratorOnMiss).
+// In every other case iter is stopped by the time this returns.
+func (pc *partitionConsumer) handleIteratorFailure(
+	ctx context.Context,
+	iterErr error,
+	iter jetstream.MessagesContext,
+) (exit, keep bool) {
+	// A missed heartbeat is logged by keepIteratorOnMiss once its outcome is known.
+	if !errors.Is(iterErr, jetstream.ErrNoHeartbeat) {
+		pc.logger.Warn("iterator error", "subject", pc.subject, "error", iterErr)
+	}
 
 	// When recovery is disabled, use the pre-existing escalation mechanism.
 	if pc.recovery == nil {
@@ -364,15 +386,38 @@ func (pc *partitionConsumer) handleIteratorFailure(ctx context.Context, iterErr 
 		// otherwise-infinite retry loop using the same
 		// RecoveryRetry.MaxAttempts cap as the recovery-enabled path.
 		// (v2 P0-A fix.)
-		if escErr := pc.maybeEscalateIteratorFailures(ctx); escErr != nil && natsutil.IsStreamNotFound(escErr) {
+		replaced, escErr := pc.maybeEscalateIteratorFailures(ctx)
+		streamMissing := escErr != nil && natsutil.IsStreamNotFound(escErr)
+		// The escalation swaps pc.consumer when it rebinds the durable;
+		// the iterator of a replaced handle is never kept.
+		if pc.keepIteratorOnMiss(ctx, iter, iterErr, !streamMissing && !replaced) {
+			return false, true
+		}
+		if streamMissing {
 			wrapped := fmt.Errorf("%w: stream %q: %w", types.ErrStreamMissing, pc.streamName, escErr)
-			return pc.handleStreamMissingFailure(ctx, iterErr, wrapped)
+			return pc.handleStreamMissingFailure(ctx, iterErr, wrapped), false
 		}
 
-		return pc.delayWithBackoffOrExit(ctx, "iterate")
+		return pc.delayWithBackoffOrExit(ctx, "iterate"), false
 	}
 
 	action, newCons, classifyErr := pc.recovery.Classify(ctx, iterErr, pc.consumerInfoFn(), pc.consumerConfig, pc.recreateFn())
+	// ActionBackoff is the only outcome that leaves both stream and consumer handle as they were.
+	if pc.keepIteratorOnMiss(ctx, iter, iterErr, action == recovery.ActionBackoff) {
+		return false, true
+	}
+
+	return pc.applyRecoveryAction(ctx, action, newCons, classifyErr), false
+}
+
+// applyRecoveryAction carries out the action chosen by recovery.Classify for an iterator that has already been stopped.
+// Returns true when the consume loop must end.
+func (pc *partitionConsumer) applyRecoveryAction(
+	ctx context.Context,
+	action recovery.Action,
+	newCons jetstream.Consumer,
+	classifyErr error,
+) bool {
 	switch action {
 	case recovery.ActionExit:
 		return true
@@ -419,6 +464,42 @@ func (pc *partitionConsumer) handleIteratorFailure(ctx context.Context, iterErr 
 	}
 
 	return pc.delayWithBackoffOrExit(ctx, "iterate")
+}
+
+// keepIteratorOnMiss decides whether iter stays in service after iterErr.
+//
+// A missed pull heartbeat leaves a nats.go iterator usable:
+// the next Next() re-issues the pull on the same inbox.
+// Stopping it would discard messages already in flight to that inbox,
+// which the server redelivers only after AckWait.
+// So the iterator is kept when detection left the stream and consumer handle alone (undisturbed)
+// and pulls are not suppressed.
+// Otherwise it is stopped here, before any backoff the caller applies.
+//
+// Any other error returns false: processIterator has already stopped the iterator.
+func (pc *partitionConsumer) keepIteratorOnMiss(
+	ctx context.Context,
+	iter jetstream.MessagesContext,
+	iterErr error,
+	undisturbed bool,
+) bool {
+	if !errors.Is(iterErr, jetstream.ErrNoHeartbeat) {
+		return false
+	}
+
+	suppressed := false
+	if undisturbed && pc.checkPullSuppression != nil {
+		suppressed, _ = pc.checkPullSuppression(ctx)
+	}
+	if undisturbed && !suppressed {
+		pc.logger.Warn("pull heartbeat missed; keeping iterator", "subject", pc.subject)
+		return true
+	}
+
+	pc.logger.Warn("iterator error", "subject", pc.subject, "error", iterErr)
+	iter.Stop()
+
+	return false
 }
 
 // Stop cancels the consumption loop.
@@ -515,10 +596,15 @@ func (pc *partitionConsumer) processIterator(
 		msg, err := iter.Next()
 		if err != nil {
 			pc.logger.Debug("iterator next error", "subject", pc.subject, "error", err)
-			iter.Stop()
+			// A missed heartbeat leaves the iterator usable;
+			// handleIteratorFailure decides whether to keep or stop it.
+			if !errors.Is(err, jetstream.ErrNoHeartbeat) {
+				iter.Stop()
+			}
 			if errors.Is(err, jetstream.ErrMsgIteratorClosed) || errors.Is(err, context.Canceled) {
 				return false, nil // graceful shutdown, not an iterator error
 			}
+
 			return false, err
 		}
 
@@ -549,14 +635,18 @@ func (pc *partitionConsumer) startIterStopper(ctx context.Context, iter jetstrea
 // attempts per-subject remediation (recreate/bind the durable) when a burst
 // occurs within the configured window.
 //
+// Returns replaced=true only when remediation rebound the durable and
+// installed the resulting handle as pc.consumer; an iterator built from the
+// previous handle must then not be kept.
+//
 // Returns a non-nil error only when remediation surfaced a stream-not-found
 // classification from the underlying `ensureConsumer` call — this is the
 // signal the iterator-creation envelope (Site A) uses to enter the
 // stream-missing detour. All other remediation outcomes — no escalation,
 // healthy consumer info, transient ensureConsumer error, or successful
-// rebind — return nil; the original iterator-creation error is what the
-// envelope counts against its budget.
-func (pc *partitionConsumer) maybeEscalateIteratorFailures(ctx context.Context) error {
+// rebind — return a nil error; the original iterator-creation error is what
+// the envelope counts against its budget.
+func (pc *partitionConsumer) maybeEscalateIteratorFailures(ctx context.Context) (replaced bool, err error) {
 	pc.iterEscMu.Lock()
 	defer pc.iterEscMu.Unlock()
 
@@ -576,7 +666,7 @@ func (pc *partitionConsumer) maybeEscalateIteratorFailures(ctx context.Context) 
 	lastEsc := pc.lastEscalation
 	canEscalate := count >= threshold && (lastEsc.IsZero() || now.Sub(lastEsc) >= window)
 	if !canEscalate {
-		return nil
+		return false, nil
 	}
 
 	if pc.config.Metrics != nil {
@@ -608,7 +698,7 @@ func (pc *partitionConsumer) maybeEscalateIteratorFailures(ctx context.Context) 
 			// no longer load-bearing, so a later episode receives the
 			// full RecoveryRetry.MaxAttempts budget. (v3 P1 fix.)
 			pc.streamMissingFailures.Store(0)
-			return nil
+			return false, nil
 		}
 	}
 
@@ -624,10 +714,10 @@ func (pc *partitionConsumer) maybeEscalateIteratorFailures(ctx context.Context) 
 		// the envelope's per-attempt budget already accounts for them
 		// via the original iterFactory error.
 		if natsutil.IsStreamNotFound(err) {
-			return err
+			return false, err
 		}
 
-		return nil
+		return false, nil
 	}
 
 	// Update loop reference under lock
@@ -641,7 +731,7 @@ func (pc *partitionConsumer) maybeEscalateIteratorFailures(ctx context.Context) 
 
 	pc.logger.Info("per-subject consumer remediated", "subject", pc.subject, "durable", pc.durableName)
 
-	return nil
+	return true, nil
 }
 
 // ensureConsumer creates or updates the durable consumer.
@@ -690,7 +780,7 @@ func (pc *partitionConsumer) ensureConsumer(ctx context.Context) (jetstream.Cons
 // delayWithBackoffOrExit applies jittered exponential backoff according to config.
 // The previous delay (pc.retryPrev) is threaded through so the window grows toward Max on
 // consecutive failures; pc.retryPrev is updated in-place. Reset pc.retryPrev to 0 at every
-// successful iteration point (ActionContinue in handleIteratorFailure, successful
+// successful iteration point (ActionContinue in applyRecoveryAction, successful
 // processIterator call in Run) so a recovered consumer starts fresh from Base.
 // Guarded by: only called from the consume loop goroutine.
 func (pc *partitionConsumer) delayWithBackoffOrExit(ctx context.Context, purpose string) bool { //nolint:unparam // purpose is used for logging/metrics; all sites currently pass "iterate" but may diverge.
