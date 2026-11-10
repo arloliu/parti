@@ -96,10 +96,8 @@ type CommonConfig struct {
 	// ErrInvalidConfig. See [WithPullHeartbeatCap].
 	PullHeartbeatCap time.Duration `validate:"gte=0"`
 
-	// MaxWaiting is the maximum number of outstanding pull requests allowed.
-	//
-	// This controls the pre-fetch buffer. A value of 2 with BatchSize of 1 means
-	// there can be 2 messages buffered locally (1 being processed, 1 ready).
+	// MaxWaiting is the maximum number of pull requests that can wait on the durable consumer.
+	// See [WithMaxWaiting].
 	//
 	// Default: 2.
 	MaxWaiting int `default:"2" validate:"gt=0"`

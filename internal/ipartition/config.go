@@ -53,7 +53,7 @@ type ConsumerConfig struct {
 	// validated public entry point ([500ms, 30s] when nonzero).
 	PullHeartbeatCap time.Duration
 
-	// MaxWaiting is the maximum number of outstanding pull requests allowed.
+	// MaxWaiting is the maximum number of pull requests that can wait on the durable consumer.
 	// Default: 2.
 	MaxWaiting int `default:"2" validate:"gt=0"`
 

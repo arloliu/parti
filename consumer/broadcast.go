@@ -82,6 +82,10 @@ type BroadcastConfig struct {
 
 	// IteratorFactory optionally overrides the internal iterator creation logic.
 	// This is primarily used for testing to inject mock iterators.
+	// A custom factory chooses the pull options itself.
+	// The default one requests the next batch only when the previous pull request is used up
+	// (jetstream.PullThresholdMessages(1)); without it one iterator overlaps pull requests,
+	// and the server drops those beyond MaxWaiting without a reply.
 	IteratorFactory func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error)
 
 	// RecoveryStrategy defines how a recreated consumer resumes after an unexpected deletion.
