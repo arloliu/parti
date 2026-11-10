@@ -402,7 +402,11 @@ func WithPullHeartbeatCap(d time.Duration) Option {
 	})
 }
 
-// WithMaxWaiting caps outstanding pull requests.
+// WithMaxWaiting caps the pull requests that can wait on the durable consumer at once.
+// Each running consumer instance keeps one pull request waiting,
+// so a durable shared by several instances (a Queue) needs at least one slot per instance.
+// The server drops a pull request beyond the cap without a reply.
+// MaxWaiting cannot be changed on an existing durable consumer.
 func WithMaxWaiting(n int) Option {
 	return universalOpt(func(o *options) {
 		if n > 0 {
