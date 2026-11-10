@@ -1364,7 +1364,7 @@ func TestPartitionConsumer_SiteB_ActionContinue_ResetsStreamMissingCounter(t *te
 	// Driving ErrConsumerDeleted through handleIteratorFailure runs:
 	//   Classify → ErrorConsumerGone → recover() → recreate() → success
 	//   → ActionContinue → reset branch (including streamMissingFailures.Store(0)).
-	exit := pc.handleIteratorFailure(context.Background(), jetstream.ErrConsumerDeleted)
+	exit, _ := pc.handleIteratorFailure(context.Background(), jetstream.ErrConsumerDeleted, nil)
 	require.False(t, exit, "ActionContinue must not exit the loop")
 
 	require.Equal(t, int32(0), pc.streamMissingFailures.Load(),
@@ -1444,9 +1444,10 @@ func TestPartitionConsumer_NilRecovery_RemediationSuccess_ResetsCounter(t *testi
 
 	// Drive escalation directly: stale Info + ensureConsumer success →
 	// remediation success branch.
-	escErr := pc.maybeEscalateIteratorFailures(context.Background())
+	replaced, escErr := pc.maybeEscalateIteratorFailures(context.Background())
 	require.NoError(t, escErr,
 		"successful remediation must NOT return an error to the caller")
+	require.True(t, replaced, "a successful rebind must be reported as a replaced consumer")
 
 	require.Equal(t, int32(0), pc.streamMissingFailures.Load(),
 		"successful nil-recovery remediation must reset streamMissingFailures so the next stream-missing episode receives the full MaxAttempts budget")
@@ -1456,4 +1457,612 @@ func TestPartitionConsumer_NilRecovery_RemediationSuccess_ResetsCounter(t *testi
 	pc.consumerMu.RUnlock()
 	require.Same(t, jetstream.Consumer(rebuiltCons), got,
 		"successful remediation must swap pc.consumer to the rebuilt one")
+}
+
+// --- heartbeat-miss iterator retention ---
+//
+// A missed pull heartbeat (jetstream.ErrNoHeartbeat) leaves the nats.go
+// iterator usable: the next Next() re-issues the pull on the same inbox.
+// Stopping it discards messages already in flight to that inbox. These tests
+// pin that Run keeps the iterator across a miss while the consumer handle is
+// unchanged, and still replaces it when detection swaps the consumer or
+// takes the stream-missing path.
+
+// hbStep is one scripted result of Next().
+type hbStep struct {
+	msg jetstream.Msg
+	err error
+}
+
+func hbMiss() hbStep         { return hbStep{err: jetstream.ErrNoHeartbeat} }
+func hbData(d string) hbStep { return hbStep{msg: &mockMsg{data: []byte(d)}} }
+func hbMisses(n int) []hbStep {
+	return slices.Repeat([]hbStep{hbMiss()}, n)
+}
+
+// scriptedIter returns its steps from successive Next() calls and then blocks
+// until Stop(). After Stop() every Next() returns ErrMsgIteratorClosed,
+// mirroring a stopped nats.go iterator. It never spins.
+type scriptedIter struct {
+	mu       sync.Mutex
+	steps    []hbStep
+	idx      int
+	done     chan struct{}
+	stopOnce sync.Once
+	stops    atomic.Int32
+	missFlag *atomic.Bool  // set when an ErrNoHeartbeat step is returned
+	missGap  time.Duration // delay before each ErrNoHeartbeat step is returned
+	// reentered is closed when a live iterator's Next() is entered with the script exhausted:
+	// the loop came back to this iterator and is now blocked in it.
+	reentered     chan struct{}
+	reenteredOnce sync.Once
+}
+
+func newScriptedIter(missFlag *atomic.Bool, steps ...hbStep) *scriptedIter {
+	return &scriptedIter{
+		steps:     steps,
+		done:      make(chan struct{}),
+		missFlag:  missFlag,
+		reentered: make(chan struct{}),
+	}
+}
+
+func (s *scriptedIter) Next(_ ...jetstream.NextOpt) (jetstream.Msg, error) {
+	select {
+	case <-s.done:
+		return nil, jetstream.ErrMsgIteratorClosed
+	default:
+	}
+
+	s.mu.Lock()
+	if s.idx >= len(s.steps) {
+		s.mu.Unlock()
+		s.reenteredOnce.Do(func() { close(s.reentered) })
+		<-s.done
+
+		return nil, jetstream.ErrMsgIteratorClosed
+	}
+	st := s.steps[s.idx]
+	s.idx++
+	s.mu.Unlock()
+
+	if st.err != nil && errors.Is(st.err, jetstream.ErrNoHeartbeat) {
+		if s.missGap > 0 {
+			select {
+			case <-time.After(s.missGap):
+			case <-s.done:
+				return nil, jetstream.ErrMsgIteratorClosed
+			}
+		}
+		if s.missFlag != nil {
+			s.missFlag.Store(true)
+		}
+	}
+
+	return st.msg, st.err
+}
+
+func (s *scriptedIter) Stop() {
+	s.stops.Add(1)
+	s.stopOnce.Do(func() { close(s.done) })
+}
+
+func (s *scriptedIter) Drain() {}
+
+// hbMetrics records iterator restart reasons.
+type hbMetrics struct {
+	types.NopMetrics
+
+	mu       sync.Mutex
+	restarts map[string]int
+}
+
+func (m *hbMetrics) IncrementWorkerConsumerIteratorRestart(reason string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.restarts == nil {
+		m.restarts = make(map[string]int)
+	}
+	m.restarts[reason]++
+}
+
+func (m *hbMetrics) count(reason string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.restarts[reason]
+}
+
+// hbConsumer is a consumer stub with a configurable Info() result. Info calls
+// are counted only after the first heartbeat miss, so the startup checkpoint
+// seed does not count as a detection probe.
+type hbConsumer struct {
+	jetstream.Consumer
+
+	infoErr error
+	armed   *atomic.Bool
+	probes  atomic.Int32
+}
+
+func (c *hbConsumer) Info(_ context.Context) (*jetstream.ConsumerInfo, error) {
+	if c.armed != nil && c.armed.Load() {
+		c.probes.Add(1)
+	}
+	if c.infoErr != nil {
+		return nil, c.infoErr
+	}
+
+	return &jetstream.ConsumerInfo{}, nil
+}
+
+// hbRun is a partitionConsumer driven by scripted iterators.
+type hbRun struct {
+	pc           *partitionConsumer
+	metrics      *hbMetrics
+	handled      chan string
+	cancel       context.CancelFunc
+	done         chan struct{}
+	armed        atomic.Bool
+	factoryCalls atomic.Int32
+
+	mu       sync.Mutex
+	iters    []*scriptedIter
+	consSeen []jetstream.Consumer
+}
+
+type hbOpts struct {
+	strategy RecoveryStrategy
+	cons     jetstream.Consumer
+	js       jetstream.JetStream
+	backoff  time.Duration
+	// factory returns the iterator for the call-th (1-based) iterFactory call.
+	factory func(call int, cons jetstream.Consumer) *scriptedIter
+	mutate  func(*partitionConsumerConfig)
+	// suppress is the pull-suppression check; nil means never suppressed.
+	suppress func(ctx context.Context) (bool, string)
+}
+
+func newHBRun() *hbRun {
+	return &hbRun{
+		metrics: &hbMetrics{},
+		handled: make(chan string, 16),
+		done:    make(chan struct{}),
+	}
+}
+
+func (r *hbRun) firstIter() *scriptedIter {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.iters[0]
+}
+
+func (r *hbRun) allIters() []*scriptedIter {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return slices.Clone(r.iters)
+}
+
+func (r *hbRun) lastConsumer() jetstream.Consumer {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.consSeen[len(r.consSeen)-1]
+}
+
+func (r *hbRun) waitHandled(t *testing.T, want string, within time.Duration) {
+	t.Helper()
+	select {
+	case got := <-r.handled:
+		require.Equal(t, want, got)
+	case <-time.After(within):
+		t.Fatalf("message %q not handled within %s (iterFactory calls=%d, heartbeat metric=%d)",
+			want, within, r.factoryCalls.Load(), r.metrics.count("heartbeat"))
+	}
+}
+
+func (r *hbRun) stopAndWait(t *testing.T) {
+	t.Helper()
+	r.cancel()
+	select {
+	case <-r.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
+func (r *hbRun) start(t *testing.T, o hbOpts) {
+	t.Helper()
+
+	cfg := partitionConsumerConfig{
+		BatchSize:        1,
+		FetchTimeout:     50 * time.Millisecond,
+		RecoveryStrategy: o.strategy,
+		Retry:            RetryConfig{Backoff: o.backoff, Base: o.backoff, Multiplier: 1.0, Max: o.backoff},
+		// Both detection paths trigger at the third miss.
+		IteratorEscalationWindow:    time.Minute,
+		IteratorEscalationThreshold: 3,
+		RecoveryRetry: RecoveryRetryConfig{
+			MaxAttempts: 3,
+			BaseBackoff: 5 * time.Millisecond,
+			MaxBackoff:  10 * time.Millisecond,
+		},
+		Metrics: r.metrics,
+	}
+	if o.mutate != nil {
+		o.mutate(&cfg)
+	}
+
+	iterFactory := func(cons jetstream.Consumer, _ int, _ time.Duration) (jetstream.MessagesContext, error) {
+		// The consume loop calls the factory serially.
+		// The call is counted only after the iterator is recorded,
+		// so factoryCalls >= n implies n iterators are visible to the accessors.
+		call := int(r.factoryCalls.Load()) + 1
+		it := o.factory(call, cons)
+		r.mu.Lock()
+		r.iters = append(r.iters, it)
+		r.consSeen = append(r.consSeen, cons)
+		r.mu.Unlock()
+		r.factoryCalls.Add(1)
+
+		return it, nil
+	}
+
+	r.pc = newPartitionConsumer(logging.NewNop(), o.js, cfg, partitionConsumerOpts{
+		streamName:     "STREAM",
+		durableName:    "DUR",
+		subject:        "subj.p1",
+		partitionID:    "p1",
+		consumerConfig: jetstream.ConsumerConfig{Durable: "DUR_p1"},
+		consumer:       o.cons,
+		iterFactory:    iterFactory,
+
+		checkPullSuppression: o.suppress,
+	})
+
+	handler := messageHandlerFunc(func(_ context.Context, msg jetstream.Msg) error {
+		r.handled <- string(msg.Data())
+		return nil
+	})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	r.cancel = cancel
+	t.Cleanup(cancel)
+
+	go func() {
+		defer close(r.done)
+		r.pc.Run(ctx, handler)
+	}()
+}
+
+var hbModes = []struct {
+	name     string
+	strategy RecoveryStrategy
+}{
+	{"recovery_disabled", RecoveryDisabled},
+	{"recovery_enabled", RecoverFromLastProcessed},
+}
+
+// A single heartbeat miss with an unchanged consumer must keep the iterator:
+// no new iterator, no Stop, no backoff.
+func TestPartitionConsumer_HeartbeatMiss_KeepsIterator(t *testing.T) {
+	for _, mode := range hbModes {
+		t.Run(mode.name, func(t *testing.T) {
+			r := newHBRun()
+			r.start(t, hbOpts{
+				strategy: mode.strategy,
+				cons:     &hbConsumer{},
+				// Large backoff: any backoff sleep blows the 1s budget for msg2.
+				backoff: 5 * time.Second,
+				factory: func(call int, _ jetstream.Consumer) *scriptedIter {
+					if call == 1 {
+						return newScriptedIter(&r.armed, hbData("msg1"), hbMiss(), hbData("msg2"))
+					}
+
+					return newScriptedIter(&r.armed) // a replacement has nothing in flight
+				},
+			})
+
+			r.waitHandled(t, "msg1", 2*time.Second)
+			r.waitHandled(t, "msg2", time.Second)
+
+			require.Equal(t, int32(1), r.factoryCalls.Load(), "iterator must not be recreated after a heartbeat miss")
+			require.Equal(t, int32(0), r.firstIter().stops.Load(), "iterator must not be stopped by a heartbeat miss")
+			require.Equal(t, 1, r.metrics.count("heartbeat"), "the miss must still be reported")
+
+			r.stopAndWait(t)
+		})
+	}
+}
+
+// Sustained misses against a healthy consumer (the production case): the
+// detection probe still runs, but the iterator is kept throughout.
+func TestPartitionConsumer_HeartbeatMiss_SustainedHealthyConsumer_KeepsIterator(t *testing.T) {
+	const threshold = 3 // matches IteratorEscalationThreshold and the recovery burst threshold
+
+	for _, mode := range hbModes {
+		t.Run(mode.name, func(t *testing.T) {
+			r := newHBRun()
+			cons := &hbConsumer{armed: &r.armed}
+			r.start(t, hbOpts{
+				strategy: mode.strategy,
+				cons:     cons,
+				backoff:  5 * time.Second,
+				factory: func(call int, _ jetstream.Consumer) *scriptedIter {
+					if call == 1 {
+						return newScriptedIter(&r.armed, append(hbMisses(threshold+1), hbData("msg1"))...)
+					}
+
+					return newScriptedIter(&r.armed)
+				},
+			})
+
+			r.waitHandled(t, "msg1", time.Second)
+
+			require.Equal(t, int32(1), r.factoryCalls.Load(), "iterator must not be recreated across sustained misses")
+			require.Equal(t, int32(0), r.firstIter().stops.Load(), "iterator must not be stopped across sustained misses")
+			require.GreaterOrEqual(t, cons.probes.Load(), int32(1), "detection must still probe consumer Info")
+			require.Equal(t, threshold+1, r.metrics.count("heartbeat"), "every miss must be reported")
+
+			r.stopAndWait(t)
+		})
+	}
+}
+
+// Guard: when detection finds the consumer really gone and swaps the handle,
+// the old iterator is stopped and a new one is built from the new consumer.
+func TestPartitionConsumer_HeartbeatMiss_ConsumerGone_ReplacesIterator(t *testing.T) {
+	for _, mode := range hbModes {
+		t.Run(mode.name, func(t *testing.T) {
+			r := newHBRun()
+			original := &hbConsumer{infoErr: jetstream.ErrConsumerNotFound, armed: &r.armed}
+			rebuilt := &hbConsumer{}
+			js := &streamMissingJS{plan: []consumerOutcome{{cons: rebuilt}}}
+
+			r.start(t, hbOpts{
+				strategy: mode.strategy,
+				cons:     original,
+				js:       js,
+				backoff:  5 * time.Millisecond,
+				factory: func(call int, cons jetstream.Consumer) *scriptedIter {
+					switch {
+					case cons == jetstream.Consumer(rebuilt):
+						return newScriptedIter(&r.armed, hbData("after"))
+					case call == 1:
+						return newScriptedIter(&r.armed, hbMisses(3)...)
+					default:
+						return newScriptedIter(&r.armed, hbMiss())
+					}
+				},
+			})
+
+			r.waitHandled(t, "after", 3*time.Second)
+
+			require.GreaterOrEqual(t, r.firstIter().stops.Load(), int32(1), "old iterator must be stopped once the consumer is swapped")
+			require.Same(t, jetstream.Consumer(rebuilt), r.lastConsumer(), "new iterator must be built from the new consumer")
+			require.Same(t, jetstream.Consumer(rebuilt), r.pc.Consumer())
+
+			r.stopAndWait(t)
+		})
+	}
+}
+
+// Guard: a heartbeat-burst whose Info probe reports the stream gone takes the
+// stream-missing detour (hook, rebuild) and the old iterator is stopped.
+func TestPartitionConsumer_HeartbeatMiss_StreamMissing_RecoveryEnabled_Detours(t *testing.T) {
+	r := newHBRun()
+	original := &hbConsumer{infoErr: jetstream.ErrStreamNotFound, armed: &r.armed}
+	rebuilt := &hbConsumer{}
+	js := &streamMissingJS{plan: []consumerOutcome{{cons: rebuilt}}}
+
+	var hookCalls atomic.Int32
+	r.start(t, hbOpts{
+		strategy: RecoverFromLastProcessed,
+		cons:     original,
+		js:       js,
+		backoff:  5 * time.Millisecond,
+		mutate: func(c *partitionConsumerConfig) {
+			c.StreamMissingHook = func(string) error { hookCalls.Add(1); return nil }
+		},
+		factory: func(call int, cons jetstream.Consumer) *scriptedIter {
+			switch {
+			case cons == jetstream.Consumer(rebuilt):
+				return newScriptedIter(&r.armed, hbData("after"))
+			case call == 1:
+				return newScriptedIter(&r.armed, hbMisses(3)...)
+			default:
+				return newScriptedIter(&r.armed, hbMiss())
+			}
+		},
+	})
+
+	r.waitHandled(t, "after", 3*time.Second)
+
+	require.Equal(t, int32(1), hookCalls.Load(), "stream-missing hook must fire once")
+	require.GreaterOrEqual(t, r.firstIter().stops.Load(), int32(1), "old iterator must be stopped on the stream-missing detour")
+	require.Same(t, jetstream.Consumer(rebuilt), r.lastConsumer())
+
+	r.stopAndWait(t)
+}
+
+// Guard: with recovery disabled, heartbeat misses whose escalation finds the
+// stream gone must still be bounded by RecoveryRetry.MaxAttempts and end in
+// OnPermanentFailure, stopping every iterator along the way.
+func TestPartitionConsumer_HeartbeatMiss_StreamMissing_RecoveryDisabled_BoundsAndFiresPermanent(t *testing.T) {
+	r := newHBRun()
+	original := &hbConsumer{infoErr: jetstream.ErrConsumerNotFound, armed: &r.armed}
+	js := &streamMissingJS{} // empty plan: CreateOrUpdateConsumer returns ErrStreamNotFound
+
+	var permanentCalls atomic.Int32
+	var permanentErr atomic.Pointer[error]
+	r.start(t, hbOpts{
+		strategy: RecoveryDisabled,
+		cons:     original,
+		js:       js,
+		backoff:  5 * time.Millisecond,
+		mutate: func(c *partitionConsumerConfig) {
+			// Every miss escalates: misses are 30ms apart, the window is 20ms.
+			c.IteratorEscalationThreshold = 1
+			c.IteratorEscalationWindow = 20 * time.Millisecond
+			c.OnPermanentFailure = func(_ string, err error) {
+				permanentCalls.Add(1)
+				permanentErr.Store(&err)
+			}
+		},
+		factory: func(_ int, _ jetstream.Consumer) *scriptedIter {
+			it := newScriptedIter(&r.armed, hbMisses(10)...)
+			it.missGap = 30 * time.Millisecond
+
+			return it
+		},
+	})
+
+	select {
+	case <-r.done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Run did not exit on stream-missing exhaustion (iterFactory calls=%d, permanent=%d)",
+			r.factoryCalls.Load(), permanentCalls.Load())
+	}
+
+	require.Equal(t, int32(1), permanentCalls.Load())
+	require.ErrorIs(t, *permanentErr.Load(), types.ErrStreamMissing)
+	for i, it := range r.allIters() {
+		require.GreaterOrEqual(t, it.stops.Load(), int32(1), "iterator %d must be stopped before Run exits", i)
+	}
+}
+
+// Exit: a kept iterator is stopped when the loop exits on ctx cancel.
+func TestPartitionConsumer_HeartbeatMiss_KeptIteratorStoppedOnCancel(t *testing.T) {
+	for _, mode := range hbModes {
+		t.Run(mode.name, func(t *testing.T) {
+			r := newHBRun()
+			first := newScriptedIter(&r.armed, hbMiss())
+			r.start(t, hbOpts{
+				strategy: mode.strategy,
+				cons:     &hbConsumer{},
+				backoff:  5 * time.Second,
+				factory: func(call int, _ jetstream.Consumer) *scriptedIter {
+					if call == 1 {
+						return first
+					}
+
+					return newScriptedIter(&r.armed)
+				},
+			})
+
+			// The loop must come back to the same iterator after the miss and block in it.
+			select {
+			case <-first.reentered:
+			case <-time.After(2 * time.Second):
+				t.Fatalf("loop did not re-enter the iterator after a heartbeat miss (iterFactory calls=%d, stops=%d)",
+					r.factoryCalls.Load(), first.stops.Load())
+			}
+			require.Equal(t, int32(0), first.stops.Load(), "iterator must still be in service before the cancel")
+			require.Equal(t, int32(1), r.factoryCalls.Load(), "iterator must not be recreated after a heartbeat miss")
+
+			r.stopAndWait(t)
+
+			for i, it := range r.allIters() {
+				require.GreaterOrEqual(t, it.stops.Load(), int32(1), "iterator %d leaked after Run returned", i)
+			}
+		})
+	}
+}
+
+// A heartbeat miss while pulls are suppressed must not keep the iterator:
+// re-entering it would issue a new pull and skip the suppression wait.
+func TestPartitionConsumer_HeartbeatMiss_PullSuppressed_StopsIterator(t *testing.T) {
+	for _, mode := range hbModes {
+		t.Run(mode.name, func(t *testing.T) {
+			r := newHBRun()
+			var suppressedChecks atomic.Int32 // checks answered "suppressed"
+			r.start(t, hbOpts{
+				strategy: mode.strategy,
+				cons:     &hbConsumer{},
+				backoff:  5 * time.Millisecond,
+				// Suppression turns on at the miss and stays on.
+				suppress: func(context.Context) (bool, string) {
+					suppressed := r.armed.Load()
+					if suppressed {
+						suppressedChecks.Add(1)
+					}
+
+					return suppressed, "test"
+				},
+				factory: func(_ int, _ jetstream.Consumer) *scriptedIter {
+					return newScriptedIter(&r.armed, hbData("msg1"), hbMiss(), hbData("late"))
+				},
+			})
+
+			r.waitHandled(t, "msg1", 2*time.Second)
+
+			require.Eventually(t, func() bool {
+				return r.firstIter().stops.Load() >= 1
+			}, 2*time.Second, 5*time.Millisecond, "iterator must be stopped by a heartbeat miss while pulls are suppressed")
+
+			// The first suppressed check is the keep decision at the miss.
+			// Each later one comes from the outer loop's suppression wait, after the backoff;
+			// the third proves a full wait passed without leaving it.
+			require.Eventually(t, func() bool {
+				return suppressedChecks.Load() >= 3
+			}, 2*time.Second, 5*time.Millisecond, "loop must reach and stay in the suppression wait")
+			require.Empty(t, r.handled, "a suppressed partition must not keep reading the old iterator")
+			require.Equal(t, int32(1), r.factoryCalls.Load(), "no new iterator may be built while pulls are suppressed")
+			require.Equal(t, 1, r.metrics.count("heartbeat"), "the miss must still be reported")
+			require.Zero(t, r.metrics.count("transient"), "a missed heartbeat must not be reported as a transient failure")
+
+			r.stopAndWait(t)
+		})
+	}
+}
+
+// uncomparableConsumer is a consumer decorator held by value.
+// Its slice field makes == on a jetstream.Consumer holding it panic,
+// as it would for a caller-supplied decorator of the same shape.
+type uncomparableConsumer struct {
+	jetstream.Consumer
+
+	tags []string
+}
+
+func (uncomparableConsumer) Info(context.Context) (*jetstream.ConsumerInfo, error) {
+	return &jetstream.ConsumerInfo{}, nil
+}
+
+// jetstream.Consumer implementations need not be comparable,
+// so failure handling must never compare consumer handles.
+func TestPartitionConsumer_IteratorFailure_UncomparableConsumer(t *testing.T) {
+	tests := []struct {
+		name      string
+		first     []hbStep // script of the first iterator
+		next      []hbStep // script of every later iterator
+		wantIters int32
+	}{
+		{"heartbeat_miss", []hbStep{hbMiss(), hbData("after")}, nil, 1},
+		{"transient_error", []hbStep{{err: errors.New("transient")}}, []hbStep{hbData("after")}, 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newHBRun()
+			r.start(t, hbOpts{
+				strategy: RecoveryDisabled,
+				cons:     uncomparableConsumer{tags: []string{"decorated"}},
+				backoff:  5 * time.Millisecond,
+				factory: func(call int, _ jetstream.Consumer) *scriptedIter {
+					if call == 1 {
+						return newScriptedIter(&r.armed, tt.first...)
+					}
+
+					return newScriptedIter(&r.armed, tt.next...)
+				},
+			})
+
+			r.waitHandled(t, "after", 2*time.Second)
+			require.Equal(t, tt.wantIters, r.factoryCalls.Load())
+
+			r.stopAndWait(t)
+		})
+	}
 }
