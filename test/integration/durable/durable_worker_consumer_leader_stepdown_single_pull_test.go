@@ -21,8 +21,6 @@ package durable_test
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -130,26 +128,14 @@ func TestWorkerConsumer_LeaderStepdown_SinglePull_NoMissedHeartbeat(t *testing.T
 			require.NoError(t, wc.UpdateWorkerConsumer(ctx, "worker-SD", []parti.Partition{{Keys: []string{"1"}}}))
 
 			// The durable name is derived internally; locate it via the stream.
-			var name string
-			require.Eventually(t, func() bool {
-				stream, streamErr := js.Stream(ctx, stepdownHBStream)
-				if streamErr != nil {
-					return false
-				}
-				for ci := range stream.ListConsumers(ctx).Info() {
-					name = ci.Name
-					return true
-				}
-
-				return false
-			}, 5*time.Second, 50*time.Millisecond, "per-partition durable not found")
+			cons := testutil.WaitSoleConsumer(t, js, stepdownHBStream)
 
 			// peakWaiting is the most pull requests any consumer info reported waiting.
 			peakWaiting := 0
 			waitInfo := func(timeout time.Duration, what string, pred func(*jetstream.ConsumerInfo) bool) *jetstream.ConsumerInfo {
 				t.Helper()
 
-				return waitStepdownHBInfo(t, js, name, timeout, what, func(ci *jetstream.ConsumerInfo) bool {
+				return testutil.WaitConsumerInfo(t, cons, timeout, what, func(ci *jetstream.ConsumerInfo) bool {
 					peakWaiting = max(peakWaiting, ci.NumWaiting)
 
 					return pred(ci)
@@ -169,21 +155,14 @@ func TestWorkerConsumer_LeaderStepdown_SinglePull_NoMissedHeartbeat(t *testing.T
 			}, expiry+10*time.Second, 20*time.Millisecond, "pull requests before the stepdown")
 			before := waitInfo(5*time.Second, "one pull request waiting with current replicas",
 				func(ci *jetstream.ConsumerInfo) bool {
-					return ci.NumWaiting == 1 && stepdownHBReplicasCurrent(ci)
+					return ci.NumWaiting == 1 && testutil.ConsumerReplicasCurrent(ci, 2)
 				})
 			t.Logf("before stepdown: pulls=%d first pull age=%v",
 				pulls.Load(), time.Since(*firstPullAt.Load()).Round(time.Millisecond))
 
 			stepdownAt := time.Now()
-			reply, err := nc.Request(fmt.Sprintf("$JS.API.CONSUMER.LEADER.STEPDOWN.%s.%s", stepdownHBStream, name), nil, 5*time.Second)
-			require.NoError(t, err)
-			var resp struct {
-				Error   *jetstream.APIError `json:"error"`
-				Success bool                `json:"success"`
-			}
-			require.NoError(t, json.Unmarshal(reply.Data, &resp))
-			require.Nil(t, resp.Error, "stepdown reply: %s", reply.Data)
-			require.True(t, resp.Success, "stepdown reply: %s", reply.Data)
+			testutil.RequestConsumerLeaderStepdown(t, nc, cons)
+			// Through waitInfo, so the samples taken during the election count towards peakWaiting.
 			waitInfo(10*time.Second, "new consumer leader", func(ci *jetstream.ConsumerInfo) bool {
 				return ci.Cluster.Leader != "" && ci.Cluster.Leader != before.Cluster.Leader
 			})
@@ -200,11 +179,7 @@ func TestWorkerConsumer_LeaderStepdown_SinglePull_NoMissedHeartbeat(t *testing.T
 
 			// 2. No heartbeat is missed, even once the detection window has passed.
 			time.Sleep(time.Until(stepdownAt.Add(2*heartbeat + 2*time.Second)))
-			metrics.mu.Lock()
-			restarts := fmt.Sprint(metrics.restarts)
-			missed := metrics.restarts["heartbeat"]
-			metrics.mu.Unlock()
-			require.Zero(t, missed, "a consumer leader stepdown must not cause a missed heartbeat; restarts=%s", restarts)
+			require.Zero(t, stepdownHBMissed(metrics), "a consumer leader stepdown must not cause a missed heartbeat")
 
 			// 3. No sampled consumer info showed overlapping pull requests.
 			waitInfo(5*time.Second, "final consumer info", func(*jetstream.ConsumerInfo) bool { return true })

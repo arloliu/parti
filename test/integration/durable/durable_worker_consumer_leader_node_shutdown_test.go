@@ -16,7 +16,6 @@ package durable_test
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -101,19 +100,7 @@ func TestWorkerConsumer_LeaderNodeShutdown_SinglePull_NoMissedHeartbeat(t *testi
 			defer wc.Close(context.Background())
 			require.NoError(t, wc.UpdateWorkerConsumer(ctx, "worker-NS", []parti.Partition{{Keys: []string{"1"}}}))
 
-			var name string
-			require.Eventually(t, func() bool {
-				stream, streamErr := adminJS.Stream(ctx, stepdownHBStream)
-				if streamErr != nil {
-					return false
-				}
-				for ci := range stream.ListConsumers(ctx).Info() {
-					name = ci.Name
-					return true
-				}
-
-				return false
-			}, 5*time.Second, 50*time.Millisecond, "per-partition durable not found")
+			cons := testutil.WaitSoleConsumer(t, adminJS, stepdownHBStream)
 
 			for range seed {
 				_, pubErr := adminJS.Publish(ctx, stepdownHBSubject, []byte("seed"))
@@ -126,24 +113,14 @@ func TestWorkerConsumer_LeaderNodeShutdown_SinglePull_NoMissedHeartbeat(t *testi
 			onClientServer := func(ci *jetstream.ConsumerInfo) bool { return ci.Cluster.Leader == clientServer.Name() }
 			var before *jetstream.ConsumerInfo
 			for range 20 {
-				before = waitStepdownHBInfo(t, adminJS, name, 10*time.Second, "one pull request waiting with current replicas",
+				before = testutil.WaitConsumerInfo(t, cons, 10*time.Second, "one pull request waiting with current replicas",
 					func(ci *jetstream.ConsumerInfo) bool {
-						return ci.Cluster.Leader != "" && ci.NumWaiting == 1 && stepdownHBReplicasCurrent(ci)
+						return ci.Cluster.Leader != "" && ci.NumWaiting == 1 && testutil.ConsumerReplicasCurrent(ci, 2)
 					})
 				if onClientServer(before) == tt.clientOnLeader {
 					break
 				}
-				reply, reqErr := adminNC.Request(
-					fmt.Sprintf("$JS.API.CONSUMER.LEADER.STEPDOWN.%s.%s", stepdownHBStream, name), nil, 5*time.Second)
-				require.NoError(t, reqErr)
-				var resp struct {
-					Error *jetstream.APIError `json:"error"`
-				}
-				require.NoError(t, json.Unmarshal(reply.Data, &resp))
-				require.Nil(t, resp.Error, "stepdown reply: %s", reply.Data)
-				prev := before.Cluster.Leader
-				waitStepdownHBInfo(t, adminJS, name, 10*time.Second, "leader moved",
-					func(ci *jetstream.ConsumerInfo) bool { return ci.Cluster.Leader != "" && ci.Cluster.Leader != prev })
+				testutil.StepDownConsumerLeader(t, adminNC, cons, before.Cluster.Leader)
 			}
 			require.Equal(t, tt.clientOnLeader, onClientServer(before), "could not place the consumer leader")
 			missedBefore := stepdownHBMissed(metrics)

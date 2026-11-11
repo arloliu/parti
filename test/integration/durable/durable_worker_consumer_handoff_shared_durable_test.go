@@ -19,6 +19,7 @@ import (
 	"github.com/arloliu/parti/v2"
 	"github.com/arloliu/parti/v2/internal/durable"
 	"github.com/arloliu/parti/v2/internal/testutil"
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 )
@@ -113,26 +114,14 @@ func TestWorkerConsumer_HandoffOnSharedDurable_MaxWaiting2(t *testing.T) {
 			require.NoError(t, oldWC.UpdateWorkerConsumer(ctx, "worker-old", partitions))
 
 			// Both owners derive the same durable name; locate it via the stream.
-			var name string
-			require.Eventually(t, func() bool {
-				stream, streamErr := js.Stream(ctx, streamName)
-				if streamErr != nil {
-					return false
-				}
-				for ci := range stream.ListConsumers(ctx).Info() {
-					name = ci.Name
-					return true
-				}
-
-				return false
-			}, 5*time.Second, 20*time.Millisecond, "per-partition durable not found")
+			cons := testutil.WaitSoleConsumer(t, js, streamName)
 			numWaiting := func() int {
-				cons, consErr := js.Consumer(ctx, streamName, name)
-				if consErr != nil {
+				info, infoErr := cons.Info(ctx)
+				if infoErr != nil {
 					return -1
 				}
 
-				return cons.CachedInfo().NumWaiting
+				return info.NumWaiting
 			}
 
 			// More than half a batch: the older iterator issues its second, overlapping pull request.
@@ -145,12 +134,20 @@ func TestWorkerConsumer_HandoffOnSharedDurable_MaxWaiting2(t *testing.T) {
 			require.Eventually(t, func() bool { return numWaiting() == tt.oldWaiting }, 5*time.Second, 20*time.Millisecond,
 				"old owner pull requests waiting")
 
+			// The old owner is idle now, so the next pull request on the durable is the new owner's.
+			var newOwnerPulls atomic.Int32
+			sub, err := nc.Subscribe("$JS.API.CONSUMER.MSG.NEXT."+streamName+".*", func(*nats.Msg) { newOwnerPulls.Add(1) })
+			require.NoError(t, err)
+			defer func() { _ = sub.Unsubscribe() }()
+
 			// The new owner starts consuming while the old owner still holds the partition.
 			newMetrics := newTransientCaptureMetrics()
 			newWC := newOwner(&newHandled, newMetrics, nil)
 			defer newWC.Close(context.Background())
 			newStartedAt := time.Now()
 			require.NoError(t, newWC.UpdateWorkerConsumer(ctx, "worker-new", partitions))
+			require.Eventually(t, func() bool { return newOwnerPulls.Load() >= 1 }, 5*time.Second, 5*time.Millisecond,
+				"the new owner did not issue a pull request")
 			// Both slots are in use either way: one request per owner, or two from the old owner.
 			require.Eventually(t, func() bool { return numWaiting() == 2 }, 5*time.Second, 20*time.Millisecond,
 				"two pull requests must be waiting during the handoff")
@@ -166,9 +163,7 @@ func TestWorkerConsumer_HandoffOnSharedDurable_MaxWaiting2(t *testing.T) {
 			t.Logf("new owner handled its first message %v after the release (%v after it started)",
 				time.Since(releasedAt).Round(time.Millisecond), time.Since(newStartedAt).Round(time.Millisecond))
 
-			newMetrics.mu.Lock()
-			missed := newMetrics.restarts["heartbeat"]
-			newMetrics.mu.Unlock()
+			missed := stepdownHBMissed(newMetrics)
 			if tt.wantMiss {
 				require.Positive(t, missed, "the new owner's dropped pull request is recovered by a missed heartbeat")
 			} else {

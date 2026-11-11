@@ -105,7 +105,7 @@ func TestPull_SingleOutstandingRequest_NoStrandAtMaxWaiting2(t *testing.T) {
 			require.NoError(t, err)
 
 			const streamName = "SINGLEPULL"
-			stream, err := js.CreateStream(ctx, jetstream.StreamConfig{
+			_, err = js.CreateStream(ctx, jetstream.StreamConfig{
 				Name:     streamName,
 				Subjects: []string{"single.*"},
 				Storage:  jetstream.MemoryStorage,
@@ -120,21 +120,13 @@ func TestPull_SingleOutstandingRequest_NoStrandAtMaxWaiting2(t *testing.T) {
 			}))
 
 			// Each consumer type names its durable differently; the stream has exactly one.
-			var durable string
-			require.Eventually(t, func() bool {
-				for name := range stream.ConsumerNames(ctx).Name() {
-					durable = name
-				}
-
-				return durable != ""
-			}, 5*time.Second, 20*time.Millisecond, "durable consumer not created")
-
+			cons := testutil.WaitSoleConsumer(t, js, streamName)
 			numWaiting := func() int {
 				t.Helper()
-				cons, consErr := js.Consumer(ctx, streamName, durable)
-				require.NoError(t, consErr)
+				info, infoErr := cons.Info(ctx)
+				require.NoError(t, infoErr)
 
-				return cons.CachedInfo().NumWaiting
+				return info.NumWaiting
 			}
 
 			total := 0
