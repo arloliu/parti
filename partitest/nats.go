@@ -282,8 +282,9 @@ func waitForClusterFormation(t *testing.T, servers []*server.Server, clusterSize
 	}
 }
 
-// waitForJetStreamMetaLeader waits until exactly one server in the cluster
-// reports JetStreamIsLeader()==true. Must be called after waitForClusterFormation.
+// waitForJetStreamMetaLeader waits until a server in the cluster reports
+// JetStreamIsLeader()==true and can place replicas on every server.
+// Must be called after waitForClusterFormation.
 func waitForJetStreamMetaLeader(t *testing.T, servers []*server.Server) {
 	t.Helper()
 
@@ -295,10 +296,12 @@ func waitForJetStreamMetaLeader(t *testing.T, servers []*server.Server) {
 		select {
 		case <-timeout:
 			shutdownServers(servers)
-			t.Fatal("JetStream meta-leader not elected within 15 s")
+			t.Fatal("JetStream meta-leader not elected with all peers placeable within 15 s")
 		case <-ticker.C:
 			for _, s := range servers {
-				if s.JetStreamIsLeader() {
+				// The leader places replicas only on peers whose stats it has received.
+				// Until then an R>1 create fails with "no suitable peers for placement".
+				if s.JetStreamIsLeader() && len(s.JetStreamClusterPeers()) >= len(servers) {
 					return
 				}
 			}
