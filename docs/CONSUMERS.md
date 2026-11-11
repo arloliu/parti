@@ -689,7 +689,7 @@ is gone they log a warning and back off indefinitely, and they
 self-heal only if the stream returns AND a `RecoveryStrategy` is
 enabled — there is no exhaustion or degrade tier for them. When
 `RecoveryStrategy` is disabled, these consumers surface each iterator
-restart with a Warn log and the iterator-restart metric label
+error with a Warn log and the iterator-restart metric label
 `recovery_disabled` instead of cycling silently.
 
 ### Validation
@@ -758,6 +758,7 @@ c, _ := consumer.NewQueue(js, "stream", "consumer", "subject.>", handler,
 | `WithMaxDeliver(n)`               | Max redelivery attempts                       |
 | `WithMaxAckPending(n)`            | Max unacked messages                          |
 | `WithFetchTimeout(duration)`      | Max wait when pulling batch                   |
+| `WithMaxWaiting(n)`               | Pull requests that can wait on the durable at once (default `2`). Each running instance keeps one waiting, so a `Queue` needs at least its instance count. **Not** live-editable; see [Recreating Durable Consumers](RECREATING_DURABLES.md) |
 | `WithManualAck(bool)`             | Disable auto-acknowledgement                  |
 | `WithInactiveThreshold(duration)` | Consumer cleanup threshold                    |
 | `WithRecoveryStrategy(strategy)`  | Auto-recovery on unexpected consumer deletion |

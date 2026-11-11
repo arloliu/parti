@@ -18,7 +18,7 @@
 The server drops a pull request beyond the cap without a reply,
 and the consumer notices only after a missed heartbeat.
 
-In releases after v2.10.2 each running consumer instance keeps **one** pull request waiting,
+From v2.11.0 on, each running consumer instance keeps **one** pull request waiting,
 whatever its `BatchSize`:
 
 | Consumer    | Pull requests waiting on one durable       | `MaxWaiting` needed               |
