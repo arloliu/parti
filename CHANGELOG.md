@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v2.11.0] - 2026-11-11
+
+A consumer reliability release.
+Delivery could stall until a missed pull heartbeat whenever `BatchSize` was more than a few messages
+and `MaxWaiting` was small, which includes the default `MaxWaiting` of 2.
+Consumers now keep one pull request outstanding and no longer tear the pull iterator down on a missed heartbeat.
+Existing durable consumers need no change, and an ordinary rolling update is enough.
+The minimum nats.go version is raised to v1.55.0.
+No API is removed or changed incompatibly.
+
 ### Added
 
 - **`partictl consumers delete` and `partictl consumers verify`** —
@@ -72,6 +82,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The iterator-restart metric still counts every missed heartbeat, including those where the iterator is kept:
   under the `heartbeat` reason, or `recovery_disabled` for `Static`, `Queue`, and `Broadcast` without a recovery strategy.
   A kept miss no longer records a retry or backoff observation.
+- **`partitest.StartEmbeddedNATSCluster` and `StartEmbeddedNATSClusterN` could return before the cluster accepted replicated resources** —
+  they returned as soon as a JetStream meta leader existed.
+  The leader places replicas only on peers whose stats it has received,
+  so creating a replicated stream or consumer right away could fail with `no suitable peers for placement`.
+  They now also wait until the leader sees every server as a placeable peer.
 
 ## [v2.10.2] - 2026-07-17
 

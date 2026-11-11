@@ -271,7 +271,10 @@ partictl consumers apply -f <path> [flags]
   -dry-run   Plan only — emit the same output as consumers plan
 ```
 
-The `-policy` flag is not accepted: precreation is policy-independent.
+`-policy` accepts `warn` or `force`.
+Creating missing consumers does not depend on it.
+`force` additionally enables the delete/recreate repair described under [Force + Repair](#force--repair),
+for targets that set `allowDeleteRecreate`.
 
 Two further subcommands work on existing durables and take no config file:
 
@@ -717,9 +720,11 @@ is found; a fully-precreated consumer set emits only `informational` findings
 and exits 0.
 
 `consumers apply` runs `consumers plan` then creates every missing consumer.
-`--dry-run` makes it behave exactly like `consumers plan`. The `-policy` flag
-is not accepted; precreation is policy-independent (a consumer either exists
-or is created — there is no warn / safe-update / adopt distinction for it).
+`--dry-run` makes it behave exactly like `consumers plan`.
+Creating missing consumers is policy-independent: a consumer either exists or is created.
+`-policy` accepts only `warn` or `force`.
+`force` additionally enables the delete/recreate repair described under [Force + Repair](#force--repair),
+for targets that set `allowDeleteRecreate`.
 
 The `provision` SDK exposes the same surface as `PlanConsumers` and
 `ApplyConsumers`.
