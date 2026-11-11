@@ -245,6 +245,11 @@ spec:
   minReadySeconds: 30  # Allow stabilization window
 ```
 
+These settings pace a rollout only when the pod has a readiness probe that reflects the Manager state
+(see [Health Checks](#health-checks)).
+Without a readiness probe, Kubernetes counts a pod as ready as soon as its containers start,
+so old pods are replaced as fast as new ones are created.
+
 #### Pod Disruption Budget
 
 ```yaml
@@ -585,21 +590,54 @@ hooks := &parti.Hooks{
 ### Scaling Down
 
 1. Stop worker gracefully (SIGTERM)
-2. Worker releases stable ID
-3. Leader detects missing heartbeat
-4. Stabilization window starts
-5. Leader redistributes orphaned partitions
+2. Worker deletes its heartbeat and releases its stable ID
+3. Leader detects the missing heartbeat
+4. Leader waits at least `EmergencyGracePeriod` (default 1.5 × `HeartbeatInterval`)
+5. Leader runs an emergency rebalance and redistributes the orphaned partitions
 
-**Ensure graceful shutdown:**
+A departure does not go through the stabilization window.
+That window applies to workers joining.
+
+### Graceful Shutdown
+
+`Manager.Stop` does not stop the consumer registered with `WithWorkerConsumerUpdater`.
+The application owns that consumer and must stop it, after the Manager:
 
 ```go
 ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 defer cancel()
 
+// 1. Stop the Manager: it gives up its heartbeat, partitions and stable ID.
 if err := mgr.Stop(ctx); err != nil {
     log.Error("shutdown error", "error", err)
 }
+
+// 2. Stop the consumer: its pull loops end and no more messages are delivered.
+if err := dyn.Stop(ctx); err != nil {
+    log.Error("consumer stop error", "error", err)
+}
+
+// 3. Only now release whatever the handler depends on (worker pools, clients).
 ```
+
+Why the order matters:
+
+- **Consumer left running.**
+  After `Manager.Stop` the pull loops keep pulling until the consumer is stopped.
+  A worker that has given up its partitions then still receives their messages.
+- **Consumer stopped first.**
+  A stopped consumer rejects assignment updates with `ErrConsumerStopped`,
+  so a Manager that is still running logs a failed apply and retries until it is stopped.
+- **Handler dependencies released first.**
+  If the handler starts rejecting messages with `Nak()` while the consumer is still pulling,
+  the server redelivers each message at once, and every redelivery counts against `MaxDeliver`.
+  A message that reaches `MaxDeliver` is not delivered again, to this worker or to the next owner.
+  Stop the consumer before the handler stops accepting work.
+
+Stopping the consumer, and removing a partition during a rebalance,
+cancels the `context.Context` passed to the handler for that partition.
+A handler that hands the message to another goroutine and returns
+must expect that context to be cancelled while the work is still running.
 
 ### Rolling Updates
 

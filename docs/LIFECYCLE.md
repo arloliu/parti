@@ -185,7 +185,9 @@ _ = claimer.Release(ctx)
 - If a worker restarts within the TTL window, it will reclaim its previous ID
 - If a worker's key is stale (not renewed within 3 renewal intervals), a restarting worker reclaims it via an atomic revision-checked takeover, recovering worker IDs leaked by ungraceful exits even when the bucket TTL has not yet expired
 - On `Manager.Start`, the stableID bucket's `MaxAge` is reconciled to exactly `WorkerIDTTL`; an operator-created bucket with a different TTL (including `0` / unlimited) is corrected automatically
-- This preserves partition affinity during rolling updates
+- A worker that restarts in place therefore keeps its ID, and with a consistent-hash strategy the same partitions
+- This does not hold for a surge rollout (`maxSurge` ≥ 1), where the new pod starts while the old one still holds its ID:
+  the new pod claims a free ID instead, so partition affinity is not preserved across the rollout
 
 **Pool Exhaustion:**
 - If all IDs are in use, new workers will fail to start

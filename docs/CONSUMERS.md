@@ -210,6 +210,12 @@ mgr, _ := parti.NewManager(cfg, js, src, strategy.NewConsistentHash(),
 )
 ```
 
+**Shutdown order:**
+the Manager does not stop this consumer.
+Stop the Manager first, then call `c.Stop(ctx)`, and only then release what the handler depends on.
+`Stop`, and the removal of a partition during a rebalance, cancel the context passed to the handler.
+See [Graceful Shutdown](OPERATIONS.md#graceful-shutdown) for the reasons.
+
 **Manual Update (without Manager):**
 
 ```go
@@ -367,6 +373,14 @@ msg.Nak()           // Negative ack (immediate redeliver)
 msg.NakWithDelay(d) // Negative ack with delay
 msg.Term()          // Terminate (no redeliver)
 ```
+
+Every redelivery counts against `MaxDeliver`, including the immediate one after `Nak()`.
+A handler that answers every message with `Nak()`, for example because it is shutting down,
+can use up `MaxDeliver` within milliseconds; the message is then not delivered again.
+Prefer `NakWithDelay`, and stop the consumer before the handler stops accepting work.
+
+With `MaxAckPending` above 1, a redelivered message can be processed after messages published later.
+Keep the default of 1 when a consumer needs strict per-subject order.
 
 ---
 
