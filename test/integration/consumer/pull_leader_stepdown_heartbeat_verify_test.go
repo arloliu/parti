@@ -1,7 +1,7 @@
 package consumer_test
 
-// TestVerify_PullLeaderStepdownHeartbeat characterizes nats-server v2.14.1
-// (with nats.go v1.52.0) on a real 3-node embedded cluster.
+// TestVerify_PullLeaderStepdownHeartbeat characterizes nats-server v2.14
+// (with nats.go v1.55.0) on a real 3-node embedded cluster.
 //
 // Hypothesis under test, derived from server/consumer.go
 // (addClusterPendingRequest, removeClusterPendingRequest, checkPendingRequests):
@@ -34,9 +34,6 @@ package consumer_test
 //	go test ./test/integration/consumer/ -run TestVerify_PullLeaderStepdownHeartbeat -count=1 -race -v
 
 import (
-	"context"
-	"encoding/json"
-	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -93,103 +90,6 @@ func (s *leadershipChangeSniffer) since(start time.Time) (int, []time.Duration) 
 	}
 
 	return len(offsets), offsets
-}
-
-// stepdownConsumerInfo fetches consumer info with a short deadline,
-// so a leaderless gap cannot eat the timing window.
-func stepdownConsumerInfo(t *testing.T, cons jetstream.Consumer) (*jetstream.ConsumerInfo, bool) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
-	defer cancel()
-	info, err := cons.Info(ctx)
-	if err != nil || info.Cluster == nil {
-		return nil, false
-	}
-
-	return info, true
-}
-
-// waitStepdownConsumerInfo polls consumer info until pred accepts it.
-func waitStepdownConsumerInfo(
-	t *testing.T, cons jetstream.Consumer, timeout time.Duration, what string,
-	pred func(*jetstream.ConsumerInfo) bool,
-) *jetstream.ConsumerInfo {
-	t.Helper()
-	var last, got *jetstream.ConsumerInfo
-	ok := func() bool {
-		info, fetched := stepdownConsumerInfo(t, cons)
-		if !fetched {
-			return false
-		}
-		last = info
-		if pred(info) {
-			got = info
-		}
-
-		return got != nil
-	}
-	if !waitStepdownCondition(timeout, ok) {
-		waiting := -1
-		if last != nil {
-			waiting = last.NumWaiting
-		}
-		require.FailNowf(t, "consumer info condition not met",
-			"%s: not reached within %v (last NumWaiting=%d)", what, timeout, waiting)
-	}
-
-	return got
-}
-
-func waitStepdownCondition(timeout time.Duration, cond func() bool) bool {
-	deadline := time.Now().Add(timeout)
-	for {
-		if cond() {
-			return true
-		}
-		if time.Now().After(deadline) {
-			return false
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-}
-
-func stepdownReplicasCurrent(info *jetstream.ConsumerInfo) bool {
-	if len(info.Cluster.Replicas) != 2 {
-		return false
-	}
-	for _, replica := range info.Cluster.Replicas {
-		if !replica.Current || replica.Lag != 0 {
-			return false
-		}
-	}
-
-	return true
-}
-
-// stepDownConsumerLeader asks the consumer leader to step down and waits for a different leader.
-// It returns the stepdown request time, how long until info showed the new leader
-// (an upper bound on the election, quantized by the info deadline), and that info.
-func stepDownConsumerLeader(
-	t *testing.T, nc *nats.Conn, cons jetstream.Consumer, stream, name, oldLeader string,
-) (time.Time, time.Duration, *jetstream.ConsumerInfo) {
-	t.Helper()
-	stepdownAt := time.Now()
-	reply, err := nc.Request(fmt.Sprintf("$JS.API.CONSUMER.LEADER.STEPDOWN.%s.%s", stream, name), nil, 5*time.Second)
-	require.NoError(t, err)
-	var resp struct {
-		Error   *jetstream.APIError `json:"error"`
-		Success bool                `json:"success"`
-	}
-	require.NoError(t, json.Unmarshal(reply.Data, &resp))
-	require.Nil(t, resp.Error, "stepdown reply: %s", reply.Data)
-	require.True(t, resp.Success, "stepdown reply: %s", reply.Data)
-
-	info := waitStepdownConsumerInfo(t, cons, 10*time.Second, "new consumer leader",
-		func(info *jetstream.ConsumerInfo) bool {
-			return info.Cluster.Leader != "" && info.Cluster.Leader != oldLeader
-		})
-
-	return stepdownAt, time.Since(stepdownAt), info
 }
 
 func TestVerify_PullLeaderStepdownHeartbeat(t *testing.T) {
@@ -277,21 +177,23 @@ func TestVerify_PullLeaderStepdownHeartbeat(t *testing.T) {
 		pull2At := time.Now()
 		resCh := blockInNext(iter)
 
-		waitStepdownConsumerInfo(t, cons, 2*time.Second, "both pulls waiting",
+		testutil.WaitConsumerInfo(t, cons, 2*time.Second, "both pulls waiting",
 			func(info *jetstream.ConsumerInfo) bool { return info.NumWaiting == 2 })
-		waitStepdownConsumerInfo(t, cons, stepdownPullExpiry, "pull1 expired",
+		testutil.WaitConsumerInfo(t, cons, stepdownPullExpiry, "pull1 expired",
 			func(info *jetstream.ConsumerInfo) bool { return info.NumWaiting == 1 })
 		// The 408 of pull1 leaves client pending at 6 (>= threshold 5), so the client must not re-pull.
-		before := waitStepdownConsumerInfo(t, cons, time.Second, "replicas current",
+		before := testutil.WaitConsumerInfo(t, cons, time.Second, "replicas current",
 			func(info *jetstream.ConsumerInfo) bool {
 				require.Equal(t, 1, info.NumWaiting, "precondition broken: client re-pulled after pull1 expired")
 
-				return stepdownReplicasCurrent(info)
+				return testutil.ConsumerReplicasCurrent(info, 2)
 			})
 		require.Less(t, time.Since(pull2At), stepdownPullExpiry-500*time.Millisecond,
 			"precondition broken: stepdown would land too close to pull2 expiry")
 
-		stepdownAt, election, after := stepDownConsumerLeader(t, nc, cons, stream, name, before.Cluster.Leader)
+		stepdownAt := time.Now()
+		after := testutil.StepDownConsumerLeader(t, nc, cons, before.Cluster.Leader)
+		election := time.Since(stepdownAt)
 		t.Logf("leader %s -> %s visible after<=%v; new leader NumWaiting=%d; pull2 age at stepdown=%v",
 			before.Cluster.Leader, after.Cluster.Leader, election.Round(time.Millisecond),
 			after.NumWaiting, stepdownAt.Sub(pull2At).Round(time.Millisecond))
@@ -301,7 +203,7 @@ func TestVerify_PullLeaderStepdownHeartbeat(t *testing.T) {
 		case res = <-resCh:
 		case <-time.After(stepdownNextWait):
 			count, offsets := sniffer.since(stepdownAt)
-			info, _ := stepdownConsumerInfo(t, cons)
+			info, _ := cons.Info(t.Context())
 			require.FailNowf(t, "blocked Next did not return",
 				"RESULT overlapping: Next still blocked %v after stepdown | 409s=%d at %v | info=%+v",
 				stepdownNextWait, count, offsets, info)
@@ -338,15 +240,17 @@ func TestVerify_PullLeaderStepdownHeartbeat(t *testing.T) {
 		defer iter.Stop()
 		resCh := blockInNext(iter)
 
-		before := waitStepdownConsumerInfo(t, cons, 2*time.Second, "single pull waiting, replicas current",
+		before := testutil.WaitConsumerInfo(t, cons, 2*time.Second, "single pull waiting, replicas current",
 			func(info *jetstream.ConsumerInfo) bool {
 				require.LessOrEqual(t, info.NumWaiting, 1, "precondition broken: more than one pull outstanding")
 
-				return info.NumWaiting == 1 && stepdownReplicasCurrent(info)
+				return info.NumWaiting == 1 && testutil.ConsumerReplicasCurrent(info, 2)
 			})
 
-		stepdownAt, election, after := stepDownConsumerLeader(t, nc, cons, stream, name, before.Cluster.Leader)
-		repulled := waitStepdownConsumerInfo(t, cons, stepdownNextWait, "client re-pulled on the new leader",
+		stepdownAt := time.Now()
+		after := testutil.StepDownConsumerLeader(t, nc, cons, before.Cluster.Leader)
+		election := time.Since(stepdownAt)
+		repulled := testutil.WaitConsumerInfo(t, cons, stepdownNextWait, "client re-pulled on the new leader",
 			func(info *jetstream.ConsumerInfo) bool { return info.NumWaiting == 1 })
 
 		_, err := js.Publish(t.Context(), stream+".evt", []byte("after-stepdown"))

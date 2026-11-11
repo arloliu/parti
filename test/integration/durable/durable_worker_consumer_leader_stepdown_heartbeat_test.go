@@ -18,8 +18,6 @@ package durable_test
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -42,56 +40,6 @@ const (
 	// request) is issued when the first is ~2s old.
 	stepdownHBDwell = 2 * time.Second
 )
-
-// stepdownHBConsumerInfo fetches consumer info with a short deadline so a
-// leaderless gap cannot eat the timing window.
-func stepdownHBConsumerInfo(ctx context.Context, js jetstream.JetStream, name string) (*jetstream.ConsumerInfo, bool) {
-	cctx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
-	defer cancel()
-	cons, err := js.Consumer(cctx, stepdownHBStream, name)
-	if err != nil {
-		return nil, false
-	}
-	ci, err := cons.Info(cctx)
-	if err != nil || ci.Cluster == nil {
-		return nil, false
-	}
-
-	return ci, true
-}
-
-// waitStepdownHBInfo polls consumer info until pred accepts it.
-func waitStepdownHBInfo(
-	t *testing.T, js jetstream.JetStream, name string, timeout time.Duration, what string,
-	pred func(*jetstream.ConsumerInfo) bool,
-) *jetstream.ConsumerInfo {
-	t.Helper()
-	var got *jetstream.ConsumerInfo
-	require.Eventually(t, func() bool {
-		ci, ok := stepdownHBConsumerInfo(t.Context(), js, name)
-		if ok && pred(ci) {
-			got = ci
-			return true
-		}
-
-		return false
-	}, timeout, 20*time.Millisecond, what)
-
-	return got
-}
-
-func stepdownHBReplicasCurrent(ci *jetstream.ConsumerInfo) bool {
-	if len(ci.Cluster.Replicas) != 2 {
-		return false
-	}
-	for _, r := range ci.Cluster.Replicas {
-		if !r.Current || r.Lag != 0 {
-			return false
-		}
-	}
-
-	return true
-}
 
 func TestWorkerConsumer_LeaderStepdownMissedHeartbeat_KeepsIterator(t *testing.T) {
 	if testing.Short() {
@@ -160,23 +108,8 @@ func TestWorkerConsumer_LeaderStepdownMissedHeartbeat_KeepsIterator(t *testing.T
 	require.NoError(t, wc.UpdateWorkerConsumer(ctx, "worker-SD", []parti.Partition{{Keys: []string{"1"}}}))
 
 	// The durable name is derived internally; locate it via the stream.
-	var name string
-	require.Eventually(t, func() bool {
-		stream, err := js.Stream(ctx, stepdownHBStream)
-		if err != nil {
-			return false
-		}
-		for ci := range stream.ListConsumers(ctx).Info() {
-			name = ci.Name
-			return true
-		}
-
-		return false
-	}, 5*time.Second, 50*time.Millisecond, "per-partition durable not found")
-	t.Logf("durable=%s", name)
-	created := waitStepdownHBInfo(t, js, name, 5*time.Second, "consumer info",
-		func(*jetstream.ConsumerInfo) bool { return true })
-	require.Equal(t, 3, created.Config.Replicas, "durable must be R3")
+	cons := testutil.WaitSoleConsumer(t, js, stepdownHBStream)
+	require.Equal(t, 3, cons.CachedInfo().Config.Replicas, "durable must be R3")
 
 	for range 6 {
 		_, err := js.Publish(ctx, stepdownHBSubject, []byte("seed"))
@@ -185,41 +118,23 @@ func TestWorkerConsumer_LeaderStepdownMissedHeartbeat_KeepsIterator(t *testing.T
 
 	// The 6th handler returns ~2s after the first pull request, so the second is issued then.
 	pullsStart := time.Now()
-	waitStepdownHBInfo(t, js, name, 8*time.Second, "both pulls waiting",
+	testutil.WaitConsumerInfo(t, cons, 8*time.Second, "both pulls waiting",
 		func(ci *jetstream.ConsumerInfo) bool { return ci.NumWaiting == 2 })
-	waitStepdownHBInfo(t, js, name, stepdownHBExpiry+time.Second, "first pull expired",
+	testutil.WaitConsumerInfo(t, cons, stepdownHBExpiry+time.Second, "first pull expired",
 		func(ci *jetstream.ConsumerInfo) bool { return ci.NumWaiting == 1 })
-	before := waitStepdownHBInfo(t, js, name, time.Second, "replicas current with exactly one pull waiting",
+	before := testutil.WaitConsumerInfo(t, cons, time.Second, "replicas current with exactly one pull waiting",
 		func(ci *jetstream.ConsumerInfo) bool {
 			require.Equal(t, 1, ci.NumWaiting, "precondition broken: client re-pulled after first pull expired")
 
-			return stepdownHBReplicasCurrent(ci)
+			return testutil.ConsumerReplicasCurrent(ci, 2)
 		})
 	t.Logf("pull overlap reached %v after publish", time.Since(pullsStart).Round(time.Millisecond))
 
 	stepdownAt := time.Now()
-	reply, err := nc.Request(fmt.Sprintf("$JS.API.CONSUMER.LEADER.STEPDOWN.%s.%s", stepdownHBStream, name), nil, 5*time.Second)
-	require.NoError(t, err)
-	var resp struct {
-		Error   *jetstream.APIError `json:"error"`
-		Success bool                `json:"success"`
-	}
-	require.NoError(t, json.Unmarshal(reply.Data, &resp))
-	require.Nil(t, resp.Error, "stepdown reply: %s", reply.Data)
-	require.True(t, resp.Success, "stepdown reply: %s", reply.Data)
-	waitStepdownHBInfo(t, js, name, 10*time.Second, "new consumer leader",
-		func(ci *jetstream.ConsumerInfo) bool {
-			return ci.Cluster.Leader != "" && ci.Cluster.Leader != before.Cluster.Leader
-		})
+	testutil.StepDownConsumerLeader(t, nc, cons, before.Cluster.Leader)
 
 	// 1. Precondition: the real missed heartbeat happened.
-	heartbeats := func() int {
-		metrics.mu.Lock()
-		defer metrics.mu.Unlock()
-
-		return metrics.restarts["heartbeat"]
-	}
-	require.Eventually(t, func() bool { return heartbeats() >= 1 }, 5*time.Second, 20*time.Millisecond,
+	require.Eventually(t, func() bool { return stepdownHBMissed(metrics) >= 1 }, 5*time.Second, 20*time.Millisecond,
 		"scenario did not reproduce: no IncrementWorkerConsumerIteratorRestart(\"heartbeat\") within 5s of the "+
 			"consumer leader stepdown (this test characterizes the pinned nats-server version)")
 	t.Logf("heartbeat metric seen %v after stepdown", time.Since(stepdownAt).Round(time.Millisecond))

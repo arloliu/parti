@@ -10,58 +10,11 @@ import (
 	"github.com/arloliu/parti/v2"
 	"github.com/arloliu/parti/v2/internal/durable"
 	"github.com/arloliu/parti/v2/internal/natsutil"
+	"github.com/arloliu/parti/v2/internal/testutil"
 	partitesting "github.com/arloliu/parti/v2/partitest"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 )
-
-// hbInjectIter wraps a real iterator. Its Next() delegates normally, except
-// that exactly once, after the first message was returned and the server
-// reports every message delivered to the client, it returns
-// jetstream.ErrNoHeartbeat without touching the real iterator.
-type hbInjectIter struct {
-	jetstream.MessagesContext
-
-	cons    jetstream.Consumer
-	wantSeq uint64
-	calls   int
-	state   *hbInjectState
-}
-
-// hbInjectState is shared by every wrapper so the miss fires once overall,
-// even if a (buggy) restart builds a second iterator.
-type hbInjectState struct {
-	claimed  atomic.Bool
-	injected atomic.Bool // set just before the error is returned
-	// undelivered is set, before injected, when the server never reported every message delivered.
-	// Next() may run off the test goroutine, so the test asserts on this flag itself.
-	undelivered atomic.Bool
-}
-
-func (w *hbInjectIter) Next(opts ...jetstream.NextOpt) (jetstream.Msg, error) {
-	w.calls++
-	if w.calls != 2 || !w.state.claimed.CompareAndSwap(false, true) {
-		return w.MessagesContext.Next(opts...)
-	}
-
-	// Wait until the server has delivered every message into this iterator's
-	// inbox, so they are buffered client-side when the miss is injected.
-	delivered := false
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		info, err := w.cons.Info(context.Background())
-		if err == nil && info.Delivered.Consumer >= w.wantSeq {
-			delivered = true
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	w.state.undelivered.Store(!delivered)
-	w.state.injected.Store(true)
-
-	return nil, jetstream.ErrNoHeartbeat
-}
 
 // TestWorkerConsumer_HeartbeatMiss_InFlightMessagesSurvive is a FAULT
 // INJECTION test. A real ErrNoHeartbeat fires with an empty client buffer, so
@@ -102,7 +55,7 @@ func TestWorkerConsumer_HeartbeatMiss_InFlightMessagesSurvive(t *testing.T) {
 				mu           sync.Mutex
 				seenSeq      = map[uint64]uint64{} // stream seq -> NumDelivered
 				factoryCalls atomic.Int32
-				state        hbInjectState
+				injector     testutil.HeartbeatMissInjector
 			)
 			handler := func(_ context.Context, msg jetstream.Msg) error {
 				md, mdErr := msg.Metadata()
@@ -135,7 +88,7 @@ func TestWorkerConsumer_HeartbeatMiss_InFlightMessagesSurvive(t *testing.T) {
 						return nil, iterErr
 					}
 
-					return &hbInjectIter{MessagesContext: inner, cons: cons, wantSeq: total, state: &state}, nil
+					return injector.Wrap(inner, cons, total), nil
 				},
 			}, handler)
 			require.NoError(t, err)
@@ -143,8 +96,8 @@ func TestWorkerConsumer_HeartbeatMiss_InFlightMessagesSurvive(t *testing.T) {
 
 			require.NoError(t, wc.UpdateWorkerConsumer(ctx, "worker-HB", []parti.Partition{{Keys: []string{"1"}}}))
 
-			require.Eventually(t, state.injected.Load, 10*time.Second, 10*time.Millisecond, "heartbeat miss was never injected")
-			require.False(t, state.undelivered.Load(),
+			require.Eventually(t, injector.Injected, 10*time.Second, 10*time.Millisecond, "heartbeat miss was never injected")
+			require.False(t, injector.Undelivered(),
 				"precondition broken: server did not report all %d messages delivered before the miss was injected", total)
 
 			require.Eventually(t, func() bool {
