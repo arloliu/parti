@@ -15,6 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   saw no change, and published nothing until an unrelated trigger.
   It now also compares against the worker set of the last published assignment.
 
+### Documentation
+
+- Documented the shutdown order for a Manager with a `Dynamic` consumer:
+  `Manager.Stop` does not stop the consumer, so the application stops it afterwards
+  (`docs/OPERATIONS.md`, "Graceful Shutdown").
+  Also documented that stopping the consumer or removing a partition cancels the handler context,
+  and that an immediate `Nak()` counts against `MaxDeliver`.
+- Corrected three statements:
+  a departing worker triggers an emergency rebalance after `EmergencyGracePeriod`, not a stabilization window;
+  stable IDs do not preserve partition affinity in a surge rollout;
+  rollout pacing settings need a readiness probe that reflects the Manager state.
+
 ## [v2.11.0] - 2026-11-11
 
 A consumer reliability release.

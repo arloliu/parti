@@ -678,6 +678,16 @@ var _ interface{ ObserveWorkerCount(int) } = (*Dynamic)(nil)
 // are NOT deleted; they will be garbage-collected by the server after
 // InactiveThreshold.
 //
+// Stop cancels the context passed to the handler. A handler that hands the
+// message to another goroutine and returns must expect that context to be
+// cancelled while the work is still running. Removing a partition during a
+// rebalance cancels the handler context for that partition in the same way.
+//
+// The manager does not call Stop. During shutdown, stop the manager first, then
+// call Stop, and only then release what the handler depends on. A handler that
+// rejects messages with Nak while the pull loops are still running makes the
+// server redeliver them at once, and each redelivery counts against MaxDeliver.
+//
 // If DrainOnRemove is enabled, Stop will first drain pending messages
 // (up to DrainOnRemoveTimeout) before stopping.
 //

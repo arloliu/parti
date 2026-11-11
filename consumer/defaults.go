@@ -29,7 +29,10 @@ const (
 
 	// DefaultMaxAckPending is the default number of messages that can be
 	// in-flight (unacknowledged) per consumer. Set to 1 for strict ordered
-	// processing. Increase for higher throughput at the cost of ordering.
+	// processing. Increase for higher throughput at the cost of ordering:
+	// above 1, a redelivered message can be processed after messages published
+	// later, and a partition handed to another worker can be processed by both
+	// workers for a short time.
 	DefaultMaxAckPending = 1
 
 	// DefaultMaxWaiting is the default maximum number of pull requests that can

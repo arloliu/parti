@@ -174,6 +174,8 @@ func main() {
     <-sig
 
     log.Println("Shutting down...")
+    // Stop the Manager first. It does not stop the consumer:
+    // the deferred dyn.Stop above runs after it and ends the pull loops.
     mgr.Stop(ctx)
 }
 ```

@@ -916,6 +916,10 @@ func (m *Manager) applyInitialAssignment(ctx context.Context, assignmentKV jetst
 
 // Stop gracefully shuts down the manager.
 //
+// Stop does not stop the consumer registered with [WithWorkerConsumerUpdater].
+// The application owns that consumer and must stop it after Stop returns;
+// until then its pull loops keep receiving messages for partitions this worker has given up.
+//
 // Safe to call multiple times - subsequent calls will return ErrNotStarted.
 //
 // Parameters:
