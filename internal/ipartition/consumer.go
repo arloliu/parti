@@ -289,6 +289,14 @@ func (c *JSConsumer) run(ctx context.Context) {
 
 	c.rc.SeedCheckpoint(ctx, c.consumerInfoFn())
 
+	// kept is the iterator carried over from a missed heartbeat; see recovery.KeepIterator.
+	var kept jetstream.MessagesContext
+	defer func() {
+		if kept != nil {
+			kept.Stop()
+		}
+	}()
+
 	for {
 		if ctx.Err() != nil {
 			return
@@ -301,16 +309,22 @@ func (c *JSConsumer) run(ctx context.Context) {
 			return
 		}
 
-		iter, err := cons.Messages(
-			natsutil.PullMessagesOpts(c.config.BatchSize, c.config.FetchTimeout, c.config.PullHeartbeatCap)...,
-		)
-		if err != nil {
-			c.config.Metrics.IncrementWorkerConsumerIteratorRestart("transient")
-			c.config.Logger.Warn("partition consumer messages iterator error", "error", err, "subject", c.subject)
-			if !sleepWithContext(ctx) {
-				return
+		iter := kept
+		kept = nil
+		if iter == nil {
+			var err error
+			iter, err = cons.Messages(
+				natsutil.PullMessagesOpts(c.config.BatchSize, c.config.FetchTimeout, c.config.PullHeartbeatCap)...,
+			)
+			if err != nil {
+				c.config.Metrics.IncrementWorkerConsumerIteratorRestart("transient")
+				c.config.Logger.Warn("partition consumer messages iterator error", "error", err, "subject", c.subject)
+				if !sleepWithContext(ctx) {
+					return
+				}
+
+				continue
 			}
-			continue
 		}
 
 		iterErr := c.processIterator(ctx, iter)
@@ -335,6 +349,15 @@ func (c *JSConsumer) run(ctx context.Context) {
 		}
 
 		action, newCons, classifyErr := c.rc.Classify(ctx, iterErr, c.consumerInfoFn(), consumerConfig, c.recreateFn())
+		if recovery.KeepIterator(iterErr, action) {
+			c.config.Logger.Debug("pull heartbeat missed; keeping iterator", "subject", c.subject)
+			kept = iter
+
+			continue
+		}
+		// processIterator leaves the iterator open after a missed heartbeat.
+		iter.Stop()
+
 		switch action {
 		case recovery.ActionExit:
 			return
@@ -368,11 +391,17 @@ func (c *JSConsumer) run(ctx context.Context) {
 	}
 }
 
-func (c *JSConsumer) processIterator(ctx context.Context, iter jetstream.MessagesContext) error {
+// processIterator processes messages from iter until an error or cancellation.
+//
+// The iterator is stopped on return, except after a missed heartbeat:
+// it is still usable then, and run decides whether to keep it.
+func (c *JSConsumer) processIterator(ctx context.Context, iter jetstream.MessagesContext) (iterErr error) {
 	stop := context.AfterFunc(ctx, iter.Stop)
 	defer func() {
 		_ = stop()
-		iter.Stop() // Ensure iterator is stopped when exiting
+		if !errors.Is(iterErr, jetstream.ErrNoHeartbeat) {
+			iter.Stop()
+		}
 	}()
 
 	for {

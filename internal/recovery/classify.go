@@ -70,3 +70,18 @@ const (
 	// internal/ipartition — they do not own stream lifecycle).
 	ActionStreamMissing
 )
+
+// KeepIterator reports whether a pull loop should carry on with the same iterator
+// after iterErr was classified as action.
+//
+// It is true for a missed pull heartbeat that Classify answered with ActionBackoff:
+// the consumer handle is unchanged and the stream was not found missing.
+// That covers a miss that needs no recovery,
+// and a recovery that was due but produced no new consumer on this attempt.
+// nats.go has reset the iterator by the time it reports the miss,
+// so the next Next call issues a fresh pull request.
+// Stopping the iterator instead discards the messages the server already delivered to it;
+// those come back only after AckWait, or never once MaxDeliver is reached.
+func KeepIterator(iterErr error, action Action) bool {
+	return action == ActionBackoff && errors.Is(iterErr, jetstream.ErrNoHeartbeat)
+}

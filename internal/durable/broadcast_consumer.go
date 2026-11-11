@@ -326,6 +326,14 @@ func (bc *BroadcastConsumer) runLoop(ctx context.Context) {
 	batch := bc.config.BatchSize
 	expiry := bc.config.FetchTimeout
 
+	// kept is the iterator carried over from a missed heartbeat; see recovery.KeepIterator.
+	var kept jetstream.MessagesContext
+	defer func() {
+		if kept != nil {
+			kept.Stop()
+		}
+	}()
+
 	for {
 		if ctx.Err() != nil {
 			return
@@ -335,18 +343,23 @@ func (bc *BroadcastConsumer) runLoop(ctx context.Context) {
 		cons := bc.consumer
 		bc.consumerMu.RUnlock()
 
-		iter, err := bc.iterFactory(cons, batch, expiry)
-		if err != nil {
-			bc.logger.Warn("iterator creation failed", "error", err)
-			if bc.config.Metrics != nil {
-				bc.config.Metrics.IncrementWorkerConsumerIteratorRestart("transient")
-			}
+		iter := kept
+		kept = nil
+		if iter == nil {
+			var err error
+			iter, err = bc.iterFactory(cons, batch, expiry)
+			if err != nil {
+				bc.logger.Warn("iterator creation failed", "error", err)
+				if bc.config.Metrics != nil {
+					bc.config.Metrics.IncrementWorkerConsumerIteratorRestart("transient")
+				}
 
-			if bc.delayOrExit(ctx) {
-				return
-			}
+				if bc.delayOrExit(ctx) {
+					return
+				}
 
-			continue
+				continue
+			}
 		}
 
 		iterErr := bc.processIterator(ctx, iter)
@@ -377,6 +390,18 @@ func (bc *BroadcastConsumer) runLoop(ctx context.Context) {
 		}
 
 		action, newCons, classifyErr := bc.recovery.Classify(ctx, iterErr, bc.consumerInfoFn(), consumerConfig, bc.recreateFn())
+		if recovery.KeepIterator(iterErr, action) {
+			bc.logger.Debug("pull heartbeat missed; keeping iterator",
+				"stream", bc.config.StreamName,
+				"filter", bc.config.WildcardFilter,
+			)
+			kept = iter
+
+			continue
+		}
+		// processIterator leaves the iterator open after a missed heartbeat.
+		iter.Stop()
+
 		switch action {
 		case recovery.ActionExit:
 			return
@@ -417,23 +442,10 @@ func (bc *BroadcastConsumer) runLoop(ctx context.Context) {
 // Returns nil on graceful exit (context canceled or ErrMsgIteratorClosed).
 // Returns the iterator error so the caller can classify and handle recovery.
 func (bc *BroadcastConsumer) processIterator(ctx context.Context, iter jetstream.MessagesContext) error {
-	// Start stopper goroutine
-	stopperCh := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			iter.Stop()
-		case <-stopperCh:
-		}
-	}()
-
-	defer func() {
-		select {
-		case <-stopperCh:
-		default:
-			close(stopperCh)
-		}
-	}()
+	// Stop the iterator when the context is cancelled so that iter.Next() unblocks.
+	// Deregistered on return: an iterator kept after a missed heartbeat belongs to runLoop.
+	stop := context.AfterFunc(ctx, iter.Stop)
+	defer stop()
 
 	for {
 		if ctx.Err() != nil {
@@ -444,10 +456,14 @@ func (bc *BroadcastConsumer) processIterator(ctx context.Context, iter jetstream
 		msg, err := iter.Next()
 		if err != nil {
 			bc.logger.Debug("iterator next error", "error", err)
-			iter.Stop()
+			// A missed heartbeat leaves the iterator usable; runLoop decides whether to keep it.
+			if !errors.Is(err, jetstream.ErrNoHeartbeat) {
+				iter.Stop()
+			}
 			if errors.Is(err, jetstream.ErrMsgIteratorClosed) || errors.Is(err, context.Canceled) {
 				return nil // graceful shutdown
 			}
+
 			return err // caller classifies for recovery or backoff
 		}
 

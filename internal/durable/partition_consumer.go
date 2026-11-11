@@ -468,13 +468,9 @@ func (pc *partitionConsumer) applyRecoveryAction(
 
 // keepIteratorOnMiss decides whether iter stays in service after iterErr.
 //
-// A missed pull heartbeat leaves a nats.go iterator usable:
-// the next Next() re-issues the pull on the same inbox.
-// Stopping it would discard messages already in flight to that inbox,
-// which the server redelivers only after AckWait.
-// So the iterator is kept when detection left the stream and consumer handle alone (undisturbed)
-// and pulls are not suppressed.
-// Otherwise it is stopped here, before any backoff the caller applies.
+// It keeps the iterator after a missed pull heartbeat, for the reasons given at recovery.KeepIterator,
+// when detection left the stream and consumer handle alone (undisturbed) and pulls are not suppressed.
+// Otherwise it stops the iterator here, before any backoff the caller applies.
 //
 // Any other error returns false: processIterator has already stopped the iterator.
 func (pc *partitionConsumer) keepIteratorOnMiss(

@@ -95,6 +95,10 @@ type QueueConfig struct {
 
 	// IteratorFactory optionally overrides the internal iterator creation logic.
 	// This is primarily used for testing to inject mock iterators.
+	// A custom factory chooses the pull options itself.
+	// The default one requests the next batch only when the previous pull request is used up
+	// (jetstream.PullThresholdMessages(1)); without it one iterator overlaps pull requests,
+	// and the server drops those beyond MaxWaiting without a reply.
 	IteratorFactory func(cons jetstream.Consumer, batch int, expiry time.Duration) (jetstream.MessagesContext, error)
 
 	// RecoveryStrategy defines how a recreated consumer resumes after an unexpected deletion.
@@ -387,6 +391,14 @@ func (q *Queue) runLoop(ctx context.Context) {
 
 	var backoff time.Duration
 
+	// kept is the iterator carried over from a missed heartbeat; see recovery.KeepIterator.
+	var kept jetstream.MessagesContext
+	defer func() {
+		if kept != nil {
+			kept.Stop()
+		}
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -410,16 +422,22 @@ func (q *Queue) runLoop(ctx context.Context) {
 			return
 		}
 
-		iter, err := q.iterFactory(cons, q.config.BatchSize, q.config.FetchTimeout)
-		if err != nil {
-			q.metrics.IncrementWorkerConsumerIteratorRestart("create_error")
-			q.logger.Error("failed to create iterator", "error", err)
-			if q.delayWithBackoffOrExit(ctx, &backoff) {
-				return
+		iter := kept
+		kept = nil
+		if iter == nil {
+			var err error
+			iter, err = q.iterFactory(cons, q.config.BatchSize, q.config.FetchTimeout)
+			if err != nil {
+				q.metrics.IncrementWorkerConsumerIteratorRestart("create_error")
+				q.logger.Error("failed to create iterator", "error", err)
+				if q.delayWithBackoffOrExit(ctx, &backoff) {
+					return
+				}
+
+				continue
 			}
-			continue
+			backoff = 0
 		}
-		backoff = 0
 
 		iterErr := q.processIterator(ctx, iter)
 		if iterErr == nil {
@@ -450,6 +468,18 @@ func (q *Queue) runLoop(ctx context.Context) {
 		}
 
 		action, newCons, classifyErr := q.recovery.Classify(ctx, iterErr, q.consumerInfoFn(), consumerConfig, q.recreateFn())
+		if recovery.KeepIterator(iterErr, action) {
+			q.logger.Debug("pull heartbeat missed; keeping iterator",
+				"stream", q.config.StreamName,
+				"consumer", q.config.ConsumerName,
+			)
+			kept = iter
+
+			continue
+		}
+		// processIterator leaves the iterator open after a missed heartbeat.
+		iter.Stop()
+
 		switch action {
 		case recovery.ActionExit:
 			return
@@ -503,13 +533,18 @@ func (q *Queue) recreateFn() recovery.RecreateFunc {
 // processIterator processes messages from an iterator.
 // Returns nil on graceful exit (context canceled or ErrMsgIteratorClosed).
 // Returns the iterator error so the caller can classify and handle recovery.
-func (q *Queue) processIterator(ctx context.Context, iter jetstream.MessagesContext) error {
+//
+// The iterator is stopped on return, except after a missed heartbeat:
+// it is still usable then, and runLoop decides whether to keep it.
+func (q *Queue) processIterator(ctx context.Context, iter jetstream.MessagesContext) (iterErr error) {
 	// Stop the iterator when the context is cancelled so that iter.Next()
 	// unblocks with ErrMsgIteratorClosed instead of hanging indefinitely.
 	stop := context.AfterFunc(ctx, iter.Stop)
 	defer func() {
 		_ = stop()
-		iter.Stop() // Ensure iterator is stopped when exiting
+		if !errors.Is(iterErr, jetstream.ErrNoHeartbeat) {
+			iter.Stop()
+		}
 	}()
 
 	for {
