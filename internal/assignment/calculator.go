@@ -1279,8 +1279,12 @@ func (c *Calculator) observeAndDecideLocked(ctx context.Context, provided map[st
 		return pollActionNone, err
 	}
 
+	// Also compare against currentWorkers, the set the last published assignment covers.
+	// A rebalance that does not refresh lastWorkers can absorb a leave;
+	// the same worker ID rejoining then matches lastWorkers
+	// although the published assignment leaves it out.
 	c.mu.RLock()
-	changed := c.hasWorkersChangedLocked(workers)
+	changed := c.hasWorkersChangedLocked(workers) || !maps.Equal(workers, c.currentWorkers)
 	lastWorkersCopy := c.cloneLastWorkersLocked()
 	c.mu.RUnlock()
 
