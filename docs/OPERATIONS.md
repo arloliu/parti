@@ -780,6 +780,13 @@ When performing NATS maintenance:
    - Update connection URLs in worker config
    - Perform rolling restart of workers
 
+### Changing `MaxWaiting` on Existing Durables
+
+`MaxWaiting` cannot be updated on an existing durable consumer,
+so a rolling update that changes it leaves the new instances unable to bind their durables.
+See [Recreating Durable Consumers](RECREATING_DURABLES.md) for when a larger value is needed
+and for the stop, delete, and restart procedure.
+
 ---
 
 ## Troubleshooting

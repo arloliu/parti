@@ -28,7 +28,7 @@ type consumerParams struct {
 // handled by the top-level plan/apply commands.
 func cmdConsumers(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "partictl consumers: a subcommand is required (plan or apply)")
+		fmt.Fprintln(stderr, "partictl consumers: a subcommand is required (plan, apply, delete or verify)")
 		printConsumersUsage(stderr)
 
 		return ExitValidation
@@ -40,6 +40,10 @@ func cmdConsumers(args []string, stdout, stderr io.Writer) int {
 		return cmdConsumersPlan(rest, stdout, stderr)
 	case "apply":
 		return cmdConsumersApply(rest, stdout, stderr)
+	case "delete":
+		return cmdConsumersDelete(rest, stdout, stderr)
+	case "verify":
+		return cmdConsumersVerify(rest, stdout, stderr)
 	case "help", "-help", "--help", "-h":
 		printConsumersUsage(stdout)
 
@@ -54,17 +58,33 @@ func cmdConsumers(args []string, stdout, stderr io.Writer) int {
 
 // printConsumersUsage writes the `consumers` command help text.
 func printConsumersUsage(w io.Writer) {
-	_, _ = fmt.Fprint(w, `partictl consumers — precreate per-partition durable consumers
+	_, _ = fmt.Fprint(w, `partictl consumers — precreate, delete and verify durable consumers
 
 Usage:
-  partictl consumers plan  -f <config> [flags]
-  partictl consumers apply -f <config> [flags]
+  partictl consumers plan   -f <config> [flags]
+  partictl consumers apply  -f <config> [flags]
+  partictl consumers delete -stream <stream> <selection> [-apply] [flags]
+  partictl consumers verify -stream <stream> <selection> -max-waiting <n> [flags]
 
 Subcommands:
-  plan   Compute which per-partition durable consumers are missing (PlanResult).
-  apply  Create missing per-partition durable consumers.
+  plan    Compute which per-partition durable consumers are missing (PlanResult).
+  apply   Create missing per-partition durable consumers.
+  delete  Delete the durables of stopped consumers so that they are created again with a new
+          immutable setting such as MaxWaiting. Reports only, unless -apply is given.
+          Exits 2 when a check blocks the delete.
+  verify  Check that every selected durable has the expected MaxWaiting. Exits 2 otherwise.
 
-Flags:
+Selection (delete, verify):
+  -name <n>                           an explicit durable; repeatable
+  -names-file <f>                     a file with one durable name per line
+  -prefix <p> -subject-template <t>   discover the durables named like those of one Dynamic consumer.
+                                      Candidates only: delete -apply needs explicit names
+                                      (save them with -save-names, review, pass with -names-file)
+
+Run 'partictl consumers delete -help' or 'partictl consumers verify -help' for their flags.
+See docs/RECREATING_DURABLES.md for the whole procedure.
+
+Flags (plan, apply):
   -f <path>       YAML config file (required)
   -policy <p>     Reconcile policy: warn or force (default: warn or cfg.policy).
                   Precreation of missing consumers is policy-independent; -policy force

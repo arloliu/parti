@@ -60,6 +60,7 @@ mgr.Start(context.Background())
 | [Reference](REFERENCE.md)         | Hooks, error handling, best practices, glossary |
 | [API Reference](API_REFERENCE.md) | Detailed API documentation                      |
 | [Operations Guide](OPERATIONS.md) | Deployment, monitoring, troubleshooting         |
+| [Recreating Durable Consumers](RECREATING_DURABLES.md) | Changing `MaxWaiting` on existing durables: when it is needed and the stop, delete, restart procedure |
 | [Provision Guide](PROVISION.md)   | provision SDK and partictl CLI for NATS resource management |
 | [Kubernetes Operator](KUBERNETES.md) | ProvisionedPartiEnv CRD, install steps, CRD reference |
 
