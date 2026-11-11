@@ -62,7 +62,7 @@ Commands:
   apply       Create missing resources; -dry-run emits the same output as plan
   adopt       Stamp Parti ownership marker on unmarked resources (shorthand for apply --policy=adopt)
   partitions  Plan/apply the partition-source key contents (partitions plan|apply)
-  consumers   Precreate per-partition durable consumers (consumers plan|apply)
+  consumers   Precreate, delete or verify durable consumers (consumers plan|apply|delete|verify)
   stream      Manage application JetStream streams (stream view|plan|apply)
 
 Common flags (accepted by all commands):
@@ -84,7 +84,7 @@ Deferred commands (not yet supported):
 Exit codes:
   0  success
   1  runtime / generic error
-  2  drift detected (-fail-on-drift)
+  2  drift detected (-fail-on-drift), or consumers delete/verify refused or failed its check
   3  config parse or validation error
   4  NATS connect / auth / timeout failure
 

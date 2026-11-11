@@ -273,13 +273,41 @@ partictl consumers apply -f <path> [flags]
 
 The `-policy` flag is not accepted: precreation is policy-independent.
 
+Two further subcommands work on existing durables and take no config file:
+
+```
+partictl consumers delete -stream <stream> <selection> [flags]
+  -apply             Delete the durables; without it the command only reports.
+                     Needs -name or -names-file
+  -save-names <f>    Write the names of the selected durables to a file
+  -settle <d>        How long to watch the durables for activity (default 5s)
+  -allow-replay      limits retention: accept a replay of every retained message
+  -allow-loss        interest retention: accept that messages are removed
+  -allow-redelivery  workqueue retention: accept redelivery of messages delivered without an acknowledgement
+partictl consumers verify -stream <stream> <selection> -max-waiting <n>
+
+<selection>:
+  -name <n>                           an explicit durable; repeatable
+  -names-file <f>                     a file with one durable name per line
+  -prefix <p> -subject-template <t>   discover the durables named like those of one Dynamic consumer
+```
+
+`consumers delete` removes the durables of stopped consumers so that they are created again
+with a new immutable setting such as `MaxWaiting`.
+It exits 2 when a check blocks the delete.
+Discovery by `-prefix` lists candidates and cannot prove that they belong to that consumer,
+so `-apply` takes explicit names only: save the candidates, review them, and pass the file back.
+The checks block on signs of a running consumer; they cannot show that none is running.
+`consumers verify` exits 2 when a selected durable does not have the expected `MaxWaiting`, or when none is found.
+See [Recreating Durable Consumers](RECREATING_DURABLES.md) for the procedure they belong to.
+
 ### Exit codes
 
 | Code | Meaning                                                     |
 |------|-------------------------------------------------------------|
 | 0    | Success                                                     |
 | 1    | Runtime error (operation failed after preflight)            |
-| 2    | Drift detected with `-fail-on-drift`                        |
+| 2    | Drift detected with `-fail-on-drift`; `consumers delete` blocked; `consumers verify` failed |
 | 3    | Config parse / validation error, or flag conflict           |
 | 4    | NATS connect / auth / context timeout failure               |
 
@@ -853,6 +881,11 @@ is simultaneously `force`.
 will delete a resource out from under active consumers. Stop or quiesce
 the workers that consume the affected resources before running
 `apply -policy force`.
+
+To change `MaxWaiting` on existing durable consumers, do not use this path:
+it recreates them from the precreation defaults (`MaxWaiting` 2) and makes none of the checks above.
+Use `partictl consumers delete`, which blocks on signs of a running consumer,
+as described in [Recreating Durable Consumers](RECREATING_DURABLES.md).
 
 ### Stale-plan safety — honest scope
 

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`partictl consumers delete` and `partictl consumers verify`** —
+  `MaxWaiting` cannot be changed on an existing durable consumer,
+  so changing it means deleting the durables while the consumers are stopped and letting them be created again.
+  `consumers delete` does the deleting safely.
+  It takes an explicit list of durable names and without `-apply` it only reports.
+  For a `Dynamic` consumer it can list the candidate durables from the consumer prefix and subject template;
+  the list is saved, reviewed, and passed back, because a name alone does not prove which consumer a durable belongs to.
+  It blocks while a durable shows signs of a running consumer,
+  on `limits` or `interest` retention unless the consequence is accepted,
+  and on `workqueue` retention while messages delivered without an acknowledgement would be delivered again.
+  The checks cannot show that nothing is running: stopping every consumer instance first remains a requirement.
+  `consumers verify` checks afterwards that every durable has the new value.
+  The whole procedure, including when it is needed at all, is in
+  [Recreating Durable Consumers](docs/RECREATING_DURABLES.md).
+
 ### Changed
 
 - **The minimum `github.com/nats-io/nats.go` version is now v1.55.0** (was v1.52.0).
