@@ -3,6 +3,7 @@ package assignment
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -2031,6 +2032,84 @@ func TestTriggerRebalance_NoDuplicateScaleOnNextPoll(t *testing.T) {
 	require.NoError(t, calc.checkForChanges(ctx))
 	require.Equal(t, versionAfterTrigger, calc.CurrentVersion(),
 		"no further rebalance must run for an unchanged topology after TriggerRebalance")
+}
+
+// TestObserveAndDecide_RejoinAfterAbsorbedLeave verifies that a worker that
+// leaves and rejoins under the same ID gets assigned again when a rebalance
+// that does not refresh lastWorkers absorbed the leave in between.
+//
+// Partition-lifecycle rebalances (partition updates, label re-checks) publish
+// the current worker set but deliberately leave lastWorkers alone,
+// and so does a rebalance deferred by a label observation.
+// If the leave is absorbed that way,
+// lastWorkers still lists the departed worker,
+// so its rejoin reproduces lastWorkers exactly.
+// Comparing only against lastWorkers then reports no change,
+// and the rejoined worker stays unassigned until an unrelated trigger.
+func TestObserveAndDecide_RejoinAfterAbsorbedLeave(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	_, nc := partitest.StartEmbeddedNATS(t)
+	assignmentKV := partitest.CreateJetStreamKV(t, nc, "test-rejoin-absorbed-assignment")
+	heartbeatKV := partitest.CreateJetStreamKV(t, nc, "test-rejoin-absorbed-heartbeat")
+
+	putHeartbeat := func(id string) {
+		_, err := heartbeatKV.Put(ctx, "worker-hb."+id, []byte(time.Now().Format(time.RFC3339Nano)))
+		require.NoError(t, err)
+	}
+	for _, id := range []string{"worker-1", "worker-2", "worker-3"} {
+		putHeartbeat(id)
+	}
+
+	// The long emergency grace keeps the leave pending in the tail-check that
+	// follows the partition rebalance, so nothing refreshes lastWorkers.
+	calc, err := NewCalculator(&Config{
+		AssignmentKV:         assignmentKV,
+		HeartbeatKV:          heartbeatKV,
+		AssignmentPrefix:     "assignment",
+		Source:               &mockSource{partitions: []types.Partition{{Keys: []string{"p1"}}, {Keys: []string{"p2"}}, {Keys: []string{"p3"}}}},
+		Strategy:             &mockStrategy{},
+		HeartbeatPrefix:      "worker-hb",
+		HeartbeatTTL:         60 * time.Second,
+		EmergencyGracePeriod: 30 * time.Second,
+		ColdStartWindow:      50 * time.Millisecond,
+		PlannedScaleWindow:   50 * time.Millisecond,
+		Cooldown:             10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.NoError(t, calc.Start(ctx))
+	defer func() { _ = calc.Stop(ctx) }()
+
+	require.Eventually(t, func() bool {
+		return calc.GetState() == types.CalcStateIdle && calc.CurrentVersion() > 0
+	}, 5*time.Second, 25*time.Millisecond, "initial rebalance did not settle")
+	// Only the explicit calls below observe the worker set from here on.
+	require.NoError(t, calc.monitor.Stop())
+
+	require.NoError(t, heartbeatKV.Delete(ctx, "worker-hb.worker-2"))
+	require.NoError(t, calc.triggerPartitionRebalance(lifecyclePartitionUpdate))
+
+	calc.mu.RLock()
+	published := maps.Clone(calc.currentWorkers)
+	lastWorkers := calc.cloneLastWorkersLocked()
+	calc.mu.RUnlock()
+	require.NotContains(t, published, "worker-2", "precondition: the partition rebalance published the leave")
+	require.Contains(t, lastWorkers, "worker-2", "precondition: lastWorkers still lists the departed worker")
+
+	putHeartbeat("worker-2")
+	versionBeforeRejoin := calc.CurrentVersion()
+
+	require.Eventually(t, func() bool {
+		if err := calc.checkForChanges(ctx); err != nil {
+			return false
+		}
+		calc.mu.RLock()
+		defer calc.mu.RUnlock()
+
+		return calc.CurrentVersion() > versionBeforeRejoin && calc.currentWorkers["worker-2"]
+	}, 5*time.Second, 50*time.Millisecond, "the rejoined worker must be included in a new assignment")
 }
 
 // --- merged from calculator_splitbrain_test.go ---

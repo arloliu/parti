@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A worker that left and rejoined under the same worker ID could stay unassigned
+  when a partition update or label re-check had already rebalanced its departure.
+  The leader compared the rejoin only against the worker set of its last worker-change rebalance,
+  saw no change, and published nothing until an unrelated trigger.
+  It now also compares against the worker set of the last published assignment.
+
 ## [v2.11.0] - 2026-11-11
 
 A consumer reliability release.
