@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/arloliu/parti/v2/internal/logging"
+	"github.com/arloliu/parti/v2/internal/testutil"
 	"github.com/arloliu/parti/v2/types"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -256,6 +257,12 @@ type errorOnNextIter struct {
 }
 
 func (e *errorOnNextIter) Next(opts ...jetstream.NextOpt) (jetstream.Msg, error) {
+	// nats.go reports a missed heartbeat only after twice the heartbeat interval,
+	// and a loop that keeps its iterator calls Next again at once.
+	if errors.Is(e.err, jetstream.ErrNoHeartbeat) {
+		time.Sleep(5 * time.Millisecond)
+	}
+
 	return nil, e.err
 }
 
@@ -1469,85 +1476,30 @@ func TestPartitionConsumer_NilRecovery_RemediationSuccess_ResetsCounter(t *testi
 // takes the stream-missing path.
 
 // hbStep is one scripted result of Next().
-type hbStep struct {
-	msg jetstream.Msg
-	err error
-}
+type hbStep = testutil.IterStep
 
-func hbMiss() hbStep         { return hbStep{err: jetstream.ErrNoHeartbeat} }
-func hbData(d string) hbStep { return hbStep{msg: &mockMsg{data: []byte(d)}} }
+func hbMiss() hbStep         { return testutil.IterMiss() }
+func hbData(d string) hbStep { return testutil.IterData(d) }
 func hbMisses(n int) []hbStep {
 	return slices.Repeat([]hbStep{hbMiss()}, n)
 }
 
-// scriptedIter returns its steps from successive Next() calls and then blocks
-// until Stop(). After Stop() every Next() returns ErrMsgIteratorClosed,
-// mirroring a stopped nats.go iterator. It never spins.
-type scriptedIter struct {
-	mu       sync.Mutex
-	steps    []hbStep
-	idx      int
-	done     chan struct{}
-	stopOnce sync.Once
-	stops    atomic.Int32
-	missFlag *atomic.Bool  // set when an ErrNoHeartbeat step is returned
-	missGap  time.Duration // delay before each ErrNoHeartbeat step is returned
-	// reentered is closed when a live iterator's Next() is entered with the script exhausted:
-	// the loop came back to this iterator and is now blocked in it.
-	reentered     chan struct{}
-	reenteredOnce sync.Once
-}
-
-func newScriptedIter(missFlag *atomic.Bool, steps ...hbStep) *scriptedIter {
-	return &scriptedIter{
-		steps:     steps,
-		done:      make(chan struct{}),
-		missFlag:  missFlag,
-		reentered: make(chan struct{}),
-	}
-}
-
-func (s *scriptedIter) Next(_ ...jetstream.NextOpt) (jetstream.Msg, error) {
-	select {
-	case <-s.done:
-		return nil, jetstream.ErrMsgIteratorClosed
-	default:
-	}
-
-	s.mu.Lock()
-	if s.idx >= len(s.steps) {
-		s.mu.Unlock()
-		s.reenteredOnce.Do(func() { close(s.reentered) })
-		<-s.done
-
-		return nil, jetstream.ErrMsgIteratorClosed
-	}
-	st := s.steps[s.idx]
-	s.idx++
-	s.mu.Unlock()
-
-	if st.err != nil && errors.Is(st.err, jetstream.ErrNoHeartbeat) {
-		if s.missGap > 0 {
-			select {
-			case <-time.After(s.missGap):
-			case <-s.done:
-				return nil, jetstream.ErrMsgIteratorClosed
+// newScriptedIter returns a scripted iterator that waits missGap and sets
+// missFlag just before it reports each missed heartbeat.
+func newScriptedIter(missFlag *atomic.Bool, missGap time.Duration, steps ...hbStep) *testutil.ScriptedIter {
+	armed := make([]hbStep, len(steps))
+	for i, step := range steps {
+		if errors.Is(step.Err, jetstream.ErrNoHeartbeat) {
+			step.Before = func() {
+				time.Sleep(missGap)
+				missFlag.Store(true)
 			}
 		}
-		if s.missFlag != nil {
-			s.missFlag.Store(true)
-		}
+		armed[i] = step
 	}
 
-	return st.msg, st.err
+	return testutil.NewScriptedIter(armed...)
 }
-
-func (s *scriptedIter) Stop() {
-	s.stops.Add(1)
-	s.stopOnce.Do(func() { close(s.done) })
-}
-
-func (s *scriptedIter) Drain() {}
 
 // hbMetrics records iterator restart reasons.
 type hbMetrics struct {
@@ -1582,9 +1534,14 @@ type hbConsumer struct {
 	infoErr error
 	armed   *atomic.Bool
 	probes  atomic.Int32
+	// onInfo, if set, runs at the start of every Info call.
+	onInfo func()
 }
 
 func (c *hbConsumer) Info(_ context.Context) (*jetstream.ConsumerInfo, error) {
+	if c.onInfo != nil {
+		c.onInfo()
+	}
 	if c.armed != nil && c.armed.Load() {
 		c.probes.Add(1)
 	}
@@ -1606,7 +1563,7 @@ type hbRun struct {
 	factoryCalls atomic.Int32
 
 	mu       sync.Mutex
-	iters    []*scriptedIter
+	iters    []*testutil.ScriptedIter
 	consSeen []jetstream.Consumer
 }
 
@@ -1616,7 +1573,7 @@ type hbOpts struct {
 	js       jetstream.JetStream
 	backoff  time.Duration
 	// factory returns the iterator for the call-th (1-based) iterFactory call.
-	factory func(call int, cons jetstream.Consumer) *scriptedIter
+	factory func(call int, cons jetstream.Consumer) *testutil.ScriptedIter
 	mutate  func(*partitionConsumerConfig)
 	// suppress is the pull-suppression check; nil means never suppressed.
 	suppress func(ctx context.Context) (bool, string)
@@ -1630,14 +1587,14 @@ func newHBRun() *hbRun {
 	}
 }
 
-func (r *hbRun) firstIter() *scriptedIter {
+func (r *hbRun) firstIter() *testutil.ScriptedIter {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	return r.iters[0]
 }
 
-func (r *hbRun) allIters() []*scriptedIter {
+func (r *hbRun) allIters() []*testutil.ScriptedIter {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -1755,12 +1712,12 @@ func TestPartitionConsumer_HeartbeatMiss_KeepsIterator(t *testing.T) {
 				cons:     &hbConsumer{},
 				// Large backoff: any backoff sleep blows the 1s budget for msg2.
 				backoff: 5 * time.Second,
-				factory: func(call int, _ jetstream.Consumer) *scriptedIter {
+				factory: func(call int, _ jetstream.Consumer) *testutil.ScriptedIter {
 					if call == 1 {
-						return newScriptedIter(&r.armed, hbData("msg1"), hbMiss(), hbData("msg2"))
+						return newScriptedIter(&r.armed, 0, hbData("msg1"), hbMiss(), hbData("msg2"))
 					}
 
-					return newScriptedIter(&r.armed) // a replacement has nothing in flight
+					return newScriptedIter(&r.armed, 0) // a replacement has nothing in flight
 				},
 			})
 
@@ -1768,7 +1725,7 @@ func TestPartitionConsumer_HeartbeatMiss_KeepsIterator(t *testing.T) {
 			r.waitHandled(t, "msg2", time.Second)
 
 			require.Equal(t, int32(1), r.factoryCalls.Load(), "iterator must not be recreated after a heartbeat miss")
-			require.Equal(t, int32(0), r.firstIter().stops.Load(), "iterator must not be stopped by a heartbeat miss")
+			require.Zero(t, r.firstIter().Stops(), "iterator must not be stopped by a heartbeat miss")
 			require.Equal(t, 1, r.metrics.count("heartbeat"), "the miss must still be reported")
 
 			r.stopAndWait(t)
@@ -1789,19 +1746,19 @@ func TestPartitionConsumer_HeartbeatMiss_SustainedHealthyConsumer_KeepsIterator(
 				strategy: mode.strategy,
 				cons:     cons,
 				backoff:  5 * time.Second,
-				factory: func(call int, _ jetstream.Consumer) *scriptedIter {
+				factory: func(call int, _ jetstream.Consumer) *testutil.ScriptedIter {
 					if call == 1 {
-						return newScriptedIter(&r.armed, append(hbMisses(threshold+1), hbData("msg1"))...)
+						return newScriptedIter(&r.armed, 0, append(hbMisses(threshold+1), hbData("msg1"))...)
 					}
 
-					return newScriptedIter(&r.armed)
+					return newScriptedIter(&r.armed, 0)
 				},
 			})
 
 			r.waitHandled(t, "msg1", time.Second)
 
 			require.Equal(t, int32(1), r.factoryCalls.Load(), "iterator must not be recreated across sustained misses")
-			require.Equal(t, int32(0), r.firstIter().stops.Load(), "iterator must not be stopped across sustained misses")
+			require.Zero(t, r.firstIter().Stops(), "iterator must not be stopped across sustained misses")
 			require.GreaterOrEqual(t, cons.probes.Load(), int32(1), "detection must still probe consumer Info")
 			require.Equal(t, threshold+1, r.metrics.count("heartbeat"), "every miss must be reported")
 
@@ -1825,21 +1782,21 @@ func TestPartitionConsumer_HeartbeatMiss_ConsumerGone_ReplacesIterator(t *testin
 				cons:     original,
 				js:       js,
 				backoff:  5 * time.Millisecond,
-				factory: func(call int, cons jetstream.Consumer) *scriptedIter {
+				factory: func(call int, cons jetstream.Consumer) *testutil.ScriptedIter {
 					switch {
 					case cons == jetstream.Consumer(rebuilt):
-						return newScriptedIter(&r.armed, hbData("after"))
+						return newScriptedIter(&r.armed, 0, hbData("after"))
 					case call == 1:
-						return newScriptedIter(&r.armed, hbMisses(3)...)
+						return newScriptedIter(&r.armed, 0, hbMisses(3)...)
 					default:
-						return newScriptedIter(&r.armed, hbMiss())
+						return newScriptedIter(&r.armed, 0, hbMiss())
 					}
 				},
 			})
 
 			r.waitHandled(t, "after", 3*time.Second)
 
-			require.GreaterOrEqual(t, r.firstIter().stops.Load(), int32(1), "old iterator must be stopped once the consumer is swapped")
+			require.Positive(t, r.firstIter().Stops(), "old iterator must be stopped once the consumer is swapped")
 			require.Same(t, jetstream.Consumer(rebuilt), r.lastConsumer(), "new iterator must be built from the new consumer")
 			require.Same(t, jetstream.Consumer(rebuilt), r.pc.Consumer())
 
@@ -1865,14 +1822,14 @@ func TestPartitionConsumer_HeartbeatMiss_StreamMissing_RecoveryEnabled_Detours(t
 		mutate: func(c *partitionConsumerConfig) {
 			c.StreamMissingHook = func(string) error { hookCalls.Add(1); return nil }
 		},
-		factory: func(call int, cons jetstream.Consumer) *scriptedIter {
+		factory: func(call int, cons jetstream.Consumer) *testutil.ScriptedIter {
 			switch {
 			case cons == jetstream.Consumer(rebuilt):
-				return newScriptedIter(&r.armed, hbData("after"))
+				return newScriptedIter(&r.armed, 0, hbData("after"))
 			case call == 1:
-				return newScriptedIter(&r.armed, hbMisses(3)...)
+				return newScriptedIter(&r.armed, 0, hbMisses(3)...)
 			default:
-				return newScriptedIter(&r.armed, hbMiss())
+				return newScriptedIter(&r.armed, 0, hbMiss())
 			}
 		},
 	})
@@ -1880,7 +1837,7 @@ func TestPartitionConsumer_HeartbeatMiss_StreamMissing_RecoveryEnabled_Detours(t
 	r.waitHandled(t, "after", 3*time.Second)
 
 	require.Equal(t, int32(1), hookCalls.Load(), "stream-missing hook must fire once")
-	require.GreaterOrEqual(t, r.firstIter().stops.Load(), int32(1), "old iterator must be stopped on the stream-missing detour")
+	require.Positive(t, r.firstIter().Stops(), "old iterator must be stopped on the stream-missing detour")
 	require.Same(t, jetstream.Consumer(rebuilt), r.lastConsumer())
 
 	r.stopAndWait(t)
@@ -1910,11 +1867,8 @@ func TestPartitionConsumer_HeartbeatMiss_StreamMissing_RecoveryDisabled_BoundsAn
 				permanentErr.Store(&err)
 			}
 		},
-		factory: func(_ int, _ jetstream.Consumer) *scriptedIter {
-			it := newScriptedIter(&r.armed, hbMisses(10)...)
-			it.missGap = 30 * time.Millisecond
-
-			return it
+		factory: func(_ int, _ jetstream.Consumer) *testutil.ScriptedIter {
+			return newScriptedIter(&r.armed, 30*time.Millisecond, hbMisses(10)...)
 		},
 	})
 
@@ -1928,7 +1882,7 @@ func TestPartitionConsumer_HeartbeatMiss_StreamMissing_RecoveryDisabled_BoundsAn
 	require.Equal(t, int32(1), permanentCalls.Load())
 	require.ErrorIs(t, *permanentErr.Load(), types.ErrStreamMissing)
 	for i, it := range r.allIters() {
-		require.GreaterOrEqual(t, it.stops.Load(), int32(1), "iterator %d must be stopped before Run exits", i)
+		require.Positive(t, it.Stops(), "iterator %d must be stopped before Run exits", i)
 	}
 }
 
@@ -1937,34 +1891,34 @@ func TestPartitionConsumer_HeartbeatMiss_KeptIteratorStoppedOnCancel(t *testing.
 	for _, mode := range hbModes {
 		t.Run(mode.name, func(t *testing.T) {
 			r := newHBRun()
-			first := newScriptedIter(&r.armed, hbMiss())
+			first := newScriptedIter(&r.armed, 0, hbMiss())
 			r.start(t, hbOpts{
 				strategy: mode.strategy,
 				cons:     &hbConsumer{},
 				backoff:  5 * time.Second,
-				factory: func(call int, _ jetstream.Consumer) *scriptedIter {
+				factory: func(call int, _ jetstream.Consumer) *testutil.ScriptedIter {
 					if call == 1 {
 						return first
 					}
 
-					return newScriptedIter(&r.armed)
+					return newScriptedIter(&r.armed, 0)
 				},
 			})
 
 			// The loop must come back to the same iterator after the miss and block in it.
 			select {
-			case <-first.reentered:
+			case <-first.Idle():
 			case <-time.After(2 * time.Second):
 				t.Fatalf("loop did not re-enter the iterator after a heartbeat miss (iterFactory calls=%d, stops=%d)",
-					r.factoryCalls.Load(), first.stops.Load())
+					r.factoryCalls.Load(), first.Stops())
 			}
-			require.Equal(t, int32(0), first.stops.Load(), "iterator must still be in service before the cancel")
+			require.Zero(t, first.Stops(), "iterator must still be in service before the cancel")
 			require.Equal(t, int32(1), r.factoryCalls.Load(), "iterator must not be recreated after a heartbeat miss")
 
 			r.stopAndWait(t)
 
 			for i, it := range r.allIters() {
-				require.GreaterOrEqual(t, it.stops.Load(), int32(1), "iterator %d leaked after Run returned", i)
+				require.Positive(t, it.Stops(), "iterator %d leaked after Run returned", i)
 			}
 		})
 	}
@@ -1990,15 +1944,15 @@ func TestPartitionConsumer_HeartbeatMiss_PullSuppressed_StopsIterator(t *testing
 
 					return suppressed, "test"
 				},
-				factory: func(_ int, _ jetstream.Consumer) *scriptedIter {
-					return newScriptedIter(&r.armed, hbData("msg1"), hbMiss(), hbData("late"))
+				factory: func(_ int, _ jetstream.Consumer) *testutil.ScriptedIter {
+					return newScriptedIter(&r.armed, 0, hbData("msg1"), hbMiss(), hbData("late"))
 				},
 			})
 
 			r.waitHandled(t, "msg1", 2*time.Second)
 
 			require.Eventually(t, func() bool {
-				return r.firstIter().stops.Load() >= 1
+				return r.firstIter().Stops() >= 1
 			}, 2*time.Second, 5*time.Millisecond, "iterator must be stopped by a heartbeat miss while pulls are suppressed")
 
 			// The first suppressed check is the keep decision at the miss.
@@ -2040,7 +1994,7 @@ func TestPartitionConsumer_IteratorFailure_UncomparableConsumer(t *testing.T) {
 		wantIters int32
 	}{
 		{"heartbeat_miss", []hbStep{hbMiss(), hbData("after")}, nil, 1},
-		{"transient_error", []hbStep{{err: errors.New("transient")}}, []hbStep{hbData("after")}, 2},
+		{"transient_error", []hbStep{{Err: errors.New("transient")}}, []hbStep{hbData("after")}, 2},
 	}
 
 	for _, tt := range tests {
@@ -2050,12 +2004,12 @@ func TestPartitionConsumer_IteratorFailure_UncomparableConsumer(t *testing.T) {
 				strategy: RecoveryDisabled,
 				cons:     uncomparableConsumer{tags: []string{"decorated"}},
 				backoff:  5 * time.Millisecond,
-				factory: func(call int, _ jetstream.Consumer) *scriptedIter {
+				factory: func(call int, _ jetstream.Consumer) *testutil.ScriptedIter {
 					if call == 1 {
-						return newScriptedIter(&r.armed, tt.first...)
+						return newScriptedIter(&r.armed, 0, tt.first...)
 					}
 
-					return newScriptedIter(&r.armed, tt.next...)
+					return newScriptedIter(&r.armed, 0, tt.next...)
 				},
 			})
 

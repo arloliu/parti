@@ -2,6 +2,7 @@ package ipartition
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -328,6 +329,12 @@ type errorOnNextMsgsCtx struct {
 }
 
 func (e *errorOnNextMsgsCtx) Next(opts ...jetstream.NextOpt) (jetstream.Msg, error) {
+	// nats.go reports a missed heartbeat only after twice the heartbeat interval,
+	// and a loop that keeps its iterator calls Next again at once.
+	if errors.Is(e.err, jetstream.ErrNoHeartbeat) {
+		time.Sleep(5 * time.Millisecond)
+	}
+
 	return nil, e.err
 }
 
