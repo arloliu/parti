@@ -1592,46 +1592,38 @@ func runWorker(ctx context.Context, cfg *config.Config) error {
 	// emitterCtx is cancelled below.
 	emitterCtx, emitterCancel := context.WithCancel(ctx)
 	defer emitterCancel()
-	startEmitters(emitterCtx, workerID, w, receivedCh, assignmentsCh, startLatCh, degradedCh)
+	shutdownReported := startEmitters(emitterCtx, workerID, w, receivedCh, assignmentsCh, startLatCh, degradedCh)
 
 	if err := w.Start(ctx); err != nil {
 		return err
 	}
 
-	// Long-lived loop. Exit conditions:
+	// Long-lived wait.
+	// Exit conditions:
 	//  - ctx cancelled (parent orchestrator shutdown, SIGKILL chaos path
 	//    surfaces here via context's deadline / parent close);
 	//  - the manager's state reaches StateShutdown (claimLostShutdown
 	//    self-stop path — Phase 7b's Gap 8a invariant).
 	//
-	// The state poll piggybacks on the same ticker the emitter uses for
-	// state/leader frames (250ms cadence). Bandwidth is trivial; the
-	// poll-vs-hook tradeoff is documented in the Phase 7a brief.
-	const exitPollInterval = 250 * time.Millisecond
-	ticker := time.NewTicker(exitPollInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			w.Stop()
-			return nil
-		case <-ticker.C:
-			// types.StateShutdown == 9 (see types/state.go). Use the
-			// same numeric value the coordinator's
-			// workerStateShutdown const carries so a future enum
-			// renumbering surfaces in both packages at once.
-			if w.WorkerStateInt() == int(types.StateShutdown) {
-				log.Printf("[%s] manager reached StateShutdown; runWorker exiting", workerID)
-				w.Stop()
-				return nil
-			}
-		}
+	// The Shutdown exit waits for the state emitter instead of polling the state itself.
+	// The orchestrator's returning-shutdown gate reads the state only from IPC frames,
+	// so the worker must not stop its emitters before the Shutdown frame is written.
+	select {
+	case <-ctx.Done():
+	case <-shutdownReported:
+		log.Printf("[%s] manager reached StateShutdown; runWorker exiting", workerID)
 	}
+	w.Stop()
+
+	return nil
 }
 
-// startEmitters launches the four channel-drain goroutines plus the periodic
-// state/leader ticker that together write NDJSON IPC frames to stdout. All
-// goroutines stop when ctx is cancelled.
+// startEmitters launches the four channel-drain goroutines plus the periodic state/leader ticker
+// that together write NDJSON IPC frames to stdout.
+// All goroutines stop when ctx is cancelled.
+//
+// The returned channel is closed once a state frame carrying StateShutdown has been written.
+// No state frame is written after it.
 //
 // Each frame's stable_id field is filled lazily from w.StableWorkerID() so
 // the coordinator can correlate sim-side worker IDs with parti stable IDs
@@ -1641,7 +1633,7 @@ func startEmitters(ctx context.Context, workerID string, w *worker.Worker,
 	assignmentsCh <-chan coordinator.AssignmentReport,
 	startLatCh <-chan coordinator.StartLatencyReport,
 	degradedCh <-chan coordinator.WorkerDegradedReport,
-) {
+) <-chan struct{} {
 	emit := func(kind string, payload any) {
 		line, err := coordinator.EncodeIPCFrame(kind, workerID, w.StableWorkerID(), time.Now().UnixMilli(), payload)
 		if err != nil {
@@ -1726,23 +1718,37 @@ func startEmitters(ctx context.Context, workerID string, w *worker.Worker,
 		}
 	}()
 
-	// state + leader ticker. Emits every tick (even when the value has
-	// not changed) so the coordinator-side smoke oracle observes at
-	// least one of each kind within T_smoke even for workers that never
-	// transition past their initial state (the empty-cluster edge case).
-	go func() {
-		ticker := time.NewTicker(250 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
+	shutdownReported := make(chan struct{})
+	go emitStateFrames(ctx, w, emit, shutdownReported)
+
+	return shutdownReported
+}
+
+// emitStateFrames writes one state frame and one leader frame per tick until ctx is cancelled.
+// It emits every tick (even when the value has not changed)
+// so the coordinator-side smoke oracle observes at least one of each kind within T_smoke,
+// even for workers that never transition past their initial state (the empty-cluster edge case).
+//
+// StateShutdown is terminal:
+// after writing a frame that carries it, emitStateFrames closes shutdownReported and returns.
+func emitStateFrames(ctx context.Context, w *worker.Worker, emit func(kind string, payload any), shutdownReported chan<- struct{}) {
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			state := w.WorkerStateInt()
+			emit(coordinator.IPCKindState, coordinator.IPCPayloadState{State: state})
+			emit(coordinator.IPCKindLeader, coordinator.IPCPayloadLeader{IsLeader: w.IsLeader()})
+			if state == int(types.StateShutdown) {
+				close(shutdownReported)
+
 				return
-			case <-ticker.C:
-				emit(coordinator.IPCKindState, coordinator.IPCPayloadState{State: w.WorkerStateInt()})
-				emit(coordinator.IPCKindLeader, coordinator.IPCPayloadLeader{IsLeader: w.IsLeader()})
 			}
 		}
-	}()
+	}
 }
 
 // runProcessOrchestrator is the parent process for Phase 7a "process" mode.
